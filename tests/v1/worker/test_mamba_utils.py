@@ -645,8 +645,7 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
 
 def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
     """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
-    per-request staging buffers touched by stage_postprocess_inputs_to_gpu.
-    """
+    per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
     ctx = MagicMock()
     ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
@@ -658,8 +657,7 @@ def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
 def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
     """stage_postprocess_inputs_to_gpu writes each request's state_idx and
     scheduled/computed/draft counts into slot `i` for `req_ids[i]`, leaves
-    slots past `num_reqs` untouched, and mirrors the values to the GPU buffers.
-    """
+    slots past `num_reqs` untouched, and mirrors the values to the GPU buffers."""
     device = torch.device("cpu")
     max_num_reqs = 8
     ctx = _make_staging_ctx(max_num_reqs, device)
@@ -731,8 +729,7 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
 
 def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
     """If preprocess_mamba didn't populate mamba_state_idx for a req in the
-    batch, staging must fail loudly rather than silently writing a stale index.
-    """
+    batch, staging must fail loudly rather than silently writing a stale index."""
     device = torch.device("cpu")
     ctx = _make_staging_ctx(max_num_reqs=4, device=device)
     scheduler_output = _make_postprocess_scheduler_output(
@@ -810,8 +807,7 @@ def _run_gpu_postprocess(
     device: torch.device,
 ) -> None:
     """Initialize the GPU context against `block_table`, run the fused
-    postprocess kernel for `req_ids`, and synchronize.
-    """
+    postprocess kernel for `req_ids`, and synchronize."""
 
     def t(values):
         return torch.tensor(values, dtype=torch.int32, device=device)

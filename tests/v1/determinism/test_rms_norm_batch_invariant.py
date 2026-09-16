@@ -275,8 +275,7 @@ def test_rms_norm_per_block_quant_batch_invariant(
     hidden_size: int, dtype: torch.dtype, seed: int
 ):
     """C++ ``rms_norm_per_block_quant`` must be batch invariant across the
-    block threshold (compiled fp8 block-quant path; block pinned to 512).
-    """
+    block threshold (compiled fp8 block-quant path; block pinned to 512)."""
     import vllm._custom_ops as ops
 
     device = torch.device(DEVICE_TYPE)

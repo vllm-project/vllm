@@ -81,8 +81,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
     ) -> list[str]:
         """Prepare weights for the model.
 
-        If the model is not local, it will be downloaded.
-        """
+        If the model is not local, it will be downloaded."""
         is_object_storage_path = is_runai_obj_uri(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"

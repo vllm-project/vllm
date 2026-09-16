@@ -308,8 +308,7 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
 
 def test_resolve_chat_template_resolves_name():
     """When chat_template is a name, resolve_chat_template should return
-    the actual Jinja content so that kwargs detection works correctly.
-    """
+    the actual Jinja content so that kwargs detection works correctly."""
     from unittest.mock import MagicMock
 
     jinja_content = "{{ messages }}{% if tools %}{{ tools }}{% endif %}"
@@ -331,8 +330,7 @@ def test_resolve_chat_template_resolves_name():
 
 def test_resolve_chat_template_kwargs_with_template_name():
     """Ensures template kwargs are not silently dropped when chat_template
-    was originally a template name that has been resolved to Jinja content.
-    """
+    was originally a template name that has been resolved to Jinja content."""
     from unittest.mock import MagicMock
 
     jinja_content = (
@@ -934,8 +932,7 @@ EFFORT_BREAKING_TEMPLATE = (
 
 class TestApplyChatTemplateEffortTolerant:
     """Chat templates that reject unsupported reasoning_effort values should
-    surface a 400-style client error instead of crashing the request.
-    """
+    surface a 400-style client error instead of crashing the request."""
 
     @pytest.fixture
     def model_config(self):

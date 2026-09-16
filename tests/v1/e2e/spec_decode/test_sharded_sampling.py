@@ -28,8 +28,7 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
     sampling under MTP spec decoding: the collectives move the same logits
     bytes, Gumbel keys derive from (request slot, position, seed), and slot
     assignment is rank-deterministic. Both runs here are spec decode with
-    identical math, so outputs must match exactly.
-    """
+    identical math, so outputs must match exactly."""
     tp_size = 2
     _skip_if_insufficient_gpus_for_tp(tp_size)
     model_name = "Qwen/Qwen3.5-0.8B-Base"

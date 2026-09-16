@@ -128,8 +128,7 @@ class WorkerBase:
 
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait.
-        """
+        ``torch.accelerator`` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 

@@ -1075,10 +1075,14 @@ class HF3FSKVConnectorStats(KVConnectorStats):
             "Num save task failed": num_failed_save,
             "Num load task success": num_success_load,
             "Num load task failed": num_failed_load,
-            "Avg save duration (ms)": round(save_duration.mean() * 1e3, 3),
-            "P90 save duration (ms)": round(np.percentile(save_duration, 90) * 1e3, 3),
-            "Avg load duration (ms)": round(load_duration.mean() * 1e3, 3),
-            "P90 load duration (ms)": round(np.percentile(load_duration, 90) * 1e3, 3),
+            "Avg save duration (ms)": round(save_duration.mean().item() * 1e3, 3),
+            "P90 save duration (ms)": round(
+                np.percentile(save_duration, 90).item() * 1e3, 3
+            ),
+            "Avg load duration (ms)": round(load_duration.mean().item() * 1e3, 3),
+            "P90 load duration (ms)": round(
+                np.percentile(load_duration, 90).item() * 1e3, 3
+            ),
         }
 
     def is_empty(self) -> bool:

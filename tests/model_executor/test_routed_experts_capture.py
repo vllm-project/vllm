@@ -326,8 +326,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
 
 def test_routed_experts_attention_group_is_shared_and_fail_closed():
     """Both sides key routing data by this gid, so it must skip non-full-attention
-    groups rather than defaulting to 0, and fail closed when none exists.
-    """
+    groups rather than defaulting to 0, and fail closed when none exists."""
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     config = SimpleNamespace(
         kv_cache_groups=[

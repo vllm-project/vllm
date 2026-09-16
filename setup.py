@@ -724,8 +724,7 @@ class precompiled_wheel_utils:
         wheels: list[dict], repo_url: str, arch: str
     ) -> None:
         """Warn if installed torch differs from the custom ROCm build on
-        wheels.vllm.ai and suggest the correct install command.
-        """
+        wheels.vllm.ai and suggest the correct install command."""
         try:
             installed = torch.__version__
         except Exception:
