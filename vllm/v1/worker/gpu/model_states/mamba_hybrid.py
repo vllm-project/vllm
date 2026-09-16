@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
@@ -41,6 +42,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    mamba_prompt_lens_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -65,6 +67,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         ):
             return {}
         return {
+            "mamba_prompt_lens_cpu": self.mamba_prompt_lens_cpu,
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -86,6 +89,7 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
         self.cache_config = vllm_config.cache_config
+        self._prompt_lens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
@@ -114,6 +118,7 @@ class MambaHybridModelState(DefaultModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
+        self._prompt_lens[req_index] = new_req_data.prompt_len
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
@@ -305,10 +310,23 @@ class MambaHybridModelState(DefaultModelState):
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
+        prompt_lens_cpu = None
+        if envs.VLLM_BATCH_INVARIANT and not for_capture:
+            # Dummy profiling batches do not own request slots (prefill_len=0).
+            # Treat their entire query as prompt, never as generated history,
+            # even when a slot retains an earlier real request's prompt length.
+            prompt_lens_cpu = torch.from_numpy(
+                np.where(
+                    input_batch.prefill_len_np > 0,
+                    self._prompt_lens[input_batch.idx_mapping_np],
+                    seq_lens_cpu_upper_bound[: input_batch.num_reqs].numpy(),
+                )
+            )
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            mamba_prompt_lens_cpu=prompt_lens_cpu,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

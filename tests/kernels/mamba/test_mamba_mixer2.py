@@ -6,14 +6,48 @@ import unittest
 import pytest
 import torch
 
-from tests.utils import ensure_current_vllm_config, multi_gpu_test
+from tests.utils import (
+    create_new_process_for_each_test,
+    ensure_current_vllm_config,
+    multi_gpu_test,
+)
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
+from vllm.model_executor.layers.mamba import mamba_mixer2
 from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@create_new_process_for_each_test()
+def test_mixer2_tp_local_reduction_batch_invariance(monkeypatch, dtype):
+    """The local reduction must not depend on the number of replayed tokens."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    init_batch_invariance()
+    monkeypatch.setattr(mamba_mixer2, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(mamba_mixer2, "get_tensor_model_parallel_rank", lambda: 0)
+    # Model an identical peer shard; real collectives are covered by the
+    # end-to-end TP=2 preemption test. Isolate only the local reduction here.
+    monkeypatch.setattr(
+        mamba_mixer2, "tensor_model_parallel_all_reduce", lambda x: x * 2
+    )
+    with ensure_current_vllm_config():
+        norm = Mixer2RMSNormGated(1536, 1).to(device="cuda", dtype=dtype)
+    torch.manual_seed(42)
+    x = torch.randn(97, 768, device="cuda", dtype=dtype)
+    gate = torch.randn_like(x)
+    with torch.inference_mode():
+        alone = torch.cat(
+            [norm.forward_native(row[None], z[None]) for row, z in zip(x, gate)]
+        )
+        batched = norm.forward_native(x, gate)
+    assert torch.equal(alone.view(torch.uint8), batched.view(torch.uint8))
 
 
 @multi_gpu_test(num_gpus=2)
@@ -58,6 +92,7 @@ def test_mixer2_gated_norm_multi_gpu(
     run_torch_spawn(mixer2_gated_norm_tensor_parallel, 2)
 
 
+@ensure_current_vllm_config()
 def mixer2_gated_norm_tensor_parallel(
     local_rank: int,
     world_size: int,

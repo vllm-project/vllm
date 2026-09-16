@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -56,6 +57,43 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+def test_mamba_recovery_prompt_lengths_follow_request_slots(monkeypatch, dummy):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = False
+    state.recoverssm = None
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state._prompt_lens = np.array([514, 513, 999], dtype=np.int32)
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=16,
+        idx_mapping_np=np.array([1, 0]),
+        query_start_loc_np=np.array([0, 8, 16], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 8, 16]),
+        num_scheduled_tokens=np.array([8, 8]),
+        seq_lens=torch.tensor([521, 522]),
+        seq_lens_cpu_upper_bound=torch.tensor([521, 522], dtype=torch.int32),
+        prefill_len_np=np.array([0, 0] if dummy else [545, 546]),
+        is_prefilling_np=np.array([not dummy, not dummy]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(16),
+        prompt_lens=None,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid.build_attn_metadata",
+        lambda **kwargs: kwargs["model_specific_attn_metadata"],
+    )
+    metadata = state.prepare_attn(
+        batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None
+    )
+    assert metadata.mamba_prompt_lens_cpu.tolist() == (
+        [521, 522] if dummy else [513, 514]
+    )
+    # Gathering a batch must not alter persistent request metadata.
+    assert state._prompt_lens.tolist() == [514, 513, 999]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
