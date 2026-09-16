@@ -8,7 +8,6 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
-from math import gcd
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import regex as re
@@ -125,28 +124,6 @@ def _fill_short_context_topk_indices(
 # plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
     return current_platform.is_device_capability_family(100)
-
-
-# A packed page is rounded up to the record's TMA stride (the spec's
-# ``alignment``), so a state count whose raw page is not already a multiple of
-# that stride pads every page, and the loss surfaces nowhere. The V4.1 records
-# are exact on the right count -- 528 B on multiples of 32, 288 B on multiples
-# of 16 -- and this keeps a later change to a record width or a block size
-# from starting to pad silently. V4's 584 B record would need a multiple of 72
-# and never gets one under the multiple-of-32 SWA rule, so it is exempt.
-def _check_exact_packed_page(
-    what: str, states_per_page: int, bytes_per_state: int, alignment: int
-) -> None:
-    if bytes_per_state == 584:
-        return
-    raw = states_per_page * bytes_per_state
-    if raw % alignment:
-        raise ValueError(
-            f"{what}: {states_per_page} states x {bytes_per_state} B pads every "
-            f"page from {raw} B up to the {alignment} B stride; this record "
-            f"needs a multiple of {alignment // gcd(bytes_per_state, alignment)} "
-            "states per page."
-        )
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -544,14 +521,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "decodes only on SM100."
             )
 
-        swa_block_size = 32
-        if self.kv_cache_dtype.endswith("_ds_mla"):
-            _check_exact_packed_page(
-                f"{prefix}.swa_cache",
-                swa_block_size,
-                self.swa_bytes_per_token,
-                self.kv_page_alignment,
-            )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -559,7 +528,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=swa_block_size,
+            block_size=32,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
         )
@@ -955,13 +924,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         chunk-interleaved layout, so the Q half of the launch is a zero-pad to
         ``padded_heads`` -- and nothing at all once the shard is that wide.
         """
-        interleaved_q = self.accepts_unnormed_unroped_query
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
             if self.n_local_heads >= self.padded_heads:
                 return q
-            if interleaved_q:
+            if self.accepts_unnormed_unroped_query:
                 # Padding heads sit at the tail of every head-dim chunk in
                 # that layout, so no head-major pad of `q` reproduces it --
                 # and nothing reads it on a profile run.
@@ -997,7 +965,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
             pad_to = (
                 0
-                if interleaved_q and self.n_local_heads == self.padded_heads
+                if self.accepts_unnormed_unroped_query
+                and self.n_local_heads == self.padded_heads
                 else self.padded_heads
             )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
@@ -1012,12 +981,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata.block_size,
                 False,  # apply_q_norm: qr is normed before wq_b
                 self.kv_mxfp8,
-                not interleaved_q,  # apply_q_rope
-                interleaved_q,  # is_q_interleaved
+                not self.accepts_unnormed_unroped_query,  # apply_q_rope
+                self.accepts_unnormed_unroped_query,  # is_q_interleaved
             )
             return q if pad_to == 0 else q_padded
 
-        assert not interleaved_q, (
+        assert not self.accepts_unnormed_unroped_query, (
             "the chunk-interleaved Q layout only pairs with a packed KV record"
         )
         # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
@@ -1077,18 +1046,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-        block_size = vllm_config.cache_config.block_size
-        if uses_fp8_ds_mla_layout:
-            # One state per compress_ratio tokens, so that is what multiplies
-            # the record width in the page.
-            _check_exact_packed_page(
-                f"{self.prefix}.compressed_cache",
-                block_size // self.compress_ratio,
-                self.compressed_bytes_per_token,
-                self.kv_page_alignment,
-            )
         return MLAAttentionSpec(
-            block_size=block_size,
+            block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
