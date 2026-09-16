@@ -269,11 +269,11 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    async_tensor_h2d,
     direct_register_custom_op,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
-    np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -420,6 +420,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     """
 
     supports_dense_mha_prefill: ClassVar[bool] = True
+    # Under PCP+DCP only the decode rows carry an LSE; the base forward
+    # merges a full-batch LSE, so subclasses opt in with their own forward.
+    supports_pcp_dcp: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -660,6 +663,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
+        if self.use_pcp and self.impl.dcp_world_size > 1 and not self.supports_pcp_dcp:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support PCP+DCP."
+            )
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
@@ -1973,11 +1980,6 @@ def plan_mla_context_chunks(
     return plans
 
 
-def _flat_int32(values: list[int] | np.ndarray) -> torch.Tensor:
-    """Pinned int32 CPU tensor backing one concatenated per-chunk field."""
-    return np_to_pinned_tensor(np.asarray(values, dtype=np.int32))
-
-
 def align_mla_chunked_context_workspace_size(
     vllm_config: VllmConfig,
     workspace_size: int,
@@ -2154,24 +2156,28 @@ def build_mla_chunked_context_metadata(
         token_offset += num_tokens
         local_token_offset += num_local_tokens
 
-    seq_lens_cpu = _flat_int32(seq_lens_flat)
-    starts_and_context_lens = _flat_int32(starts_flat + context_lens).to(
-        device, non_blocking=True
+    seq_lens_cpu = torch.tensor(
+        seq_lens_flat, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
+    )
+    starts_and_context_lens = async_tensor_h2d(
+        starts_flat + context_lens, device=device, dtype=torch.int32
     )
     starts = starts_and_context_lens[: len(starts_flat)]
     context_lens_gpu = starts_and_context_lens[len(starts_flat) :]
-    cu_seq_lens = _flat_int32(cu_seq_lens_flat).to(device, non_blocking=True)
-    cu_seqlens_q = _flat_int32(cu_seqlens_q_flat).to(device, non_blocking=True)
-    token_to_seq = _flat_int32(np.concatenate(token_to_seq_parts)).to(
-        device, non_blocking=True
+    cu_seq_lens = async_tensor_h2d(cu_seq_lens_flat, device=device, dtype=torch.int32)
+    cu_seqlens_q = async_tensor_h2d(cu_seqlens_q_flat, device=device, dtype=torch.int32)
+    token_to_seq = async_tensor_h2d(
+        np.concatenate(token_to_seq_parts), device=device, dtype=torch.int32
     )
     if use_dcp:
-        padded_local_cu_seq_lens = _flat_int32(padded_local_cu_seq_lens_flat).to(
-            device, non_blocking=True
+        padded_local_cu_seq_lens = async_tensor_h2d(
+            padded_local_cu_seq_lens_flat, device=device, dtype=torch.int32
         )
-        padded_local_token_to_seq = _flat_int32(
-            np.concatenate(padded_local_token_to_seq_parts)
-        ).to(device, non_blocking=True)
+        padded_local_token_to_seq = async_tensor_h2d(
+            np.concatenate(padded_local_token_to_seq_parts),
+            device=device,
+            dtype=torch.int32,
+        )
 
     chunks: list[MLACommonPrefillMetadata.ContextChunk] = []
     for index, (plan, layout) in enumerate(zip(plans, layouts)):
@@ -2864,6 +2870,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
+        if k_pe.shape[-1] == 0:
+            # NoPE MLA: nothing to append, so no copy either.
+            return k_nope
+
         k = torch.empty(
             (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
             dtype=k_nope.dtype,
