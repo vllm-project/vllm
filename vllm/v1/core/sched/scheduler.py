@@ -1558,12 +1558,10 @@ class Scheduler(SchedulerInterface):
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
     ) -> None:
-        """
-        Updates the waiting session with the next streaming update.
+        """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
         """
-
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
@@ -1665,8 +1663,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget: int,
         shift_computed_tokens: int = 0,
     ) -> tuple[list[int], int, int, list[int]]:
-        """
-        Determine which encoder inputs need to be scheduled in the current step,
+        """Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
 
         An encoder input will be scheduled if:
@@ -2110,6 +2107,17 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if (
+                        prefill_stats is not None
+                        and kv_transfer_params is not None
+                        and kv_transfer_params.get("do_remote_prefill")
+                    ):
+                        # P-side cache hits, so D can report them in
+                        # prompt_tokens_details instead of its own (~100%)
+                        # hit rate from the KV transfer.
+                        kv_transfer_params["remote_prefill_cached_tokens"] = (
+                            prefill_stats.num_cached_tokens
+                        )
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -2496,6 +2504,7 @@ class Scheduler(SchedulerInterface):
         Returns:
             List of requests that were aborted. Will not include any that were
             already finished.
+
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -2830,8 +2839,7 @@ class Scheduler(SchedulerInterface):
     def _connector_finished(
         self, request: Request
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Invoke the KV connector request_finished() method if applicable.
+        """Invoke the KV connector request_finished() method if applicable.
 
         Returns optional kv transfer parameters to be included with the
         request outputs.
@@ -2899,14 +2907,12 @@ class Scheduler(SchedulerInterface):
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-
         return sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
-        """
-        KV Connector: update request state after async recv is finished.
+        """KV Connector: update request state after async recv is finished.
 
         When the kv transfer is ready, we cache the blocks
         and the request state will be moved back to WAITING from
@@ -2948,9 +2954,7 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
-        """
-        Try to promote a blocked waiting request back to schedulable states.
-        """
+        """Try to promote a blocked waiting request back to schedulable states."""
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             # finished_recving_kv_req_ids is populated during
             # update_from_output(), based on worker-side connector signals
@@ -2984,8 +2988,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
-        """
-        KV Connector: update the scheduler state based on the output.
+        """KV Connector: update the scheduler state based on the output.
 
         The Worker side connectors add finished_recving and
         finished_sending reqs to the output.
@@ -2993,7 +2996,6 @@ class Scheduler(SchedulerInterface):
         # if finished_recving: add to state so we can
             schedule the request during the next step.
         """
-
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
 
@@ -3019,18 +3021,12 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         evict_blocks: bool = True,
     ) -> tuple[set[str], int, set[int]]:
-        """
-        Identify and update requests affected by invalid KV cache blocks.
+        """Identify and update requests affected by invalid KV cache blocks.
 
         This method scans the given requests, detects those with invalid blocks
         and adjusts their `num_computed_tokens` to the longest valid prefix.
         For observability, it also accumulates the total number of tokens that
         will need to be recomputed across all affected requests.
-
-        A hybrid model spreads one token span over KV cache groups that disagree
-        on block size, so a block index maps to a different token position in
-        each group and there is no single longest valid prefix. Those requests
-        recompute in full instead.
 
         Args:
             requests: The set of requests to scan for invalid blocks.
@@ -3047,6 +3043,7 @@ class Scheduler(SchedulerInterface):
                 be recomputed across all affected requests.
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
+
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
@@ -3055,48 +3052,18 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
-        # Positions a group holds no KV for -- skipped sliding-window blocks,
-        # and every Mamba block but the aligned snapshot -- all point at this
-        # one block, shared by every request. It carries no request's data, so
-        # it can neither fail for a request nor be evicted on its behalf.
-        null_block_id = self.kv_cache_manager.block_pool.null_block.block_id
         for request in requests:
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # One block-id list per KV cache group.
-            req_block_ids_per_group = self.kv_cache_manager.get_block_ids(req_id)
+            # One block-id list per KV cache group; single-group layouts are
+            # enforced by _handle_invalid_blocks.
+            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
-
-            if len(req_block_ids_per_group) > 1:
-                # No single truncation point exists across groups, so the whole
-                # request is recomputed. Blocks are still marked, so a request
-                # sharing one of them is rescheduled too.
-                request_invalid_block_ids = {
-                    block_id
-                    for req_block_ids in req_block_ids_per_group
-                    for block_id in req_block_ids
-                    if block_id != null_block_id and block_id in invalid_block_ids
-                }
-                if request_invalid_block_ids:
-                    marked_invalid_block_ids |= request_invalid_block_ids
-                    total_affected_tokens += req_num_computed_tokens
-                    request.num_computed_tokens = 0
-                    if evict_blocks:
-                        for req_block_ids in req_block_ids_per_group:
-                            blocks_to_evict.update(
-                                block_id
-                                for block_id in req_block_ids
-                                if block_id != null_block_id
-                            )
-                    affected_req_ids.add(req_id)
-                continue
-
-            (req_block_ids,) = req_block_ids_per_group
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
@@ -3169,12 +3136,23 @@ class Scheduler(SchedulerInterface):
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
     ) -> set[str]:
-        """
-        Handle requests affected by invalid KV cache blocks.
+        """Handle requests affected by invalid KV cache blocks.
 
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
+
         """
+        if len(self.kv_cache_config.kv_cache_groups) > 1:
+            # Block IDs are only unique within a group, so a flat set of
+            # invalid block IDs cannot be mapped back to requests.
+            raise RuntimeError(
+                "A KV connector reported block-level load failures "
+                "(invalid_block_ids) on a layout with multiple KV cache "
+                "groups, where block IDs are only unique within a group. "
+                "Connectors must report failed requests via "
+                "KVConnectorTransferResults.failed_recving instead."
+            )
+
         should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
