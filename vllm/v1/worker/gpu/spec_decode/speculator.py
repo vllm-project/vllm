@@ -412,17 +412,15 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
+        # idx_mapping == -1 marks a row the drafter must not act on: sampling
+        # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
+        # always get it; a dummy batch gets it for every row, since its arange
+        # idx_mapping names request-state slots with stale block tables.
         if dummy_run:
-            # A dummy batch's idx_mapping (arange) names real request-state
-            # slots whose persistent block tables are stale. The draft decode
-            # steps compute their slot mappings from those tables, so mark
-            # every row as dummy: the kernel then emits PAD and writes no KV.
-            self.idx_mapping[:num_reqs].fill_(-1)
+            self.idx_mapping.fill_(-1)
         else:
             self.idx_mapping[:num_reqs].copy_(idx_mapping)
-        # idx_mapping for CG padded requests points to -1, which is ignored
-        # during sampling to prevent writing stale values to draft logits.
-        self.idx_mapping[num_reqs:].fill_(-1)
+            self.idx_mapping[num_reqs:].fill_(-1)
 
     def _build_uniform_batch_dp_sync(
         self,

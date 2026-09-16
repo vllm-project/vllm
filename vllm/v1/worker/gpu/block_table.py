@@ -315,10 +315,9 @@ def _compute_slot_mappings_kernel(
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
-    # A dummy (or CUDA-graph padding) request carries idx_mapping == -1 and owns
-    # no blocks: skip its block-table row and emit PAD for all of its tokens.
+    # idx_mapping == -1 marks a dummy (or CUDA-graph padding) request that owns
+    # no blocks: never read its block-table row and emit PAD for its tokens.
     is_real_req = req_state_idx >= 0
-    req_state_idx = tl.maximum(req_state_idx, 0)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
