@@ -2605,13 +2605,21 @@ class FlashInferImpl(AttentionImpl):
                     mm_wrapper = attn_metadata.prefill.mm_wrapper
                     mm_prefill_ranges = attn_metadata.prefill.mm_prefill_ranges
                     assert mm_prefill_ranges is not None
-                    # vLLM stores window_left = sliding_window - 1; the
-                    # wrapper's windows are "keep when (q_abs - kv) < N" with
-                    # N the effective window, and 0 disables the term.
-                    sw_n = self.window_left + 1 if self.window_left >= 0 else 0
+                    # The causal window goes over as-is: causal_window_left
+                    # carries FlashInfer's own window_left contract, the same
+                    # one every other wrapper here is given self.window_left
+                    # for, so converting it would shift the window by a row.
+                    causal_sw = self.window_left
+                    # The range clamp is a separate contract of that wrapper:
+                    # it keeps a key when (q_abs - kv) < N, so it wants the
+                    # window as a count of keys rather than as a left bound,
+                    # and 0 leaves the spans unclamped. vLLM stores
+                    # window_left = sliding_window - 1, hence the + 1 here and
+                    # nowhere else.
                     clamp_sw = (
-                        sw_n
-                        if getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        self.window_left + 1
+                        if self.window_left >= 0
+                        and getattr(layer, "mm_prefix_clamp_sliding_window", False)
                         else 0
                     )
                     # A packed NVFP4 cache is handed over as the fp4 data
@@ -2631,7 +2639,7 @@ class FlashInferImpl(AttentionImpl):
                         prefill_query,
                         mm_kv_cache,
                         mm_prefill_ranges,
-                        causal_window_left=sw_n,
+                        causal_window_left=causal_sw,
                         range_window_left=clamp_sw,
                         q_scale=layer._q_scale_float,
                         k_scale=layer._k_scale_float,
