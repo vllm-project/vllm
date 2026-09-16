@@ -13,7 +13,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.config import try_get_safetensors_metadata
 
-from ....registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
