@@ -1022,15 +1022,22 @@ def get_properties(schema: Any) -> dict[str, Any]:
         return {}
 
     properties = schema.get("properties")
-    if isinstance(properties, dict):
+    combinators = [
+        keyword
+        for keyword in ("allOf", "anyOf", "oneOf")
+        if isinstance(schema.get(keyword), list)
+    ]
+    if isinstance(properties, dict) and not combinators:
         return properties
 
     collected: dict[str, list[Any]] = {}
-    for keyword in ("allOf", "anyOf", "oneOf"):
-        branches = schema.get(keyword)
-        if not isinstance(branches, list):
-            continue
-        for branch in branches:
+    if isinstance(properties, dict):
+        # Direct properties are one more contributor, not a reason to stop:
+        # an allOf next to them refines the same object.
+        for name, prop in properties.items():
+            collected.setdefault(name, []).append(prop)
+    for keyword in combinators:
+        for branch in schema[keyword]:
             if isinstance(branch, dict) and isinstance(branch.get("properties"), dict):
                 for name, prop in branch["properties"].items():
                     collected.setdefault(name, []).append(prop)
@@ -1246,7 +1253,10 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if parsed_type == "integer" and "number" in declared:
         # JSON Schema numbers include the integers.
         parsed_type = "number"
-    if declared and parsed_type not in declared:
+    # Only containers are held back: an array standing in for a declared object
+    # is a different shape entirely. A scalar the schema does not list is still
+    # closer to what the model meant decoded than as the characters "null".
+    if isinstance(parsed, (dict, list)) and declared and parsed_type not in declared:
         return value
     return parsed
 

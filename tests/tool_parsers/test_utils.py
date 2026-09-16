@@ -258,10 +258,18 @@ class TestCoerceToSchemaType:
             assert result == expected
             assert isinstance(result, int)
 
-        @pytest.mark.parametrize("value", ["3.5", "-2.25"])
-        def test_fractional_number_stays_a_string_for_integer(self, value):
-            """A real fraction is not an integer in any spelling."""
-            assert coerce_to_schema_type(value, "integer") == value
+        @pytest.mark.parametrize(
+            ("value", "expected"), [("3.5", 3.5), ("-2.25", -2.25)]
+        )
+        def test_fractional_number_is_never_truncated_to_integer(self, value, expected):
+            """A real fraction is not an integer, and must not be rounded into one.
+
+            The declared type is not satisfiable here, so the value is handed
+            over decoded rather than narrowed or stringified.
+            """
+            result = coerce_to_schema_type(value, "integer")
+            assert result == expected
+            assert isinstance(result, float)
 
         @pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e999"])
         def test_non_finite_never_becomes_an_integer(self, value):
@@ -400,14 +408,18 @@ class TestGetProperties:
         }
         assert get_properties(schema) == {"a": {"type": "string"}}
 
-    def test_direct_properties_win_over_combinator(self):
+    def test_direct_properties_merge_with_a_combinator(self):
+        """Direct properties contribute alongside the branches, not instead."""
         schema = {
             "properties": {"a": {"type": "string"}},
             "allOf": [{"properties": {"b": {"type": "integer"}}}],
         }
-        assert get_properties(schema) == {"a": {"type": "string"}}
+        assert get_properties(schema) == {
+            "a": {"type": "string"},
+            "b": {"type": "integer"},
+        }
 
-    def test_first_branch_with_properties_wins(self):
+    def test_branch_without_properties_is_skipped(self):
         schema = {
             "anyOf": [{"type": "null"}, {"properties": {"a": {"type": "string"}}}]
         }
@@ -501,6 +513,29 @@ class TestGetProperties:
                 ]
             }
             assert get_properties(schema) == {"value": {"type": "integer"}}
+
+        def test_all_of_refines_direct_properties(self):
+            """``allOf`` is a conjunction: its members apply on top, not instead.
+
+            Returning early on the direct properties left every name declared
+            by the refinement uncoerced -- the shape schema generators emit.
+            """
+            schema = {
+                "properties": {"a": {"type": "integer"}},
+                "allOf": [{"properties": {"b": {"type": "integer"}}}],
+            }
+            assert get_properties(schema) == {
+                "a": {"type": "integer"},
+                "b": {"type": "integer"},
+            }
+
+        def test_direct_and_branch_disagreement_is_dropped(self):
+            """Both constraints apply at once, so neither can be picked."""
+            schema = {
+                "properties": {"a": {"type": "integer"}},
+                "allOf": [{"properties": {"a": {"type": "string"}}}],
+            }
+            assert get_properties(schema) == {}
 
 
 def _value_of(expr: str):
