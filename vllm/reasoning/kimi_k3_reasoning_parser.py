@@ -256,7 +256,8 @@ class KimiK3ReasoningParser(ReasoningParser):
     ) -> tuple[str | None, str | None]:
         """Split full text into ``(reasoning, rest)`` for the non-streaming path.
 
-        Handles three shapes:
+        Handles four shapes:
+          * response opener without think markers -> no think channel; all content
           * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
           * open marker absent but a   close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
@@ -273,6 +274,12 @@ class KimiK3ReasoningParser(ReasoningParser):
         content_start = m_open.end() if m_open is not None else 0
 
         m_close = self._think_close_re.search(model_output, content_start)
+        if (
+            m_open is None
+            and m_close is None
+            and self._response_open_re.search(model_output) is not None
+        ):
+            return None, self._content_after_reasoning(model_output, request)
         if m_close is not None:
             reasoning = model_output[content_start : m_close.start()]
             rest = model_output[m_close.end() :]
