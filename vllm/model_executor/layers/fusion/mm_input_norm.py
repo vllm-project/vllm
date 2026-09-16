@@ -52,11 +52,11 @@ if HAS_TRITON:
     _SUPPORTED_OUTPUTS = (torch.float16, torch.bfloat16, torch.float32)
     _SUPPORTED_COMPUTE = (torch.float32,)
 
-    # Default tile size along L. Tuned for the common case C=3 (RGB): the
-    # kernel folds all C channels into one program, so a 2048-wide tile
-    # keeps each lane busy with ~8 elements without excessive register
-    # pressure. Adjust if a model ever uses a much larger C.
-    _DEFAULT_BLOCK_L = 2048
+    # Default tile size along the flattened element axis. 4096 keeps each
+    # program's payload large enough to amortise launch overhead while
+    # staying small enough that the grid saturates the SMs for typical
+    # image tensors.
+    _DEFAULT_BLOCK = 4096
 
     # Target elements per lane for the num_warps heuristic.
     _ELEMS_PER_THREAD = 8
@@ -67,68 +67,39 @@ if HAS_TRITON:
         y_ptr,
         w_ptr,
         b_ptr,
+        numel,
         L,
-        stride_xn,
-        stride_xc,
-        stride_yn,
-        stride_yc,
         C: tl.constexpr,
-        HAS_MASK: tl.constexpr,
-        BLOCK_L: tl.constexpr,
+        BLOCK: tl.constexpr,
         COMPUTE_DTYPE: tl.constexpr,
     ):
-        # 2D grid: (N, cdiv(L, BLOCK_L)). Each program processes all C channels
-        # for a single (n, L-block) tile, so the C loop is fully unrolled and
-        # no integer div/mod is needed to recover (n, c) from a flat pid.
-        n = tl.program_id(0)
-        lb = tl.program_id(1)
+        # 1D grid over the flattened (N, C, L) tensor. Each program processes
+        # BLOCK contiguous elements; the channel index is recovered from the
+        # flat offset via `(offs // L) % C`.
+        pid = tl.program_id(0)
+        offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < numel
 
-        offs = lb * BLOCK_L + tl.arange(0, BLOCK_L)
-        # Tell the compiler that `offs` forms a contiguous BLOCK_L tile whose
-        # base is a multiple of BLOCK_L. This enables wide vectorized
-        # ld.global.v2/v4 and st.global.v2/v4 on the L axis.
-        offs = tl.max_contiguous(tl.multiple_of(offs, BLOCK_L), BLOCK_L)
+        # Channel gather: different lanes within a program may straddle a
+        # channel boundary, so this is a per-lane gather rather than a scalar.
+        c = (offs // L) % C
 
-        # Hoist the per-program base pointers out of the channel loop. The
-        # per-channel offset `c * stride` is then just a scalar add inside
-        # the unrolled loop, which the compiler can fold cheaply.
-        x_base = x_ptr + n * stride_xn + offs
-        y_base = y_ptr + n * stride_yn + offs
-
-        if HAS_MASK:
-            mask = offs < L
-            for c in tl.static_range(C):
-                # Per-channel scalars: read by every program in the grid and
-                # reused C times within each program, so keep them hot in L2/L1.
-                w = tl.load(w_ptr + c, eviction_policy="evict_last").to(COMPUTE_DTYPE)
-                b = tl.load(b_ptr + c, eviction_policy="evict_last").to(COMPUTE_DTYPE)
-                # Streaming load: read once, evict early to protect L2 from
-                # being thrashed by large one-shot image tensors.
-                x = tl.load(
-                    x_base + c * stride_xc,
-                    mask=mask,
-                    other=0,
-                    eviction_policy="evict_first",
-                ).to(COMPUTE_DTYPE)
-                tl.store(
-                    y_base + c * stride_yc,
-                    x * w + b,
-                    mask=mask,
-                    eviction_policy="evict_first",
-                )
-        else:
-            for c in tl.static_range(C):
-                w = tl.load(w_ptr + c, eviction_policy="evict_last").to(COMPUTE_DTYPE)
-                b = tl.load(b_ptr + c, eviction_policy="evict_last").to(COMPUTE_DTYPE)
-                x = tl.load(
-                    x_base + c * stride_xc,
-                    eviction_policy="evict_first",
-                ).to(COMPUTE_DTYPE)
-                tl.store(
-                    y_base + c * stride_yc,
-                    x * w + b,
-                    eviction_policy="evict_first",
-                )
+        # Streaming load: read once, evict early to protect L2 from being
+        # thrashed by large one-shot image tensors.
+        x = tl.load(
+            x_ptr + offs,
+            mask=mask,
+            other=0,
+            eviction_policy="evict_first",
+        ).to(COMPUTE_DTYPE)
+        w = tl.load(w_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
+        b = tl.load(b_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
+        tl.store(
+            y_ptr + offs,
+            x * w + b,
+            mask=mask,
+            eviction_policy="evict_first",
+        )
 
     def fused_input_norm_triton(
         inputs: torch.Tensor,
@@ -136,7 +107,7 @@ if HAS_TRITON:
         weight: torch.Tensor,
         bias: torch.Tensor,
         compute_dtype: torch.dtype,
-        block_l: int | None = None,
+        block: int | None = None,
         num_warps: int | None = None,
     ):
         """Fused per-channel affine transform for normalisation.
@@ -159,11 +130,10 @@ if HAS_TRITON:
             bias: Per-channel shift, shape ``(C,)``, contiguous.
             compute_dtype: Compute dtype used inside the kernel. Only
                 ``torch.float32`` is currently supported.
-            block_l: Block size along the L axis. Defaults to
-                ``_DEFAULT_BLOCK_L`` (tuned for C=3). Only override if a
-                model uses an unusually large ``C``.
+            block: Block size along the flattened element axis. Defaults to
+                ``_DEFAULT_BLOCK``.
             num_warps: Number of warps per program. If ``None``, derived from
-                ``block_l`` and ``C`` targeting ~8 elements per lane.
+                ``block`` targeting ~8 elements per lane.
 
         Returns:
             ``outputs``, for chaining.
@@ -210,21 +180,18 @@ if HAS_TRITON:
         )
 
         # --- derive launch config -----------------------------------------
-        # C is effectively always 3 (RGB), so a single tuned default is
-        # enough. Callers that know better can still override block_l.
-        if block_l is None:
-            block_l = _DEFAULT_BLOCK_L
+        if block is None:
+            block = _DEFAULT_BLOCK
 
-        has_mask = (L % block_l) != 0
-        grid = (N, triton.cdiv(L, block_l))
+        # The kernel only ever touches the [:N, :C, :L] region, so index over
+        # that slice rather than the full (possibly padded) output buffer.
+        numel = N * C * L
+        grid = (triton.cdiv(numel, block),)
 
         if num_warps is None:
-            # Target ~_ELEMS_PER_THREAD elements per lane: enough ILP to
-            # hide memory latency without excessive register pressure. The
-            # effective per-program payload is C * block_l. Triton requires
-            # num_warps to be a power of two, so round the target up to the
-            # next power of two and clamp to a sane range.
-            target = (C * block_l) // (32 * _ELEMS_PER_THREAD)
+            # Target ~_ELEMS_PER_THREAD elements per lane. Triton requires
+            # num_warps to be a power of two; round up and clamp to [1, 16].
+            target = block // (32 * _ELEMS_PER_THREAD)
             num_warps = 1
             while num_warps < target and num_warps < 16:
                 num_warps *= 2
@@ -235,14 +202,10 @@ if HAS_TRITON:
             outputs,
             weight,
             bias,
+            numel,
             L,
-            inputs.stride(0),
-            inputs.stride(1),
-            outputs.stride(0),
-            outputs.stride(1),
             C=C,
-            HAS_MASK=has_mask,
-            BLOCK_L=block_l,
+            BLOCK=block,
             COMPUTE_DTYPE=_TL_DTYPE[compute_dtype],
             num_warps=num_warps,
         )
