@@ -739,11 +739,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
-            self._chunked_prefill_workspace_size = (
-                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                    self._vllm_config
-                )
+            # Ask the backend's own metadata builder: sparse MLA builders
+            # (`SparseMLACommonMetadataBuilder`, used by FLASHMLA_SPARSE /
+            # FLASH_ATTN_MLA_SPARSE / FLASHINFER_MLA_SPARSE) cap the workspace
+            # at `max_num_seqs * index_topk`, far below the dense 64K
+            # heuristic, and the profile run must not over-reserve for a chunk
+            # size the runtime can never produce. Builders that do not define
+            # the classmethod keep the dense sizing.
+            builder_cls = self.attn_backend.get_builder_cls()
+            determine = getattr(
+                builder_cls,
+                "determine_chunked_prefill_workspace_size",
+                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size,
             )
+            self._chunked_prefill_workspace_size = determine(self._vllm_config)
         return self._chunked_prefill_workspace_size
 
     def update_kv_cache(
