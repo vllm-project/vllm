@@ -1018,6 +1018,14 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    if candidate_blocks is not None:
+        # DeepSeek-V4.1 two-level candidate selection has no ROCm kernel; the
+        # shared layer passes these unconditionally, so accept and reject them
+        # here rather than failing on an arity mismatch at trace time.
+        raise NotImplementedError(
+            "Two-level candidate block selection is not implemented for the "
+            "ROCm sparse attention indexer."
+        )
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata

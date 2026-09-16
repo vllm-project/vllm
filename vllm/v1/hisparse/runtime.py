@@ -405,7 +405,10 @@ def release_pinned_state(
                     err.value,
                     len(pinned_host_pools),
                 )
-                cudart.cudaGetLastError()
+                # Best-effort sticky-flag clear; absent from ROCm's cudart.
+                clear_error = getattr(cudart, "cudaGetLastError", None)
+                if clear_error is not None:
+                    clear_error()
                 break
             freed_bytes += tensor.nbytes
             pinned_host_pools.pop()

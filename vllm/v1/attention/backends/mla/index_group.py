@@ -7,11 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch.fx import has_side_effect
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
-from vllm.utils.torch_utils import current_stream
+from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -31,6 +32,28 @@ def _create_event() -> torch.Event:
     return torch.Event()
 
 
+_INDEX_GROUPS: list[SparseMLAIndexGroup] = []
+
+
+def _record_logical_topk_ready(group_handle: int) -> None:
+    _INDEX_GROUPS[group_handle].logical_topk_ready.record(current_stream())
+
+
+def _record_logical_topk_ready_fake(group_handle: int) -> None:
+    pass
+
+
+# Event can get dropped unless custom - mid flight compile
+direct_register_custom_op(
+    op_name="sparse_mla_record_logical_topk_ready",
+    op_func=_record_logical_topk_ready,
+    fake_impl=_record_logical_topk_ready_fake,
+    dispatch_key="CompositeExplicitAutograd",
+)
+
+has_side_effect(torch.ops.vllm.sparse_mla_record_logical_topk_ready.default)
+
+
 @dataclass
 class SparseMLAIndexGroup:
     """Layers that consume one sparse-indexer result."""
@@ -44,6 +67,7 @@ class SparseMLAIndexGroup:
     physical_topk_ready: torch.Event
     has_indexer: bool
     num_layers: int = 0
+    group_handle: int = -1
 
     def register_layer(
         self,
@@ -66,7 +90,7 @@ class SparseMLAIndexGroup:
         # touches this event), so skip the record as well.
         if in_piecewise_cudagraph():
             return
-        self.logical_topk_ready.record(current_stream())
+        torch.ops.vllm.sparse_mla_record_logical_topk_ready(self.group_handle)
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         pass
@@ -485,7 +509,9 @@ class SparseMLAIndexGroupBuilder:
                 logical_topk_ready=_create_event(),
                 physical_topk_ready=_create_event(),
                 has_indexer=is_index_producing_layer,
+                group_handle=len(_INDEX_GROUPS),
             )
+            _INDEX_GROUPS.append(self.current_group)
         group = self.current_group
         group_index = group.register_layer(
             vllm_config,
