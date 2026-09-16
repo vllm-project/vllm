@@ -728,17 +728,20 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
 
+        # Decode-graph dispatch is shape based and runs before this metadata is
+        # built, so a one-token batch replays the captured decode graph even
+        # when a stateless first chunk makes it a prefill batch.
+        # num_decodes < batch_size is reachable here, so copy every row and mask
+        # none: rows past num_decodes are prefills holding their own state
+        # indices, and padded rows already carry NULL_BLOCK_ID from the runner.
         if (
             self.use_full_cuda_graph
-            and num_prefills == 0
             and num_spec_decodes == 0
-            and num_decodes <= self.decode_cudagraph_max_bs
+            and m.max_query_len <= 1
+            and batch_size <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+            self.non_spec_state_indices_tensor[:batch_size].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
-            )
-            self.non_spec_state_indices_tensor[num_decodes:batch_size].fill_(
-                NULL_BLOCK_ID
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size
