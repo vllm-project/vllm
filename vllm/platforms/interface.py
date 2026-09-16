@@ -1262,9 +1262,7 @@ class Platform:
 
     @classmethod
     def validate_environ(cls, hard_fail: bool) -> None:
-        """
-        Validate environment variables for the current platform.
-        """
+        """Validate environment variables for the current platform."""
         from vllm import envs
 
         for env in os.environ:
