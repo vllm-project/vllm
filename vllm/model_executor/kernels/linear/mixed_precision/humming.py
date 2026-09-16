@@ -61,11 +61,10 @@ class HummingLinearKernel(MPLinearKernel):
             apply_humming_linear,
         )
 
-        # bias is accessed in apply_humming_linear via getattr(layer, "bias", None),
-        # so we don't need to pass bias here.
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

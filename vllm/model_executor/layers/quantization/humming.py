@@ -600,6 +600,9 @@ class HummingLinearMethod(LinearMethodBase):
         name = self.input_schema.static_tensor_scale_name
         if name is not None:
             tensors[name] = source_tensors[name]
+        if "bias" in tensors:
+            zero_bias = torch.zeros_like(tensors["bias"])
+            layer.register_buffer("zero_bias", zero_bias)
         for name, _ in list(layer.named_parameters()):
             delattr(layer, name)
         for name, tensor in tensors.items():
@@ -622,7 +625,7 @@ class HummingLinearMethod(LinearMethodBase):
             weight=layer.weight,
             weight_scale=getattr(layer, "weight_scale", None),
             zero_point=getattr(layer, "zero_point", None),
-            bias=getattr(layer, "bias", None),
+            bias=getattr(layer, "bias" if bias is not None else "zero_bias", None),
             weight_scale_2=getattr(layer, "weight_scale_2", None),
             input_scale=getattr(layer, "input_scale", None),
             input_scale_2=getattr(layer, "input_scale_2", None),

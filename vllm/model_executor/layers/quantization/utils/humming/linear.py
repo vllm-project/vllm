@@ -127,6 +127,9 @@ def prepare_humming_linear_layer_config(
     )
     tensors = transform_humming_tensors(config, tensors)
     tensors.update(input_tensors)
+    if "bias" in tensors:
+        zero_bias = torch.zeros_like(tensors["bias"])
+        layer.register_buffer("zero_bias", zero_bias)
     for name, _ in list(layer.named_parameters()):
         delattr(layer, name)
     for name, tensor in tensors.items():
@@ -150,6 +153,7 @@ def apply_humming_linear(
     layer: LinearBase,
     x: torch.Tensor,
     *,
+    skip_bias_add: bool = False,
     layer_config: "LayerConfig",
     compute_config: str,
     locks: torch.Tensor,
@@ -168,7 +172,7 @@ def apply_humming_linear(
         weight=layer.weight,
         weight_scale=getattr(layer, "weight_scale", None),
         zero_point=getattr(layer, "zero_point", None),
-        bias=getattr(layer, "bias", None),
+        bias=getattr(layer, "zero_bias" if skip_bias_add else "bias", None),
         weight_scale_2=getattr(layer, "weight_scale_2", None),
         input_scale=input_scale,
         input_scale_2=input_scale_2,
