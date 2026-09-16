@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
@@ -48,6 +49,8 @@ def test_bounded_context_cudagraph_replay_pads_inert_slots():
     assert graph.replay_count == 1
     assert manager.replay_count == 1
     assert manager.fallback_count == 0
+    assert manager.context_copy_count == 1
+    assert manager.direct_projection_count == 0
     torch.testing.assert_close(manager.context_states[:2], states)
     torch.testing.assert_close(manager.context_positions[:2], positions)
     assert manager.context_slot_mapping.tolist() == [9, PAD_SLOT_ID]
@@ -95,6 +98,9 @@ def test_bounded_context_cudagraph_clear_drops_pool_ownership():
     manager.fallback_count = 4
     manager.segmented_batch_count = 2
     manager.segmented_replay_count = 5
+    manager.context_copy_count = 3
+    manager.direct_projection_count = 4
+    manager.batched_replay_count = 6
 
     manager.clear()
 
@@ -104,10 +110,20 @@ def test_bounded_context_cudagraph_clear_drops_pool_ownership():
     assert manager.fallback_count == 0
     assert manager.segmented_batch_count == 0
     assert manager.segmented_replay_count == 0
+    assert manager.context_copy_count == 0
+    assert manager.direct_projection_count == 0
+    assert manager.batched_replay_count == 0
 
 
 @pytest.mark.cpu_test
-def test_context_graph_replays_decode_slice_in_mixed_batch():
+def test_context_graph_replays_decode_slice_in_mixed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator."
+        "envs.VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION",
+        True,
+    )
     manager = BoundedContextCudaGraph(
         torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
     )
@@ -121,13 +137,22 @@ def test_context_graph_replays_decode_slice_in_mixed_batch():
     graph = FakeGraph()
     manager.graphs[2] = graph  # type: ignore[assignment]
     project_calls = []
-    store_calls = []
+    eager_calls = []
+
+    def project_into(states, output):
+        project_calls.append(states)
+        output.copy_(states + 10)
+        return output
+
     model = SimpleNamespace(
-        project_context_kv=lambda states: project_calls.append(states) or states + 10,
-        store_projected_context_kv=lambda *args: store_calls.append(args),
-        precompute_and_store_context_kv=lambda *_args: pytest.fail(
-            "a replayable decode slice must share the eager projection"
+        project_context_kv_into=project_into,
+        project_context_kv=lambda _states: pytest.fail(
+            "a replayable decode slice must project into the graph buffer"
         ),
+        store_projected_context_kv=lambda *_args: pytest.fail(
+            "the decode graph must consume the staged projection"
+        ),
+        precompute_and_store_context_kv=lambda *args: eager_calls.append(args),
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -152,20 +177,29 @@ def test_context_graph_replays_decode_slice_in_mixed_batch():
     )
 
     assert len(project_calls) == 1
-    assert project_calls[0] is states
+    torch.testing.assert_close(project_calls[0], states[:2])
     assert graph.replay_count == 1
     assert manager.replay_count == 1
     assert manager.segmented_batch_count == 1
     assert manager.segmented_replay_count == 1
+    assert manager.direct_projection_count == 1
+    assert manager.context_copy_count == 0
     torch.testing.assert_close(manager.context_states, states[:2] + 10)
-    assert len(store_calls) == 1
-    torch.testing.assert_close(store_calls[0][0], states[2:] + 10)
-    torch.testing.assert_close(store_calls[0][1], positions[2:])
-    torch.testing.assert_close(store_calls[0][2], slots[2:])
+    assert len(eager_calls) == 1
+    torch.testing.assert_close(eager_calls[0][0], states[2:])
+    torch.testing.assert_close(eager_calls[0][1], positions[2:])
+    torch.testing.assert_close(eager_calls[0][2], slots[2:])
 
 
 @pytest.mark.cpu_test
-def test_context_graph_replays_each_request_in_multi_decode_batch():
+def test_context_graph_replays_each_request_in_multi_decode_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator."
+        "envs.VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION",
+        True,
+    )
     manager = BoundedContextCudaGraph(
         torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
     )
@@ -178,10 +212,19 @@ def test_context_graph_replays_each_request_in_multi_decode_batch():
 
     graph = FakeGraph()
     manager.graphs[2] = graph  # type: ignore[assignment]
-    store_calls = []
+
+    def project_into(states, output):
+        output.copy_(states)
+        return output
+
     model = SimpleNamespace(
-        project_context_kv=lambda states: states,
-        store_projected_context_kv=lambda *args: store_calls.append(args),
+        project_context_kv_into=project_into,
+        project_context_kv=lambda _states: pytest.fail(
+            "each decode slice must project directly"
+        ),
+        store_projected_context_kv=lambda *_args: pytest.fail(
+            "each fixed decode slice must replay"
+        ),
         precompute_and_store_context_kv=lambda *_args: pytest.fail(
             "each fixed decode slice must replay"
         ),
@@ -209,7 +252,81 @@ def test_context_graph_replays_each_request_in_multi_decode_batch():
     assert manager.replay_count == 2
     assert manager.segmented_batch_count == 1
     assert manager.segmented_replay_count == 2
-    assert store_calls == []
+    assert manager.direct_projection_count == 2
+    assert manager.context_copy_count == 0
+
+
+@pytest.mark.cpu_test
+def test_context_graph_prefers_batched_multi_decode_shape(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dflash.speculator."
+        "envs.VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION",
+        True,
+    )
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"),
+        torch.float32,
+        hidden_size=2,
+        max_num_tokens=4,
+        capture_sizes=[2, 4],
+    )
+
+    class FakeGraph:
+        replay_count = 0
+
+        def replay(self):
+            self.replay_count += 1
+
+    per_request_graph = SimpleNamespace(
+        replay=lambda: pytest.fail("the batched graph must take priority")
+    )
+    batched_graph = FakeGraph()
+    manager.graphs[2] = per_request_graph  # type: ignore[assignment]
+    manager.graphs[4] = batched_graph  # type: ignore[assignment]
+
+    def project_into(states, output):
+        output.copy_(states)
+        return output
+
+    model = SimpleNamespace(
+        project_context_kv_into=project_into,
+        project_context_kv=lambda _states: pytest.fail(
+            "the batched projection must write directly"
+        ),
+        store_projected_context_kv=lambda *_args: pytest.fail(
+            "the batched graph must replay"
+        ),
+        precompute_and_store_context_kv=lambda *_args: pytest.fail(
+            "the batched graph must replay"
+        ),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
+        query_start_loc_np=np.array([0, 2, 4], dtype=np.int32),
+        is_prefilling_np=np.array([False, False]),
+        has_prefill=False,
+    )
+
+    _store_context_kv_with_graphs(
+        model,
+        manager,
+        torch.arange(8, dtype=torch.float32).view(4, 2),
+        torch.arange(4, dtype=torch.int64),
+        torch.arange(4, dtype=torch.int64),
+        input_batch,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+    assert batched_graph.replay_count == 1
+    assert manager.replay_count == 1
+    assert manager.batched_replay_count == 1
+    assert manager.segmented_batch_count == 0
+    assert manager.direct_projection_count == 1
+    assert manager.context_copy_count == 0
 
 
 @pytest.mark.cpu_test
@@ -307,6 +424,24 @@ def test_context_precompute_split_reuses_eager_projection():
     assert calls[1][0] is projected
     assert calls[1][1] is positions
     assert calls[1][2] is slots
+
+
+@pytest.mark.cpu_test
+def test_context_projection_writes_directly_into_stable_output():
+    states = torch.randn(3, 4)
+    weight = nn.Parameter(torch.randn(6, 4), requires_grad=False)
+    output = torch.empty(3, 6)
+    owner = SimpleNamespace(
+        context_kv_proj=SimpleNamespace(
+            quant_method=UnquantizedLinearMethod(),
+            weight=weight,
+        )
+    )
+
+    actual = dspark_mla.K3DSparkModel.project_context_kv_into(owner, states, output)
+
+    assert actual is output
+    torch.testing.assert_close(output, torch.nn.functional.linear(states, weight))
 
 
 @pytest.mark.parametrize(

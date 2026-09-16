@@ -215,6 +215,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
     VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS: int = 0
+    VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1620,6 +1621,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # this token bound. Replay preserves PAD_SLOT_ID cache rows. Zero disables it.
     "VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS": lambda: int(
         os.getenv("VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS", "0")
+    ),
+    "VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION", "0"))
     ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).

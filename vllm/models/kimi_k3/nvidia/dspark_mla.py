@@ -13,6 +13,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
@@ -256,6 +257,22 @@ class K3DSparkModel(nn.Module):
         """Keep the AITER GEMM outside HIP graph capture."""
         return self.context_kv_proj(context_states)
 
+    def project_context_kv_into(
+        self,
+        context_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project directly into a stable context-graph input buffer."""
+        if not isinstance(self.context_kv_proj.quant_method, UnquantizedLinearMethod):
+            output.copy_(self.project_context_kv(context_states))
+            return output
+        torch.mm(
+            context_states,
+            self.context_kv_proj.weight.t(),
+            out=output,
+        )
+        return output
+
     def store_projected_context_kv(
         self,
         all_kv: torch.Tensor,
@@ -494,6 +511,15 @@ class K3DSparkForCausalLM(nn.Module):
         if not hasattr(self.model, "_num_context_layers"):
             self.model._build_fused_context_kv_metadata()
         return self.model.project_context_kv(context_states)
+
+    def project_context_kv_into(
+        self,
+        context_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if not hasattr(self.model, "_num_context_layers"):
+            self.model._build_fused_context_kv_metadata()
+        return self.model.project_context_kv_into(context_states, output)
 
     def store_projected_context_kv(
         self,

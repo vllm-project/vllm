@@ -132,15 +132,20 @@ class DSparkSpeculator(DFlashSpeculator):
             and current_platform.is_rocm()
             and getattr(self.model, "supports_bounded_context_cudagraph", False)
         ):
+            capture_sizes = [context_cg_tokens]
+            two_request_tokens = 2 * context_cg_tokens
+            if self.max_num_reqs >= 2 and two_request_tokens <= context_cg_limit:
+                capture_sizes.append(two_request_tokens)
             self.context_cudagraph_manager = BoundedContextCudaGraph(
                 self.device,
                 self.dtype,
                 self.model.context_cudagraph_input_size,
-                context_cg_tokens,
+                max(capture_sizes),
+                capture_sizes,
             )
             logger.info(
-                "Kimi-K3 DSpark context precompute graphs enabled for 1..%d tokens",
-                context_cg_tokens,
+                "Kimi-K3 DSpark context precompute graph sizes: %s",
+                capture_sizes,
             )
 
     def _sample_logits(

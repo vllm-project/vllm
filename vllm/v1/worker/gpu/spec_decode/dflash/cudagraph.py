@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 import torch
 
@@ -38,8 +38,20 @@ class BoundedContextCudaGraph:
         dtype: torch.dtype,
         hidden_size: int,
         max_num_tokens: int,
+        capture_sizes: Iterable[int] | None = None,
     ) -> None:
         self.max_num_tokens = max_num_tokens
+        self.capture_sizes = tuple(
+            range(1, max_num_tokens + 1)
+            if capture_sizes is None
+            else sorted(set(capture_sizes))
+        )
+        if not self.capture_sizes or any(
+            size <= 0 or size > max_num_tokens for size in self.capture_sizes
+        ):
+            raise ValueError(
+                f"invalid context graph capture sizes: {self.capture_sizes}"
+            )
         self.context_states = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
@@ -63,6 +75,9 @@ class BoundedContextCudaGraph:
         self.fallback_count = 0
         self.segmented_batch_count = 0
         self.segmented_replay_count = 0
+        self.context_copy_count = 0
+        self.direct_projection_count = 0
+        self.batched_replay_count = 0
 
     def clear(self) -> None:
         """Release graphs captured against a temporary or superseded KV cache."""
@@ -73,6 +88,9 @@ class BoundedContextCudaGraph:
         self.fallback_count = 0
         self.segmented_batch_count = 0
         self.segmented_replay_count = 0
+        self.context_copy_count = 0
+        self.direct_projection_count = 0
+        self.batched_replay_count = 0
 
     @staticmethod
     def _shared_slot_mapping(
@@ -108,7 +126,7 @@ class BoundedContextCudaGraph:
         """Warm up and capture every context shape up to the configured bound."""
         self.clear()
         self.context_slot_mapping.fill_(PAD_SLOT_ID)
-        for num_tokens in range(1, self.max_num_tokens + 1):
+        for num_tokens in self.capture_sizes:
             logger.info("Warming DSpark context graph shape %d", num_tokens)
             forward_fn(
                 self.context_states[:num_tokens],
@@ -126,7 +144,7 @@ class BoundedContextCudaGraph:
         self.capture_stream = capture_stream
         capture_stream.wait_stream(source_stream)
         with torch.cuda.stream(capture_stream):
-            for num_tokens in range(1, self.max_num_tokens + 1):
+            for num_tokens in self.capture_sizes:
                 logger.info("Capturing DSpark context graph shape %d", num_tokens)
                 graph = torch.cuda.CUDAGraph()
                 graph_pool = current_platform.graph_pool_handle()
@@ -195,7 +213,11 @@ class BoundedContextCudaGraph:
             return False
 
         assert shared_slot_mapping is not None
-        self.context_states[:num_tokens].copy_(context_states)
+        if context_states.data_ptr() == self.context_states.data_ptr():
+            self.direct_projection_count += 1
+        else:
+            self.context_states[:num_tokens].copy_(context_states)
+            self.context_copy_count += 1
         self.context_positions[:num_tokens].copy_(context_positions)
         self.context_slot_mapping[:num_tokens].copy_(shared_slot_mapping)
         self.graphs[num_tokens].replay()
