@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
+import heapq
 import math
 from abc import ABC, abstractmethod
 from collections import deque
@@ -51,6 +52,30 @@ class FCFSQueue(JobQueue):
 
     def maybe_has_work(self):
         return bool(self.q)
+
+
+class SJFHeapQueue(JobQueue):
+    """Min-heap queue that returns the shortest job (fewest tasks) first."""
+
+    def __init__(self, block_size: int):
+        super().__init__(block_size)
+        # heap entries: (num_tasks, job_id)
+        self._heap: list[tuple[int, JobId]] = []
+
+    def put(self, job_id: JobId, num_tasks: int):
+        heapq.heappush(self._heap, (num_tasks, job_id))
+
+    def get(self) -> JobId | None:
+        if not self._heap:
+            return None
+        _, job_id = heapq.heappop(self._heap)
+        return job_id
+
+    def clear(self):
+        self._heap.clear()
+
+    def maybe_has_work(self):
+        return bool(self._heap)
 
 
 # put tuples (job_id, num_tasks) as and when they arrive.
