@@ -624,20 +624,19 @@ class DiffusionGemmaRequestStates:
         # Per-slot confidence flag, set by the sampler each step.
         self.confident = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
 
-        # Per-slot denoising step cap (structured reads run 1). Defaults to the
-        # global max; the sampler's add_request lowers it from extra_args.
+        # Per-slot step cap, lowered per request from extra_args.
         self.max_steps = torch.full(
             (max_num_reqs,), max_denoising_steps, dtype=torch.int32, device=device
         )
-        # A seed canvas replaces the random initial canvas once the prompt is
-        # prefilled. The host-side slot sets let the sampler skip the seed and
-        # read-only work when no live request asked for it.
+        # Seed canvases replace the random canvas after prefill. The host-side
+        # sets gate the seed and read-only work so plain generation skips it.
         self.seed_canvas = torch.zeros(
             max_num_reqs, canvas_length, dtype=torch.int64, device=device
         )
         self.has_seed = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
         self.seeded_slots: set[int] = set()
-        # Read-only slots finish on their converging step (no commit forward).
+        # Read-only slots emit on their converging step and skip the commit
+        # forward.
         self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
         self.read_only_slots: set[int] = set()
 
@@ -677,9 +676,8 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots.discard(slot_idx)
 
     def remove_request(self, slot_idx: int) -> None:
-        # The GPU flags (max_steps, has_seed, read_only) are reset by
-        # add_request before the slot is reused; only the host sets that gate
-        # the sampler's work need clearing now.
+        # add_request resets the GPU flags before a slot is reused. The host
+        # sets gate work on every step, so they clear here.
         self.is_encoder_phase[slot_idx].fill_(False)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
@@ -1087,7 +1085,8 @@ class DiffusionSampler:
         if seed is not None:
             if len(seed) != self.canvas_length:
                 raise ValueError(
-                    f"diffusion_seed_canvas must hold exactly {self.canvas_length} ids, got {len(seed)}"
+                    "diffusion_seed_canvas must hold exactly "
+                    f"{self.canvas_length} ids, got {len(seed)}"
                 )
             states.set_seed_canvas(req_idx, seed)
         if extra.get("diffusion_read_only"):
@@ -1365,11 +1364,11 @@ class DiffusionSampler:
                         pos = li * CL
                         src = flat_logits
                         if slot in states.read_only_slots:
-                            # A read reports the model's own distribution at
-                            # temperature 1, not the schedule-tempered one the
-                            # sampler draws from. The argmax is the same.
+                            # Read-only slots report logprobs at temperature 1.
+                            # The schedule-tempered logits share the argmax.
                             if raw_flat is None:
-                                raw_flat = logits[start_req * CL : end_req * CL].float()
+                                tile_rows = slice(start_req * CL, end_req * CL)
+                                raw_flat = logits[tile_rows].float()
                             src = raw_flat
                         per_req_ids = max_token_ids > 0
                         self._pending_logprobs[slot] = compute_topk_scores(
@@ -1389,15 +1388,14 @@ class DiffusionSampler:
                             logits_mode=self.logits_mode,
                         )
 
-        # Read-only slots that converged this step: emit the argmax canvas now
-        # (as a commit would), keep them out of the encoder phase, and hand out
-        # their logprobs below. The request ends on these tokens.
+        # Read-only slots that converged this step emit their argmax canvas
+        # now, skip the encoder phase, and hand out their logprobs below.
         emit_now: set[int] = set()
         if states.read_only_slots and not states.read_only_slots.isdisjoint(
             decode_slots_np.tolist()
         ):
-            # A read-only slot never enters the encoder phase, so the flag
-            # being set here means it converged on this step.
+            # Read-only slots never enter the encoder phase, so the flag here
+            # means converged this step.
             ro_mask = states.read_only[decode_slots] & states.is_encoder_phase[
                 decode_slots
             ]

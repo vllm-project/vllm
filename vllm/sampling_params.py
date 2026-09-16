@@ -1083,14 +1083,13 @@ class SamplingParams(
         model_config: ModelConfig,
         diffusion_config: DiffusionConfig | None,
     ) -> None:
-        """Check the per-request diffusion fields carried in ``extra_args``.
+        """Reject bad diffusion fields in ``extra_args`` before the worker.
 
-        ``diffusion_seed_canvas`` (list of token ids, one per canvas position)
-        replaces the random initial canvas once the prompt is prefilled,
-        ``diffusion_max_steps`` (int) caps the denoising steps per canvas, and
-        ``diffusion_read_only`` (bool) ends the request on the first canvas it
-        converges. The sampler consumes these on the GPU, where an id outside
-        the vocabulary is a device-side assert, so they are checked here.
+        On the GPU a seed id outside the vocabulary is a device-side assert.
+        ``diffusion_seed_canvas``: token ids, one per canvas position, that
+        replace the random canvas after prefill. ``diffusion_max_steps``:
+        denoise steps per canvas. ``diffusion_read_only``: end the request
+        on the first canvas that converges.
         """
         extra = self.extra_args
         if not extra:
@@ -1141,11 +1140,13 @@ class SamplingParams(
             )
         if read_only:
             # One canvas is the whole output. Cap max_tokens so the scheduler
-            # ends the request on it, and ignore EOS so a noise draw that lands
-            # an end-of-turn token in the canvas cannot cut it short.
+            # ends the request there, and ignore EOS so an end-of-turn token
+            # drawn into a noise slot does not end it early.
             if diffusion_config is not None:
                 canvas_length = diffusion_config.canvas_length
-                self.max_tokens = min(self.max_tokens or canvas_length, canvas_length)
+                self.max_tokens = min(
+                    self.max_tokens or canvas_length, canvas_length
+                )
             self.ignore_eos = True
 
     def _validate_structured_outputs(

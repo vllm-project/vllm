@@ -149,6 +149,6 @@ def test_step_cap_is_per_slot():
 
     _denoise_once(states, [0, 1])
 
-    # Slot 0 hit its cap and moves to commit; slot 1 keeps denoising.
+    # Slot 0 hit its cap and moves to commit. Slot 1 keeps denoising.
     assert states.is_encoder_phase[:2].tolist() == [True, False]
     assert states.step[:2].tolist() == [1, 1]
