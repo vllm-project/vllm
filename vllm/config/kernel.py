@@ -283,7 +283,7 @@ class KernelConfig:
     """
 
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
-    """Backend for the DSA sparse indexer decode top-k kernel. Available options:
+    """Backend for DSA sparse indexer top-k selection. Available options:
 
     - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
       the other backends are opt-in
@@ -294,7 +294,10 @@ class KernelConfig:
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "torch": Use a plain torch.topk implementation (debug reference)
 
-    Explicit values raise RuntimeError when their constraints are not met.
+    These options select the decode kernel. "deep_select" also accelerates
+    supported single-request prefill chunks without context parallelism; other
+    prefill chunks retain the default kernel. Explicit decode values raise
+    RuntimeError when their constraints are not met.
     """
 
     linear_backend: LinearBackend = "auto"

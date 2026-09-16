@@ -1667,38 +1667,46 @@ def test_deep_select_topk(
 
 
 @requires_sm100
+@pytest.mark.parametrize("bounded", [False, True])
 @torch.inference_mode()
-def test_deep_select_topk_preallocated_output() -> None:
-    """DeepSelect writes into a preallocated aligned buffer (no `end`)."""
+def test_deep_select_topk_preallocated_output(bounded: bool) -> None:
+    """Preserve output bounds and observe updated prefill ends on graph replay."""
     from vllm.model_executor.layers import indexer_topk
 
     set_random_seed(0)
     torch.set_default_device("cuda:0")
-
-    batch_size = 8
-    vocab_size = 131072
-    top_k = 2048
+    batch_size, vocab_size, top_k = 8, 131072, 2048
     logits = torch.randn(batch_size, vocab_size, dtype=torch.float32, device="cuda")
-
-    # Mimic vLLM's topk_indices_buffer: slice of a wider contiguous buffer,
-    # whose stride(0) is 32B-aligned.
     buffer = torch.full((batch_size, 4096), -2, dtype=torch.int32, device="cuda")
     output_idx = buffer[:, :top_k]
-    result = indexer_topk.deep_select_topk(logits, top_k, output_idx=output_idx)
-    torch.accelerator.synchronize()
-
-    assert result.data_ptr() == output_idx.data_ptr()
-    assert torch.all(buffer[:, top_k:] == -2), "kernel wrote out of bounds"
-
     row_ends = torch.full((batch_size,), vocab_size, dtype=torch.int32, device="cuda")
-    row_starts = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-    torch_indices = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
-    for i in range(batch_size):
-        torch_indices[i] = logits[i].topk(top_k, dim=-1)[1]
+    row_starts = torch.zeros_like(row_ends)
 
-    assert compare_top_k_results(
-        logits, output_idx, torch_indices, row_starts, row_ends, top_k
-    ), "DeepSelect topk (preallocated output) results don't match torch.topk"
+    def select():
+        return indexer_topk.deep_select_topk(
+            logits, top_k, end=row_ends if bounded else None, output_idx=output_idx
+        )
+
+    result = select()
+    assert result.data_ptr() == output_idx.data_ptr()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        select()
+    lengths = [0, 1, 512, 2047, 2048, 8192, vocab_size - 1, vocab_size]
+    for ends in (lengths, lengths[::-1]) if bounded else ([vocab_size] * 8,):
+        row_ends.copy_(torch.tensor(ends, device="cuda", dtype=torch.int32))
+        buffer.fill_(-2)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.all(buffer[:, top_k:] == -2), "kernel wrote out of bounds"
+        expected = torch.full_like(output_idx, -1)
+        for row, end in enumerate(ends):
+            k = min(top_k, end)
+            expected[row, :k] = logits[row, :end].topk(k).indices
+            assert torch.all(output_idx[row, k:] == -1)
+        assert compare_top_k_results(
+            logits, output_idx, expected, row_starts, row_ends, top_k
+        ), "DeepSelect ignored row bounds or returned incorrect scores"
 
 
 def _has_flashinfer_topk() -> bool:

@@ -22,7 +22,10 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
+    deep_select_topk,
+    get_deep_select_stride_requirement,
     get_indexer_topk,
+    is_deep_select_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -614,16 +617,33 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    cu_seqlen_ks,
-                    cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                if (
+                    topk_backend == "deep_select"
+                    and chunk.num_reqs == 1
+                    and not use_pcp
+                    and dcp_world_size == 1
+                    and current_platform.is_device_capability_family(100)
+                    and is_deep_select_supported(logits, topk_tokens)
+                    and topk_indices.stride(0)
+                    * topk_indices.element_size()
+                    % get_deep_select_stride_requirement()[1]
+                    == 0
+                ):
+                    # A single request's gathered keys start at column zero.
+                    deep_select_topk(
+                        logits, topk_tokens, end=cu_seqlen_ke, output_idx=topk_indices
+                    )
+                else:
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
             if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
