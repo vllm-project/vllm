@@ -694,6 +694,10 @@ def minimax_m3_index_score(
         1,
         min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
     )
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
+    ):
+        split_k = 1
     grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
