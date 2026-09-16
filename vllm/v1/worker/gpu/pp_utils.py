@@ -11,7 +11,7 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -138,7 +138,7 @@ class PPHandler:
                 return None
             # Filter excluded request indices.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
 
         self.main_stream.wait_event(slot.event)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
@@ -148,7 +148,7 @@ class PPHandler:
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=self.device)
                 draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_copy_to_gpu(
+                draft_idx_mapping = async_tensor_h2d(
                     slot.idx_mapping_np[keep], device=self.device
                 )
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
@@ -170,10 +170,12 @@ class PPHandler:
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             send = draft_tokens[input_batch.idx_mapping].contiguous()
+            # Must record the idx_mapping tensor since it was allocated
+            # on the main stream.
+            input_batch.idx_mapping.record_stream(self.broadcast_stream)
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )
-            send.record_stream(self.broadcast_stream)
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
