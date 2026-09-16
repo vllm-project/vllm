@@ -910,12 +910,13 @@ def test_quant_method_dispatch_target(case):
 
 
 def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
-    """A 32x32 per-block e8m0 FP8 linear routes to the Quark MXFP8 scheme.
+    """Shape B (DeepSeek-V4.1): 32x32 per-block e8m0 routes to QuarkOCP_MX.
 
-    Shape taken from DeepSeek-V4.1-Flash-MXFP4, which is mixed precision:
-    MXFP4 globally for the experts, per-layer 2-D block MXFP8 for attention.
+    Verifies that get_quant_method and get_quant_method_target agree (the
+    short-circuit that previously caused them to diverge has been removed).
     """
-    from vllm.model_executor.layers.quantization.quark.schemes import QuarkW8A8Mxfp8
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     mxfp8_spec = {
@@ -963,11 +964,18 @@ def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
         def __init__(self):
             torch.nn.Module.__init__(self)
 
+    # get_quant_method_target now routes MXFP8 through the matcher chain.
+    wk, ak, mcls = config.get_quant_method_target(
+        "layers.0.attn.wkv", LinearBase
+    )
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
     linear = TestLinear()
     method = config.get_quant_method(linear, "layers.0.attn.wkv")
     assert isinstance(method, QuarkLinearMethod)
-    assert isinstance(linear.scheme, QuarkW8A8Mxfp8)
-    # Each checkpoint scale row covers 32 weight rows and is expanded on load.
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
     assert linear.scheme.scale_block_rows == 32
 
     # Experts still fall through to the global MXFP4 spec.
@@ -988,6 +996,97 @@ def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
     linear = TestLinear()
     assert isinstance(v4_config.get_quant_method(linear, "linear"), QuarkLinearMethod)
     assert isinstance(linear.scheme, QuarkW8A8Fp8PerBlock)
+
+
+def test_quant_method_dispatch_mxfp8_canonical(default_vllm_config):
+    """Shape A (canonical MX): per_group/group_size=32/e8m0 FP8 routes
+    to QuarkOCP_MX with scale_block_rows == 1.
+
+    This covers the canonical MXFP8 spelling (no 2-D block). Validated by
+    synthetic dispatch test only — no canonical-MXFP8 checkpoint on hand.
+    """
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_canonical_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": mxfp8_canonical_spec,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {},
+            "exclude": [],
+        }
+    )
+
+    wk, ak, mcls = config.get_quant_method_target("linear", LinearBase)
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "linear")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
+    assert linear.scheme.scale_block_rows == 1
+
+
+def test_quant_method_dispatch_mxfp8_moe_raises(default_vllm_config):
+    """MXFP8 in a MoE config raises ValueError — experts are unsupported."""
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": mxfp8_spec,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {},
+            "exclude": [],
+        }
+    )
+    wk, ak, mcls = config.get_quant_method_target("experts", RoutedExperts)
+    assert mcls is QuarkOCP_MX_MoEMethod
+    # The OCP MX MoE constructor should fail loudly for MXFP8.
+    fake_moe_config = MagicMock()
+    with pytest.raises(ValueError, match="MXFP8 experts are not supported"):
+        QuarkOCP_MX_MoEMethod(fake_moe_config, wk, ak)
 
 
 @pytest.mark.parametrize(
