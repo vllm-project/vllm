@@ -137,28 +137,16 @@ class NCCLRendezvous(Protocol):
 
 
 def _require_usable_communicator(comm: "PyNcclCommunicator") -> "PyNcclCommunicator":
-    """Off CUDA/ROCm, reject a communicator that disabled itself.
+    """Reject a disabled or unavailable communicator, since every collective on it
+    is a no-op and the transfer would leave the workers on stale weights.
 
-    `PyNcclCommunicator` degrades to a no-op instead of raising when the NCCL
-    library will not load, and every collective then early-returns on
-    `self.disabled`. That is the right default for the inference collectives it
-    was written for, but for weight transfer it means a whole update round
-    "succeeds" without moving a byte, leaving the workers serving stale weights
-    with no error anywhere.
+    Skipped on CUDA/ROCm.
     """
-    if current_platform.is_cuda_alike():
-        # Unchanged where NCCL is the native transport: a disabled communicator
-        # there means `world_size == 1` or `VLLM_DISABLE_PYNCCL`, both long-standing
-        # behavior that callers may rely on.
-        return comm
-    if comm.disabled or not comm.available:
-        platform = current_platform.device_type or "this platform"
+    if not current_platform.is_cuda_alike() and (comm.disabled or not comm.available):
         raise RuntimeError(
             "NCCL weight transfer needs a working PyNccl communicator, but it "
-            f"disabled itself on {platform} (rank={comm.rank}, "
-            f"world_size={comm.world_size}). Every collective would be a no-op, "
-            "silently leaving the inference weights stale while the transfer "
-            "reports success."
+            f"disabled itself on {current_platform.device_type} "
+            f"(rank={comm.rank}, world_size={comm.world_size})."
         )
     return comm
 
