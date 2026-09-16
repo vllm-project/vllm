@@ -80,10 +80,10 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
 
 
 @contextmanager
-def moe_near_tie_expert_flip_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
+def moe_near_tie_expert_flip_double_check(hf_choice: dict[int, torch.Tensor], tol: float):
     """Adopt HF's expert pair on a one-for-one swap that is a near tie in vLLM.
 
-    Yields the list of adopted row counts, so a caller can tell an empty rescue
+    Yields the list of adopted row counts, so a caller can tell a no-op apart
     from one that changed something. Rows match `hf_choice` by position: enter
     once per generate call, under eager execution only -- graph replay skips
     Python and misaligns the cursor.
@@ -363,7 +363,7 @@ def test_models(
             # whose router logits are tied picks an arbitrary winner, and either
             # winner is a correct answer. Generate again with HF's pick taken on
             # those rows only, and fail only if that diverges too.
-            with moe_near_tie_expert_flip_rescue(
+            with moe_near_tie_expert_flip_double_check(
                 hf_expert_choice, MOE_NEAR_TIE_EXPERT_FLIP_TOL
             ) as flips:
                 vllm_outputs_flipped = vllm_model.generate_greedy_logprobs(
