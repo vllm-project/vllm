@@ -2565,6 +2565,26 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
+@pytest.mark.parametrize("method", ["dflash", "dspark"])
+def test_dflash_family_does_not_drop_trailing_prefix_cache_block(method: str):
+    # DFlash/DSpark draft from their own KV cache and never write target
+    # blocks, so the EAGLE volatile-trailing-block drop must not apply to
+    # them: applying it backs the last mamba-aligned cache position off one
+    # block, the final block-aligned mamba state never materializes, and
+    # prefix-cache / offload-tier lookups collapse ("stores but never serves
+    # a hit", #53505). Start from an ngram config to avoid loading model
+    # metadata: these predicates depend only on the speculative method.
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+    )
+    speculative_config.method = method
+
+    assert speculative_config.use_eagle()
+    assert not speculative_config.use_eagle_preserves_target_kv_cache()
+    assert speculative_config.use_eagle_block_drop() is False
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
