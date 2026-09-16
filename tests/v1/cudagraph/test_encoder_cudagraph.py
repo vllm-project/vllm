@@ -989,7 +989,6 @@ class _FakeLingViT(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.spatial_merge_size = _LING_MERGE
-        self.patch_size = _LING_PATCH
         self.proj = torch.nn.Linear(_LING_FLAT, _LING_VIT_HIDDEN)
 
     def prepare_encoder_metadata(self, grid_thw_list, **kwargs):
@@ -1036,7 +1035,7 @@ class TestBailingMoeV3VLEncoderCudaGraph:
     def setup_method(self):
         self.model = _make_ling_vl_model()
 
-    def test_config_uses_text_width_and_patch16_min_budget(self):
+    def test_config_uses_text_width_and_power_of_two_budgets(self):
         config = self.model.get_encoder_cudagraph_config()
         assert config.modalities == ["image"]
         # The graph covers linear_proj, so DP gather buffers are text-width.
@@ -1045,9 +1044,9 @@ class TestBailingMoeV3VLEncoderCudaGraph:
         vllm_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_batched_tokens=8192)
         )
-        # 224x224 with 16px patches and 2x2 merge -> 7x7 tokens (not Qwen's 64).
+        # Floor of 64 keeps budgets on powers of two; max capped by max_model_len.
         assert self.model.get_encoder_cudagraph_budget_range(vllm_config) == (
-            49,
+            64,
             2048,
         )
 

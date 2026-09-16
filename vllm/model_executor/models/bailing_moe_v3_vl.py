@@ -410,9 +410,9 @@ class BailingMoeV3VLForConditionalGeneration(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int]:
-        # Min: merged tokens of a 224x224 image.
-        merged_patch_px = self.visual.patch_size * self.visual.spatial_merge_size
-        min_budget = (224 // merged_patch_px) ** 2
+        # Power-of-2 budgets (same floor as Qwen3-VL) line up with common
+        # square resolutions: 512px -> 256 tokens, 1024px -> 1024 tokens.
+        min_budget = 64
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
