@@ -491,6 +491,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            sampling_states = getattr(self.sampler, "sampling_states", None)
+            if self.speculator is not None and sampling_states is not None:
+                # The drafter reads the requests' top-k / top-p from the
+                # sampler's persistent tensors, also inside its CUDA graphs.
+                self.speculator.set_draft_sampling_params(
+                    sampling_states.top_k.gpu, sampling_states.top_p.gpu
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
