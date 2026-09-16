@@ -543,6 +543,7 @@ def test_nvfp4_per_token_backend_contract() -> None:
             expected = backend in (
                 nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
                 nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
             assert experts_cls._supports_quant_scheme(*scheme) == expected, experts_cls
     assert not BatchedMarlinExperts._supports_quant_scheme(*scheme)
@@ -559,6 +560,7 @@ def test_nvfp4_per_token_rejects_unsupported_backends(monkeypatch, backend) -> N
             available = candidate not in (
                 nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_TRTLLM,
                 nvfp4_oracle.NvFp4MoeBackend.HUMMING,
+                nvfp4_oracle.NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
             monkeypatch.setattr(
                 experts_cls, "_supports_current_device", lambda v=available: v
