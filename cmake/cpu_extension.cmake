@@ -709,6 +709,14 @@ else()
             AT_BUILD_ARM_VEC256_WITH_SLEEF# PyTorch requires this to enable Sleef for SIMD and SVE
             CPU_CAPABILITY=SVE128
             CPU_CAPABILITY_SVE128)
+
+        # GCC < 12.4 omits this macro despite supporting BF16.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+            AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12.4)
+            target_compile_definitions(_C_SVE256 PRIVATE __ARM_FEATURE_BF16=1)
+            target_compile_definitions(_C_SVE128 PRIVATE __ARM_FEATURE_BF16=1)
+        endif()
+
         if (VLLM_OPENBLAS_LIB)
             target_compile_definitions(_C_SVE256 PRIVATE VLLM_HAS_OPENBLAS)
             target_compile_definitions(_C_SVE128 PRIVATE VLLM_HAS_OPENBLAS)
