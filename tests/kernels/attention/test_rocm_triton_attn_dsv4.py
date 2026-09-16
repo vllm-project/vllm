@@ -1716,6 +1716,11 @@ def _v41_combine_case(case, window):
         qsl = torch.tensor([0, 64], dtype=torch.int32, device=dev)
         sl = torch.tensor([32], dtype=torch.int32, device=dev)
         rows = 64
+    elif case == "seq_len_zero":
+        # The warmup batch: every pos is negative, so both lengths clamp to 0.
+        qsl = torch.tensor([0, 32, 64], dtype=torch.int32, device=dev)
+        sl = torch.zeros(2, dtype=torch.int32, device=dev)
+        rows = 64
     elif case == "compress_ratio_zero":
         qsl = torch.tensor([0, 4, 8], dtype=torch.int32, device=dev)
         sl = torch.tensor([4, 4], dtype=torch.int32, device=dev)
@@ -1737,6 +1742,7 @@ def _v41_combine_case(case, window):
     "case,window",
     [
         ("seq_len_below_query_len", 128),
+        ("seq_len_zero", 128),
         ("compress_ratio_zero", 128),
         ("plain", 64),
         ("plain", 128),
