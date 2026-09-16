@@ -324,14 +324,21 @@ def check_and_fallback_input_schema(
     input_scale_dtype = input_schema.input_scale_dtype
 
     def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
+        if dtype is None or dtype.num_bits == 16:
+            return False
         is_int4_deprecated = dtype == humming_dtypes.int4 and sm_version >= 90
         is_int8_deprecated = dtype == humming_dtypes.int8 and 103 <= sm_version < 110
-        return is_int4_deprecated or is_int8_deprecated
+        # Humming has not yet implemented high-performance FP8 computation
+        # on SM10X and SM11X. Therefore, it is temporarily considered deprecated.
+        # TODO: removed this after Humming has high-performance FP8 computation
+        is_fp8_deprecated = dtype.num_bits < 16 and 100 <= sm_version < 120
+        return is_int4_deprecated or is_int8_deprecated or is_fp8_deprecated
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
             if is_deprecated(a_dtype):
-                logger.warning_once(f"{a_dtype} is deprecated on SM{sm_version}")
+                msg = f"Humming {a_dtype} activation is slow on SM{sm_version} now."
+                logger.warning_once(msg)
             return input_schema
 
         if a_dtype is None or a_dtype.num_bits == 16:
