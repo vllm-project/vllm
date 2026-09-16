@@ -15,11 +15,10 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::KimiK3ChatRenderer;
 use crate::ChatRenderer;
+use crate::EffortValue;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{
-    ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode, ReasoningEffort,
-};
+use crate::request::{ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
 const OPEN_ID: u32 = 256;
@@ -37,8 +36,96 @@ fn test_tokenizer() -> TestTokenizer {
         .with_special_token(IMAGE_PLACEHOLDER, MEDIA_ID)
 }
 
+#[test]
+fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
+    let tokenizer = Arc::new(test_tokenizer());
+    let renderer = KimiK3ChatRenderer::new(
+        tokenizer.clone(),
+        [("thinking_effort".to_string(), json!("max"))].into(),
+    );
+    for (kwargs, typed, effort) in [
+        (json!({}), Some(EffortValue::from("low")), "low"),
+        (
+            json!({"enable_thinking": true, "reasoning_effort": "none"}),
+            None,
+            "max",
+        ),
+        (
+            json!({"thinking_effort": "high"}),
+            Some(EffortValue::from("none")),
+            "none",
+        ),
+        (
+            json!({"thinking": true, "thinking_effort": "high"}),
+            Some(EffortValue::from("none")),
+            "high",
+        ),
+    ] {
+        let mut request = crate::ChatRequest::for_test();
+        request.chat_options.reasoning_effort = typed;
+        request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
+        let rendered = renderer.render(&request).unwrap();
+        let prompt = tokenizer.decode(&rendered.prompt.into_token_ids().unwrap(), false).unwrap();
+        let enabled = effort != "none";
+        assert_eq!(prompt.ends_with("<|open|>think<|sep|>"), enabled);
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            effort
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+        if enabled {
+            assert!(prompt.contains(&format!("thinking_effort={effort}")));
+            assert_eq!(
+                rendered.effective_template_kwargs["thinking_effort"],
+                effort
+            );
+        } else {
+            assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
+        }
+    }
+
+    // Each source parses its native override only while reasoning is active.
+    for value in [json!(true), json!(false), json!([]), json!({}), json!(null)] {
+        for disabled in [false, true] {
+            for deployment in [false, true] {
+                let mut source = std::collections::HashMap::from([(
+                    "thinking_effort".to_string(),
+                    value.clone(),
+                )]);
+                if disabled {
+                    source.insert("thinking".to_string(), json!(false));
+                }
+                let mut request = crate::ChatRequest::for_test();
+                let defaults = if deployment {
+                    source
+                } else {
+                    request.chat_options.template_kwargs = source;
+                    Default::default()
+                };
+                let result = KimiK3ChatRenderer::new(tokenizer.clone(), defaults).render(&request);
+                if disabled {
+                    let rendered = result.unwrap();
+                    assert_eq!(
+                        rendered.effective_template_kwargs["reasoning_effort"],
+                        "none"
+                    );
+                    assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
+                } else {
+                    assert!(result.unwrap_err().is_request_validation_error());
+                }
+            }
+        }
+    }
+}
+
 fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {
-    let prompt = KimiK3ChatRenderer::new(tokenizer).render(request).unwrap().prompt;
+    let prompt = KimiK3ChatRenderer::new(tokenizer, Default::default())
+        .render(request)
+        .unwrap()
+        .prompt;
     let Prompt::TokenIds(token_ids) = prompt else {
         panic!("kimi k3 renderer should return token IDs")
     };
@@ -310,7 +397,7 @@ fn media_order_follows_reordered_tool_results() {
         ),
     ];
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
-    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()));
+    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default());
 
     let rendered = renderer.render(&request).unwrap();
     let media_order = rendered.media_order.unwrap();
@@ -431,7 +518,7 @@ fn enable_thinking_true_overrides_standard_none() {
 #[test]
 fn typed_none_disables_thinking() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
 
     let rendered = render_request(&request);
 
@@ -447,12 +534,12 @@ fn rejects_removed_medium_thinking_effort() {
         .template_kwargs
         .insert("thinking_effort".to_string(), json!("medium"));
 
-    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()))
+    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default())
         .render(&request)
         .unwrap_err();
 
     expect![[r#"
-        ChatTemplate(
+        InvalidReasoningEffort(
             "unsupported thinking_effort=\"medium\"; supported values are `low`, `high`, and `max`",
         )
     "#]]
