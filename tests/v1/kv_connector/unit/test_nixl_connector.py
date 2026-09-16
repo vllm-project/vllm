@@ -383,7 +383,8 @@ def test_prefill_exports_cached_tokens_in_kv_transfer_params():
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
-    assert request.num_cached_tokens == NUM_TOKENS - BLOCK_SIZE
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.num_cached_tokens == NUM_TOKENS - BLOCK_SIZE
 
     # max_tokens=1, so the request finishes and returns kv_transfer_params.
     model_runner_output = create_model_runner_output([request])
