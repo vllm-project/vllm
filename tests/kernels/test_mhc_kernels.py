@@ -11,6 +11,7 @@ import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
+    mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -38,6 +39,10 @@ from vllm.models.deepseek_v4.nvidia.model import (
 )
 from vllm.models.deepseek_v41.nvidia.model import (
     DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
+)
+from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
+    is_mega_mhc_supported,
+    mhc_shifted_post_pre_deep_gemm,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -145,6 +150,27 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     torch.testing.assert_close(
         actual, expected.to(streams.dtype), atol=1.6e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("num_tokens", [1, 7, 32])
+@pytest.mark.parametrize("tp_size", [4, 8])
+def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
+    """Simulate SP on one GPU, including padding and ranks without valid tokens."""
+    set_random_seed(0)
+    padded_tokens = num_tokens + (-num_tokens) % tp_size
+    streams = torch.randn(padded_tokens, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    pre_mix = torch.rand(padded_tokens, 4, device=DEVICE)
+    stream_shards = streams.chunk(tp_size)
+    mix_shards = pre_mix.chunk(tp_size)
+    before = hc_collapse_triton(
+        torch.cat(stream_shards)[:num_tokens], torch.cat(mix_shards)[:num_tokens]
+    )
+    after = torch.cat(
+        [hc_collapse_triton(x, pre) for x, pre in zip(stream_shards, mix_shards)]
+    )[:num_tokens]
+    assert after.shape == (num_tokens, 5120)
+    torch.testing.assert_close(after, before, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
@@ -474,7 +500,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         reference,
     )
     monkeypatch.setattr(
-        "vllm.models.deepseek_v41.nvidia.model.mhc_fused_post_pre_delayed_tilelang",
+        "vllm.models.deepseek_v41.nvidia.model.mhc_shifted_post_pre",
         fused_reference,
     )
     expected = decoder(x, positions, None, **kwargs)
@@ -559,6 +585,104 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     )
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+    set_random_seed(0)
+    hc_mult = 4
+    if not is_mega_mhc_supported(hidden_size, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    previous_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
+    post_mix = torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
+    res_mix = torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE)
+    fn = torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01
+    scale = torch.randn(3, device=DEVICE) * 0.1
+    base = torch.randn(24, device=DEVICE) * 0.1
+    norm_weight = torch.empty(
+        hidden_size, dtype=torch.bfloat16, device=DEVICE
+    ).uniform_(0.9, 1.1)
+
+    expected_residual = (
+        mhc_post_tilelang(x, residual, post_mix, res_mix) if num_tokens else residual
+    )
+    (
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
+    ) = mhc_pre_delayed_tilelang(
+        expected_residual,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+        pre_mix=previous_mix,
+        norm_weight=norm_weight,
+        norm_eps=7e-6,
+    )
+    args = (
+        x,
+        residual,
+        previous_mix,
+        post_mix,
+        res_mix,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        1.25,
+        2e-6,
+        10,
+        norm_weight,
+        7e-6,
+    )
+    actual = mhc_shifted_post_pre_deep_gemm(*args)
+    expected = (
+        expected_residual,
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
+    )
+    for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
+        # Match the existing mHC BF16 tolerance: post rounding differences
+        # can be amplified by cancellation in the carried collapse.
+        atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
+        torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
+
+    if num_tokens:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # DeepGEMM initializes barriers per stream before capture.
+            mhc_shifted_post_pre_deep_gemm(*args)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = mhc_shifted_post_pre_deep_gemm(*args)
+            for multiplier in (0.5, -1.0):
+                x.mul_(multiplier)
+                graph.replay()
+                eager = mhc_shifted_post_pre_deep_gemm(*args)
+                for result, ref in zip(captured, eager, strict=True):
+                    torch.testing.assert_close(result, ref, atol=0, rtol=0)
+        torch.cuda.current_stream().wait_stream(stream)
+
+
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
     x = x.softmax(-1) + eps
     x = x / (x.sum(-2, keepdim=True) + eps)
@@ -579,7 +703,7 @@ def mhc_pre_ref(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """mHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303"""
+    """MHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303."""
     hc_mult = residual.shape[-2]
 
     residual_flat = residual.flatten(-2, -1).float()
@@ -618,7 +742,7 @@ def mhc_post_ref(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    """mHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68"""
+    """MHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68."""
     term2 = torch.bmm(comb_res_mix.mT, residual.float())
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
@@ -1248,7 +1372,8 @@ def _patch_first_rank_pp_group(monkeypatch):
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     """First finalize (at the end of load_weights) allocates
-    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
+    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams.
+    """
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1263,7 +1388,8 @@ def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
 def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     """Re-finalizing after a weight refit must copy into the existing
     broadcast tensor so its address stays stable for captured CUDA graphs,
-    while picking up the new hc_attn_fn values."""
+    while picking up the new hc_attn_fn values.
+    """
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])

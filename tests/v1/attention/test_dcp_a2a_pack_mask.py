@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The empty-shard mask fused into the DCP A2A pack kernel must be bit-exact
-with the eager ``mask_dcp_empty_shards_`` pass it replaces."""
+with the eager ``mask_dcp_empty_shards_`` pass it replaces.
+"""
 
 import pytest
 import torch
@@ -13,7 +14,7 @@ from vllm.v1.attention.ops.dcp import (
     mask_dcp_empty_shards_,
 )
 
-pytestmark = pytest.mark.skipif(
+requires_accelerator = pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="needs a CUDA or ROCm device for the Triton pack kernel",
 )
@@ -44,6 +45,7 @@ def _pack(out, lse, world_size, h_per_rank, head_dim, seq_lens, query_start_loc)
 @pytest.mark.parametrize("world_size,h_per_rank", [(8, 2), (8, 16), (4, 4), (2, 1)])
 @pytest.mark.parametrize("tokens_per_req", [1, 2, 3])
 @pytest.mark.parametrize("num_pad_rows", [0, 2])
+@requires_accelerator
 @pytest.mark.parametrize(
     "seq_lens_list",
     [
@@ -97,6 +99,7 @@ def test_fused_mask_matches_eager(
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seed", range(8))
+@requires_accelerator
 def test_fused_mask_matches_eager_ragged(dtype, seed):
     """Non-uniform per-request query lengths.
 
@@ -137,6 +140,7 @@ def test_fused_mask_matches_eager_ragged(dtype, seed):
     )
 
 
+@requires_accelerator
 def test_mask_disabled_is_unmasked():
     """Passing no seq_lens/query_start_loc must leave the LSE untouched."""
     torch.manual_seed(0)
@@ -149,3 +153,14 @@ def test_mask_disabled_is_unmasked():
 
     packed = _pack(out, lse, world_size, h_per_rank, head_dim, None, None)
     assert torch.isfinite(packed.float()).all()
+
+
+def test_eager_mask_handles_rank_with_no_local_sequences():
+    """Padded graph rows are all empty when a DCP rank has no sequences."""
+    lse = torch.randn(8, 4, dtype=torch.float32)
+    seq_lens = torch.empty(0, dtype=torch.int32)
+    query_start_loc = torch.tensor([0], dtype=torch.int32)
+
+    mask_dcp_empty_shards_(lse, seq_lens, query_start_loc)
+
+    assert torch.isneginf(lse).all()

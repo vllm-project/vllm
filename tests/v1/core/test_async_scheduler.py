@@ -334,7 +334,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request = create_requests(num_requests=1, num_tokens=1)[0]
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
     request.num_output_placeholders = 1
@@ -343,10 +342,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -556,7 +552,8 @@ def _create_async_pp_scheduler(
 
 def _assert_ordered_subset(delivered: list[int], emitted: list[int]) -> None:
     """Delivered tokens must be an order-preserving subset of the emitted
-    tokens with no duplicates (tokens are globally unique)."""
+    tokens with no duplicates (tokens are globally unique).
+    """
     it = iter(emitted)
     for token in delivered:
         assert token in it, f"token {token} delivered out of order or twice"
@@ -566,7 +563,8 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
     """The i-th delivered output token must be one the runner sampled for
     exactly sequence position prompt_len + i: catches a preempted request's
     stale output landing on a position the resumed request resampled (or
-    vice versa), which token-stream equality alone cannot see."""
+    vice versa), which token-stream equality alone cannot see.
+    """
     for i, token in enumerate(req.output_token_ids):
         expected = req.num_prompt_tokens + i
         actual = engine.emitted_position[token]

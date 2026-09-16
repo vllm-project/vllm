@@ -110,7 +110,8 @@ def make_meta(*, p_tp: int, p_dp: int, remote_dp_rank: int, host: str = "phost0"
 def build_decode_workers(cfg: PDConfig) -> list:
     """Decode workers that issue reads for one prefill instance. A TP decode
     instance reads from every tp rank; a DP decode instance from each dp-rank
-    worker. Reused across requests so per-worker round-robin state advances."""
+    worker. Reused across requests so per-worker round-robin state advances.
+    """
     if cfg.d_tp > 1:
         return [
             make_decode_worker(world_size=cfg.d_tp, tp_rank=r, dp_rank=0)
@@ -125,7 +126,8 @@ def prefill_target_multiset(cfg: PDConfig, rounds: int) -> Counter:
     """Drive the REAL _resolve_read_source over a fair input stream; tally which
     prefill GPU each read targets. The only modelled assumption is the proxy
     contract -- each owner dp-rank delivered equally (``for owner_dp in
-    range(p_dp)``); no proxy algorithm is reproduced."""
+    range(p_dp)``); no proxy algorithm is reproduced.
+    """
     workers = build_decode_workers(cfg)
     hits: Counter = Counter()
     for _ in range(rounds):

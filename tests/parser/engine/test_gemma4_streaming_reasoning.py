@@ -1097,7 +1097,8 @@ class TestNonStreamingReasoningPlusToolCalls:
 
     def test_both_extractions_independent(self, parser, request_obj):
         """Calling extract_reasoning then extract_tool_calls on the same
-        parser instance should both work (each resets the engine)."""
+        parser instance should both work (each resets the engine).
+        """
         model_output = FULL_MODEL_OUTPUT
 
         reasoning, _ = parser.extract_reasoning(model_output, request_obj)
@@ -1111,7 +1112,8 @@ class TestNonStreamingReasoningPlusToolCalls:
 
 class TestAdapterExtractReasoning:
     """The reasoning adapter's extract_reasoning uses skip_tool_parsing
-    so tool call text is preserved as content for the tool adapter."""
+    so tool call text is preserved as content for the tool adapter.
+    """
 
     @pytest.fixture
     def adapter(self, mock_tokenizer):
@@ -1152,7 +1154,8 @@ class TestAdapterExtractReasoning:
 class TestGemma4SchemaAwareTypeCoercion:
     """Verify that streaming and non-streaming produce identical
     type-fixed arguments when tool schemas declare string parameters
-    but the model outputs bare numbers/booleans."""
+    but the model outputs bare numbers/booleans.
+    """
 
     @pytest.fixture
     def tools(self):
@@ -1182,7 +1185,8 @@ class TestGemma4SchemaAwareTypeCoercion:
 
     def test_streaming_string_param_not_coerced(self, parser_with_tools, mock_request):
         """A numeric value for a string-typed param must remain a string
-        in the streamed output, matching the non-streaming result."""
+        in the streamed output, matching the non-streaming result.
+        """
         chunks = [
             "<|tool_call>",
             "call:update_record{",
@@ -1213,7 +1217,8 @@ class TestGemma4SchemaAwareTypeCoercion:
 
     def test_streaming_matches_non_streaming(self, parser_with_tools, mock_request):
         """Concatenated streaming deltas must produce the same arguments
-        as non-streaming extraction."""
+        as non-streaming extraction.
+        """
         text = "<|tool_call>call:update_record{zipcode:12345}<tool_call|>"
 
         non_streaming = parser_with_tools.extract_tool_calls(text, mock_request)
@@ -1234,7 +1239,8 @@ class TestGemma4SchemaAwareTypeCoercion:
 
 class TestGemma4SchemaCoercionBoolNumberNull:
     """Verify that _fix_arg_types coerces string values to non-string
-    schema types for the Gemma4 parser."""
+    schema types for the Gemma4 parser.
+    """
 
     @pytest.fixture
     def tools(self):
@@ -1295,7 +1301,8 @@ class TestGemma4SchemaCoercionBoolNumberNull:
 
     def test_streaming_type_stability(self, parser_with_tools, mock_request):
         """Values streamed incrementally must not cause prefix
-        incompatibility when types are coerced."""
+        incompatibility when types are coerced.
+        """
         text = (
             "<|tool_call>call:configure{"
             "enabled:true,"
@@ -1395,7 +1402,8 @@ BARE_THOUGHT_SEQUENCE.append((TOOL_CALL_END_ID, "<tool_call|>"))
 class TestBareThoughtWithoutChannelOpener:
     """When the model omits <|channel> and starts with bare ``thought``,
     the parser should auto-inject the channel opener so reasoning is
-    captured correctly."""
+    captured correctly.
+    """
 
     @pytest.fixture
     def bare_thought_tokenizer(self):
@@ -1466,7 +1474,8 @@ class TestBareThoughtWithoutChannelOpener:
 
     def test_bare_thought_token_at_end_of_stream(self, request_obj):
         """When the stream ends with just "thought" (no \\n), the parser
-        should treat it as the thought prefix token, not real reasoning."""
+        should treat it as the thought prefix token, not real reasoning.
+        """
         seq: list[tuple[int, str]] = [
             (CHANNEL_START_ID, "<|channel>"),
             (3000, "thought"),
@@ -1616,3 +1625,36 @@ class TestCommaInStringValueRegression:
         assert result.tools_called is True
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+
+class TestGemma4IsReasoningEnd:
+    @staticmethod
+    def _parser(thinking: bool):
+        return Gemma4Parser(
+            _make_tokenizer(_PLAIN_ANSWER_TOKENS),
+            chat_template_kwargs={"enable_thinking": thinking},
+        )
+
+    @pytest.mark.parametrize(
+        ("ids", "thinking", "ended"),
+        [
+            ([CHANNEL_START_ID, 3000, CHANNEL_END_ID], True, True),
+            ([CHANNEL_START_ID, 3000, TOOL_CALL_START_ID], True, True),
+            ([CHANNEL_START_ID, 3000], True, False),
+            ([NEW_TURN_ID, 9100], True, False),
+            ([CHANNEL_END_ID, NEW_TURN_ID, 9100], True, False),
+            ([NEW_TURN_ID, 9100], False, True),
+            # The bundled template's thinking-off prompt: closed channel.
+            ([NEW_TURN_ID, 9100, CHANNEL_START_ID, 3000, CHANNEL_END_ID], False, True),
+            # A marker still wins with thinking off: the grammar honours it.
+            ([CHANNEL_START_ID, 3000], False, False),
+            # A tool-call opener after the channel closed: still ended.
+            (
+                [CHANNEL_START_ID, 3000, CHANNEL_END_ID, TOOL_CALL_START_ID, 9200],
+                True,
+                True,
+            ),
+        ],
+    )
+    def test_is_reasoning_end(self, ids, thinking, ended):
+        assert self._parser(thinking).is_reasoning_end(ids) is ended

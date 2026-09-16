@@ -336,7 +336,8 @@ class Worker(WorkerBase):
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
         cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit."""
+        value on exit.
+        """
         if not current_platform.is_cuda():
             yield
             return
@@ -536,6 +537,7 @@ class Worker(WorkerBase):
         Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
+
         """
         maybe_apply_startup_plan(self)
 
@@ -694,7 +696,6 @@ class Worker(WorkerBase):
 
         Returned dict is keyed by `(pp_rank, tp_rank)`.
         """
-
         if not has_kv_transfer_group():
             return None
 
@@ -734,7 +735,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -1238,6 +1238,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
+            return self.model_runner.pool()  # type: ignore
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1362,12 +1364,12 @@ class Worker(WorkerBase):
             )
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """
-        Initialize weight transfer mechanism.
+        """Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
 
         Args:
             init_info: Dictionary containing backend-specific initialization info
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1376,8 +1378,7 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def start_weight_update(self) -> None:
-        """
-        Start a new weight update session.
+        """Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
@@ -1387,8 +1388,7 @@ class Worker(WorkerBase):
             self._start_weight_update()
 
     def start_draft_weight_update(self) -> None:
-        """
-        Like start_weight_update, but retargets the engine at the speculative
+        """Like start_weight_update, but retargets the engine at the speculative
         draft model for this session.
         """
         with set_current_vllm_config(self.vllm_config):
@@ -1421,8 +1421,7 @@ class Worker(WorkerBase):
         self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict | list[dict]) -> None:
-        """
-        Receive one weight update chunk from the trainer.
+        """Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
@@ -1432,6 +1431,7 @@ class Worker(WorkerBase):
         Args:
             update_info: Backend-specific update info, or a list indexed by
                 global worker rank across data parallel replicas.
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None

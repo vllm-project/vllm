@@ -337,9 +337,112 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
         VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
 
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 128},
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                    },
+                    {
+                        "kv_connector": "HiSparseConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"host_pool_gib": 128},
+                    },
+                ]
+            },
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                    {
+                        "kv_connector": "HiSparseConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"host_pool_gib": 128},
+                    },
+                ]
+            },
+        ),
+    ],
+    ids=["standalone", "multi-connector", "pd-decode"],
+)
+def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    config = VllmConfig(
+        kv_transfer_config=kv_transfer_config,
+        # Skip the HMA auto-detect block: it imports the connector class,
+        # which pulls the platform's compiled attention extensions.
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+    assert isinstance(config.attention_config.hisparse_config, HiSparseConfig)
+
+
+def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    config = VllmConfig(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(device_buffer_size=512)
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 128},
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+    assert config.attention_config.hisparse_config.device_buffer_size == 512
+
+
+def test_hisparse_connector_without_cuda_still_rejected(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+        VllmConfig(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"host_pool_gib": 128},
+            )
+        )
+
+
+def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector", kv_role="kv_both"
+        )
+    )
+    assert config.attention_config.hisparse_config is None
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
+    MRV1 paths and off breakable cudagraphs by default.
+    """
     from vllm.config.vllm import (
         ROCM_DEFAULT_MRV1_ARCHITECTURES,
         default_breakable_cudagraph_architectures,
@@ -554,7 +657,8 @@ def test_v2_model_runner_supports_extract_hidden_states():
 
 def test_dflash2_draft_forces_v2_model_runner():
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
-    candidate selector; on V1 it would draft as DFlash1 without raising."""
+    candidate selector; on V1 it would draft as DFlash1 without raising.
+    """
 
     def config(method, architectures):
         return SimpleNamespace(
@@ -667,7 +771,8 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
 
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
     """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
-    block-count guard must only fire for the real cache sizing."""
+    block-count guard must only fire for the real cache sizing.
+    """
     kv_cache_config = SimpleNamespace(has_mamba_layers=True, num_blocks=4)
 
     compilation_config = CompilationConfig(
@@ -992,7 +1097,8 @@ def test_v1_model_runner_rejects_v2_only_features():
 
 def test_batch_sharded_sampling_rejects_return_sampling_mask():
     """The batch-sharded gather drops sampling masks, so the combination must
-    fail loudly instead of returning ``sampling_mask=None``."""
+    fail loudly instead of returning ``sampling_mask=None``.
+    """
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             enable_batch_sharded_sampling=True, tensor_parallel_size=2
@@ -2071,7 +2177,7 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
 
 
 class MockConfig:
-    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai."""
 
     def __init__(self, model: str, tokenizer: str):
         self.model = model
@@ -2089,7 +2195,8 @@ class MockConfig:
 @patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
 def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
     """Test that S3 URLs create deterministic local directories for model and
-    tokenizer."""
+    tokenizer.
+    """
     # Mock pull_files to avoid actually downloading files during tests
     mock_pull_files.return_value = None
 
@@ -2187,7 +2294,8 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 @patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
 def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     """Test that when model and tokenizer are different cloud URIs,
-    pull_files receives the correct URI for each."""
+    pull_files receives the correct URI for each.
+    """
     mock_pull_files.return_value = None
 
     model_url = "s3://bucket/model/"
@@ -2549,7 +2657,6 @@ def test_validate_mamba_align_subblock_prefill():
 )
 def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
-
     model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
@@ -2733,8 +2840,8 @@ def test_vllm_config_explicit_overrides():
 
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
-    correctly control default fusions"""
-
+    correctly control default fusions
+    """
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()
     assert not cfg1.compilation_config.pass_config.fuse_norm_quant
@@ -2818,7 +2925,8 @@ def test_needs_dp_coordination(
 
 def test_fault_tolerance_requires_single_api_server():
     """Fault tolerance assumes one AsyncMPClient manages all engines, so it
-    is incompatible with API server scale-out (_api_process_count > 1)."""
+    is incompatible with API server scale-out (_api_process_count > 1).
+    """
     with pytest.raises(ValueError, match="single API server"):
         ParallelConfig(enable_fault_tolerance=True, _api_process_count=2)
 
@@ -2828,7 +2936,8 @@ def test_fault_tolerance_requires_single_api_server():
 
 def test_renderer_num_workers_with_mm_cache():
     """Disallow renderer_num_workers > 1 with the mm processor cache only for
-    pooling models, whose preprocessing runs on the renderer workers."""
+    pooling models, whose preprocessing runs on the renderer workers.
+    """
     mm_model = "Qwen/Qwen2-VL-2B-Instruct"
 
     # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)
@@ -3154,7 +3263,8 @@ def test_watermarking_forces_model_runner_v2(monkeypatch):
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
-    pull_runai_model_from_obj_storage)."""
+    pull_runai_model_from_obj_storage).
+    """
     from unittest.mock import MagicMock
 
     s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
@@ -3339,7 +3449,7 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
 
 
 def test_ir_op_priority_str():
-    """Test that passing a comma-delimited string works"""
+    """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig
 
     priority_config = IrOpPriorityConfig(rms_norm="vllm_c")

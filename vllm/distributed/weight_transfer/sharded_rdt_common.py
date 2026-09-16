@@ -60,6 +60,7 @@ def check_ray_rdt_version() -> None:
 
     Raises:
         ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+
     """
     import importlib.metadata
 
@@ -75,6 +76,16 @@ def check_ray_rdt_version() -> None:
             f"set_target_for_ref) needs at least 2.55. Found {current}. "
             f"Run `pip install -U 'ray>={required}'`."
         )
+
+
+def register_nixl_memory(tensor: torch.Tensor) -> None:
+    """Register a tensor with Ray using the platform's NIXL package."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import register_nixl_memory as ray_register_nixl_memory
+
+    ray_register_nixl_memory(tensor)
 
 
 def assign_producer_indices(
@@ -152,6 +163,7 @@ class RdtRouter:
             ValueError: ``workers_per_replica`` does not divide
                 ``num_consumers``, so the deployments are not uniform and two
                 workers of one deployment would share a block index.
+
         """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
@@ -202,7 +214,8 @@ class RdtRouter:
 
     def class_of(self, name: str) -> int:
         """The name's owner class — the planner's bucketing key, since all names
-        of a chunk must share one producer."""
+        of a chunk must share one producer.
+        """
         return self._class_of.get(name, 0)
 
     def owners(self, name: str) -> list[int]:
@@ -253,6 +266,7 @@ class RdtRouter:
         Raises:
             ValueError: an owner set is empty or out of range, or a class index
                 does not resolve.
+
         """
         for c, row in enumerate(self._owner_sets):
             if not row:
@@ -272,7 +286,8 @@ class RdtRouter:
     def bind(self, actors: list, produce_methods: list, consumer_id: int) -> None:
         """Attach this consumer's producer handles. Rebuilt wholesale per init,
         never appended to: every owner index is a position in these lists, so a
-        rejoining engine that re-inits must not shift them."""
+        rejoining engine that re-inits must not shift them.
+        """
         if len(actors) != len(produce_methods):
             raise ValueError("actors and produce_methods must be parallel")
         self._actors = list(actors)
@@ -335,5 +350,6 @@ def buffer_alloc_bytes(nbytes: int, presize: int = 0) -> int:
     optional ``presize`` floor, and a coarse 256MB round-up, so the buffer is
     allocated ONCE and never regrows. Regrowth is a correctness hazard, not just a
     perf one -- see ``buffer_presize_gb``. Shared by the consumer's receive buffers
-    and the producer's serve rings."""
+    and the producer's serve rings.
+    """
     return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))
