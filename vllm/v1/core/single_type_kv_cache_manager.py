@@ -1636,6 +1636,14 @@ class MambaManager(SingleTypeKVCacheManager):
         for i in range(last_block - 1, first_block - 1, -1):
             if blocks[i].is_null:
                 continue
+            if blocks[i].block_hash is not None:
+                # Registered in the prefix cache, so keep it. For Mamba,
+                # "skipped" means this request's next forward pass does not
+                # need the state, not that no one does: a later request that
+                # shares the prefix resumes from exactly this block. Retiring
+                # it drops the boundary sparse retention keeps on purpose, and
+                # the attention match then survives with nothing to serve it.
+                continue
             freed.append(blocks[i])
             blocks[i] = self._null_block
         if freed:

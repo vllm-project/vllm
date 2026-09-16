@@ -141,6 +141,44 @@ def test_mamba_retirement_crosses_null_gaps():
     assert manager.req_to_blocks["r"][1].ref_cnt == 1
 
 
+def test_mamba_retirement_keeps_cache_registered_states():
+    """A state registered in the prefix cache must survive retirement.
+
+    For Mamba, "skipped" means this request's next forward pass does not need
+    the state. It does not mean nobody needs it: under the default
+    ``prefix_cache_retention_interval=0`` the replay boundary is hashed so a
+    later request sharing the prefix can resume from it, and that boundary sits
+    inside the retired range once decode passes the prompt length.
+    """
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    unhashed, hashed, in_flight = pool.get_new_blocks(3)
+    # Stand in for a block the prefix cache registered (the replay boundary).
+    hashed.set_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"boundary"), 0), num_tokens=8
+    )
+    manager.req_to_blocks["r"] = [unhashed, hashed, in_flight]
+
+    manager.remove_skipped_blocks("r", processed_computed_tokens=12)
+
+    blocks = manager.req_to_blocks["r"]
+    assert blocks[0].is_null, "an unhashed skipped state is still retired"
+    assert blocks[1] is hashed, "a cache-registered state must not be retired"
+    assert blocks[2] is in_flight
+
+
 @pytest.mark.parametrize("block_size", [3584, 4608])
 @pytest.mark.parametrize("in_flight_chunks", [0, 1, 2])
 def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
