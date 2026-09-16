@@ -504,7 +504,6 @@ class OpenAIServingChat(GenerateBaseServing):
             logger.exception("Error in parser creation.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
-            yield "data: [DONE]\n\n"
             return
 
         stream_options = request.stream_options
