@@ -504,6 +504,15 @@ class InputProcessor:
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
 
+        if prompt_input["type"] == "embeds":
+            is_token_ids = prompt_input.get("is_token_ids")
+            if is_token_ids is not None and len(is_token_ids) != prompt_len:
+                raise VLLMValidationError(
+                    "prompt_is_token_ids must have the same length as prompt_embeds "
+                    f"(expected {prompt_len}, got {len(is_token_ids)}).",
+                    parameter="prompt_is_token_ids",
+                )
+
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
