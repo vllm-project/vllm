@@ -128,6 +128,7 @@ def create_standby_groups(
                 coord_store=coord_store,
             )
 
+
 def pop_standby_groups() -> dict:
     """Return all standby groups and clear the standby state."""
     global \
