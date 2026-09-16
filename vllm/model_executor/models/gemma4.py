@@ -22,12 +22,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
 
-import regex as re
 import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.utils import getattr_iter
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -37,7 +37,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    MoERunner,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -69,6 +73,7 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     ShardIds,
     WeightsMapper,
     extract_layer_index,
@@ -306,6 +311,9 @@ class Gemma4Router(nn.Module):
         self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps, has_weight=False)
         # Per-dimension learned scale, applied after norm + root_size
         self.scale = nn.Parameter(torch.ones(self.hidden_size))
+        # Per-expert output scale folded into routing weights so that
+        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
+        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
         # Constant 1/sqrt(hidden_size) scaling factor
         self.register_buffer(
             "root_size",
@@ -323,6 +331,29 @@ class Gemma4Router(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
+    def routing_function(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Softmax over ALL experts → top-k → renormalize.
+
+        MoERunner's built-in fused_topk scopes softmax differently, so Gemma4
+        needs its own routing for numerical correctness.
+
+        NOTE: self.per_expert_scale is read at call time (not captured into a
+        local) so that torch.func.functional_call parameter substitution
+        reaches the routing function correctly.
+        """
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            return gemma4_fused_routing_kernel_triton(
+                gating_output, topk, self.per_expert_scale
+            )
+
+        return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns raw router logits [T, E]."""
         x = self.norm(x)
@@ -330,77 +361,6 @@ class Gemma4Router(nn.Module):
         x = x * self.scale.to(x.dtype)
         router_logits, _ = self.proj(x)
         return router_logits
-
-
-class Gemma4MoE(nn.Module):
-    """Mixture of Experts for Gemma4 using vLLM's MoERunner.
-
-    Wraps MoERunner with custom routing. The router projection is
-    external (Gemma4Router) — this class only handles expert dispatch.
-
-    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-    per_expert_scale is folded into routing weights for mathematical
-    correctness with MoERunner's fused kernel.
-    """
-
-    def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.num_experts = config.num_experts
-
-        # Per-expert output scale folded into routing weights so that
-        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
-        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
-
-        # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-        # MoERunner's built-in fused_topk scopes softmax differently, so
-        # a custom routing function is needed for numerical correctness.
-        # NOTE: self.per_expert_scale is read at call time (not captured into
-        # a local) so that torch.func.functional_call parameter substitution
-        # reaches the routing function correctly.
-        def routing_function(
-            hidden_states: torch.Tensor,
-            gating_output: torch.Tensor,
-            topk: int,
-            renormalize: bool,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                return gemma4_fused_routing_kernel_triton(
-                    gating_output, topk, self.per_expert_scale
-                )
-
-            return gemma4_routing_function_torch(
-                gating_output, topk, self.per_expert_scale
-            )
-
-        # MoERunner experts with custom Gemma4 routing
-        intermediate_size = getattr(
-            config,
-            "moe_intermediate_size",
-            getattr(config, "expert_intermediate_size", None),
-        )
-        if intermediate_size is None:
-            raise ValueError("Gemma4 MoE requires an expert intermediate size")
-
-        self.experts = FusedMoEFactory(
-            num_experts=config.num_experts,
-            top_k=config.top_k_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size,
-            renormalize=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            custom_routing_function=routing_function,
-            activation="gelu_tanh",
-        )
-
-    def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
-        return self.experts(x, router_logits)
 
 
 class Gemma4Attention(nn.Module):
@@ -672,7 +632,7 @@ class Gemma4DecoderLayer(nn.Module):
             config, "use_second_mlp_block", False
         )
         self.router: Gemma4Router | None
-        self.moe: Gemma4MoE | None
+        self.experts: MoERunner | None
         self.post_feedforward_layernorm_1: RMSNorm | None
         self.post_feedforward_layernorm_2: RMSNorm | None
         self.pre_feedforward_layernorm_2: RMSNorm | None
@@ -682,10 +642,20 @@ class Gemma4DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.router",
             )
-            self.moe = Gemma4MoE(
-                config,
+            names = ("moe_intermediate_size", "expert_intermediate_size")
+            intermediate_size = getattr_iter(config, names)
+            if intermediate_size is None:
+                raise ValueError("Gemma4 MoE requires an expert intermediate size")
+            self.experts = FusedMoEFactory(
+                num_experts=config.num_experts,
+                top_k=config.top_k_experts,
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                renormalize=True,
                 quant_config=quant_config,
-                prefix=f"{prefix}.moe",
+                prefix=f"{prefix}.experts",
+                custom_routing_function=self.router.routing_function,
+                activation="gelu_tanh",
             )
             self.post_feedforward_layernorm_1 = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
@@ -698,7 +668,7 @@ class Gemma4DecoderLayer(nn.Module):
             )
         else:
             self.router = None
-            self.moe = None
+            self.experts = None
             self.post_feedforward_layernorm_1 = None
             self.post_feedforward_layernorm_2 = None
             self.pre_feedforward_layernorm_2 = None
@@ -774,13 +744,13 @@ class Gemma4DecoderLayer(nn.Module):
             assert self.post_feedforward_layernorm_1 is not None
             assert self.pre_feedforward_layernorm_2 is not None
             assert self.router is not None
-            assert self.moe is not None
+            assert self.experts is not None
             assert self.post_feedforward_layernorm_2 is not None
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
             router_logits = self.router(residual)
-            hidden_states_2 = self.moe(hidden_states_2, router_logits)
+            hidden_states_2 = self.experts(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
             # Combine MLP and MoE outputs
@@ -1010,13 +980,6 @@ class Gemma4CrossDecoderLayers(nn.Module):
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={
-            re.compile(r"(?<!\.moe)\.experts(?=\.|$)"): ".moe.experts",
-        },
-        orig_to_new_substr={".router.per_expert_scale": ".moe.per_expert_scale"},
-    )
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1024,9 +987,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | _gemma4_layer_weights_mapper(
-            config
-        )
+        self.hf_to_vllm_mapper = _gemma4_layer_weights_mapper(config)
 
         # PLE config values (default to 0 if not present — disables PLE)
         self.hidden_size_per_layer_input = getattr(
@@ -1433,15 +1394,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
-    hf_to_vllm_mapper = Gemma4Model.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_regex={
-            # Gemma4ForConditionalGeneration names MoE adapter targets under
-            # `...moe.experts.*`, while the text-only model exposes them
-            # under `...moe.*`.
-            re.compile(r"\.moe\.experts\.(gate_up_proj|down_proj)\.lora_"): (
-                r".moe.\1.lora_"
-            ),
-        },
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # Multimodal weights are handled by the multimodal wrapper.
             "audio_tower.": None,
@@ -1501,26 +1454,18 @@ class Gemma4ForCausalLM(
         )
 
         # --- MixtureOfExperts protocol ---
-        self.moe_layers: list[nn.Module] = []
-        example_moe: Gemma4MoE | None = None
-
-        for layer in self.model.layers:
-            if hasattr(layer, "moe") and isinstance(layer.moe, Gemma4MoE):
-                example_moe = layer.moe
-                self.moe_layers.append(layer.moe.experts)
-
+        self.moe_layers: list[nn.Module] = [
+            layer.experts
+            for layer in self.model.layers
+            if not isinstance(layer, PPMissingLayer) and layer.experts is not None
+        ]
         self.num_moe_layers = len(self.moe_layers)
 
-        if example_moe is not None:
-            self.num_logical_experts = example_moe.num_experts
-            self.num_physical_experts = example_moe.num_experts
-            self.num_local_physical_experts = example_moe.num_experts
-            self.num_routed_experts = example_moe.num_experts
-        else:
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
+        num_experts = config.num_experts if self.num_moe_layers else 0
+        self.num_logical_experts = num_experts
+        self.num_physical_experts = num_experts
+        self.num_local_physical_experts = num_experts
+        self.num_routed_experts = num_experts
 
         self.num_expert_groups = 1
         self.num_shared_experts = 0
