@@ -37,11 +37,10 @@ from vllm.model_executor.models.qwen3_asr import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing.processor import (
     BaseDummyInputsBuilder,
-    MultiModalPromptUpdates,
+    MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
     cached_encode,
 )
@@ -114,10 +113,10 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsOptionalItems,
-        mm_prompt_updates: MultiModalPromptUpdates,
+        mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        mm_kwargs = mm_res.kwargs
+
         audios = mm_kwargs.get("audio", [])
         assert len(audios) == 1, (
             f"Expected only one audio input for realtime, got {len(audios)}"
@@ -147,7 +146,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         # Find the audio_pad token position and expand it to audio_len tokens
         expanded_ids = list[int]()
         pad_start_idx = -1
-        for i, tid in enumerate(prompt_ids):
+        for i, tid in enumerate(mm_res.prompt_ids):
             if tid == audio_pad_id and pad_start_idx == -1:
                 pad_start_idx = i
                 expanded_ids.extend([audio_pad_id] * audio_len)

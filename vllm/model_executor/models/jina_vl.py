@@ -13,7 +13,7 @@ from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.processing.processor import (
-    MultiModalProcessingInfo,
+    MultiModalProcessingResult,
     ProcessorInputs,
     TimingContext,
 )
@@ -63,19 +63,19 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalProcessingInfo:
-        mm_info = super()._cached_apply_hf_processor(inputs, timing_ctx)
+    ) -> MultiModalProcessingResult:
+        mm_res = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
         # Score inputs are query-first, while the prompt template is document-first.
         mm_kwargs = MultiModalKwargsItems(
             {
                 modality: list(reversed(items))
-                for modality, items in mm_info.kwargs.items()
+                for modality, items in mm_res.kwargs.items()
             }
         )
         mm_hashes = {
             modality: list(reversed(hashes))
-            for modality, hashes in mm_info.hashes.items()
+            for modality, hashes in mm_res.hashes.items()
         }
         mm_prompt_updates = {
             modality: [
@@ -85,10 +85,11 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 ]
                 for item_idx, updates in enumerate(reversed(item_updates))
             ]
-            for modality, item_updates in mm_info.prompt_updates.items()
+            for modality, item_updates in mm_res.prompt_updates.items()
         }
 
-        return MultiModalProcessingInfo(
+        return MultiModalProcessingResult(
+            prompt_ids=mm_res.prompt_ids,
             kwargs=mm_kwargs,
             hashes=mm_hashes,
             prompt_updates=mm_prompt_updates,
