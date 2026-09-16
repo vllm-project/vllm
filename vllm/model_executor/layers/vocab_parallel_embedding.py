@@ -242,6 +242,7 @@ class VocabParallelEmbedding(PluggableLayer):
         disable_tp: If true, tensor parallelism will be disabled for this layer.
         quant_method: Preselected quantization method for model-specific layers.
         parallel_group: Process group used to shard and reduce the embedding.
+
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -375,7 +376,8 @@ class VocabParallelEmbedding(PluggableLayer):
     ) -> VocabParallelEmbeddingShardIndices:
         """Get start and end indices for vocab parallel embedding, following the
         layout outlined in the class docstring, based on the given tp_rank and
-        tp_size."""
+        tp_size.
+        """
         num_added_embeddings_padded = vocab_size_padded - org_vocab_size_padded
         padded_org_vocab_start_index, padded_org_vocab_end_index = (
             vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank, tp_size)
@@ -581,6 +583,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
         disable_tp: If true, tensor parallelism will be disabled for this layer.
+
     """
 
     # --8<-- [end:parallel_lm_head]

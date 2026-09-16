@@ -33,7 +33,8 @@ def _render(template, messages, **kwargs):
 class TestGemma4ChatTemplate:
     def test_basic_multiturn_thinking_disabled(self, gemma4_template):
         """With enable_thinking=False (default), generation prompt ends with
-        an empty thought channel to suppress thinking."""
+        an empty thought channel to suppress thinking.
+        """
         messages = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -49,7 +50,8 @@ class TestGemma4ChatTemplate:
 
     def test_basic_multiturn_thinking_enabled(self, gemma4_template):
         """With enable_thinking=True, generation prompt ends with model
-        turn opener (no thought suppression)."""
+        turn opener (no thought suppression).
+        """
         messages = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -144,7 +146,8 @@ class TestGemma4ChatTemplate:
 
     def test_tool_responses_openai_style(self, gemma4_template):
         """role='tool' messages are formatted as <|tool_response> blocks
-        with content dumped as-is."""
+        with content dumped as-is.
+        """
         messages = [
             {"role": "user", "content": "Weather?"},
             {
@@ -202,7 +205,8 @@ class TestGemma4ChatTemplate:
 
     def test_generation_prompt_not_after_tool_response(self, gemma4_template):
         """add_generation_prompt=True should NOT add <|turn>model when the
-        last message type was tool_response (the model turn continues)."""
+        last message type was tool_response (the model turn continues).
+        """
         messages = [
             {"role": "user", "content": "Weather?"},
             {
@@ -228,8 +232,9 @@ class TestGemma4ChatTemplate:
         assert not result.strip().endswith("<|turn>model\n")
 
     def test_reasoning_in_tool_chains(self, gemma4_template):
-        """reasoning field on assistant with tool_calls after last user
-        message emits <|channel>thought\\n...<channel|>."""
+        """Reasoning field on assistant with tool_calls after last user
+        message emits <|channel>thought\\n...<channel|>.
+        """
         messages = [
             {"role": "user", "content": "Calculate something"},
             {
@@ -252,7 +257,7 @@ class TestGemma4ChatTemplate:
         assert "<channel|>" in result
 
     def test_reasoning_not_before_last_user(self, gemma4_template):
-        """reasoning on assistant BEFORE the last user message is dropped."""
+        """Reasoning on assistant BEFORE the last user message is dropped."""
         messages = [
             {"role": "user", "content": "First"},
             {
@@ -275,7 +280,8 @@ class TestGemma4ChatTemplate:
 
     def test_strip_thinking_in_model_content(self, gemma4_template):
         """<|channel>...<channel|> in model content is stripped by the
-        strip_thinking macro."""
+        strip_thinking macro.
+        """
         messages = [
             {"role": "user", "content": "Hi"},
             {
@@ -289,7 +295,8 @@ class TestGemma4ChatTemplate:
 
     def test_multi_turn_tool_chain(self, gemma4_template):
         """assistant->tool->assistant->tool produces exactly one
-        <|turn>model (later assistants continue the same turn)."""
+        <|turn>model (later assistants continue the same turn).
+        """
         messages = [
             {"role": "user", "content": "Do two things"},
             {
@@ -346,7 +353,8 @@ class TestGemma4ChatTemplate:
 
     def test_tool_response_with_multimodal_content(self, gemma4_template):
         """Multimodal placeholders in tool messages are emitted after the
-        tool_response block."""
+        tool_response block.
+        """
         messages = [
             {"role": "user", "content": "Download the image and describe it."},
             {
@@ -380,7 +388,8 @@ class TestGemma4ChatTemplate:
 
     def test_tool_response_with_all_modalities(self, gemma4_template):
         """All multimodal types (image, audio, video) in a single tool
-        response are rendered."""
+        response are rendered.
+        """
         messages = [
             {"role": "user", "content": "Process media"},
             {

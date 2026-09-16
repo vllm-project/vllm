@@ -83,6 +83,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -313,7 +315,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         executes on the writer; the handshake runs on the background executor
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
-        send directly)."""
+        send directly).
+        """
         remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
@@ -505,7 +508,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ``BlockIds`` is canonically a tuple of per-group lists, but some
         registration payloads collapse a single-group case to a flat
         list. Re-wrap that case so downstream group-aware helpers see a
-        consistent shape."""
+        consistent shape.
+        """
         if block_ids and not isinstance(block_ids[0], (list, tuple)):
             return (list(block_ids),)
         return block_ids
@@ -530,7 +534,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_region_groups = self.region_group_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if groups_differ and not self._transfer_layer_group_ids:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"

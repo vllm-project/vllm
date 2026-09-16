@@ -72,8 +72,7 @@ _MAX_ENCODER_BATCH_SIZE = 16
 
 
 class UltravoxAudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
     - b: batch size
     - n: number of chunks
     - t: Time frames (M)
@@ -96,8 +95,7 @@ class UltravoxAudioFeatureInputs(TensorSchema):
 
 
 class UltravoxAudioEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
     - b: batch size
     - na: number of audios
     - afs: audio feature size
@@ -340,8 +338,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
 
 
 class StackAudioFrames(nn.Module):
-    """
-    Stack the audio embedding frames to reduce the sequence length by a factor
+    """Stack the audio embedding frames to reduce the sequence length by a factor
     of `stack_factor`.
     """
 
@@ -752,9 +749,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         )
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.",
             connector="multi_modal_projector.",
@@ -939,9 +934,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         positions: torch.Tensor,
         intermediate_tensors: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Run forward pass for Ultravox
+        """Run forward pass for Ultravox.
 
         One key thing to understand is the `input_ids` already accounts for the
         positions of the to-be-inserted audio embeddings. The to-be-inserted
@@ -956,9 +951,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         """
-
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -982,8 +978,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 def pad_and_concat_to_dim3(
     features: torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]],
 ) -> torch.Tensor:
-    """
-    Pad and concatenate a list of tensors.
+    """Pad and concatenate a list of tensors.
 
     output:
         Tensor of shape [B, C, M] where M is the maximum length of the input

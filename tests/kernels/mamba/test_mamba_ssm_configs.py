@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the JSON-based config loader added to selective_state_update.
+"""Unit tests for the JSON-based config loader added to selective_state_update.
 
 Tests cover:
   - Flat MoE-style filename generation
@@ -123,7 +122,8 @@ def test_fallback_when_no_config(monkeypatch, tmp_path):
 
 def test_nearest_effective_batch_interpolation(monkeypatch, tmp_path):
     """When effective_batch = batch*nheads is not an exact key, the closest
-    key should be selected."""
+    key should be selected.
+    """
     _write_config(
         tmp_path,
         dstate=32,
@@ -168,7 +168,8 @@ def test_nearest_effective_batch_interpolation(monkeypatch, tmp_path):
 
 def test_non_dict_json_returns_none(monkeypatch, tmp_path):
     """A valid JSON file that is not a dict (e.g. a list) must be ignored
-    and return None rather than raising AttributeError."""
+    and return None rather than raising AttributeError.
+    """
     device_name = get_ssm_device_name()
     config_path = tmp_path / get_ssm_config_file_name(
         _HEADDIM, 16, _CACHE_DTYPE, device_name
@@ -190,7 +191,8 @@ def test_non_dict_json_returns_none(monkeypatch, tmp_path):
 
 def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     """An empty JSON object {} must not crash min() — should fall back
-    to the hard-coded heuristic."""
+    to the hard-coded heuristic.
+    """
     _write_config(tmp_path, dstate=64, payload={})
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))

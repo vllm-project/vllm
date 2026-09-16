@@ -49,7 +49,8 @@ class KVCacheLayout(Enum):
     @property
     def is_block_compact(self) -> bool:
         """True when each page's [H, N, C] bytes form one contiguous run; i.e.
-        the L and B dimensions are outermost."""
+        the L and B dimensions are outermost.
+        """
         return set(self.value[:2]) == {_DIM_L, _DIM_B}
 
     @property
