@@ -38,7 +38,8 @@ NUM_SPEC_STEPS = 3
 
 # `warmup_kernels` ends on `torch.accelerator.synchronize()`.
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="warmup synchronizes on the accelerator"
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="warmup synchronizes on the accelerator",
 )
 
 
@@ -117,8 +118,17 @@ class _StepRecorder:
         # (blocks held per group, num_computed_tokens, num_scheduled_tokens)
         self.steps: list[tuple[list[int], int, int]] = []
         self._held: dict[str, list[int]] = {}
+        self.spec_steps: list[tuple[int, int]] = []
 
     def execute_model(self, scheduler_output) -> None:
+        if scheduler_output.scheduled_spec_decode_tokens:
+            spec_tokens = scheduler_output.scheduled_spec_decode_tokens.values()
+            self.spec_steps.append(
+                (
+                    scheduler_output.total_num_scheduled_tokens,
+                    sum(len(tokens) for tokens in spec_tokens),
+                )
+            )
         for new_req in scheduler_output.scheduled_new_reqs:
             self._held[new_req.req_id] = [len(ids) for ids in new_req.block_ids]
             self._record(new_req.req_id, new_req.num_computed_tokens, scheduler_output)
@@ -173,6 +183,23 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+
+
+def test_adaptive_warmup_respects_rejection_sampler_chunk_limit():
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.adaptive_verification = SimpleNamespace(
+        max_draft_tokens=lambda num_reqs: NUM_SPEC_STEPS
+    )
+    recorder = _StepRecorder()
+
+    warmup_kernels(runner, recorder.execute_model, recorder.sample_tokens)
+
+    assert recorder.spec_steps
+    assert recorder.spec_steps[0] == (
+        runner.max_num_reqs + NUM_SPEC_STEPS,
+        NUM_SPEC_STEPS,
+    )
+    assert all(num_drafts <= NUM_SPEC_STEPS for _, num_drafts in recorder.spec_steps)
 
 
 def test_mixed_warmup_reserves_lookahead_blocks():

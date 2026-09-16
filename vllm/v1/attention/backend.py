@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.v1.attention.ops.token_to_req import scatter_token_to_req_indices
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -496,24 +497,15 @@ class CommonAttentionMetadata:
             assert self._token_to_req_indices_cache.shape[0] >= num_tokens
             return self._token_to_req_indices_cache[:num_tokens]
 
-        # Built from the device query_start_loc: adaptive verification decides the
-        # per-request draft split on device, so the CPU copy carries the right total
-        # but not the right per-request boundaries. Padding requests have a query
-        # length of zero and are skipped by the device boundary search.
-        num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
-
-        num_output_tokens = max(num_mapped_tokens, num_tokens)
-        assert buffer.shape[0] >= num_output_tokens
-        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
+        assert buffer.shape[0] >= num_tokens
+        scatter_token_to_req_indices(
             self.query_start_loc,
             buffer,
-            self.query_start_loc.shape[0] - 1,
-            num_mapped_tokens,
-            num_output_tokens,
-            num_warps=4,
+            num_reqs=self.num_reqs,
+            num_tokens=num_tokens,
+            max_query_len=self.max_query_len,
         )
-        self._token_to_req_indices_cache = buffer[:num_output_tokens]
+        self._token_to_req_indices_cache = buffer[:num_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support

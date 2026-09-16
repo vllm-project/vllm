@@ -94,7 +94,9 @@ def kernel_paged_attention_2d(
         cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
         cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
         cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-        if cur_batch_query_len > 1:
+        # FULL graphs may pad the request dimension with zero-length rows.
+        # This kernel handles exactly one query token per request.
+        if cur_batch_query_len != 1:
             return
     else:
         cur_batch_in_all_start_index = seq_idx
