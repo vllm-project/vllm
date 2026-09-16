@@ -620,6 +620,7 @@ class OffloadingConnectorScheduler:
 
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
+        self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
@@ -987,6 +988,51 @@ class OffloadingConnectorScheduler:
         req_context.set_offload_key_position(key, boundary_tokens)
         return key
 
+    def _full_attention_complete_hit(
+        self, req_status: RequestOffloadState, max_hit_size_tokens: int
+    ) -> int | None:
+        """Tokens beyond num_locally_computed_tokens covered by complete chunks
+        of every full-attention group, ignoring recurrent groups.
+
+        A recurrent (cow-source) group keeps one state per producer request, at
+        that prompt's tail, so it rarely has a state at a full-attention chunk
+        boundary; requiring one there would hide every partial tail beyond the
+        first recurrent block. The partial-tail search is therefore anchored on
+        the full-attention prefix alone and checks the recurrent groups only at
+        the candidate boundary. Returns None if a lookup was deferred or a hit
+        chunk is still being loaded.
+        """
+        num_computed_tokens = req_status.num_locally_computed_tokens
+        for group_idx in self._full_attention_groups:
+            group_config = self.config.kv_group_configs[group_idx]
+            group_state = req_status.group_states[group_idx]
+            tokens_per_chunk = group_config.tokens_per_chunk
+            num_chunks = min(
+                cdiv(max_hit_size_tokens, tokens_per_chunk),
+                len(group_state.offload_keys),
+            )
+            start_chunk_idx = num_computed_tokens // tokens_per_chunk
+            offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
+            num_hit_chunks = self._maximal_prefix_lookup(
+                offload_keys,
+                req_status.req_context,
+                req_status.req,
+                group_config,
+                start_chunk_idx,
+            )
+            if num_hit_chunks is None:
+                return None
+            if self._chunks_being_loaded and any(
+                key in self._chunks_being_loaded
+                for key in offload_keys[:num_hit_chunks]
+            ):
+                return None
+            max_hit_size_tokens = min(
+                max_hit_size_tokens,
+                tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
+            )
+        return max(0, max_hit_size_tokens - num_computed_tokens)
+
     def _lookup(
         self,
         req_status: RequestOffloadState,
@@ -998,7 +1044,25 @@ class OffloadingConnectorScheduler:
             return complete_hit
 
         local_tokens = req_status.num_locally_computed_tokens
-        complete_boundary = local_tokens + complete_hit
+        max_hit_size_tokens = req_status.req.num_prompt_tokens
+        if max_num_new_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens, local_tokens + max_num_new_tokens
+            )
+        if req_status.max_load_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens, local_tokens + req_status.max_load_tokens
+            )
+        anchor_hit = complete_hit
+        if self._cow_source_groups:
+            full_attention_hit = self._full_attention_complete_hit(
+                req_status, max_hit_size_tokens
+            )
+            if full_attention_hit is None:
+                return None if complete_hit == 0 else complete_hit
+            anchor_hit = max(complete_hit, full_attention_hit)
+
+        complete_boundary = local_tokens + anchor_hit
         tokens_per_hash = self.config.tokens_per_hash
         block_end = complete_boundary + self._partial_tail_window
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
