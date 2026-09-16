@@ -33,9 +33,7 @@ def _reference_pooling_preparation(
 
     if masked_average:
         denom = valid.reshape(-1, valid.shape[-1]).float().sum(-1).clamp_min(1)
-        query = to_pool.sum(-2, keepdim=True) / denom[:, None, None].to(
-            to_pool.dtype
-        )
+        query = to_pool.sum(-2, keepdim=True) / denom[:, None, None].to(to_pool.dtype)
     else:
         query = to_pool.mean(-2, keepdim=True)
 
@@ -65,9 +63,86 @@ def test_molmo2_pooling_native_contract(
     expected = _reference_pooling_preparation(
         image_features, token_pooling, masked_average
     )
-    actual = Molmo2PoolingPreparation(
-        masked_average=masked_average
-    ).forward_native(image_features, token_pooling)
+    actual = Molmo2PoolingPreparation(masked_average=masked_average).forward_native(
+        image_features, token_pooling
+    )
 
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(actual_tensor, expected_tensor)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("masked_average", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("batch_size", "num_crops", "num_patches", "num_groups", "pool_size", "dim"),
+    [
+        pytest.param(1, 2, 16, 8, 4, 2304, id="k4-image"),
+        pytest.param(2, 3, 27, 17, 9, 2304, id="k9-video"),
+        pytest.param(2, 1, 16, 5, 4, 128, id="k4-small"),
+    ],
+)
+def test_molmo2_pooling_cuda_matches_native(
+    default_vllm_config,
+    masked_average: bool,
+    dtype: torch.dtype,
+    batch_size: int,
+    num_crops: int,
+    num_patches: int,
+    num_groups: int,
+    pool_size: int,
+    dim: int,
+) -> None:
+    torch.manual_seed(0)
+    image_features = torch.randn(
+        batch_size,
+        num_crops,
+        num_patches,
+        dim,
+        device="cuda",
+        dtype=dtype,
+    )
+    token_pooling = torch.randint(
+        0,
+        num_crops * num_patches,
+        (batch_size, num_groups, pool_size),
+        device="cuda",
+        dtype=torch.long,
+    )
+    token_pooling[:, 0] = -1
+    token_pooling[:, 1, 0] = -1
+    token_pooling[:, 2, 1] = token_pooling[:, 2, 0]
+
+    op = Molmo2PoolingPreparation(masked_average=masked_average)
+    expected = op.forward_native(image_features, token_pooling)
+    actual = op(image_features, token_pooling)
+
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    tolerance = 1e-3 if dtype == torch.float16 else 1e-2
+    torch.testing.assert_close(actual[1], expected[1], rtol=tolerance, atol=tolerance)
+    torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
+    torch.testing.assert_close(actual[3], expected[3], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("masked_average", [False, True])
+def test_molmo2_pooling_cuda_supports_strided_features(
+    default_vllm_config, masked_average: bool
+) -> None:
+    padded_features = torch.randn(2, 3, 18, 128, device="cuda", dtype=torch.float16)
+    image_features = padded_features[:, :, 1:17, :]
+    assert not image_features.is_contiguous()
+    token_pooling = torch.tensor(
+        [
+            [[0, 16, 31, -1], [15, 15, 17, 18]],
+            [[47, 32, 1, 0], [-1, -1, -1, -1]],
+        ],
+        device="cuda",
+    )
+
+    op = Molmo2PoolingPreparation(masked_average=masked_average)
+    expected = op.forward_native(image_features, token_pooling)
+    actual = op(image_features, token_pooling)
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-3, atol=1e-3)
