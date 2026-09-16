@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import binascii
+import zlib
 from collections.abc import Iterable
 from typing import Any
 
+import pybase64 as base64
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -13,6 +16,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import (
+    ResponseCompactionItem,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -48,6 +52,44 @@ from vllm.tool_parsers.utils import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+_COMPACTION_PREFIX = "vllm-compaction-v1:"
+_MAX_COMPACTION_BYTES = 1024 * 1024
+
+
+def encode_compaction_summary(summary: str) -> str:
+    payload = zlib.compress(summary.encode("utf-8"))
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii")
+    return f"{_COMPACTION_PREFIX}{encoded}"
+
+
+def decode_compaction_summary(encrypted_content: str) -> str:
+    if not encrypted_content.startswith(_COMPACTION_PREFIX):
+        raise VLLMValidationError(
+            "Only compaction items created by vLLM are supported.",
+            parameter="input",
+        )
+    encoded = encrypted_content.removeprefix(_COMPACTION_PREFIX)
+    try:
+        payload = base64.b64decode(encoded, altchars=b"-_", validate=True)
+        decompressor = zlib.decompressobj()
+        decoded = decompressor.decompress(payload, _MAX_COMPACTION_BYTES + 1)
+        if (
+            decompressor.unconsumed_tail
+            or decompressor.unused_data
+            or not decompressor.eof
+            or len(decoded) > _MAX_COMPACTION_BYTES
+        ):
+            raise ValueError("compaction item is too large")
+        decoded += decompressor.flush()
+        if len(decoded) > _MAX_COMPACTION_BYTES:
+            raise ValueError("compaction item is too large")
+        return decoded.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError, zlib.error) as exc:
+        raise VLLMValidationError(
+            "Invalid vLLM compaction item.",
+            parameter="input",
+        ) from exc
 
 
 def build_response_output_items(
@@ -270,6 +312,12 @@ def _construct_message_from_response_item(
             role="assistant",
             tool_calls=[tool_call],
         )
+    elif isinstance(item, ResponseCompactionItem):
+        summary = decode_compaction_summary(item.encrypted_content)
+        return {
+            "role": "assistant",
+            "content": "Compacted conversation context:\n\n" + summary,
+        }
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""
         if item.encrypted_content:

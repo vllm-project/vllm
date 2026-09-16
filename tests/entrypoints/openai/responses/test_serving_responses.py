@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    CompactedResponse as SDKCompactedResponse,
+)
+from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -48,10 +51,14 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
+    InputTokensDetails,
+    OutputTokensDetails,
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
+    ResponsesCompactRequest,
     ResponsesRequest,
     ResponsesResponse,
+    ResponseUsage,
     serialize_message,
 )
 from vllm.entrypoints.openai.responses.serving import (
@@ -61,6 +68,7 @@ from vllm.entrypoints.openai.responses.serving import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
+from vllm.entrypoints.openai.responses.utils import decode_compaction_summary
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -122,6 +130,67 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert isinstance(serialized, dict)
     assert serialized["type"] == "raw_message_tokens"
     assert serialized["message"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_generates_reusable_item() -> None:
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.model_config = SimpleNamespace(max_model_len=32768)
+    generated = ResponsesResponse.model_construct(
+        id="resp_compact",
+        created_at=123,
+        output=[
+            ResponseOutputMessage(
+                id="msg_summary",
+                content=[
+                    ResponseOutputText(
+                        annotations=[],
+                        text="The user selected SQLite.",
+                        type="output_text",
+                        logprobs=None,
+                    )
+                ],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ],
+        usage=ResponseUsage(
+            input_tokens=100,
+            input_tokens_details=InputTokensDetails(cached_tokens=20),
+            output_tokens=10,
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=2),
+            total_tokens=110,
+        ),
+    )
+    serving.create_responses = AsyncMock(return_value=generated)
+
+    response = await OpenAIServingResponses.compact_responses(
+        serving,
+        ResponsesCompactRequest(
+            model="test-model",
+            input="Use SQLite for this project.",
+        ),
+    )
+
+    assert response.object == "response.compaction"
+    assert response.id == "resp_compact"
+    assert response.created_at == 123
+    assert response.usage.input_tokens == 100
+    assert response.usage.input_tokens_details.cached_tokens == 20
+    assert response.usage.input_tokens_details.cache_write_tokens == 0
+    assert len(response.output) == 1
+    assert response.output[0].type == "compaction"
+    assert decode_compaction_summary(response.output[0].encrypted_content) == (
+        "The user selected SQLite."
+    )
+    SDKCompactedResponse.model_validate(response.model_dump(mode="json"))
+
+    generation_request = serving.create_responses.await_args.args[0]
+    assert generation_request.input == "Use SQLite for this project."
+    assert generation_request.store is False
+    assert generation_request.stream is False
+    assert generation_request.truncation == "auto"
 
 
 @pytest.fixture

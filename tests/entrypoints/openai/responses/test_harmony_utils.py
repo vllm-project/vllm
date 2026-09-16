@@ -4,6 +4,7 @@
 
 import pytest
 from openai.types.responses import (
+    ResponseCompactionItem,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputMessage,
@@ -14,8 +15,10 @@ from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+from vllm.entrypoints.openai.responses.utils import encode_compaction_summary
 from vllm.exceptions import VLLMValidationError
 
 
@@ -101,6 +104,23 @@ class TestResponsePreviousInputToHarmony:
         ) as exc_info:
             response_previous_input_to_harmony(chat_msg)
         assert exc_info.value.parameter == "input"
+
+
+def test_compaction_item_to_harmony() -> None:
+    item = ResponseCompactionItem(
+        id="cmp_1",
+        encrypted_content=encode_compaction_summary("Keep the database local."),
+        type="compaction",
+    )
+
+    message = response_input_to_harmony(item, [])
+
+    assert message is not None
+    assert message.author.role == Role.ASSISTANT
+    assert message.channel == "final"
+    assert message.content[0].text == (
+        "Compacted conversation context:\n\nKeep the database local."
+    )
 
 
 class TestHarmonyToResponseOutput:

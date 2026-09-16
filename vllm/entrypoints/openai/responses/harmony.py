@@ -39,6 +39,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.responses.utils import decode_compaction_summary
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -197,6 +198,11 @@ def response_input_to_harmony(
         )
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient("assistant")
+    elif response_msg["type"] == "compaction":
+        summary = decode_compaction_summary(response_msg["encrypted_content"])
+        msg = Message.from_role_and_content(
+            Role.ASSISTANT, "Compacted conversation context:\n\n" + summary
+        ).with_channel("final")
     elif response_msg["type"] == "reasoning":
         content = response_msg.get("content")
         if content and len(content) >= 1:

@@ -12,6 +12,7 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCompactionItem,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseFunctionToolCall,
@@ -100,6 +101,23 @@ class ResponseUsage(OpenAIBaseModel):
     total_tokens: int
 
 
+class CompactInputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+
+
+class CompactOutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+
+
+class CompactResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: CompactInputTokensDetails
+    output_tokens: int
+    output_tokens_details: CompactOutputTokensDetails
+    total_tokens: int
+
+
 def serialize_message(msg):
     """Serializes a single message."""
     if isinstance(msg, dict):
@@ -129,6 +147,27 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+class ResponsesCompactRequest(OpenAIBaseModel):
+    model: str
+    input: str | list[ResponseInputOutputItem] | None = None
+    instructions: str | None = None
+    previous_response_id: str | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_options: dict[str, Any] | None = None
+    prompt_cache_retention: Literal["in_memory", "24h"] | None = None
+    service_tier: Literal["auto", "default", "fast", "flex", "scale", "priority"] = (
+        "auto"
+    )
+
+
+class CompactedResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    object: Literal["response.compaction"] = "response.compaction"
+    output: list[ResponseCompactionItem]
+    usage: CompactResponseUsage
 
 
 class ResponsesRequest(OpenAIBaseModel):
