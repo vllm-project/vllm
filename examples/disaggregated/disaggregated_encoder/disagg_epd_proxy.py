@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-disagg_encoder_proxy.py
+disagg_epd_proxy.py
 
 Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
 clusters:
