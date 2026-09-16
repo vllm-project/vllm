@@ -11,6 +11,7 @@ from vllm import SamplingParams
 from vllm import logger as vllm_logger
 from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarker,
     SupportsSpeculativeDecoding,
@@ -295,7 +296,7 @@ def test_dual_key_derivation_is_stable():
 
 def test_sampling_params_can_disable_watermarking():
     assert SamplingParams().watermarking is None
-    assert not SamplingParams.from_optional(watermarking=False).watermarking
+    assert SamplingParams.from_optional(watermarking=False).watermarking is False
 
 
 def test_gpu_sampler_warns_about_unexpected_greedy_watermarking(
@@ -357,8 +358,18 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
 
 
 def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
-    make_gpu_watermark_sampler,
+    monkeypatch, make_gpu_watermark_sampler
 ):
+    # ``apply_top_k_top_p`` dispatches to a Triton kernel whenever Triton is
+    # installed, which cannot read this test's CPU tensors. Force the torch
+    # reference path; the assertion is about the call order, not the kernel.
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.gpu_sampler.apply_top_k_top_p",
+        lambda logits, k, p: apply_top_k_top_p_pytorch(
+            logits, k, p, allow_cpu_sync=True
+        ),
+    )
+
     class CapturingWatermarker:
         context_width = 1
         captured_logits = None

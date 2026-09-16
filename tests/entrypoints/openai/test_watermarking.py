@@ -27,7 +27,7 @@ def test_chat_request_preserves_watermarking_opt_out():
 
     params = request.to_sampling_params(max_tokens=1, default_sampling_params={})
 
-    assert not params.watermarking
+    assert params.watermarking is False
 
 
 def test_completion_request_preserves_watermarking_opt_out():
@@ -35,7 +35,7 @@ def test_completion_request_preserves_watermarking_opt_out():
 
     params = request.to_sampling_params(max_tokens=1)
 
-    assert not params.watermarking
+    assert params.watermarking is False
 
 
 def test_responses_request_preserves_watermarking_opt_out():
@@ -43,7 +43,7 @@ def test_responses_request_preserves_watermarking_opt_out():
 
     params = request.to_sampling_params(default_max_tokens=1)
 
-    assert not params.watermarking
+    assert params.watermarking is False
 
 
 def test_batch_chat_request_preserves_watermarking_opt_out():
@@ -54,7 +54,7 @@ def test_batch_chat_request_preserves_watermarking_opt_out():
     converted = request.to_chat_completion_request(request.messages[0])
     params = converted.to_sampling_params(max_tokens=1, default_sampling_params={})
 
-    assert not params.watermarking
+    assert params.watermarking is False
 
 
 @pytest.mark.parametrize(
@@ -128,7 +128,7 @@ def test_best_of_is_rejected(request_cls, kwargs, watermarking):
 def test_request_preserves_watermarking_opt_out(api_request, conversion, kwargs):
     params = getattr(api_request, conversion)(**kwargs)
 
-    assert not params.watermarking
+    assert params.watermarking is False
 
 
 @pytest.mark.parametrize("request_cls", [TranscriptionRequest, TranslationRequest])
@@ -183,3 +183,85 @@ def test_request_preserves_unspecified_watermarking_with_structured_outputs(
     assert params.watermarking is None
     assert params.structured_outputs is not None
     assert params.structured_outputs.choice == ["A", "B"]
+
+
+@pytest.mark.parametrize(
+    "api_request,conversion,kwargs",
+    [
+        (
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hello"}], watermarking=True
+            ),
+            "to_sampling_params",
+            {"max_tokens": 1, "default_sampling_params": {}},
+        ),
+        (
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                use_beam_search=True,
+                watermarking=True,
+            ),
+            "to_beam_search_params",
+            {"max_tokens": 1, "default_sampling_params": {}},
+        ),
+        (
+            CompletionRequest(prompt="hello", watermarking=True),
+            "to_sampling_params",
+            {"max_tokens": 1},
+        ),
+        (
+            CompletionRequest(prompt="hello", use_beam_search=True, watermarking=True),
+            "to_beam_search_params",
+            {"max_tokens": 1},
+        ),
+        (
+            ResponsesRequest(input="hello", watermarking=True),
+            "to_sampling_params",
+            {"default_max_tokens": 1},
+        ),
+        (
+            TranscriptionRequest(
+                file=UploadFile(file=BytesIO(), filename="audio.wav"),
+                watermarking=True,
+            ),
+            "to_sampling_params",
+            {"default_max_tokens": 1},
+        ),
+        (
+            TranslationRequest(
+                file=UploadFile(file=BytesIO(), filename="audio.wav"),
+                watermarking=True,
+            ),
+            "to_sampling_params",
+            {"default_max_tokens": 1},
+        ),
+    ],
+)
+def test_request_preserves_explicit_watermarking(api_request, conversion, kwargs):
+    params = getattr(api_request, conversion)(**kwargs)
+
+    assert params.watermarking is True
+
+
+def test_batch_chat_request_preserves_explicit_watermarking():
+    request = BatchChatCompletionRequest(
+        messages=[[{"role": "user", "content": "hello"}]], watermarking=True
+    )
+
+    converted = request.to_chat_completion_request(request.messages[0])
+    params = converted.to_sampling_params(max_tokens=1, default_sampling_params={})
+
+    assert converted.watermarking is True
+    assert params.watermarking is True
+
+
+def test_batch_chat_request_inherits_watermarking():
+    request = BatchChatCompletionRequest(
+        messages=[[{"role": "user", "content": "hello"}]]
+    )
+
+    converted = request.to_chat_completion_request(request.messages[0])
+    params = converted.to_sampling_params(max_tokens=1, default_sampling_params={})
+
+    assert converted.watermarking is None
+    assert params.watermarking is None

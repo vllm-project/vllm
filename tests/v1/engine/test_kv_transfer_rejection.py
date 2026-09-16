@@ -24,4 +24,4 @@ async def test_kv_transfer_rejection_stub_disables_watermarking():
     )
 
     request = add_request.call_args.args[0]
-    assert not request.sampling_params.watermarking
+    assert request.sampling_params.watermarking is False
