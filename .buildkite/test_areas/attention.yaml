@@ -2,9 +2,9 @@ group: Attention
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H100) V1 Attention Shard %N"
+- label: ":nvidia: (H100) V1 Attention / Sparse MLA Shard %N"
   key: v1-attention-h100-mi300
-  timeout_in_minutes: 85
+  timeout_in_minutes: 45
   device: h100
   source_file_dependencies:
     - vllm/config/attention.py
@@ -12,7 +12,7 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s v1/attention/sparse_mla --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
   mirror:
     amd:
@@ -20,6 +20,9 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 125
+      parallelism: 2
+      commands:
+        - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -30,6 +33,55 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H100) V1 Attention / MLA Backends"
+  key: v1-attention-h100-mla-backends
+  timeout_in_minutes: 45
+  device: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/mla/backends
+
+- label: ":nvidia: (H100) V1 Attention / MLA Correctness Shard %N"
+  key: v1-attention-h100-mla-correctness
+  timeout_in_minutes: 45
+  device: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: ":nvidia: (H100) V1 Attention / Dense and SSM"
+  key: v1-attention-h100-dense-ssm
+  timeout_in_minutes: 45
+  device: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/dense v1/attention/ssm
+
+- label: ":nvidia: (H100) V1 Attention / DCP and ROCm Compatibility"
+  key: v1-attention-h100-dcp-rocm
+  timeout_in_minutes: 45
+  device: h100
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/dcp v1/attention/rocm
 
 - label: ":nvidia: (B200) V1 Attention / Sparse MLA"
   key: v1-attention-b200-sparse-mla
