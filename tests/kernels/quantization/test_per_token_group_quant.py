@@ -118,8 +118,7 @@ def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
 ):
     """Test the packed DeepGEMM quantization kernel against the Triton
-    reference (row-major, UE8M0 scales).
-    """
+    reference (row-major, UE8M0 scales)."""
     device = "cuda"
     torch.manual_seed(42)
 
@@ -257,8 +256,7 @@ def test_per_token_group_quant_fp8_packed_all_zero():
 def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
     mantissa-rounding-up branch (exp_byte += 1). Locks down this behavior
-    before optimization.
-    """
+    before optimization."""
     device = "cuda"
     num_tokens, hidden_dim, group_size = 4, 7168, 128
 
@@ -330,8 +328,7 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
 ):
     """When output_q is allocated with shape (tma_aligned_mn, k) instead of
     (mn, k), the kernel must overwrite the padded mn rows with zeros so
-    callers can use ``torch.empty`` instead of ``torch.zeros``.
-    """
+    callers can use ``torch.empty`` instead of ``torch.zeros``."""
     device = "cuda"
     group_size = 128
     torch.manual_seed(42)

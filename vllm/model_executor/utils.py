@@ -174,8 +174,7 @@ def get_moe_expert_mapping(
 
     It will be retrieved from the first module that has a `get_expert_mapping` method.
     If the model manually implements `get_expert_mapping`, it will be used.
-    Otherwise, it will use the first RoutedExperts layer.
-    """
+    Otherwise, it will use the first RoutedExperts layer."""
     for _, module in model.named_modules():
         get_mapping = getattr(module, "get_expert_mapping", None)
         if get_mapping is not None:

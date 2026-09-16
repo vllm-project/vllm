@@ -555,8 +555,7 @@ class TestMultiConnectorStats:
 
     def test_build_kv_connector_stats_reconstructs_nixl_stats(self):
         """Test that NixlConnector stats are properly reconstructed with
-        correct data.
-        """
+        correct data."""
         serialized_data = {
             "NixlConnector": {
                 "transfer_duration": [1.5, 2.3],

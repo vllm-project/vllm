@@ -670,8 +670,7 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
-    capacity`` and keep padding tokens at PAD.
-    """
+    capacity`` and keep padding tokens at PAD."""
     from unittest.mock import MagicMock
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
@@ -1096,8 +1095,7 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_deepseek_v4_attention_quant_cache_roundtrip(num_tokens: int, block_size: int):
     """compressed_kv → quantize_and_insert_k_cache → dequantize_and_gather_k_cache
-    → compare against original.
-    """
+    → compare against original."""
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
@@ -1309,8 +1307,7 @@ def test_dequantize_and_gather_k_cache(
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
-    → manual dequant → compare against original.
-    """
+    → manual dequant → compare against original."""
     HEAD_DIM = 128
     QUANT_BLOCK_SIZE = 128
     # cache_stride = head_dim + (head_dim * 4 / quant_block_size) = 128 + 4 = 132

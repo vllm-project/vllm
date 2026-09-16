@@ -432,8 +432,7 @@ def test_cp_gather_fp8_with_sequence_starts(gather_seq_lens, seq_starts):
 )
 def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
     """Correctness test with large sequence lengths matching benchmark
-    scenarios (8K-128K prefill).
-    """
+    scenarios (8K-128K prefill)."""
     (
         cache,
         block_table,

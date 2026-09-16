@@ -281,8 +281,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
     KV cache group. Each group's count must be tracked independently rather
     than collapsed to a single scalar, or DCP read-phase alignment
-    (local_num_computed_blocks) would misalign one of the groups.
-    """
+    (local_num_computed_blocks) would misalign one of the groups."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
     )
@@ -336,8 +335,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
     owed to the producer -- so the worker must not report it in
     finished_recving. Doing so trips `assert RequestStatus.is_finished` in
     _update_from_kv_xfer_finished, which only tolerates a finished recv for a
-    request that is parked or already done.
-    """
+    request that is parked or already done."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
     )
@@ -442,8 +440,7 @@ def test_apply_dcp_prefix_caching_matches_global_logical_positions(
     """_apply_dcp_prefix_caching must operate on logical block IDs (DCP
     interleaves at logical-block granularity) and always return equal-length
     local/remote slices, so a later, unconditional _apply_prefix_caching
-    trim is a guaranteed no-op rather than double-processing the read.
-    """
+    trim is a guaranteed no-op rather than double-processing the read."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -842,8 +839,7 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
 def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
     """Local SSM slots can only exceed the remote ones by the position D
     recomputes itself. A larger excess means the lists aren't
-    position-aligned: fail loudly rather than transfer into wrong slots.
-    """
+    position-aligned: fail loudly rather than transfer into wrong slots."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -1159,8 +1155,7 @@ def test_nixl_region_sort_preserves_pipeline_layer_order():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _compute_desc_ids uses per-group strides for hybrid
-    FA+SSM when ratio=1 (no kernel block size mismatch).
-    """
+    FA+SSM when ratio=1 (no kernel block size mismatch)."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
@@ -1244,8 +1239,7 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
-    (kernel blocks) vs SSM (logical blocks) when ratio > 1.
-    """
+    (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
@@ -1276,8 +1270,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 def test_get_block_descs_ids_hetero_block_size_hybrid():
     """With a block-size ratio, FA desc ids are ratio-expanded while SSM
     desc ids keep the unexpanded logical stride (state blocks are never
-    sub-split).
-    """
+    sub-split)."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
@@ -1316,8 +1309,7 @@ def _bind_worker_method(worker, name):
 @pytest.mark.cpu_test
 def test_map_block_ids_for_block_size_ratio_hybrid():
     """Attention groups expand to remote granularity and clip to the remote
-    coverage; mamba state blocks pass through 1:1.
-    """
+    coverage; mamba state blocks pass through 1:1."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -1348,8 +1340,7 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 @pytest.mark.cpu_test
 def test_post_process_zeroes_untransferred_tail():
     """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute.
-    """
+    receive; mamba state caches are untouched by the attention permute."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -1392,8 +1383,7 @@ def test_post_process_zeroes_untransferred_tail():
 @pytest.mark.cpu_test
 def test_nixl_metadata_hybrid_ssm_block_ids():
     """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
-    groups with different block counts (kernel mismatch active).
-    """
+    groups with different block counts (kernel mismatch active)."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
@@ -1474,8 +1464,7 @@ def _make_fake_kv_cache_manager():
 @pytest.mark.cpu_test
 def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
     """Only zero-recorded (attention) groups contribute, sliced to the
-    externally-loaded token range; Mamba state blocks are never zeroed.
-    """
+    externally-loaded token range; Mamba state blocks are never zeroed."""
     manager = _make_fake_kv_cache_manager()
 
     # Tokens [0, 16) are locally cached; the load covers tokens [16, 56).
@@ -1503,8 +1492,7 @@ def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
 @pytest.mark.cpu_test
 def test_failed_load_rezeroes_unwritten_skipped_blocks():
     """A failed async load leaves zeroing-skipped blocks unwritten beyond
-    the valid prefix; they must be zeroed before local recompute.
-    """
+    the valid prefix; they must be zeroed before local recompute."""
     from unittest.mock import MagicMock
 
     from vllm.v1.core.sched.scheduler import Scheduler
@@ -1964,8 +1952,7 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 def test_exchange_clipped_blocks_ssm_single_state():
     """In single-state cache modes, SSM lists are reduced to the running
     state slot: speculative scratch slots, null placeholders and the previous
-    step's state carry nothing. Attention groups pass through untouched.
-    """
+    step's state carry nothing. Attention groups pass through untouched."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
@@ -1992,8 +1979,7 @@ def test_exchange_clipped_blocks_ssm_single_state():
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_positional_states():
     """In "all" mode every position holds a state, so only the speculative
-    slots go; placeholders stay to keep the list position-indexed.
-    """
+    slots go; placeholders stay to keep the list position-indexed."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
@@ -2010,8 +1996,7 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
     """KimiLinear-shaped config: one MLA group and two KDA (GDN-typed
     MambaSpec) groups whose layers share the same HMA tensors, with a
     mamba-aligned unified page and an MLA kernel block smaller than the
-    logical block.
-    """
+    logical block."""
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
@@ -2151,8 +2136,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     """Hybrid MLA+KDA registration: HMA tensors shared by both layer types
     must be flagged as MLA regions even when a KDA layer registers them
     first, expose TP-independent kernel-granularity block lens, and build
-    FA + mamba descriptors for every region.
-    """
+    FA + mamba descriptors for every region."""
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -2253,8 +2237,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
 def test_push_write_hybrid_mla_replicates_attention():
     """Hybrid MLA+SSM push with P_TP < D_TP: attention blocks must be
     written to every covered D rank (replicated MLA latent) while SSM state
-    is written per-rank through the split handles.
-    """
+    is written per-rank through the split handles."""
     import threading
     from collections import defaultdict
     from unittest.mock import MagicMock

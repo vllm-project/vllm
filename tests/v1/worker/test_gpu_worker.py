@@ -49,8 +49,7 @@ def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 def test_startup_plan_fingerprint_sensitivity(plan_env):
     """The fingerprint is the OOM-safety key: stable for identical inputs,
-    different for anything the profiled value depends on.
-    """
+    different for anything the profiled value depends on."""
     fp = startup_plan.compute_plan_fingerprint
     base = fp(_plan_worker().vllm_config, 0, 1)
     assert base == fp(_plan_worker().vllm_config, 0, 1)
@@ -98,8 +97,7 @@ def _snapshot(free_memory, torch_memory=0):
 
 def _profile_result(consumed, reserved_before=0, reserved_after=0):
     """A result whose free-memory readings agree with `consumed`, which
-    `memory_profiling` derives as the drop in free memory, negative when it grew.
-    """
+    `memory_profiling` derives as the drop in free memory, negative when it grew."""
     return SimpleNamespace(
         total_consumed=consumed,
         transient_peak_headroom=0,
@@ -127,8 +125,7 @@ def test_profiling_fallback_declines_when_free_memory_dropped(rocm):
 @pytest.mark.parametrize("rocm", [True], indirect=True)
 def test_profiling_fallback_replaces_a_released_measurement(rocm):
     """A negative measurement describes the rest of the device, so it is replaced
-    by this process's reservation, which the rest of the device cannot move.
-    """
+    by this process's reservation, which the rest of the device cannot move."""
     result = _profile_result(
         consumed=-RELEASED_BY_OTHERS,
         reserved_after=TORCH_RESERVED,
@@ -152,8 +149,7 @@ def test_profiling_fallback_never_returns_a_negative_amount(rocm):
 @pytest.mark.parametrize("rocm", [False], indirect=True)
 def test_profiling_fallback_declines_off_rocm(rocm):
     """Platforms that account frees eagerly keep reporting the error, so the
-    caller's assertion stays reachable there.
-    """
+    caller's assertion stays reachable there."""
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
@@ -177,8 +173,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Previous device handles are waited before the forward pass; the
-    metadata handle is left to the GroupCoordinator's reaper.
-    """
+    metadata handle is left to the GroupCoordinator's reaper."""
     import torch
 
     from vllm.sequence import IntermediateTensors

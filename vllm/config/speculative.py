@@ -543,8 +543,7 @@ class SpeculativeConfig:
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
-        the minimum-variance schedule.
-        """
+        the minimum-variance schedule."""
         num_drafts = length - 1  # expected number of accepted draft tokens
         num_full = int(num_drafts)
         return (
@@ -558,8 +557,7 @@ class SpeculativeConfig:
         length: float | None,
     ) -> list[float]:
         """Return per-position unconditional acceptance rates from exactly one
-        of `rates` or `length` (validates range, length, and monotonicity).
-        """
+        of `rates` or `length` (validates range, length, and monotonicity)."""
         if (rates is None) == (length is None):
             raise ValueError(
                 "rejection_sample_method='synthetic' requires exactly one of "
