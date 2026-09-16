@@ -255,11 +255,17 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    prefill_stats: "PrefillStats | None" = None
 
 
 @dataclass
 class PrefillStats:
-    """Breakdown of a scheduled prefill computation.
+    """Breakdown of one admitted prompt chunk's prefill computation.
+
+    Streaming-input continuations produce one snapshot per admitted input
+    chunk. The output processor combines those snapshots into a
+    session-cumulative value without counting retained generated tokens as new
+    prompt input.
 
     Fields:
         num_prompt_tokens: Total number of tokens to be prefilled.
@@ -268,6 +274,15 @@ class PrefillStats:
         num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
         num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
         num_cache_creation_tokens: Tokens computed and written to the prefix cache.
+        num_new_full_blocks: Physical KV blocks newly inserted or promoted in the
+            local prefix cache, summed across KV cache groups.
+        num_block_allocations: Physical KV blocks allocated while prefilling,
+            summed across KV cache groups.
+        num_block_evictions: Cached physical KV blocks evicted by those
+            allocations. This attributes the eviction trigger, not ownership of
+            the evicted block, to the request.
+        num_prefill_chunks: Scheduler iterations that process at least one prompt
+            token for the request, including recomputation after preemption.
     """
 
     num_prompt_tokens: int = 0
@@ -276,6 +291,10 @@ class PrefillStats:
     num_local_cached_tokens: int = 0
     num_external_cached_tokens: int = 0
     num_cache_creation_tokens: int = 0
+    num_new_full_blocks: int = 0
+    num_block_allocations: int = 0
+    num_block_evictions: int = 0
+    num_prefill_chunks: int = 0
 
     def set(
         self,
@@ -296,6 +315,40 @@ class PrefillStats:
         assert num_cached_tokens >= 0
         self.num_cache_creation_tokens = max(
             0, min(num_cached_tokens, self.num_prompt_tokens) - self.num_cached_tokens
+        )
+
+    def record_block_activity(
+        self,
+        num_block_allocations: int,
+        num_block_evictions: int,
+        num_new_full_blocks: int,
+    ) -> None:
+        """Accumulate physical block activity attributed to this prefill."""
+        self.num_block_allocations += num_block_allocations
+        self.num_block_evictions += num_block_evictions
+        self.num_new_full_blocks += num_new_full_blocks
+
+    def merged(self, other: "PrefillStats") -> "PrefillStats":
+        """Return a cumulative snapshot without mutating either operand."""
+        return PrefillStats(
+            num_prompt_tokens=self.num_prompt_tokens + other.num_prompt_tokens,
+            num_computed_tokens=(self.num_computed_tokens + other.num_computed_tokens),
+            num_cached_tokens=self.num_cached_tokens + other.num_cached_tokens,
+            num_local_cached_tokens=(
+                self.num_local_cached_tokens + other.num_local_cached_tokens
+            ),
+            num_external_cached_tokens=(
+                self.num_external_cached_tokens + other.num_external_cached_tokens
+            ),
+            num_cache_creation_tokens=(
+                self.num_cache_creation_tokens + other.num_cache_creation_tokens
+            ),
+            num_new_full_blocks=(self.num_new_full_blocks + other.num_new_full_blocks),
+            num_block_allocations=(
+                self.num_block_allocations + other.num_block_allocations
+            ),
+            num_block_evictions=(self.num_block_evictions + other.num_block_evictions),
+            num_prefill_chunks=self.num_prefill_chunks + other.num_prefill_chunks,
         )
 
 
@@ -536,6 +589,7 @@ class IterationStats:
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
         num_cached_tokens: int = 0,
+        prefill_stats: PrefillStats | None = None,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -576,6 +630,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            prefill_stats=prefill_stats,
         )
         self.finished_requests.append(finished_req)
 

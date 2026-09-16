@@ -16,6 +16,17 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-per-request-metrics
 When this flag is set, supported API responses include metrics for each
 attributable request.
 
+!!! warning "Security: prefix-cache state"
+    Prefix-cache metrics expose exact per-request cache-hit and eviction state.
+    In a shared deployment, this can reveal whether another tenant populated a
+    guessed prefix without relying on timing analysis. Use this flag only in a
+    trusted single-tenant deployment, or ensure that every request includes an
+    unpredictable secret `cache_salt` scoped to the intended tenant isolation
+    boundary. A shared or predictable salt does not provide cross-tenant
+    isolation. See the
+    [cache-salting guidance](../usage/security.md#prefix-cache-timing-side-channel-mitigation-cache-salting)
+    and [CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r).
+
 !!! note
     At high concurrency, enabling per-request metrics computation may introduce
     non-negligible CPU overhead. Benchmark your specific workload to evaluate the
@@ -41,7 +52,19 @@ When per-request metrics are enabled, the response includes a `metrics` object:
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
     "mean_itl_ms": 9.1,
-    "tokens_per_second": 103.2
+    "tokens_per_second": 103.2,
+    "prefix_cache": {
+      "num_computed_tokens": 26,
+      "num_cached_tokens": 16,
+      "num_local_cached_tokens": 16,
+      "num_external_cached_tokens": 0,
+      "num_cache_creation_tokens": 26,
+      "num_new_full_blocks": 2,
+      "num_block_allocations": 3,
+      "num_block_evictions": 1,
+      "num_prefill_chunks": 1,
+      "prefill_time_ms": 85.2
+    }
   }
 }
 ```
@@ -54,8 +77,48 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
 | `tokens_per_second` | Overall output token throughput: all generated tokens over the inference interval (scheduling to last output token). Unlike `generation_time_ms`, this includes the prefill phase, so it reflects end-to-end generation speed rather than pure decode speed. |
 
-All fields are `null` if the underlying timing data is not available for that
-request.
+All timing fields are `null` if the underlying timestamp data is not available
+for that request.
+
+The experimental `metrics.prefix_cache` object provides request-attributed
+prompt and KV-cache telemetry:
+
+| Field | Description |
+| --- | --- |
+| `num_computed_tokens` | Logical prompt tokens assigned to local model computation when each input chunk is admitted. Recomputation after preemption is not double-counted. |
+| `num_cached_tokens` | Prompt tokens skipped during local computation (`num_local_cached_tokens + num_external_cached_tokens`). |
+| `num_local_cached_tokens` | Prompt tokens supplied by the local prefix cache. |
+| `num_external_cached_tokens` | Prompt tokens supplied through an external KV transfer. This describes the scheduler source, not whether every transferred block was a cache hit in an upstream deployment. |
+| `num_cache_creation_tokens` | Prompt tokens counted as local prefix-cache creation for the request. |
+| `num_new_full_blocks` | Physical KV blocks newly inserted or promoted in local prefix-cache hash maps during prefill. |
+| `num_block_allocations` | Physical KV blocks allocated during prefill. |
+| `num_block_evictions` | Cached physical KV blocks evicted by allocations for this request. This attributes the eviction trigger; it does not claim that the request owned the evicted block. |
+| `num_prefill_chunks` | Scheduler iterations that processed at least one prompt token, including recomputation after preemption. |
+| `prefill_time_ms` | Time from first scheduling to the first output token, including prefill-time preemptions. It currently has the same measurement boundaries as `time_to_first_token_ms`. |
+
+Block counts are physical counts summed across KV cache groups. Consequently,
+one logical token block can contribute more than one physical block on hybrid
+models. The response's top-level `id` correlates the telemetry with the request;
+the same ID is present on the final streaming chunk.
+
+For streaming-input sessions, prefix-cache telemetry is cumulative across all
+admitted input chunks. Each continuation is measured independently inside the
+scheduler and then added to the prior chunks. Generated tokens retained as the
+next chunk's context are not counted again as prompt input or cache creation;
+physical block activity and prefill-chunk counts still include work attributable
+to every input chunk. Previously emitted `RequestOutput` snapshots remain
+unchanged when a later chunk completes.
+
+These engine-level fields intentionally live under `metrics`, rather than
+OpenAI `usage`: block allocation and eviction are implementation details, and
+external-transfer and local-cache sources are not billing-token categories.
+
+Offline generation exposes the same engine values as
+`RequestOutput.prefill_stats`, alongside `RequestOutput.request_id`. Custom stat
+logger plugins receive it as `FinishedRequestStats.prefill_stats`, correlated by
+`FinishedRequestStats.request_id`. As documented by the stat-logger interface,
+the plugin-side stats classes are not stable APIs and can change between
+versions.
 
 !!! note
     Timing metrics describe a single generation stream, so they are only
