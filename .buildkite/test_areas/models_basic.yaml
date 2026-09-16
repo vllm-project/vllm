@@ -78,6 +78,23 @@ steps:
   commands:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
     - pytest -v -s models/inkling
+  mirror:
+    amd:
+      label: ":amd: (MI355) Inkling"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 65
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/inkling/
+      - vllm/cute_utils/
+      - cmake/external_projects/tml_fa4.cmake
+      - tests/models/inkling/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s models/inkling/rocm
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
@@ -92,6 +109,36 @@ steps:
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Kimi K3"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 65
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/third_party/flash_linear_attention/ops/kda.py
+      - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
+      - vllm/third_party/flash_linear_attention/ops/l2norm.py
+      - vllm/models/kimi_k3/nvidia/kda.py
+      - vllm/models/kimi_k3/nvidia/kda_metadata.py
+      - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+      - vllm/models/kimi_k3/amd/
+      - CMakeLists.txt
+      - csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu
+      - csrc/libtorch_stable/ops.h
+      - csrc/libtorch_stable/torch_bindings.cpp
+      - tests/models/kimi_k3/test_amd_attn_res.py
+      - tests/models/kimi_k3/test_amd_kda_decode.py
+      - tests/models/kimi_k3/test_kda.py
+      - tests/models/kimi_k3/test_kda_metadata.py
+      - vllm/_custom_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      # Run the ROCm AttnRes/KDA decode counterparts plus existing KDA coverage.
+      - pytest -v -s models/kimi_k3/test_amd_attn_res.py models/kimi_k3/test_amd_kda_decode.py models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
