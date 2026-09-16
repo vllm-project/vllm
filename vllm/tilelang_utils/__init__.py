@@ -63,8 +63,8 @@ def _get_pass_configs() -> dict[Any, Any]:
 class _DeferredTileLangJitKernel:
     """Stand-in for a `tilelang.jit` kernel that decorates on first use.
 
-    Both attribute access and calling materializes the kernel. Required for
-    compile-only JIT warmup.
+    Both attribute access and calling apply the decoration. Required for
+    compile-only JIT warmup on platforms that defer import of tilelang.
     """
 
     _kernel_function: Callable[..., Any] | None = None
@@ -74,7 +74,7 @@ class _DeferredTileLangJitKernel:
         self._kernel_function = kernel_function
         functools.update_wrapper(self, kernel_function)
 
-    def _materialize(self) -> Any:
+    def _ensure_jit_kernel(self) -> Any:
         if self._jit_kernel is None:
             _ensure_tilelang_imported()
             kernel_function = self._kernel_function
@@ -87,10 +87,10 @@ class _DeferredTileLangJitKernel:
         return self._jit_kernel
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self._materialize()(*args, **kwargs)
+        return self._ensure_jit_kernel()(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._materialize(), name)
+        return getattr(self._ensure_jit_kernel(), name)
 
 
 def tilelang_jit(kernel_function: Callable[..., Any]) -> Callable[..., Any]:
