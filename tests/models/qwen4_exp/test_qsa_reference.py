@@ -26,6 +26,35 @@ requires_qsa_kernels = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize(
+    ("device", "has_triton", "expected"),
+    [
+        pytest.param("cpu", True, qsa_cache._build_qsa_metadata_torch, id="cpu"),
+        pytest.param(
+            "cuda",
+            True,
+            qsa_cache.build_qsa_metadata_triton,
+            id="cuda",
+        ),
+        pytest.param(
+            "cuda",
+            False,
+            qsa_cache._build_qsa_metadata_torch,
+            id="cuda-without-triton",
+        ),
+    ],
+)
+def test_qsa_metadata_dispatch_is_device_aware(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    has_triton: bool,
+    expected: object,
+) -> None:
+    monkeypatch.setattr(qsa_cache, "HAS_TRITON", has_triton)
+
+    assert qsa_cache._select_qsa_metadata_fn(torch.device(device)) is expected
+
+
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -251,6 +280,7 @@ def _qsa_sparse_paged_attention_reference(
 def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -303,6 +333,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -470,6 +501,7 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False

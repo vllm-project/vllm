@@ -12,7 +12,9 @@ from torch import nn
 from vllm.models.qwen4_exp.cpu.model_state import Qwen4ExpModelState
 from vllm.models.qwen4_exp.cpu.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
+    Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from vllm.models.qwen4_exp.cpu.ops.ple import ple_gate
 from vllm.models.qwen4_exp.cpu.ple_layer import Qwen4ExpPLELayer
@@ -144,6 +146,34 @@ def test_cpu_ple_fp8_dequantizes_only_selected_rows() -> None:
     torch.testing.assert_close(
         output,
         torch.tensor([[4.0, 8.0], [0.25, 0.5]], dtype=torch.bfloat16),
+    )
+
+
+def test_cpu_ple_bf16_unquantized_embedding_preserves_values() -> None:
+    method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+        None,
+        "model.layers.1.ple.ple_embedding.ngram_embedding",
+    )
+    assert isinstance(method, Qwen4ExpPLEUnquantizedEmbeddingMethod)
+    layer = nn.Module()
+    layer.register_parameter(
+        "weight",
+        nn.Parameter(
+            torch.tensor(
+                [[1.0, 2.0], [3.0, 4.0]],
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        ),
+    )
+
+    selected = method.embedding(layer, torch.tensor([1, 0]))
+    output = method.dequantize(layer, selected, torch.bfloat16)
+
+    assert output.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        output,
+        torch.tensor([[3.0, 4.0], [1.0, 2.0]], dtype=torch.bfloat16),
     )
 
 
