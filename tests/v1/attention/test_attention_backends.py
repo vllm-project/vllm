@@ -151,6 +151,7 @@ def create_and_prepopulate_kv_cache(
     Returns:
         A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
         2 * head_size)`` order with strides determined by ``layout``.
+
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -286,7 +287,6 @@ def run_attention_backend(
     use_cuda_graph: bool = False,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
         use_direct_block_mask = False
@@ -414,8 +414,7 @@ def _test_backend_correctness(
     max_num_seqs: int | None = None,
     max_num_batched_tokens: int | None = None,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
+    """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
 
     This test works by:

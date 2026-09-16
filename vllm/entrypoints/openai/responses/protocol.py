@@ -80,6 +80,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -100,9 +101,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -113,9 +112,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
