@@ -524,6 +524,54 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("G", [32, 128])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("M", [2, 64], ids=["M=2_decode", "M=64_prefill"])
+def test_hip_skinny_padded_group_stride(dtype, G, has_zp, M):
+    """Scale and zero-point rows may be padded past K // group_size.
+
+    Both paths index them by their own row stride, so a padded row is read
+    correctly rather than bleeding into the next row. M picks the path: the
+    HIP skinny kernel at 2, the Triton prefill kernel at 64.
+    """
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    K, N = 2048, 256
+    num_groups = K // G
+    pad = 7
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    b_packed_i8 = pack_int4_exllama_shuffle(w_int4_nk).view(torch.int8)
+
+    scales = (0.05 * torch.rand((N, num_groups), device=device)).to(dtype)
+    scales_padded = torch.zeros((N, num_groups + pad), device=device, dtype=dtype)
+    scales_padded[:, :num_groups] = scales
+    scales_view = scales_padded[:, :num_groups]
+    assert scales_view.stride(0) == num_groups + pad
+
+    zp_nkg = zp_view = None
+    if has_zp:
+        zp_nkg = torch.randint(0, 16, (N, num_groups), device=device, dtype=torch.int32)
+        zp_packed = _pack_zp_rows_for_kernel(zp_nkg)
+        zp_padded = torch.zeros(
+            (N // 8, num_groups + pad), device=device, dtype=torch.int32
+        )
+        zp_padded[:, :num_groups] = zp_packed
+        zp_view = zp_padded[:, :num_groups]
+
+    cu_count = num_compute_units()
+    out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, b_packed_i8, scales_view, zp_view, None, cu_count, G
+    )
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=zp_nkg)
+
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
 # ---------------------------------------------------------------------------
 # Tests for the full hybrid dispatch (HIP decode + Triton prefill)
 # ---------------------------------------------------------------------------

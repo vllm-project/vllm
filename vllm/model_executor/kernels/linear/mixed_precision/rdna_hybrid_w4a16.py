@@ -85,6 +85,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     K,
     K8,  # K // 8
     num_groups,  # K // group_size
+    stride_sn,  # row stride of scales_ptr and zp_ptr, in groups
     # Quantization parameters
     group_size,
     ZP_BIAS: tl.constexpr,
@@ -144,12 +145,12 @@ def _triton_w4a16_skinny_fmt_kernel(
         b = (b >> shifts_full) & 0xF
 
         group_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + group_idx
+        scale_ptrs = scales_ptr + offs_n * stride_sn + group_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + group_idx
+            zp_ptrs = zp_ptr + (offs_n // 8) * stride_sn + group_idx
             zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
             zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
             b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
@@ -214,7 +215,8 @@ def triton_w4a16_skinny_fmt_gemm(
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
     assert b_q.is_contiguous(), "Weight matrix must be contiguous"
-    assert scales.is_contiguous(), "Scales must be contiguous"
+    assert scales.stride(1) == 1, "Scale rows must be contiguous"
+    stride_sn = scales.stride(0)
 
     M, K = a.shape
     N = b_q.shape[0]
@@ -226,7 +228,10 @@ def triton_w4a16_skinny_fmt_gemm(
         f"scales shape mismatch: {scales.shape} vs ({N}, {num_groups})"
     )
     if zp is not None:
-        assert zp.is_contiguous(), "Zero-points must be contiguous"
+        assert zp.stride(1) == 1, "Zero-point rows must be contiguous"
+        assert zp.stride(0) == stride_sn, (
+            f"zp row stride {zp.stride(0)} must match scales {stride_sn}"
+        )
         assert N % 8 == 0, f"N must be divisible by 8 for packed zp, got {N}"
         assert zp.shape == (N // 8, num_groups), (
             f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
@@ -333,6 +338,7 @@ def triton_w4a16_skinny_fmt_gemm(
         K,
         K8,
         num_groups,
+        stride_sn,
         group_size=group_size,
         ZP_BIAS=zp_bias,
         HAS_ZP=has_zp,
