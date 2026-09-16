@@ -121,6 +121,8 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.failure_callback: FailureCallback | None = None
+        self.shutting_down = False
+        self.shutdown_lock = threading.Lock()
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
@@ -501,28 +503,35 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if not getattr(self, "shutting_down", False):
-            worker_count = len(getattr(self, "workers", None) or [])
-            logger.debug(
-                "[shutdown] Executor: start worker_count=%d",
-                worker_count,
-            )
+        lock = getattr(self, "shutdown_lock", None)
+        if lock is None:
+            return
+
+        with lock:
+            if getattr(self, "shutting_down", False):
+                return
             self.shutting_down = True
 
-            # Make sure all the worker processes are terminated first.
-            if workers := getattr(self, "workers", None):
-                for w in workers:
-                    # Close death_writer to signal child processes to exit
-                    if w.death_writer is not None:
-                        w.death_writer.close()
-                        w.death_writer = None
-                self._ensure_worker_termination([w.proc for w in workers])
+        worker_count = len(getattr(self, "workers", None) or [])
+        logger.debug(
+            "[shutdown] Executor: start worker_count=%d",
+            worker_count,
+        )
 
-                for w in workers:
-                    # Shutdown response queues
-                    if w.worker_response_mq is not None:
-                        w.worker_response_mq.shutdown()
-                        w.worker_response_mq = None
+        # Make sure all the worker processes are terminated first.
+        if workers := getattr(self, "workers", None):
+            for w in workers:
+                # Close death_writer to signal child processes to exit
+                if w.death_writer is not None:
+                    w.death_writer.close()
+                    w.death_writer = None
+            self._ensure_worker_termination([w.proc for w in workers])
+
+            for w in workers:
+                # Shutdown response queues
+                if w.worker_response_mq is not None:
+                    w.worker_response_mq.shutdown()
+                    w.worker_response_mq = None
 
         if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
             rpc_broadcast_mq.shutdown()
