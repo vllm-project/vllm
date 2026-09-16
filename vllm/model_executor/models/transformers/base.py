@@ -139,11 +139,11 @@ class Base(
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
         self.fusers: dict[str, list[BaseFuser]] = {}
         """Module qualname -> the fusers applied to it, populated
-        by `recursive_replace` for `create_attention_instances`."""
+        by `recursive_replace` for `_create_attention_instances`."""
         self.attention_fusers: dict[int, tuple[str, AttentionFuser]] = {}
         """`layer_idx` -> the qualname and fuser of the module computing that
         layer's attention, populated by `recursive_replace` for
-        `create_attention_instances`."""
+        `_create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -179,7 +179,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self.attention_instances = self.create_attention_instances()
+        self._create_attention_instances()
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -193,11 +193,10 @@ class Base(
         )
 
     def _patch_config(self):
-        """
-        Patch the config to ensure that the model is created correctly:
+        """Patch the config to ensure that the model is created correctly:
 
         - Sets the attention implementation to "vllm" so the attention instances from
-        `create_attention_instances` are used
+        `_create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
         """
@@ -253,8 +252,7 @@ class Base(
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
     ):
-        """
-        Decorate `cls` to indicate to vLLM that it supports torch compile.
+        """Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
             cls: The PreTrainedModel class to decorate.
@@ -265,6 +263,7 @@ class Base(
             enable_if: A function which takes in the vLLM config and returns whether
                 torch compile should be enabled for this class.
             is_encoder: Whether the class being decorated is an encoder.
+
         """
         logger.debug(
             "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
@@ -295,8 +294,7 @@ class Base(
         )
 
     def _create_hf_to_vllm_mapper(self):
-        """
-        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+        """Create a WeightsMapper to map checkpoint weight names to module qualnames.
 
         This handles:
 
@@ -347,18 +345,14 @@ class Base(
         self._maybe_apply_model_mapping()
 
     def _get_tie_word_embeddings(self):
-        """
-        Check if the model has tied word embeddings.
-        """
+        """Check if the model has tied word embeddings."""
         # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
 
     def pipeline_parallel(self):
-        """
-        Apply the model's pipeline parallelization plan.
-        """
+        """Apply the model's pipeline parallelization plan."""
         if self.pp_group.world_size <= 1:
             return
 
@@ -570,11 +564,8 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def create_attention_instances(self) -> dict[int, Attention]:
-        """
-        Create `Attention` instances to inform KV cache allocation.
-        """
-        attention_instances = {}
+    def _create_attention_instances(self):
+        """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
@@ -614,13 +605,9 @@ class Base(
                 self.parallel_config, arch_config
             )
             head_size = arch_config.head_size
-            scale = attn_fuser.scale(attn_module)
-            # Default to Llama scale if AttentionFuser couldn't identify it
-            if scale is None:
+            if (scale := attn_fuser.scale(attn_module)) is None:
+                # Default to Llama scale if AttentionFuser couldn't identify it
                 scale = head_size**-0.5
-            num_kv_heads = self.model_config.get_num_kv_heads(
-                self.parallel_config, arch_config
-            )
 
             kwargs = dict(
                 num_heads=num_heads,
@@ -651,13 +638,18 @@ class Base(
             else:
                 kwargs.update(
                     head_size=head_size,
-                    num_kv_heads=num_kv_heads,
+                    num_kv_heads=self.model_config.get_num_kv_heads(
+                        self.parallel_config, arch_config
+                    ),
                     logits_soft_cap=logits_soft_cap,
                 )
 
                 # Handle interleaved sliding window attention
                 if layer_types and layer_types[i] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
+                # Handle attention sinks
+                if (sinks := attn_fuser.sinks(attn_module)) is not None:
+                    kwargs["sinks"] = sinks
 
             attn_instance = attn_cls(**kwargs)
 
@@ -670,8 +662,6 @@ class Base(
             # layer identity into the traced graph and so costs one compiled
             # artifact per layer.
             setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
-            attention_instances[i] = attn_instance
-        return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
         """Return the `Attention` class to use for this model's layers."""
@@ -701,8 +691,7 @@ class Base(
         return Attention
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
-        """
-        If a `parameter` is on the `meta` device, then its parent
+        """If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
 
         ```python

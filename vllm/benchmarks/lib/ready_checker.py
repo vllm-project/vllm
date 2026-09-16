@@ -14,6 +14,14 @@ from .endpoint_request_func import RequestFunc, RequestFuncInput, RequestFuncOut
 
 logger = init_logger(__name__)
 
+_pending_probes: set[asyncio.Future[RequestFuncOutput]] = set()
+
+
+def _probe_done(probe: asyncio.Future[RequestFuncOutput]) -> None:
+    _pending_probes.discard(probe)
+    if not probe.cancelled():
+        probe.exception()
+
 
 async def wait_for_endpoint(
     request_func: RequestFunc,
@@ -22,18 +30,19 @@ async def wait_for_endpoint(
     timeout_seconds: int = 600,
     retry_interval: int = 5,
 ) -> RequestFuncOutput:
-    """
-    Wait for an endpoint to become available before starting benchmarks.
+    """Wait for an endpoint to become available before starting benchmarks.
 
     Args:
         request_func: The async request function to call
         test_input: The RequestFuncInput to test with
+        session: The aiohttp session used to issue the probe requests
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
 
     Returns:
         RequestFuncOutput: The successful response, or the last failed response
         if the endpoint doesn't become available within the timeout.
+
     """
     deadline = time.perf_counter() + timeout_seconds
     output = RequestFuncOutput(success=False)
@@ -56,11 +65,19 @@ async def wait_for_endpoint(
                 break
 
             # ping the endpoint using request_func
+            probe = asyncio.ensure_future(
+                request_func(request_func_input=test_input, session=session)
+            )
+            # Retain cancelled probes until cleanup finishes and collect exceptions.
+            _pending_probes.add(probe)
+            probe.add_done_callback(_probe_done)
             try:
-                output = await asyncio.wait_for(
-                    request_func(request_func_input=test_input, session=session),
-                    timeout=remaining,
+                done, _ = await asyncio.wait(
+                    {probe}, timeout=max(0, deadline - time.perf_counter())
                 )
+                if not done:
+                    break
+                output = probe.result()
                 if output.success:
                     pbar.close()
                     return output
@@ -68,17 +85,18 @@ async def wait_for_endpoint(
                     err_last_line = str(output.error).rstrip().rsplit("\n", 1)[-1]
                     logger.warning("Endpoint is not ready. Error='%s'", err_last_line)
             except asyncio.TimeoutError:
-                if not output.error:
-                    output.error = (
-                        f"Endpoint readiness timed out after {timeout_seconds}s."
-                    )
                 break
             except aiohttp.ClientConnectorError:
                 pass
+            finally:
+                if not probe.done():
+                    probe.cancel()
 
             # retry after a delay
             sleep_duration = min(retry_interval, deadline - time.perf_counter())
             if sleep_duration > 0:
                 await asyncio.sleep(sleep_duration)
 
+    if not output.error:
+        output.error = f"Endpoint readiness timed out after {timeout_seconds}s."
     return output
