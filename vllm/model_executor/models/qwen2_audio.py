@@ -251,6 +251,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
             hf_kwargs=dict(
                 hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
+                truncation=True,
             )
         )
 
