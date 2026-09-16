@@ -1482,8 +1482,14 @@ def cutlass_w4a8_moe_mm(
             Cumulative token offsets
         problem_sizes:
             Per-expert (M, N, K) GEMM sizes used by the grouped GEMM launcher.
-        a/b/c/group_scale_strides:
-            Strides describing the memory layout of the input tensors.
+        a_strides:
+            Strides describing the memory layout of a_tensors.
+        b_strides:
+            Strides describing the memory layout of b_tensors.
+        c_strides:
+            Strides describing the memory layout of out_tensors.
+        group_scale_strides:
+            Strides describing the memory layout of b_group_scales.
         maybe_schedule:
             Optional override to choose a specific kernel or epilogue schedule.
 

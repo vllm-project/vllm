@@ -190,9 +190,11 @@ def candidate_blocks_to_sparse_indices(
         candidate_blocks: [rows, K] int32 request-local candidate block ids
             (-1 padded), in units of ``candidate_block_size`` positions. K
             must be a power of two (the in-kernel sort); rows may be strided.
-        row_ks/row_ke: [rows] int32 per-row K range; bounds are in the same
+        row_ks: [rows] int32 per-row K range start; bounds are in the same
             (packed-workspace) coordinates the sparse kernel iterates over.
             Pass zeros for the paged path, whose blocks are context-relative.
+        row_ke: [rows] int32 per-row K range end, in the same coordinates as
+            ``row_ks``.
         candidate_block_size: Positions per candidate block.
         sparse_block_kv: Positions per sparse block (8 or 16).
         out: Optional ``(sparse_indices, end)`` buffers to write into,
@@ -322,12 +324,16 @@ def sparse_mqa_logits_prefill_chunk(
         k_scale: [total_kv] int32 packed UE8M0 K scales.
         weights: [rows, H] bf16 per-head weights; the sparse kernels take
             bf16 and do not fold the Q scale in.
-        cu_seqlen_ks/cu_seqlen_ke: [rows] int32 per-token K bounds in the
-            packed workspace.
+        cu_seqlen_ks: [rows] int32 per-token K start bounds in the packed
+            workspace.
+        cu_seqlen_ke: [rows] int32 per-token K end bounds in the packed
+            workspace.
         candidate_blocks: [rows, K] int32 request-local candidate block ids.
         topk_indices: [rows, topk_tokens] output buffer.
-        sparse_indices/end/col_indices: Caller-owned scratch, see
-            `candidate_blocks_to_sparse_indices` and `sparse_topk_remap`.
+        sparse_indices: Caller-owned scratch, see
+            `candidate_blocks_to_sparse_indices`.
+        end: Caller-owned scratch, see `candidate_blocks_to_sparse_indices`.
+        col_indices: Caller-owned scratch, see `sparse_topk_remap`.
         kernel_metadata: DeepGEMM schedule from a previous call with the same
             candidates and bounds (i.e. another indexer layer in the same
             step). When given, the candidate expansion is skipped and
@@ -413,7 +419,9 @@ def sparse_mqa_logits_paged_decode(
         candidate_blocks: [rows, K] int32 candidate block ids.
         topk_indices: [rows, topk_tokens] output buffer.
         row_ks: [rows] int32 zeros (paged blocks are context-relative).
-        sparse_indices/end/col_indices: Caller-owned scratch.
+        sparse_indices: Caller-owned scratch.
+        end: Caller-owned scratch.
+        col_indices: Caller-owned scratch.
         kernel_metadata: See `sparse_mqa_logits_prefill_chunk`.
 
     Returns:

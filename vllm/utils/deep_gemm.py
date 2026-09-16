@@ -726,8 +726,10 @@ def get_sparse_mqa_logits_metadata(
     need a host-side sync to pick one.
 
     Args:
-        cu_seqlen_ks/cu_seqlen_ke: Per-row K range bounds in the packed KV
+        cu_seqlen_ks: Per-row K range start bounds in the packed KV
             workspace, shape [num_q_tokens], dtype int32.
+        cu_seqlen_ke: Per-row K range end bounds in the packed KV workspace,
+            shape [num_q_tokens], dtype int32.
         num_kv_tokens: Total KV tokens in the packed workspace.
         sparse_kv_block_indices: Per-row candidate block ids, shape
             [num_q_tokens, num_max_sparse_blocks], dtype int32. Each row's
