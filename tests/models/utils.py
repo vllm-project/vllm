@@ -240,7 +240,6 @@ def check_logprobs_close(
 
                 assert logprobs_elem_0 is not None, fail_msg
                 assert logprobs_elem_1 is not None, fail_msg
-
                 assert output_id_0 in logprobs_elem_1, fail_msg
                 assert output_id_1 in logprobs_elem_0, fail_msg
 
