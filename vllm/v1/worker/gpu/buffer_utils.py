@@ -10,7 +10,6 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
-    PIN_MEMORY,
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
@@ -25,24 +24,6 @@ _DEFAULT_MAX_CONCURRENCY = 2
 def set_default_max_concurrency(n: int) -> None:
     global _DEFAULT_MAX_CONCURRENCY
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
-
-
-def async_copy_to_gpu(
-    x: torch.Tensor | np.ndarray,
-    out: torch.Tensor | None = None,
-    device: torch.device | None = None,
-) -> torch.Tensor:
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x)
-    assert x.is_cpu
-
-    if out is None:
-        assert device is not None
-        out = torch.empty_like(x, device=device)
-
-    # pin_memory() is no-op if the memory is already pinned.
-    pinned = x.pin_memory() if PIN_MEMORY else x
-    return out.copy_(pinned, non_blocking=True)
 
 
 class UvaBuffer:
