@@ -1,24 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared HTTP helpers; coverage ownership is documented in __init__.py."""
+"""Shared HTTP helpers for the RL dev-endpoint tests."""
 
-import contextlib
 import json
 import os
 import subprocess
 import sys
 import threading
-import time
-from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 
-# ---------------------------------------------------------------------------
 # Model / server defaults
-# ---------------------------------------------------------------------------
 
 
 MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
@@ -56,9 +51,6 @@ _DUMMY_ARGS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Server harness
-# ---------------------------------------------------------------------------
 @contextmanager
 def server(
     extra_args=None,
@@ -109,22 +101,18 @@ def server(
         env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
         max_wait_seconds=timeout,
     ) as remote:
-        if not dummy_weights:
-            assert ok(gen(remote.url_root, max_tokens=4, timeout=120)), (
-                "warm-up generation failed"
-            )
         yield remote.url_root
 
 
 @contextmanager
-def reusable_server(**kwargs):
+def reusable_server(*args, **kwargs):
     """Reuse one server and clean the parent only after server shutdown.
 
     Callers use pytest.mark.skip_global_cleanup so function-scoped cleanup
     does not run while this longer-lived server still owns GPU resources.
     """
     try:
-        with server(**kwargs) as url:
+        with server(*args, **kwargs) as url:
             yield url
     finally:
         from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
@@ -132,78 +120,42 @@ def reusable_server(**kwargs):
         cleanup_dist_env_and_memory()
 
 
-# ---------------------------------------------------------------------------
-# Polling helper (200-lie workaround)
-# ---------------------------------------------------------------------------
-
-
-def poll_until(
-    predicate: Callable[[], bool],
-    timeout: float = 10.0,
-    interval: float = 0.5,
-) -> bool:
-    """Poll predicate() until it returns True or timeout expires.
-
-    Workaround for the vLLM sleep/wake "200-lie" — the HTTP endpoints may
-    return 200 before the underlying operation is complete, so callers that
-    need to verify state *after* an operation can use this helper instead of
-    assuming the 200 means completion.
-
-    Returns True if predicate became true within timeout, False otherwise.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if predicate():
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
-
-
-# ---------------------------------------------------------------------------
 # HTTP helpers — generation
-# ---------------------------------------------------------------------------
 
 
 def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
-    """Fire a /v1/completions request; return JSON or None on any error."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
+    """Generate a completion, propagating transport and server failures."""
+    response = requests.post(
+        f"{url}/v1/completions",
+        json={
+            "model": "m",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def gen_with_logprobs(
     url, prompt="The capital of France is", max_tokens=8, logprobs=5, timeout=30
 ):
-    """Fire a /v1/completions request with logprobs; return JSON or None."""
-    try:
-        r = requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0,
-                "logprobs": logprobs,
-            },
-            timeout=timeout,
-        )
-        return r.json()
-    except Exception:
-        return None
+    """Generate a completion, propagating transport and server failures."""
+    response = requests.post(
+        f"{url}/v1/completions",
+        json={
+            "model": "m",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "logprobs": logprobs,
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def ok(resp) -> bool:
@@ -216,10 +168,7 @@ def ok(resp) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers — stream generation
-# ---------------------------------------------------------------------------
-
 
 # First-token wait for a streaming request; loaded machines need the slack.
 STREAM_START_TIMEOUT = 20.0
@@ -235,6 +184,7 @@ class StreamResult:
 
 
 def stream_completion(url: str, result: StreamResult, max_tokens: int) -> None:
+    """Consume a streaming completion into ``result``; never raises."""
     try:
         with requests.post(
             f"{url}/v1/completions",
@@ -268,6 +218,7 @@ def stream_completion(url: str, result: StreamResult, max_tokens: int) -> None:
 
 
 def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thread]:
+    """Start a streaming request and wait until its first token arrives."""
     result = StreamResult()
     thread = threading.Thread(
         target=stream_completion,
@@ -290,12 +241,11 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
     return result, thread
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers — pause / resume
-# ---------------------------------------------------------------------------
 
 
 def pause(url, mode="abort", clear_cache=True):
+    """POST /pause and return its status code."""
     return requests.post(
         f"{url}/pause",
         params={"mode": mode, "clear_cache": clear_cache},
@@ -304,10 +254,12 @@ def pause(url, mode="abort", clear_cache=True):
 
 
 def resume(url):
+    """POST /resume and return its status code."""
     return requests.post(f"{url}/resume", timeout=10).status_code
 
 
 def completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
+    """Generate with logprobs so prefix-cache hits are visible in usage."""
     response = requests.post(
         f"{url}/v1/completions",
         json={
@@ -324,6 +276,7 @@ def completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
 
 
 def golden_output(response: dict[str, Any]) -> dict[str, Any]:
+    """Extract the output fields that must be reproducible across pause cycles."""
     choice = response["choices"][0]
     usage = response["usage"]
     return {
@@ -336,47 +289,49 @@ def golden_output(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def cached_tokens(response: dict[str, Any]) -> int:
+    """Return the number of prompt tokens served from the prefix cache."""
     return response["usage"]["prompt_tokens_details"]["cached_tokens"]
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers — sleep / wake
-# ---------------------------------------------------------------------------
 
 
 def sleep(url, level=1, mode="abort"):
+    """POST /sleep and return its status code."""
     return requests.post(
         f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15
     ).status_code
 
 
 def wake(url, tags=None):
+    """POST /wake_up for the given tags and return its status code."""
     params = {"tags": tags} if tags else {}
     return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
 
 
 def is_sleeping(url) -> bool:
+    """Return whether the server currently reports itself asleep."""
     return requests.get(f"{url}/is_sleeping", timeout=5).json()["is_sleeping"]
 
 
 def is_paused(url) -> bool:
+    """Return whether the scheduler currently reports itself paused."""
     return requests.get(f"{url}/is_paused", timeout=5).json()["is_paused"]
 
 
 def health(url) -> int:
+    """Return the /health status code, or 0 if the server is unreachable."""
     try:
         return requests.get(f"{url}/health", timeout=5).status_code
     except Exception:
         return 0
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers — weight checker
-# ---------------------------------------------------------------------------
 
 
 def weight_checker(url: str, action: str) -> requests.Response:
-    """Invoke one Weight Checker action and return the raw response."""
+    """POST one weight-checker action and return the raw response."""
     return requests.post(f"{url}/weight_checker", json={"action": action}, timeout=180)
 
 
@@ -389,12 +344,11 @@ def collective_rpc(url: str, method: str) -> requests.Response:
     )
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers — weight transfer
-# ---------------------------------------------------------------------------
 
 
 def start_weight_update(url, is_checkpoint_format=True):
+    """POST /start_weight_update and return the raw response."""
     return requests.post(
         f"{url}/start_weight_update",
         json={"is_checkpoint_format": is_checkpoint_format},
@@ -403,10 +357,12 @@ def start_weight_update(url, is_checkpoint_format=True):
 
 
 def finish_weight_update(url):
+    """POST /finish_weight_update and return the raw response."""
     return requests.post(f"{url}/finish_weight_update", timeout=10)
 
 
 def get_world_size(url, include_dp=True):
+    """Return the engine's reported world size for the given DP inclusion."""
     return requests.get(
         f"{url}/get_world_size",
         params={"include_dp": include_dp},
@@ -414,9 +370,7 @@ def get_world_size(url, include_dp=True):
     )
 
 
-# ---------------------------------------------------------------------------
 # GPU / metrics helpers
-# ---------------------------------------------------------------------------
 
 
 def gpu_free_bytes(device: int = 0) -> int:
