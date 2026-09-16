@@ -42,6 +42,122 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "cache_dtype,kv_mxfp8",
+    [
+        (torch.uint8, False),
+        (torch.uint8, True),
+        (torch.bfloat16, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 1023, 1024])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_dspark_context_kv_matches_query_insert(
+    cache_dtype, kv_mxfp8, num_tokens, use_graph
+):
+    """KV-only insertion must preserve every cache byte, including graph replay."""
+    from vllm.models.deepseek_v41.nvidia.dspark import _insert_context_kv
+
+    torch.manual_seed(42)
+    block_size = 256
+    num_blocks = math.ceil((num_tokens + 7) / block_size)
+    row_size = (528 if kv_mxfp8 else 584) if cache_dtype == torch.uint8 else 512
+    page_stride = math.ceil(block_size * row_size / 576) * 576 + 576
+    backing = torch.full((num_blocks, page_stride), 3, device="cuda").to(cache_dtype)
+    cache = backing.as_strided(
+        (num_blocks, block_size, row_size), (page_stride, row_size, 1)
+    )
+    reference_backing = backing.clone()
+    reference = reference_backing.as_strided(cache.shape, cache.stride())
+    kv = torch.randn(num_tokens + 3, 512, device="cuda", dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens + 3, device="cuda") + 7
+    angles = torch.randn(num_tokens + 16, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    slots = torch.randperm(num_blocks * block_size, device="cuda")[:num_tokens]
+    slots[::5] = -1
+    scale = torch.tensor([0.7], device="cuda")
+    # Only what _insert_context_kv actually reads: the record width comes off
+    # the cache tensor, so no per-record width attribute is stubbed here.
+    attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
+        kv_mxfp8=kv_mxfp8,
+        rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
+        _flashinfer_fp8_kv_scale=scale,
+    )
+
+    def legacy_insert():
+        q = torch.zeros(kv.shape[0], 8, 512, dtype=kv.dtype, device="cuda")
+        if cache_dtype == torch.uint8:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                q,
+                kv,
+                reference.view(num_blocks, -1),
+                slots,
+                positions,
+                cos_sin,
+                8,
+                1e-20,
+                block_size,
+                True,
+                kv_mxfp8,
+            )
+        elif cache_dtype == torch.bfloat16:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+                q,
+                kv,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                1e-20,
+                block_size,
+            )
+        else:
+            q_fp8 = torch.empty_like(q, dtype=cache_dtype)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+                q,
+                kv,
+                q_fp8,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                scale,
+                scale,
+                1e-20,
+                block_size,
+            )
+
+    def insert():
+        _insert_context_kv(attn, kv, positions, slots)
+
+    insert()
+    graph = None
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            insert()
+    for iteration in range(3):
+        kv.normal_()
+        positions.add_(1)
+        if iteration == 2:
+            slots.fill_(-1)
+        backing.view(torch.uint8).fill_(165)
+        reference_backing.copy_(backing)
+        before = kv.clone()
+        legacy_insert()
+        insert() if graph is None else graph.replay()
+        torch.testing.assert_close(
+            backing.view(torch.uint8),
+            reference_backing.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(kv, before, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="graph capture coverage"
 )
@@ -215,6 +331,19 @@ def test_v41_fused_save_compress_and_insert(
         torch.testing.assert_close(cache_backing, expected_cache, rtol=0, atol=0)
 
 
+def _rotate_rope_tail(
+    latent_row: torch.Tensor, cos_sin_row: torch.Tensor
+) -> torch.Tensor:
+    """GPT-J RoPE of one latent row's last 64 dims, in fp32."""
+    row = latent_row.float()
+    c, s = cos_sin_row.chunk(2)
+    rotated = row.clone()
+    even, odd = row[448::2], row[449::2]
+    rotated[448::2] = even * c - odd * s
+    rotated[449::2] = odd * c + even * s
+    return rotated
+
+
 def _mxfp8_record_reference(
     latent_row: torch.Tensor, cos_sin_row: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -223,12 +352,7 @@ def _mxfp8_record_reference(
     Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
     RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
     """
-    row = latent_row.float()
-    c, s = cos_sin_row.chunk(2)
-    rotated = row.clone()
-    even, odd = row[448::2], row[449::2]
-    rotated[448::2] = even * c - odd * s
-    rotated[449::2] = odd * c + even * s
+    rotated = _rotate_rope_tail(latent_row, cos_sin_row)
     quantized, scales = _ue8m0_reference(rotated, 32, 448.0)
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
@@ -343,6 +467,125 @@ def test_v41_mxfp8_cache_round_trip():
     tolerance = 16.0 * (tile_amax / 448.0).log2().ceil().exp2()
     error = (out[0].float() - k.float()).abs()
     assert (error <= tolerance.repeat_interleave(32, dim=-1)).all()
+
+
+# e2m1 magnitudes indexed by the low 3 bits of a code; bit 3 is the sign.
+_E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Unpack one 256-byte e2m1 row and apply its 32 e4m3 tile scales."""
+    mags = torch.tensor(_E2M1_MAGNITUDES, device=packed.device)
+    codes = torch.empty(512, dtype=torch.uint8, device=packed.device)
+    codes[0::2] = packed & 0xF  # even element in the low nibble
+    codes[1::2] = packed >> 4
+    vals = mags[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
+    return (
+        vals.view(32, 16) * scales.view(torch.float8_e4m3fn).float().view(32, 1)
+    ).flatten()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
+    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales.
+
+    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
+    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(13)
+    device = "cuda"
+    cache_block = 64
+    cache_stride = math.ceil(cache_block * 288 / 512) * 512
+    num_tokens = 12
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(64, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    cache_backing = torch.full((2, cache_stride), 165, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((2, cache_block, 288), (cache_stride, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots[3] = -1  # covers the negative-slot skip
+
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, compress_ratio)
+
+    untouched = torch.full_like(cache_backing, 165)
+    for t in range(num_tokens):
+        slot = slots[t].item()
+        pos = positions[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        page, row = divmod(slot, cache_block)
+        cs = cos_sin[pos // compress_ratio * compress_ratio]
+        rotated = _rotate_rope_tail(latent[t], cs)
+        amax = rotated.view(32, 16).abs().amax(-1)
+        scale = (amax / 6.0).clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn)
+
+        got_scales = cache_backing[page, cache_block * 256 + row * 32 :][:32]
+        torch.testing.assert_close(got_scales, scale.view(torch.uint8), rtol=0, atol=0)
+        decoded = _decode_nvfp4_row(
+            cache_backing[page, row * 256 : (row + 1) * 256], got_scales
+        )
+        step = scale.float().repeat_interleave(16)
+        assert ((decoded - rotated).abs() <= step).all()
+        untouched[page, row * 256 : (row + 1) * 256] = cache_backing[
+            page, row * 256 : (row + 1) * 256
+        ]
+        untouched[page, cache_block * 256 + row * 32 :][:32] = got_scales
+    # Rows the kernel must not have touched, page padding included.
+    torch.testing.assert_close(cache_backing, untouched, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_nvfp4_gather_matches_insert():
+    """The NVFP4 gather dequantizes exactly what the insert kernel wrote."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(17)
+    device = "cuda"
+    block_size = 64
+    num_tokens = 70
+    num_blocks = 4
+    page_bytes = math.ceil(block_size * 288 / 512) * 512
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(128, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    backing = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
+    cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, 1)
+
+    out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache(
+        out,
+        cache,
+        seq_lens=torch.tensor([num_tokens], dtype=torch.int32, device=device),
+        gather_lens=None,
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            1, -1
+        ),
+        block_size=block_size,
+        offset=0,
+    )
+    for t in (0, 1, block_size, num_tokens - 1):
+        page, row = divmod(t, block_size)
+        expected = _decode_nvfp4_row(
+            backing[page, row * 256 : (row + 1) * 256],
+            backing[page, block_size * 256 + row * 32 :][:32],
+        )
+        torch.testing.assert_close(out[0, t].float(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
