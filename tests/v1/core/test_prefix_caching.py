@@ -543,6 +543,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
 
     coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
     assert resident[-1].ref_cnt == 2
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
     coordinator.update_spills({}, {restore.transfer_id: 1})
     assert resident[-1].ref_cnt == 1
     assert coordinator.request_states[request.request_id].valid_pages == set(
@@ -550,6 +551,8 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     )
     if num_tokens % HISPARSE_BLOCK_SIZE:
         assert source[-1].block_hash is None
+    else:
+        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
 
 
 def test_hisparse_aborted_tail_restore_retains_both_endpoints():
