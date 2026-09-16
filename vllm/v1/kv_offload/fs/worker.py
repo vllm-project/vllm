@@ -7,8 +7,6 @@ from abc import abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     DevicePointers,
@@ -96,7 +94,6 @@ class FSOffloadingWorker(OffloadingWorker):
         self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
         assert isinstance(dst_spec, FSLoadStoreSpec)
-        torch.cuda.current_stream().synchronize()
         futures, num_bytes = self._submit_io(device_ptrs, dst_spec.keys, is_store=True)
         self._transfers[job_id] = _Transfer(
             job_id=job_id,
@@ -110,7 +107,6 @@ class FSOffloadingWorker(OffloadingWorker):
         self, job_id: int, src_spec: LoadStoreSpec, device_ptrs: DevicePointers
     ) -> bool:
         assert isinstance(src_spec, FSLoadStoreSpec)
-        torch.cuda.current_stream().synchronize()
         futures, num_bytes = self._submit_io(device_ptrs, src_spec.keys, is_store=False)
         self._transfers[job_id] = _Transfer(
             job_id=job_id,
