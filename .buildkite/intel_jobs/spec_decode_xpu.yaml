@@ -102,7 +102,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/eagle/
   source_file_dependencies:
