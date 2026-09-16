@@ -177,7 +177,7 @@ steps:
           # moondream3_moe is a cpu_test that initializes a gloo process group
           # in the pytest parent; it gets its own process so nothing is forked
           # from that state.
-          pytest -v -s models/multimodal/generation/moondream3_moe -m 'not core_model'
+          pytest -v -s models/multimodal/generation/test_moondream3_moe.py
           # vit_cudagraph, keye, nemotron_parse, phi4mm, phi4siglip,
           # moondream3, pixtral, maverick. test_moondream3 keeps a module-scoped
           # in-process LLM, and an EngineCore forked after it hangs on startup;
