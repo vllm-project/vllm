@@ -115,13 +115,13 @@ class NixlKVConnectorStats(KVConnectorStats):
 
         return {
             "Num successful transfers": n,
-            "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
+            "Avg xfer time (ms)": round(xfer_time.mean().item() * 1e3, 3),
             "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
-            "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
+            "Avg post time (ms)": round(post_time.mean().item() * 1e3, 3),
             "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
-            "Avg MB per transfer": round(avg_mb, 3),
-            "Throughput (MB/s)": round(throughput_mb_s, 3),
-            "Avg number of descriptors": round(descs.mean(), 1),
+            "Avg MB per transfer": round(avg_mb.item(), 3),
+            "Throughput (MB/s)": round(throughput_mb_s.item(), 3),
+            "Avg number of descriptors": round(descs.mean().item(), 1),
         }
 
     @property
