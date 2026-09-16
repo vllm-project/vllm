@@ -72,10 +72,10 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   commands:
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/omni/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/standard/whisper --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/standard/test_memory_leak.py --ignore models/multimodal/standard/vit_cudagraph --ignore models/multimodal/processing
-    - pytest -v -s models/multimodal/standard/vit_cudagraph -m core_model
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/omni/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/standard/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/standard/test_memory_leak.py --ignore models/multimodal/standard/test_vit_cudagraph.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/standard/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/standard/test_memory_leak.py -m core_model
-    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/whisper -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
       label: ":amd: (MI355) Multimodal Models (Standard) 4: other + whisper"

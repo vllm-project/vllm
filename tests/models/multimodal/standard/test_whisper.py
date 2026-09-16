@@ -3,19 +3,19 @@
 
 import pytest
 
-from .....utils import create_new_process_for_each_test, multi_gpu_test
-from .._whisper import (
+from ....utils import create_new_process_for_each_test, multi_gpu_test
+from ._whisper import (
     input_audios as input_audios,
 )
-from .._whisper import (
+from ._whisper import (
     resampled_assets as resampled_assets,
 )
-from .._whisper import (
+from ._whisper import (
     run_encoder_cache_cleanup,
     run_models,
     run_models_distributed,
 )
-from .._whisper import (
+from ._whisper import (
     use_spawn_for_whisper as use_spawn_for_whisper,
 )
 
