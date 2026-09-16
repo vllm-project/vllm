@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -1048,6 +1049,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         # missing GIN support.
         probe = torch.zeros(1, device="cuda")
         torch.distributed.all_reduce(probe, group=group)
+        if os.environ.get("EP_DISABLE_GIN", "0") != "0":
+            return
 
         gin_type = query_nccl_gin_type(group)
         if gin_type is None:
