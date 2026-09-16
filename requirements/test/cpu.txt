@@ -1079,7 +1079,7 @@ statsmodels==0.14.4
     # via genai-perf
 structlog==25.4.0
     # via gpt-oss
-suffix-gpu==0.1.1
+suffix-gpu==0.1.3
     # via -r requirements/test/cuda.in
 supervisor==4.3.0
     # via model-hosting-container-standards
