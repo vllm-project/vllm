@@ -209,3 +209,51 @@ def test_replay_graph_size(state, prefilling, graph_size, num_tokens):
         and not replay.is_padding[:num_tokens].any()
     )
     assert (build.slot_mappings[:, num_tokens:] == PAD_SLOT_ID).all()
+
+
+@pytest.fixture
+def dp_state(state, monkeypatch):
+    """`state` on DP rank 0 of 2; `state.other` sets what rank 1 reports
+    (trims, replay tokens)."""
+    import vllm.models.deepseek_v41.nvidia.model_state as module
+
+    state.vllm_config.parallel_config.data_parallel_size = 2
+    state.vllm_config.parallel_config.data_parallel_rank = 0
+    state.vllm_config.parallel_config.is_moe_model = True
+    state.other = (False, 0)  # type: ignore[attr-defined]
+
+    def all_reduce(tensor, group):
+        tensor[1] = torch.tensor(state.other, dtype=torch.int32)
+
+    monkeypatch.setattr(module.dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(module, "get_dp_group", lambda: SimpleNamespace(cpu_group=None))
+    return state
+
+
+def test_dp_ranks_replay_together(dp_state):
+    """With no rank trimming a piecewise forward replays the padded batch on
+    every rank; a trimming rank makes the others replay too, on their counts."""
+    short = _input_batch(
+        [100, 100], [100, 100], [True, True], num_tokens_after_padding=512
+    )
+    dp_state.other = (False, 200)
+    assert _prepare(dp_state, short, CUDAGraphMode.NONE) == (None, None)
+    replay, _ = _prepare(dp_state, short, CUDAGraphMode.PIECEWISE)
+    assert replay is not None and not replay.trims and replay.graph_size == 512
+    assert replay.dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+
+    dp_state.other = (True, 300)  # rank 1 trims to 300 rows
+    replay, _ = _prepare(dp_state, short, CUDAGraphMode.NONE)
+    assert replay is not None and replay.graph_size is None
+    assert replay.dp_metadata.num_tokens_across_dp_cpu.tolist() == [200, 300]
+    replay, _ = _prepare(dp_state, short, CUDAGraphMode.PIECEWISE)
+    assert replay.graph_size == 512  # 256 would fit this rank's 200 rows alone
+    assert replay.dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+
+
+def test_idle_dp_rank_dummy_trims_to_the_agreed_size(dp_state):
+    dummy = _input_batch([512], [512], [False])
+    dp_state.other = (True, 129)
+    replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.PIECEWISE)
+    assert replay is not None and replay.trims
+    assert replay.rows.shape[0] == WINDOW and replay.graph_size == 256

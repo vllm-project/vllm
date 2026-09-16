@@ -910,13 +910,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         elif (
             self.use_sequence_parallel
-            or parallel_config.data_parallel_size > 1
             or parallel_config.prefill_context_parallel_size > 1
             or parallel_config.use_ubatching
         ):
             reason = (
-                "the replay-layer batch shrinks per rank, which sequence, data "
-                "and prefill-context parallelism and microbatching cannot follow"
+                "the replay-layer batch shrinks per rank, which sequence and "
+                "prefill-context parallelism and microbatching cannot follow"
             )
         elif any(i > cut for i in getattr(self.config, "engram_layer_ids", ())):
             reason = "an Engram layer sits after the last KV source layer"

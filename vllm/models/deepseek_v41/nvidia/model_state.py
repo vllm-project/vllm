@@ -5,9 +5,12 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.parallel_state import get_dp_group
+from vllm.forward_context import DPMetadata
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
@@ -19,6 +22,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataB
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -191,7 +195,9 @@ class DeepseekV41ModelState(DefaultModelState):
     sliding-window builders. With the decoder side on, it also builds the
     replay layers' batch: their rows, a row-subset ``InputBatch`` with metadata
     from builders of its own and, under piecewise graphs, the size of their
-    graph, in persistent buffers that graph reads by address.
+    graph, in persistent buffers that graph reads by address. Under data
+    parallelism the ranks agree on that batch first: all replay when any rank
+    trims, under graphs on the one size that fits the largest.
     """
 
     def __init__(
@@ -379,14 +385,15 @@ class DeepseekV41ModelState(DefaultModelState):
         num_reqs = input_batch.num_reqs
         query_start_loc = input_batch.query_start_loc_np[: num_reqs + 1]
         lens = np.diff(query_start_loc)
-        # Only prefills run past the window; dummy batches (captures) are not
-        # prefills and keep their rows.
+        # Only prefills run past the window; dummy batches (captures, an idle DP
+        # rank's) are not prefills and keep their rows unless a rank trims.
         keep = np.where(
             self._req_keeps_rows[input_batch.idx_mapping_np[:num_reqs]],
             lens,
             np.minimum(lens, window),
         )
         trims = bool((keep < lens)[input_batch.is_prefilling_np[:num_reqs]].any())
+        trims, counts = self._agree_across_dp(trims, int(keep.sum()))
         if cudagraph_mode == CUDAGraphMode.FULL:
             assert not trims
             return None
@@ -399,7 +406,9 @@ class DeepseekV41ModelState(DefaultModelState):
         num_tokens = int(replay_query_start_loc[-1])
         size = None
         if cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            size = next(s for s in self._replay_graph_sizes if s >= num_tokens)
+            size = self._replay_graph_size(
+                num_tokens, counts, input_batch.num_tokens_after_padding
+            )
         num_padded = size or num_tokens
 
         rows, replay_slot_mappings = self._gather_replay_rows(
@@ -454,8 +463,53 @@ class DeepseekV41ModelState(DefaultModelState):
                 replay_slot_mappings, kv_cache_config
             ),
             is_padding=replay_batch.is_padding,
-            dp_metadata=None,
+            dp_metadata=self._replay_dp_metadata(num_padded, size, counts),
         )
+
+    def _agree_across_dp(
+        self, trims: bool, num_replay_tokens: int
+    ) -> tuple[bool, torch.Tensor | None]:
+        """Whether any rank trims and, then, every rank's replay token count:
+        the replay layers' MoE collectives need all of them, and every rank
+        calls prepare_attn every step."""
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        if dp_size == 1:
+            return trims, None
+        agreed = torch.zeros(dp_size, 2, dtype=torch.int32)
+        agreed[parallel_config.data_parallel_rank] = torch.tensor(
+            [trims, num_replay_tokens], dtype=torch.int32
+        )
+        if not should_skip_dp_coordination():
+            dist.all_reduce(agreed, group=get_dp_group().cpu_group)
+        trims = bool(agreed[:, 0].any())
+        return trims, agreed[:, 1] if trims else None
+
+    def _replay_graph_size(
+        self, num_tokens: int, counts: torch.Tensor | None, num_tokens_padded: int
+    ) -> int:
+        """One size for every rank: the largest replay batch, or the padded
+        batch every rank runs when none trims."""
+        if counts is not None:
+            largest = int(counts.max())
+        elif self.vllm_config.parallel_config.data_parallel_size > 1:
+            largest = num_tokens_padded
+        else:
+            largest = num_tokens
+        return next(s for s in self._replay_graph_sizes if s >= largest)
+
+    def _replay_dp_metadata(
+        self, num_padded: int, size: int | None, counts: torch.Tensor | None
+    ) -> DPMetadata | None:
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        if dp_size == 1:
+            return None
+        across_dp = (
+            counts if size is None else torch.full((dp_size,), size, dtype=torch.int32)
+        )
+        assert across_dp is not None  # eager DP replays only when a rank trims
+        return DPMetadata.make(parallel_config, num_padded, across_dp)
 
     def _gather_replay_rows(
         self,
