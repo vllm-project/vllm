@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.tasks import ScoreType
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.utils.file_utils import atomic_writer
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
@@ -1014,8 +1015,6 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo, module_hash: str) -> None:
         """Save dictionary json file to cache."""
-        from vllm.model_executor.model_loader.weight_utils import atomic_writer
-
         try:
             modelinfo_dict = {
                 "hash": module_hash,
