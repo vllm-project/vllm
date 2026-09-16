@@ -24,191 +24,188 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
-
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_processor, get_processor_config
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 logger = init_logger(__name__)
 
+# torch dtype -> triton dtype mapping used for COMPUTE_DTYPE constexpr.
+_TL_DTYPE = {
+    torch.float16: tl.float16,
+    torch.bfloat16: tl.bfloat16,
+    torch.float32: tl.float32,
+}
 
-if HAS_TRITON:
-    # torch dtype -> triton dtype mapping used for COMPUTE_DTYPE constexpr.
-    _TL_DTYPE = {
-        torch.float16: tl.float16,
-        torch.bfloat16: tl.bfloat16,
-        torch.float32: tl.float32,
-    }
+_SUPPORTED_INPUTS = (
+    torch.uint8,
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+)
+_SUPPORTED_OUTPUTS = (torch.float16, torch.bfloat16, torch.float32)
+_SUPPORTED_COMPUTE = (torch.float32,)
 
-    _SUPPORTED_INPUTS = (
-        torch.uint8,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
+# Default tile size along the flattened element axis. 4096 keeps each
+# program's payload large enough to amortise launch overhead while
+# staying small enough that the grid saturates the SMs for typical
+# image tensors.
+_DEFAULT_BLOCK = 4096
+
+# Target elements per lane for the num_warps heuristic.
+_ELEMS_PER_THREAD = 8
+
+
+@triton.jit
+def _fused_input_norm_kernel(
+    x_ptr,
+    y_ptr,
+    w_ptr,
+    b_ptr,
+    numel,
+    L,
+    C: tl.constexpr,
+    BLOCK: tl.constexpr,
+    COMPUTE_DTYPE: tl.constexpr,
+):
+    # 1D grid over the flattened (N, C, L) tensor. Each program processes
+    # BLOCK contiguous elements; the channel index is recovered from the
+    # flat offset via `(offs // L) % C`.
+    pid = tl.program_id(0)
+    offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+
+    # Channel gather: different lanes within a program may straddle a
+    # channel boundary, so this is a per-lane gather rather than a scalar.
+    c = (offs // L) % C
+
+    # Streaming load: read once, evict early to protect L2 from being
+    # thrashed by large one-shot image tensors.
+    x = tl.load(
+        x_ptr + offs,
+        mask=mask,
+        other=0,
+        eviction_policy="evict_first",
+    ).to(COMPUTE_DTYPE)
+    w = tl.load(w_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
+    b = tl.load(b_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
+    tl.store(
+        y_ptr + offs,
+        x * w + b,
+        mask=mask,
+        eviction_policy="evict_first",
     )
-    _SUPPORTED_OUTPUTS = (torch.float16, torch.bfloat16, torch.float32)
-    _SUPPORTED_COMPUTE = (torch.float32,)
 
-    # Default tile size along the flattened element axis. 4096 keeps each
-    # program's payload large enough to amortise launch overhead while
-    # staying small enough that the grid saturates the SMs for typical
-    # image tensors.
-    _DEFAULT_BLOCK = 4096
 
-    # Target elements per lane for the num_warps heuristic.
-    _ELEMS_PER_THREAD = 8
+def fused_input_norm_triton(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    compute_dtype: torch.dtype,
+    block: int | None = None,
+    num_warps: int | None = None,
+):
+    """Fused per-channel affine transform for normalisation.
 
-    @triton.jit
-    def _fused_input_norm_kernel(
-        x_ptr,
-        y_ptr,
-        w_ptr,
-        b_ptr,
+    Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
+    Equivalent to::
+
+        outputs[:N] = (inputs * weight.view(1, C, 1) + bias.view(1, C, 1)).to(
+            outputs.dtype
+        )
+
+    Args:
+        inputs: Input tensor, shape ``(N, C, L)``. Must be contiguous; the
+            caller is expected to materialize a contiguous copy beforehand.
+        outputs: Output tensor. Must be contiguous and shaped exactly
+            ``(N_out, C, L)`` with ``N_out >= N``; only the leading ``N``
+            rows are written.
+        weight: Per-channel scale, shape ``(C,)``, contiguous.
+        bias: Per-channel shift, shape ``(C,)``, contiguous.
+        compute_dtype: Compute dtype used inside the kernel. Only
+            ``torch.float32`` is currently supported.
+        block: Block size along the flattened element axis. Defaults to
+            ``_DEFAULT_BLOCK``.
+        num_warps: Number of warps per program. If ``None``, derived from
+            ``block`` targeting ~8 elements per lane.
+
+    Returns:
+        ``outputs``, for chaining.
+    """
+    # --- dtype validation ---------------------------------------------
+    assert inputs.dtype in _SUPPORTED_INPUTS, f"unsupported input dtype: {inputs.dtype}"
+    assert outputs.dtype in _SUPPORTED_OUTPUTS, (
+        f"unsupported output dtype: {outputs.dtype}"
+    )
+    assert compute_dtype in _SUPPORTED_COMPUTE, (
+        f"unsupported compute dtype: {compute_dtype}"
+    )
+
+    # --- shape validation ---------------------------------------------
+    assert inputs.dim() == 3, (
+        f"expected inputs to be 3D (N, C, L), got {tuple(inputs.shape)}"
+    )
+    assert outputs.dim() == 3, (
+        f"expected outputs to be 3D (N, C, L), got {tuple(outputs.shape)}"
+    )
+    N, C, L = inputs.shape
+    assert outputs.shape[0] >= N, (
+        f"outputs.shape[0]={outputs.shape[0]} < inputs.shape[0]={N}"
+    )
+    # The flat 1D kernel addresses the output buffer as a contiguous
+    # ``N * C * L`` block (``y_ptr + offs``), so the buffer's physical
+    # layout must match the input exactly on the C and L axes. Only the
+    # batch dim (dim 0) may be padded.
+    assert outputs.shape[1:] == (C, L), (
+        f"outputs.shape[1:]={tuple(outputs.shape[1:])} != (C, L)={(C, L)}; "
+        "the flat 1D kernel addresses the output as a contiguous "
+        "N * C * L block and cannot handle a channel- or width-padded "
+        "output buffer"
+    )
+    assert weight.numel() == C and bias.numel() == C, (
+        f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
+    )
+    assert weight.is_contiguous() and bias.is_contiguous(), (
+        "weight and bias must be contiguous"
+    )
+    assert inputs.is_contiguous(), (
+        "inputs must be contiguous; materialize a copy before calling the kernel"
+    )
+    assert outputs.is_contiguous(), (
+        "outputs must be contiguous; only inputs is auto-materialized"
+    )
+
+    # --- derive launch config -----------------------------------------
+    if block is None:
+        block = _DEFAULT_BLOCK
+
+    # The kernel only ever writes the leading ``N`` rows
+    numel = N * C * L
+    grid = (triton.cdiv(numel, block),)
+
+    if num_warps is None:
+        # Target ~_ELEMS_PER_THREAD elements per lane. Triton requires
+        # num_warps to be a power of two; round up and clamp to [1, 16].
+        target = block // (32 * _ELEMS_PER_THREAD)
+        num_warps = 1
+        while num_warps < target and num_warps < 16:
+            num_warps *= 2
+
+    # --- dispatch ------------------------------------------------------
+    _fused_input_norm_kernel[grid](
+        inputs,
+        outputs,
+        weight,
+        bias,
         numel,
         L,
-        C: tl.constexpr,
-        BLOCK: tl.constexpr,
-        COMPUTE_DTYPE: tl.constexpr,
-    ):
-        # 1D grid over the flattened (N, C, L) tensor. Each program processes
-        # BLOCK contiguous elements; the channel index is recovered from the
-        # flat offset via `(offs // L) % C`.
-        pid = tl.program_id(0)
-        offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < numel
-
-        # Channel gather: different lanes within a program may straddle a
-        # channel boundary, so this is a per-lane gather rather than a scalar.
-        c = (offs // L) % C
-
-        # Streaming load: read once, evict early to protect L2 from being
-        # thrashed by large one-shot image tensors.
-        x = tl.load(
-            x_ptr + offs,
-            mask=mask,
-            other=0,
-            eviction_policy="evict_first",
-        ).to(COMPUTE_DTYPE)
-        w = tl.load(w_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
-        b = tl.load(b_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
-        tl.store(
-            y_ptr + offs,
-            x * w + b,
-            mask=mask,
-            eviction_policy="evict_first",
-        )
-
-    def fused_input_norm_triton(
-        inputs: torch.Tensor,
-        outputs: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor,
-        compute_dtype: torch.dtype,
-        block: int | None = None,
-        num_warps: int | None = None,
-    ):
-        """Fused per-channel affine transform for normalisation.
-
-        Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
-        Equivalent to::
-
-            outputs[:N] = (inputs * weight.view(1, C, 1) + bias.view(1, C, 1)).to(
-                outputs.dtype
-            )
-
-        Args:
-            inputs: Input tensor, shape ``(N, C, L)``. Must be contiguous; the
-                caller is expected to materialize a contiguous copy beforehand.
-            outputs: Output tensor. Must be contiguous and shaped exactly
-                ``(N_out, C, L)`` with ``N_out >= N``; only the leading ``N``
-                rows are written.
-            weight: Per-channel scale, shape ``(C,)``, contiguous.
-            bias: Per-channel shift, shape ``(C,)``, contiguous.
-            compute_dtype: Compute dtype used inside the kernel. Only
-                ``torch.float32`` is currently supported.
-            block: Block size along the flattened element axis. Defaults to
-                ``_DEFAULT_BLOCK``.
-            num_warps: Number of warps per program. If ``None``, derived from
-                ``block`` targeting ~8 elements per lane.
-
-        Returns:
-            ``outputs``, for chaining.
-        """
-        # --- dtype validation ---------------------------------------------
-        assert inputs.dtype in _SUPPORTED_INPUTS, (
-            f"unsupported input dtype: {inputs.dtype}"
-        )
-        assert outputs.dtype in _SUPPORTED_OUTPUTS, (
-            f"unsupported output dtype: {outputs.dtype}"
-        )
-        assert compute_dtype in _SUPPORTED_COMPUTE, (
-            f"unsupported compute dtype: {compute_dtype}"
-        )
-
-        # --- shape validation ---------------------------------------------
-        assert inputs.dim() == 3, (
-            f"expected inputs to be 3D (N, C, L), got {tuple(inputs.shape)}"
-        )
-        assert outputs.dim() == 3, (
-            f"expected outputs to be 3D (N, C, L), got {tuple(outputs.shape)}"
-        )
-        N, C, L = inputs.shape
-        assert outputs.shape[0] >= N, (
-            f"outputs.shape[0]={outputs.shape[0]} < inputs.shape[0]={N}"
-        )
-        # The flat 1D kernel addresses the output buffer as a contiguous
-        # ``N * C * L`` block (``y_ptr + offs``), so the buffer's physical
-        # layout must match the input exactly on the C and L axes. Only the
-        # batch dim (dim 0) may be padded.
-        assert outputs.shape[1:] == (C, L), (
-            f"outputs.shape[1:]={tuple(outputs.shape[1:])} != (C, L)={(C, L)}; "
-            "the flat 1D kernel addresses the output as a contiguous "
-            "N * C * L block and cannot handle a channel- or width-padded "
-            "output buffer"
-        )
-        assert weight.numel() == C and bias.numel() == C, (
-            f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
-        )
-        assert weight.is_contiguous() and bias.is_contiguous(), (
-            "weight and bias must be contiguous"
-        )
-        assert inputs.is_contiguous(), (
-            "inputs must be contiguous; materialize a copy before calling the kernel"
-        )
-        assert outputs.is_contiguous(), (
-            "outputs must be contiguous; only inputs is auto-materialized"
-        )
-
-        # --- derive launch config -----------------------------------------
-        if block is None:
-            block = _DEFAULT_BLOCK
-
-        # The kernel only ever writes the leading ``N`` rows
-        numel = N * C * L
-        grid = (triton.cdiv(numel, block),)
-
-        if num_warps is None:
-            # Target ~_ELEMS_PER_THREAD elements per lane. Triton requires
-            # num_warps to be a power of two; round up and clamp to [1, 16].
-            target = block // (32 * _ELEMS_PER_THREAD)
-            num_warps = 1
-            while num_warps < target and num_warps < 16:
-                num_warps *= 2
-
-        # --- dispatch ------------------------------------------------------
-        _fused_input_norm_kernel[grid](
-            inputs,
-            outputs,
-            weight,
-            bias,
-            numel,
-            L,
-            C=C,
-            BLOCK=block,
-            COMPUTE_DTYPE=_TL_DTYPE[compute_dtype],
-            num_warps=num_warps,
-        )
-        return outputs
+        C=C,
+        BLOCK=block,
+        COMPUTE_DTYPE=_TL_DTYPE[compute_dtype],
+        num_warps=num_warps,
+    )
+    return outputs
 
 
 class FusedInputNorm(nn.Module):
