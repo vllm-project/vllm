@@ -39,6 +39,21 @@ RMSNorm = _resolve("layernorm", "RMSNorm")
 GemmaRMSNorm = _resolve("layernorm", "GemmaRMSNorm")
 
 
+def get_vocab_parallel_embedding_cls():
+    """`VocabParallelEmbedding` class, preferring hw-agnostic. Resolved per call."""
+    return _resolve("vocab_parallel_embedding", "VocabParallelEmbedding")
+
+
+def get_parallel_lm_head_cls():
+    """`ParallelLMHead` class, preferring hw-agnostic. Resolved per call."""
+    return _resolve("vocab_parallel_embedding", "ParallelLMHead")
+
+
+def get_logits_processor_cls():
+    """`LogitsProcessor` class, preferring hw-agnostic. Resolved per call."""
+    return _resolve("logits_processor", "LogitsProcessor")
+
+
 def get_act_and_mul_fn(act_fn_name: str):
     """Fused activation-and-mul op for `act_fn_name`, preferring hw-agnostic.
 
