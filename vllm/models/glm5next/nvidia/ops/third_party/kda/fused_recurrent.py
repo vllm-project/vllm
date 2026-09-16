@@ -590,8 +590,7 @@ def fused_recurrent_gated_delta_rule(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""
-    Args:
+    r"""Args:
         q (torch.Tensor):
             queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
@@ -653,6 +652,7 @@ def fused_recurrent_gated_delta_rule(
             initial_state=h0,
             cu_seqlens=cu_seqlens
         )
+
     """
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
