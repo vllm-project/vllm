@@ -88,9 +88,7 @@ class Parser:
     The serving layer holds one ``Parser`` per request and calls only the
     members defined here. ``ParserEngine`` implements them over a single
     declarative engine; ``DelegatingParser`` composes a legacy
-    ``ReasoningParser`` / ``ToolParser`` pair. The legacy ``extract_*``
-    methods are deliberately not part of this class: they live on those two
-    bases only where they are needed.
+    ``ReasoningParser`` / ``ToolParser`` pair.
     """
 
     # Class-level parser classes for compatibility with existing patterns
