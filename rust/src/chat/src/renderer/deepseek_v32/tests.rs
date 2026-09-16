@@ -28,10 +28,12 @@ fn render_request(request: &ChatRequest) -> String {
 }
 
 #[test]
-fn standard_effort_enables_binary_thinking_and_none_disables_it() {
+fn effort_enables_binary_thinking_and_none_disables_it() {
     let mut request = ChatRequest::for_test();
     for (effort, enabled) in [
         (EffortValue::from("high"), true),
+        (EffortValue::from("custom"), true),
+        (EffortValue::Number(42.into()), true),
         (EffortValue::from("none"), false),
     ] {
         request.chat_options.reasoning_effort = Some(effort);
@@ -43,6 +45,10 @@ fn standard_effort_enables_binary_thinking_and_none_disables_it() {
         assert_eq!(
             rendered.effective_template_kwargs["enable_thinking"],
             enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort").cloned(),
+            if enabled { None } else { Some(json!("none")) }
         );
     }
 }
