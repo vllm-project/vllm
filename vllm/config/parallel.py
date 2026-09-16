@@ -730,21 +730,11 @@ class ParallelConfig:
         )
 
     @property
-    def moe_dispatch_across_pcp(self) -> bool:
-        """Whether MoE dispatch spans DP x PCP rather than DP alone.
-
-        Each PCP rank holds its own expert shard under expert parallelism, so
-        dispatch and the token-count coordination feeding it run over
-        `get_moe_non_sp_group()`, which is wider than the DP group.
-        """
-        return self.enable_expert_parallel and self.prefill_context_parallel_size > 1
-
-    @property
     def use_all2all(self) -> bool:
         return (
             self.data_parallel_size > 1
             or self.use_sequence_parallel_moe
-            or self.moe_dispatch_across_pcp
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
         )
 
     @property

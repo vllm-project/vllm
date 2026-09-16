@@ -367,7 +367,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
-            is_prefilling=self.draft_is_prefilling[:num_reqs],
+            is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
 
@@ -506,7 +506,10 @@ class DraftModelSpeculator(BaseSpeculator):
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync.padded_to(num_batch_tokens),
+            target_dp_sync,
+            num_tokens_across_dp=torch.full_like(
+                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+            ),
             uniform_token_count=num_query_per_req,
             eager=False,
         ), num_batch_tokens

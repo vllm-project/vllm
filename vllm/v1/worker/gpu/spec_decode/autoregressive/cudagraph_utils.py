@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
+import torch
+
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -9,9 +11,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
     prepare_inputs_to_capture,
-    uniform_dp_token_counts,
 )
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -43,20 +43,9 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
-            num_tokens_across_dp, moe_non_sp_token_counts = uniform_dp_token_counts(
-                self.vllm_config.parallel_config, num_tokens
-            )
-            # Capture runs one shape on every rank, so the agreement is known
-            # without a collective.
-            dp_sync = (
-                DPSyncState(
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    moe_non_sp_token_counts=moe_non_sp_token_counts,
-                    uniform_token_count=None,
-                    eager=False,
-                    num_reqs=num_reqs,
-                )
-                if num_tokens_across_dp is not None
+            num_tokens_across_dp = (
+                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+                if self.dp_size > 1
                 else None
             )
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
@@ -75,7 +64,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 num_tokens,
                 attn_metadata,
                 slot_mappings,
-                dp_sync,
+                num_tokens_across_dp,
                 cg_mode,
             )
 

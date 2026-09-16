@@ -8,11 +8,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import (
-    get_dp_group,
-    get_moe_non_sp_group,
-    get_pcp_group,
-)
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -41,18 +37,9 @@ def should_skip_dp_coordination() -> bool:
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
-    group_coordinator = get_dp_group()
-    pcp_size = 1
-    pcp_rank = 0
-    if parallel_config.moe_dispatch_across_pcp:
-        group_coordinator = get_moe_non_sp_group()
-        pcp_size = parallel_config.prefill_context_parallel_size
-        pcp_rank = get_pcp_group().rank_in_group
-
-    # Use the actual device assigned to the synchronization group, not just
-    # the device type.
-    device = group_coordinator.device
-    group = group_coordinator.device_group
+    # Use the actual device assigned to the DP group, not just the device type
+    device = get_dp_group().device
+    group = get_dp_group().device_group
 
     # Transferring this tensor from GPU to CPU will introduce a GPU sync
     # point that could adversely affect performance of vllm with asynch
@@ -60,18 +47,11 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
-            "Using CPU all reduce to synchronize parallel padding between ranks.",
+            "Using CPU all reduce to synchronize DP padding between ranks.",
         )
         device = "cpu"
-        group = group_coordinator.cpu_group
-    return (
-        device,
-        group,
-        group_coordinator.world_size,
-        group_coordinator.rank_in_group,
-        pcp_size,
-        pcp_rank,
-    )
+        group = get_dp_group().cpu_group
+    return device, group
 
 
 def _run_ar(
@@ -80,20 +60,20 @@ def _run_ar(
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> tuple[torch.Tensor, int, int]:
-    device, group, sync_size, sync_rank, pcp_size, pcp_rank = _get_device_and_group(
-        parallel_config
-    )
+) -> torch.Tensor:
+    dp_size = parallel_config.data_parallel_size
+    dp_rank = parallel_config.data_parallel_rank
+    device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
-    tensor_cpu = torch.zeros(4, sync_size, dtype=torch.int32, pin_memory=pin_memory)
-    tensor_cpu[0][sync_rank] = orig_num_tokens_per_ubatch
-    tensor_cpu[1][sync_rank] = padded_num_tokens_per_ubatch
-    tensor_cpu[2][sync_rank] = 1 if should_ubatch else 0
-    tensor_cpu[3][sync_rank] = cudagraph_mode
+    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32, pin_memory=pin_memory)
+    tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
+    tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
+    tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
+    tensor_cpu[3][dp_rank] = cudagraph_mode
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
-    return tensor, pcp_size, pcp_rank
+    return tensor
 
 
 def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
@@ -146,7 +126,7 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> tuple[bool, torch.Tensor | None, torch.Tensor | None, int]:
+) -> tuple[bool, torch.Tensor | None, int]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -167,9 +147,10 @@ def _synchronize_dp_ranks(
     """
     assert num_tokens_padded >= num_tokens_unpadded
 
-    # Coordinate the batch with one all-reduce. MoE with PCP uses the non-SP
-    # group so the result can also drive expert dispatch metadata.
-    tensor, pcp_size, pcp_rank = _run_ar(
+    # Coordinate between the DP ranks via an All Reduce
+    # to determine the total number of tokens that each rank
+    # will run and if we are using ubatching or not.
+    tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
@@ -203,21 +184,9 @@ def _synchronize_dp_ranks(
 
         # Pad all DP ranks up to the maximum token count across ranks if
         # should_dp_pad is True
-        synchronized_token_counts = _post_process_dp_padding(tensor, should_dp_pad)
+        num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
-        moe_non_sp_token_counts = None
-        num_tokens_after_padding = synchronized_token_counts
-        if pcp_size > 1:
-            moe_non_sp_token_counts = synchronized_token_counts
-            num_tokens_after_padding = synchronized_token_counts[pcp_rank::pcp_size]
-            assert len(num_tokens_after_padding) == parallel_config.data_parallel_size
-
-    return (
-        should_ubatch,
-        num_tokens_after_padding,
-        moe_non_sp_token_counts,
-        synced_cudagraph_mode,
-    )
+    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
 
 def coordinate_batch_across_dp(
@@ -227,7 +196,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
-) -> tuple[bool, torch.Tensor | None, torch.Tensor | None, int]:
+) -> tuple[bool, torch.Tensor | None, int]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -249,16 +218,13 @@ def coordinate_batch_across_dp(
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when cudagraph is enabled.
-        moe_non_sp_token_counts: Token counts indexed by rank_in_group of
-            get_moe_non_sp_group() when PCP participates in batch coordination.
-            The DP result contains the ranks at this rank's PCP coordinate.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
     ]
 
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return False, None, None, cudagraph_mode
+        return False, None, cudagraph_mode
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -285,39 +251,16 @@ def coordinate_batch_across_dp(
             num_tokens_padded,
             dtype=torch.int32,
         )
-        num_tokens_across_dp_pcp = None
-        if parallel_config.moe_dispatch_across_pcp:
-            num_tokens_across_dp_pcp = torch.full(
-                (
-                    parallel_config.data_parallel_size
-                    * parallel_config.prefill_context_parallel_size,
-                ),
-                num_tokens_padded,
-                dtype=torch.int32,
-            )
-        return (
-            should_ubatch,
-            num_tokens_after_padding,
-            num_tokens_across_dp_pcp,
+        return should_ubatch, num_tokens_after_padding, cudagraph_mode
+
+    (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
+        _synchronize_dp_ranks(
+            num_tokens_unpadded,
+            num_tokens_padded,
+            should_attempt_ubatching,
             cudagraph_mode,
+            parallel_config,
         )
-
-    (
-        should_ubatch,
-        num_tokens_after_padding,
-        moe_non_sp_token_counts,
-        synced_cudagraph_mode,
-    ) = _synchronize_dp_ranks(
-        num_tokens_unpadded,
-        num_tokens_padded,
-        should_attempt_ubatching,
-        cudagraph_mode,
-        parallel_config,
     )
 
-    return (
-        should_ubatch,
-        num_tokens_after_padding,
-        moe_non_sp_token_counts,
-        synced_cudagraph_mode,
-    )
+    return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)

@@ -90,19 +90,20 @@ def create_standby_groups(
             standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
         )
 
-        standby_moe_non_sp_ranks = (
-            all_ranks.permute(0, 2, 4, 1, 3)
-            .reshape(-1, new_dp_size * pcp_size)
-            .unbind(0)
-        )
-        standby_moe_non_sp_ranks = [x.tolist() for x in standby_moe_non_sp_ranks]
-        _STANDBY_MOE_NON_SP = _init_stateless_group(
-            standby_moe_non_sp_ranks,
-            "moe_non_sp_group",
-            master_ip,
-            backend,
-            coord_store=coord_store,
-        )
+        if new_dp_size > 1 and pcp_size > 1:
+            standby_moe_non_sp_ranks = (
+                all_ranks.permute(0, 2, 4, 1, 3)
+                .reshape(-1, new_dp_size * pcp_size)
+                .unbind(0)
+            )
+            standby_moe_non_sp_ranks = [x.tolist() for x in standby_moe_non_sp_ranks]
+            _STANDBY_MOE_NON_SP = _init_stateless_group(
+                standby_moe_non_sp_ranks,
+                "moe_non_sp_group",
+                master_ip,
+                backend,
+                coord_store=coord_store,
+            )
 
         standby_ep_ranks = (
             all_ranks.transpose(1, 2)

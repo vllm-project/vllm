@@ -201,6 +201,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
             dp_sync=dp_sync,
         )
+        num_tokens_across_dp = (
+            batch_sync.num_tokens_across_dp if batch_sync is not None else None
+        )
 
         # Rebuild the slot mappings and attention metadata.
         skip_attn = dummy_run and skip_attn_for_dummy_run
@@ -244,7 +247,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 batch_desc.num_tokens,
                 attn_metadata,
                 slot_mappings,
-                dp_sync=batch_sync,
+                num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
         return self.draft_tokens[:num_reqs]
@@ -255,7 +258,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         num_tokens: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        dp_sync: DPSyncState | None,
+        num_tokens_across_dp: torch.Tensor | None,
         spec_module_idx: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -265,12 +268,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            num_tokens_across_dp=(
-                dp_sync.num_tokens_across_dp if dp_sync is not None else None
-            ),
-            moe_non_sp_token_counts=(
-                dp_sync.moe_non_sp_token_counts if dp_sync is not None else None
-            ),
+            num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
@@ -376,7 +374,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         num_tokens: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        dp_sync: DPSyncState | None,
+        num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
@@ -413,7 +411,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 num_tokens,
                 attn_metadata,
                 slot_mappings,
-                dp_sync=dp_sync,
+                num_tokens_across_dp=num_tokens_across_dp,
                 spec_module_idx=step,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             )

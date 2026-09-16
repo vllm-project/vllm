@@ -11,10 +11,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (
-    get_ep_group,
-    get_moe_non_sp_group,
-)
+from vllm.distributed import get_ep_group, get_moe_non_sp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -68,6 +65,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
+        assert len(sizes) == comm_group.world_size
         return sizes
 
     def dispatch_router_logits(
@@ -85,7 +83,6 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        assert len(sizes) == dist_group.world_size
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, router_logits]
@@ -118,7 +115,6 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
-        assert len(sizes) == dist_group.world_size
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, topk_weights, topk_ids]
@@ -150,10 +146,6 @@ class AgRsAll2AllManager(All2AllManagerBase):
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
-        )
-        assert len(sizes) == dist_group.world_size, (
-            f"Expected one token count per dispatch rank, got {len(sizes)} "
-            f"for world size {dist_group.world_size}."
         )
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states

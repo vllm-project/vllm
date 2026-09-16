@@ -1602,15 +1602,16 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
-# Communication group for MoE execution without sequence parallelism. It is
-# used for activation dispatch/combine and the corresponding token-count
-# synchronization. Each group fixes ExternalDP, PP, and TP while spanning
-# DP x PCP ranks in DP -> PCP order. A size-one DP or PCP dimension naturally
-# yields the group for the remaining parallel dimension.
+# MoE dispatch/combine group at fixed ExternalDP, PP, and TP coordinates,
+# spanning DP x PCP in DP -> PCP order.
 _MOE_NON_SP_GROUP: GroupCoordinator | None = None
 
 
 def get_moe_non_sp_group() -> GroupCoordinator:
+    if get_pcp_group().world_size == 1:
+        return get_dp_group()
+    if get_dp_group().world_size == 1:
+        return get_pcp_group()
     assert _MOE_NON_SP_GROUP is not None, "MoE non-SP group is not initialized"
     return _MOE_NON_SP_GROUP
 
@@ -2222,29 +2223,30 @@ def initialize_model_parallel(
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
     if config.model_config is None or config.model_config.is_moe:
-        global _MOE_NON_SP_GROUP
-        assert _MOE_NON_SP_GROUP is None, "MoE non-SP group is already initialized"
-        # Fix ExternalDP, PP, and TP; flatten DP then PCP into each group.
-        group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(
-            -1,
-            data_parallel_size * prefill_context_model_parallel_size,
-        )
-        group_ranks = [x.tolist() for x in group_ranks.unbind(0)]
-        if enable_elastic_ep:
-            _MOE_NON_SP_GROUP = _init_stateless_group(
-                group_ranks,
-                "moe_non_sp_group",
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
+        if data_parallel_size > 1 and prefill_context_model_parallel_size > 1:
+            global _MOE_NON_SP_GROUP
+            assert _MOE_NON_SP_GROUP is None, "MoE non-SP group is already initialized"
+            # Fix ExternalDP, PP, and TP; flatten DP then PCP into each group.
+            group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(
+                -1,
+                data_parallel_size * prefill_context_model_parallel_size,
             )
-        else:
-            _MOE_NON_SP_GROUP = init_model_parallel_group(
-                group_ranks,
-                get_world_group().local_rank,
-                backend,
-                group_name="moe_non_sp_group",
-            )
+            group_ranks = [x.tolist() for x in group_ranks.unbind(0)]
+            if enable_elastic_ep:
+                _MOE_NON_SP_GROUP = _init_stateless_group(
+                    group_ranks,
+                    "moe_non_sp_group",
+                    parallel_config.data_parallel_master_ip,
+                    backend,
+                    coord_store=coord_store,
+                )
+            else:
+                _MOE_NON_SP_GROUP = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="moe_non_sp_group",
+                )
 
         group_ranks = (
             all_ranks.transpose(1, 2)

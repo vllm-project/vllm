@@ -513,7 +513,6 @@ class DeepseekV32Attention(MLAAttention):
                     layer_slot_mapping,
                     attn_metadata.num_decode_tokens,
                     True,
-                    num_actual_tokens=attn_metadata.num_actual_tokens,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]

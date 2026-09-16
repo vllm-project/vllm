@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group, get_moe_non_sp_group
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -27,12 +27,9 @@ class DPSyncState:
     value here.
     """
 
-    # Token counts for the DP ranks at this rank's PCP coordinate. All entries
-    # hold the agreed padded count, unless `eager`, where nothing was padded.
+    # Per-rank token counts, for the forward context. All entries hold the
+    # agreed padded count, unless `eager`, where nothing was padded.
     num_tokens_across_dp: torch.Tensor
-    # Token counts indexed by rank_in_group of get_moe_non_sp_group() when PCP
-    # participates in batch coordination.
-    moe_non_sp_token_counts: torch.Tensor | None
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
     uniform_token_count: int | None
@@ -43,22 +40,6 @@ class DPSyncState:
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
 
-    def padded_to(self, num_tokens: int) -> DPSyncState:
-        """Copy with every rank's token count replaced by `num_tokens`.
-
-        Ranks only ever pad to a count they agreed on, so all entries move
-        together.
-        """
-        return replace(
-            self,
-            num_tokens_across_dp=torch.full_like(self.num_tokens_across_dp, num_tokens),
-            moe_non_sp_token_counts=(
-                torch.full_like(self.moe_non_sp_token_counts, num_tokens)
-                if self.moe_non_sp_token_counts is not None
-                else None
-            ),
-        )
-
 
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
@@ -68,8 +49,6 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
-    pcp_size: int = 1,
-    enable_expert_parallel: bool = False,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
     parallel_config: ParallelConfig | None = None,
@@ -85,32 +64,20 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group_coordinator = get_dp_group()
-    if enable_expert_parallel and pcp_size > 1:
-        group_coordinator = get_moe_non_sp_group()
-    sync_size = group_coordinator.world_size
-    sync_rank = group_coordinator.rank_in_group
-    group = group_coordinator.cpu_group
-    tensor = torch.zeros(6, sync_size, dtype=torch.int32, device="cpu")
-    tensor[0][sync_rank] = num_tokens
-    tensor[1][sync_rank] = desired_batch_desc.cg_mode.value
-    tensor[2][sync_rank] = uniform_token_count or 0  # (0 means None)
-    tensor[3][sync_rank] = max_query_len or -1  # (-1 means None)
-    tensor[4][sync_rank] = int(allow_ubatching)
-    tensor[5][sync_rank] = num_reqs
+    group = get_dp_group().cpu_group
+    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    tensor[0][dp_rank] = num_tokens
+    tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
+    tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
+    tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = int(allow_ubatching)
+    tensor[5][dp_rank] = num_reqs
     if should_skip_dp_coordination():
-        tensor[:] = tensor[:, sync_rank, None].clone()
+        tensor[:] = tensor[:, dp_rank, None].clone()
     else:
         dist.all_reduce(tensor, group=group)
 
-    synchronized_token_counts = tensor[0]
-    moe_non_sp_token_counts = None
-    num_tokens_across_dp = synchronized_token_counts
-    if enable_expert_parallel and pcp_size > 1:
-        moe_non_sp_token_counts = synchronized_token_counts
-        pcp_rank = sync_rank % pcp_size
-        num_tokens_across_dp = synchronized_token_counts[pcp_rank::pcp_size]
-        assert len(num_tokens_across_dp) == dp_size
+    num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
@@ -124,7 +91,7 @@ def sync_cudagraph_and_dp_padding(
     ):
         synced_uniform_token_count = None
 
-    if torch.all(synchronized_token_counts == 0).item():
+    if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
         )
@@ -142,12 +109,12 @@ def sync_cudagraph_and_dp_padding(
             parallel_config,
             # Thresholds only grow with the token count, so holding the smallest
             # rank to them holds every rank to them.
-            int(synchronized_token_counts.min()),
+            int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
         ):
             # Expert all-to-all requires every rank to split and pad equally.
             # Empty microbatches run as dummy batches.
-            ubatch_num_tokens = int(synchronized_token_counts.max())
+            ubatch_num_tokens = int(num_tokens_across_dp.max())
             num_ubatches = get_num_ubatches(parallel_config)
             ubatch_desc = None
             if cudagraph_manager is not None:
@@ -160,7 +127,7 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(synchronized_token_counts.min()) < ubatch_desc.num_tokens:
+                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
                     # If one rank has an empty second microbatch, run without
                     # CUDA graphs.
                     ubatch_desc = None
@@ -178,12 +145,13 @@ def sync_cudagraph_and_dp_padding(
                 assert ubatch_desc.num_reqs is not None
                 num_reqs = ubatch_desc.num_reqs
             return ubatch_desc, DPSyncState(
-                num_tokens_across_dp=num_tokens_across_dp,
-                moe_non_sp_token_counts=moe_non_sp_token_counts,
+                num_tokens_across_dp=torch.full_like(
+                    num_tokens_across_dp, ubatch_num_tokens
+                ),
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=num_reqs,
-            ).padded_to(ubatch_num_tokens)
+            )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
@@ -198,7 +166,6 @@ def sync_cudagraph_and_dp_padding(
             ),
             DPSyncState(
                 num_tokens_across_dp=num_tokens_across_dp,
-                moe_non_sp_token_counts=moe_non_sp_token_counts,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
@@ -209,7 +176,7 @@ def sync_cudagraph_and_dp_padding(
         "cudagraph_manager should only be None during profile run, "
         "where synced_cg_mode must be NONE across all DP ranks"
     )
-    synced_num_tokens = int(synchronized_token_counts.max().item())
+    synced_num_tokens = int(num_tokens_across_dp.max().item())
 
     # Varlen decode graphs are selected by the query-length bound, so ranks must agree
     # on it or they pad to different token counts below.
@@ -229,11 +196,10 @@ def sync_cudagraph_and_dp_padding(
     )
 
     # Update num_tokens_across_dp to reflect padded size.
-    synchronized_token_counts[:] = synced_desc.num_tokens
+    num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, DPSyncState(
         num_tokens_across_dp=num_tokens_across_dp,
-        moe_non_sp_token_counts=moe_non_sp_token_counts,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
         num_reqs=(
@@ -252,8 +218,6 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
-    pcp_size: int = 1,
-    enable_expert_parallel: bool = False,
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
@@ -279,8 +243,6 @@ def dispatch_cg_and_sync_dp(
             place when a sync is reused, since that one is agreed across ranks.
         dp_size: Data-parallel world size. 1 skips all cross-rank work.
         dp_rank: This rank's index in the DP group.
-        pcp_size: Prefill-context-parallel world size.
-        enable_expert_parallel: Whether MoE expert parallelism is enabled.
         max_query_len: Upper bound on per-request query length, for selecting
             varlen decode graphs. None means the graph must not constrain it.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
@@ -332,7 +294,12 @@ def dispatch_cg_and_sync_dp(
         if not dp_sync.eager and batch_desc.num_tokens != num_tokens:
             # Capture sizes can differ between managers, so this one may
             # pad further. Every rank pads alike, so report what will run.
-            dp_sync = dp_sync.padded_to(batch_desc.num_tokens)
+            dp_sync = replace(
+                dp_sync,
+                num_tokens_across_dp=torch.full_like(
+                    dp_sync.num_tokens_across_dp, batch_desc.num_tokens
+                ),
+            )
         return batch_desc, dp_sync
 
     return sync_cudagraph_and_dp_padding(
@@ -343,8 +310,6 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
-        pcp_size,
-        enable_expert_parallel,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
         parallel_config=parallel_config,

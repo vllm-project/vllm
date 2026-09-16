@@ -765,9 +765,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             self.use_pcp,
-            num_actual_tokens=(
-                attn_metadata.num_actual_tokens if attn_metadata is not None else None
-            ),
         )
         assert slot_mapping is not None
         if cache is not None:
