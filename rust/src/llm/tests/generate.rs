@@ -47,18 +47,9 @@ fn request_output_with_events(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
         events,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -74,16 +65,8 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -101,16 +84,10 @@ fn request_output_with_logprobs_and_kv(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
         kv_transfer_params,
         ec_transfer_params,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -814,6 +791,12 @@ async fn generate_records_request_metrics_in_prometheus_output() {
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
         "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
@@ -905,6 +888,12 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"5\"}} 0.0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
     )));
 
     llm.shutdown().await.unwrap();

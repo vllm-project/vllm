@@ -82,7 +82,28 @@ def import_triton_kernels():
         )
 
 
-def import_from_path(module_name: str, file_path: str | os.PathLike):
+def import_plugin(plugin_path: str) -> ModuleType | None:
+    """
+    Import a user-defined plugin.
+
+    Plugin can be either:
+    * a module in site-packages
+    * a Python file specified by its path
+    """
+    try:
+        return importlib.import_module(plugin_path)
+    except ModuleNotFoundError:
+        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        try:
+            return import_from_path(module_name, plugin_path)
+        except Exception:
+            logger.exception(
+                "Failed to load module '%s' from %s.", module_name, plugin_path
+            )
+            return None
+
+
+def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleType:
     """
     Import a Python file according to its file path.
 
@@ -412,6 +433,21 @@ def _has_module(module_name: str) -> bool:
     return True
 
 
+@cache
+def _has_module_spec(module_name: str) -> bool:
+    """Return True if *module_name* is installed, without importing it.
+
+    Unlike [`_has_module`][vllm.utils.import_utils._has_module], this only
+    resolves the import spec. It therefore does not pay the import cost of
+    heavyweight modules, at the price of not verifying that native
+    dependencies (shared libraries, etc.) are satisfied. The result is cached.
+    """
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
@@ -504,8 +540,13 @@ def has_triton_kernels() -> bool:
 
 @cache
 def has_tilelang() -> bool:
-    """Whether the optional `tilelang` package is available."""
-    if not _has_module("tilelang"):
+    """Whether the optional `tilelang` package is available.
+
+    Only the import spec is checked: importing `tilelang` is expensive, so
+    callers must import it lazily at their point of use rather than relying
+    on this function to have imported it already.
+    """
+    if not _has_module_spec("tilelang"):
         return False
     # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
     from vllm.platforms import current_platform

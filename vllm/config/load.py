@@ -38,6 +38,10 @@ class LoadConfig:
     - "instanttensor" will load the Safetensors weights on CUDA devices using
       InstantTensor, which enables distributed loading with pipelined prefetching
       and fast direct I/O.
+    - "ipc_cache" will map post-quantized weights from a local weight cache
+      daemon via CUDA IPC for fast engine restarts. See
+      `vllm/model_executor/model_loader/weight_cache/daemon.py` for how to
+      launch the daemon.
     - "npcache" will load the weights in pytorch format and store a numpy cache
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly
@@ -49,7 +53,6 @@ class LoadConfig:
       Streamer.
     - "runai_streamer_sharded" will load weights from pre-sharded checkpoint
       files using Run:ai Model Streamer.
-    - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
     - "mistral" will load weights from consolidated safetensors files used by

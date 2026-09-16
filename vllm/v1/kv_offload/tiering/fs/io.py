@@ -139,9 +139,9 @@ def _load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Load callback: read one KV block from disk. Remove the file on failure.
-    """
+    """Read one KV block from disk; remove the file only on a provable short
+    read (a too-short file is genuine corruption) and leave it untouched on any
+    other error."""
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     o_direct = O_DIRECT if use_o_direct else 0
@@ -150,15 +150,16 @@ def _load_block(
         fd = os.open(source_path, os.O_RDONLY | o_direct)
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
+            # A failure to remove must not mask the short-read error below.
+            try:
+                os.remove(source_path)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove short-read file %s: %s",
+                    source_path,
+                    cleanup_exc,
+                )
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
-    except Exception:
-        try:
-            os.remove(source_path)
-        except OSError as cleanup_exc:
-            logger.warning(
-                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
-            )
-        raise
     finally:
         if fd is not None:
             os.close(fd)
@@ -200,7 +201,9 @@ def batch_load_block(
     Load a batch of KV blocks from disk into a shared buffer in one call.
 
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
-    Raises on first error and removes the offending file.
+    Raises on first error (see _load_block for the delete-on-short-read policy).
+    On failure the raised OSError carries ``num_succeeded`` = the number of
+    blocks loaded before the failing one, so the tier can keep them.
     """
     _validate_offsets(view, offsets, block_size)
 
@@ -209,5 +212,11 @@ def batch_load_block(
         view_slices = [view_B[x : x + block_size] for x in offsets]
         return batch_load_block_C(paths, view_slices, use_o_direct)
     else:
-        for path, offset in zip(paths, offsets):
-            _load_block(path, view, offset, block_size, use_o_direct)
+        for i, (path, offset) in enumerate(zip(paths, offsets)):
+            try:
+                _load_block(path, view, offset, block_size, use_o_direct)
+            except OSError as exc:
+                # Blocks 0..i-1 loaded fine; record the count for partial keep.
+                # The C path sets the same attribute via PyObject_SetAttrString.
+                exc.num_succeeded = i  # type: ignore[attr-defined]
+                raise

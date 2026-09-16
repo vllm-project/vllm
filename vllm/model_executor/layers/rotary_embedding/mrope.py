@@ -226,12 +226,14 @@ def triton_mrope(
 def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
     """Apply interleaved MRoPE to 3D rotary embeddings.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    interleaved [THWTHWTHW...TT], preserving frequency continuity.
     """
-    x_t = x[0].clone()
-    x_t[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
-    x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
-    return x_t
+    channels = torch.arange(x.shape[-1], device=x.device)
+    is_height = (channels % 3 == 1) & (channels < mrope_section[1] * 3)
+    is_width = (channels % 3 == 2) & (channels < mrope_section[2] * 3)
+
+    result = torch.where(is_height, x[1], x[0])
+    return torch.where(is_width, x[2], result)
 
 
 class MRotaryEmbedding(RotaryEmbeddingBase):
@@ -250,21 +252,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # YaRN parameters.
         *,
         scaling_factor: float | None = None,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            if attention_factor is not None:
+                self.mscale = float(attention_factor)
+            elif mscale and mscale_all_dim:
+                self.mscale = float(
+                    yarn_get_mscale(self.scaling_factor, mscale)
+                    / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                )
+            else:
+                self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
             self.mscale = 1.0
 
@@ -419,6 +428,15 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_cuda(positions, query, key, offsets)
 
     @staticmethod
     def get_next_input_positions(

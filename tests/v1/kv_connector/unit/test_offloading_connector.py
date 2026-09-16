@@ -15,12 +15,26 @@ from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
-CPU_BLOCK_SIZES: int = 64 if current_platform.is_xpu() else 48
+# The offloaded block size must stay a whole number of GPU blocks.
+CPU_BLOCK_SIZES: int
+if current_platform.is_xpu():
+    CPU_BLOCK_SIZES = 64
+elif current_platform.is_rocm():
+    # ROCM_AITER_UNIFIED_ATTN prefers 64-token GPU blocks, so 192 covers both that
+    # and the 16-token default.
+    CPU_BLOCK_SIZES = 192
+else:
+    CPU_BLOCK_SIZES = 48
+
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
     _ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
     _ATTN_BACKENDS = ["TRITON_ATTN"]
+    if is_aiter_found_and_supported():
+        _ATTN_BACKENDS.append("ROCM_AITER_UNIFIED_ATTN")
 elif current_platform.is_xpu():
     _ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
@@ -212,12 +226,21 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
     if subscriber is not None:
         subscriber.get_new_cpu_stored_events()
 
-    # Pad prompt so its token count is a multiple of cpu_block_size.
-    # Use the tokenizer directly to avoid expensive llm.generate() calls.
+    # Align the reusable prefix; the final token must be recomputed for logits.
     tokenizer = llm.get_tokenizer()
-    prompt = "Let's count to 10. One, two, three, four,"
-    while len(tokenizer.encode(prompt)) % cpu_block_size != 0:
-        prompt = ". " + prompt
+    prompt_token_ids = tokenizer.encode("Let's count to 10. One, two, three, four,")
+    reusable_prefix = prompt_token_ids[:-1]
+    final_token = prompt_token_ids[-1:]
+
+    [padding_token_id] = tokenizer.encode(".", add_special_tokens=False)
+    padding = [padding_token_id] * (-len(reusable_prefix) % cpu_block_size)
+    insert_at = int(reusable_prefix[0] == tokenizer.bos_token_id)
+    reusable_prefix[insert_at:insert_at] = padding
+    assert len(reusable_prefix) % cpu_block_size == 0
+
+    prompt = TokensPrompt(
+        prompt_token_ids=reusable_prefix + final_token,
+    )
 
     # Seed the CPU cache with the prompt.
     llm.generate(prompt, sampling_params, use_tqdm=False)
@@ -574,7 +597,15 @@ def test_mamba_cpu_offload_boundary(
     )
 
     _PROMPT_SIZE: int = block_size * 2
-    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # the whole prompt vs selective_state_update for the recomputed token), so
+    # exact-text equality only holds while the rounding difference never flips a
+    # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
+    # padding and keeps top-1 ahead of top-2 by >2.8 logprobs at every step.
+    _PROMPT_TEXT = (
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+    )
 
     # build prompt ids to match prompt_size
     tokenizer = llm.get_tokenizer()

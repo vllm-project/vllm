@@ -31,6 +31,9 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.model_executor.layers.fusion.quant_activation import (
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -56,14 +59,26 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 
-pytestmark = pytest.mark.skipif(
-    not (
-        current_platform.is_cuda_alike()
-        or current_platform.is_cpu()
-        or current_platform.is_xpu()
+
+def test_lora_linear_requires_unquantized_input() -> None:
+    layer = RowParallelLinearWithLoRA.__new__(RowParallelLinearWithLoRA)
+    layer._input_quant_key = object()
+    assert get_input_quant_key(layer) is None
+
+
+pytestmark = [
+    pytest.mark.skipif(
+        not (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ),
+        reason="Backend not supported",
     ),
-    reason="Backend not supported",
-)
+    # Tests here either take dist_init, which tears the distributed environment
+    # down itself, or never build one, so the global cleanup only repeats it.
+    pytest.mark.skip_global_cleanup,
+]
 
 DEVICE_TYPE = current_platform.device_type
 DEVICES = (

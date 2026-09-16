@@ -24,11 +24,9 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-)
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -39,7 +37,6 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
 )
-from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
@@ -58,6 +55,7 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "python": "code_interpreter",
     "container": "container",
 }
+MCP_PREFIX = "mcp_"
 
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
@@ -567,6 +565,7 @@ class ParsableContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name in self._tool_sessions:
                     continue
@@ -579,6 +578,8 @@ class ParsableContext(ConversationContext):
                     tool_server.new_session(tool_name, request_id, headers)
                 )
                 self._tool_sessions[tool_name] = tool_session
+                initialized_session = True
+            if initialized_session:
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
@@ -865,6 +866,7 @@ class HarmonyContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
                     tool_type = _map_tool_name_to_tool_type(tool_name)
@@ -875,7 +877,9 @@ class HarmonyContext(ConversationContext):
                         tool_server.new_session(tool_name, request_id, headers)
                     )
                     self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
+                    initialized_session = True
+            if initialized_session:
+                exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message

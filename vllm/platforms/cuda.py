@@ -86,6 +86,8 @@ def _get_backend_priorities(
     num_heads: int | None = None,
     kv_cache_dtype: CacheDType | None = None,
     use_non_causal: bool = False,
+    head_size: int | None = None,
+    use_mm_prefix: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -133,13 +135,21 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
+            sparse_tail = [
+                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
+            flashinfer_sparse = AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90
+            if head_size == 512:
+                sparse_tail.insert(0, flashinfer_sparse)
+            else:
+                sparse_tail.append(flashinfer_sparse)
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
-                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
-                AttentionBackendEnum.FLASHMLA_SPARSE,
+                *sparse_tail,
             ]
     else:
         # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal
@@ -147,6 +157,7 @@ def _get_backend_priorities(
         # So prefer FlashAttention when non-causal on SM100f.
         if device_capability.major == 10 and not use_non_causal:
             return [
+                *([AttentionBackendEnum.TRITON_FLASHINFER] if use_mm_prefix else []),
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
@@ -155,6 +166,11 @@ def _get_backend_priorities(
             ]
         else:
             return [
+                *(
+                    [AttentionBackendEnum.TRITON_FLASH_ATTN]
+                    if device_capability.major == 9 and use_mm_prefix
+                    else []
+                ),
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
@@ -223,11 +239,17 @@ class CudaPlatformBase(Platform):
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+            logger.warning_once(
+                "Failed to import from vllm._C_stable_libtorch: %s", repr(e)
+            )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
         with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -309,6 +331,12 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError("PCP does not support data parallelism on CUDA yet.")
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
@@ -369,11 +397,13 @@ class CudaPlatformBase(Platform):
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
         backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla,
-            device_capability,
-            num_heads,
-            attn_selector_config.kv_cache_dtype,
-            attn_selector_config.use_non_causal,
+            use_mla=attn_selector_config.use_mla,
+            device_capability=device_capability,
+            num_heads=num_heads,
+            kv_cache_dtype=attn_selector_config.kv_cache_dtype,
+            use_non_causal=attn_selector_config.use_non_causal,
+            head_size=attn_selector_config.head_size,
+            use_mm_prefix=attn_selector_config.use_mm_prefix,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -382,8 +412,11 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except ImportError:
-                invalid_reasons_i = ["ImportError"]
+            except (ImportError, OSError) as e:
+                logger.debug(
+                    "Attention backend %s is unavailable", backend.name, exc_info=True
+                )
+                invalid_reasons_i = [f"{type(e).__name__}: {e}"]
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
@@ -392,6 +425,26 @@ class CudaPlatformBase(Platform):
                 )
 
         return valid_backends_priorities, invalid_reasons
+
+    @classmethod
+    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
+        index_kpool = getattr(
+            vllm_config.model_config.hf_text_config, "index_kpool", None
+        )
+        if not index_kpool or index_kpool <= 1:
+            return None
+        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+
+        # kpool paged-MQA indexer: the storage block (block_size /
+        # index_kpool) is virtually split into pool pages, so block_size
+        # must be a multiple of index_kpool times a legal pool page.
+        page = min(PAGED_MQA_PAGE_SIZES)
+        if cls.is_device_capability_family(120):
+            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
+            # 64 for the fp8 indexer cache, so align to the largest pool
+            # page here to make the page split land on 64 not the min 32.
+            page = max(PAGED_MQA_PAGE_SIZES)
+        return index_kpool * page
 
     @classmethod
     def get_attn_backend_cls(
@@ -411,8 +464,11 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except ImportError:
-                invalid_reasons = ["ImportError"]
+            except (ImportError, OSError) as e:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: [{type(e).__name__}: {e}]"
+                ) from e
             if invalid_reasons:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
@@ -701,7 +757,10 @@ class CudaPlatformBase(Platform):
             rms_norm = ["oink"] + default
 
         return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            default,
+            rms_norm=rms_norm,
+            fused_add_rms_norm=rms_norm,
+            gelu_and_mul_sparse=["triton", "native"],
         )
 
     @classmethod
