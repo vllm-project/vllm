@@ -15,11 +15,11 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - |
     case "$$BUILDKITE_PARALLEL_JOB" in
-      0) pytest -v -s basic_correctness/memory ;;  # target: <=20m
-      1) pytest -v -s basic_correctness/models --num-shards=2 --shard-id=0 ;;  # target: <=20m
-      2) pytest -v -s basic_correctness/models --num-shards=2 --shard-id=1 ;;  # target: <=20m
-      3) pytest -v -s basic_correctness/cpu_offload ;;  # target: <=20m
-      4) pytest -v -s basic_correctness/prefetch_offload ;;  # target: <=20m
+      0) pytest -v -s basic_correctness/test_mem.py ;;  # target: <=20m
+      1) pytest -v -s basic_correctness/test_models_gemma2.py basic_correctness/test_basic_correctness.py ;;  # target: <=20m
+      2) pytest -v -s basic_correctness/test_models_llama.py ;;  # target: <=20m
+      3) pytest -v -s basic_correctness/test_cpu_offload.py ;;  # target: <=20m
+      4) pytest -v -s basic_correctness/test_prefetch_offload.py ;;  # target: <=20m
       *) exit 2 ;;
     esac
   mirror:
@@ -33,7 +33,7 @@ steps:
       - image-build-amd
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - pytest -v -s basic_correctness/memory
-      - pytest -v -s basic_correctness/models
-      - pytest -v -s basic_correctness/cpu_offload
-      - pytest -v -s basic_correctness/prefetch_offload
+      - pytest -v -s basic_correctness/test_mem.py
+      - pytest -v -s basic_correctness/test_models_gemma2.py basic_correctness/test_models_llama.py basic_correctness/test_basic_correctness.py
+      - pytest -v -s basic_correctness/test_cpu_offload.py
+      - pytest -v -s basic_correctness/test_prefetch_offload.py

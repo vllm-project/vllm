@@ -4,7 +4,7 @@
 
 These cover the registry/factory contract and capability flags. They do not
 touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/memory/test_mem.py``.
+in ``tests/basic_correctness/test_mem.py``.
 """
 
 import pytest

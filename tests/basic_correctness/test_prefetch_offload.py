@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test prefetch offloading correctness with Llama model."""
 
-from ...utils import compare_two_settings
+from ..utils import compare_two_settings
 
 
 def test_prefetch_offload_llama():
