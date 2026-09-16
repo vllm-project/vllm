@@ -388,8 +388,20 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         # layer count. Cosine similarity vs ag_rs was >= 0.999994 across the
         # sweep.
         #
-        # Deliberately NOT setting q_replicate=True, which GlmMoeDsa does: that
-        # changes weight loading and is an independent, unmeasured question.
+        # Leave the default alone under prefill context parallelism. a2a has a
+        # known caveat there: #56677 pins --dcp-comm-backend ag_rs for a GLM-5.2
+        # PCP4+DCP4 eval config, and GLM already defaults to a2a. Everything
+        # measured above is DCP-only with PCP off, so a PCP user keeps upstream's
+        # ag_rs and can still opt in explicitly.
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            return
+
+        # NB set_dcp_defaults also resolves dcp_q_replicate from None to its
+        # default False -- it is not left as None. That is the same value the
+        # consumer (MLAAttention) already defaults to, so behaviour is unchanged,
+        # but this hook does decide it. Deliberately NOT passing q_replicate=True,
+        # which GlmMoeDsa does: that changes weight loading and is an
+        # independent, unmeasured question.
         vllm_config.parallel_config.set_dcp_defaults(comm_backend="a2a")
 
     @staticmethod
