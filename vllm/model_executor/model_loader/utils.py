@@ -4,7 +4,7 @@
 
 import inspect
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -15,7 +15,6 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
-from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -120,11 +119,18 @@ def process_weights_after_loading(
                     "does not support pre-processed weights"
                 )
             # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
+            # (for repacking, quantizing, etc), they typically expect parameters
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            # Methods that can process weights in place (e.g. PLE scale
+            # validation) set requires_device_loading=False to skip this move.
+            loading_context = (
+                device_loading_context(module, target_device)
+                if quant_method.requires_device_loading
+                else nullcontext()
+            )
+            with loading_context:
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -146,15 +152,6 @@ def process_weights_after_loading(
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
-
-    # Process HPC modules (HpcRopeNorm, etc.) that rely on
-    # process_weights_after_loading being called from the model's
-    # load_weights(). When using DummyModelLoader (e.g. profiling or
-    # sleep/wake_up reload), the model's load_weights() is not called, so we
-    # must handle HPC modules here generically.
-    for _, module in model.named_modules():
-        if isinstance(module, HpcModule):
-            module.process_weights_after_loading(model)
 
     # Model-level post-load hook, after the per-layer quant finalize.
     if hasattr(model, "process_weights_after_loading"):
