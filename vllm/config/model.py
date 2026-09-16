@@ -585,22 +585,27 @@ class ModelConfig:
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
-        # to prevent resolving it multiple times downstream.
-        # If the weights come from a different repo, we cannot eagerly resolve revision
-        weights_from_model = not self.model_weights or self.model_weights == self.model
-        # If the config comes from a different repo, we cannot eagerly resolve revision
-        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
-        can_resolve_model_revision = config_from_model and weights_from_model
-        if can_resolve_model_revision:
-            self.revision = resolve_revision(
-                self.model,
+        # to prevent resolving it multiple times downstream. A resolved revision
+        # only pins the repo it was resolved for, so each repo needs its own call.
+        self.revision = resolve_revision(
+            self.model,
+            self.revision,
+            self.hf_token,
+        )
+
+        # The config can live in another repo, which `self.revision` does not pin.
+        # It stays `None` if the config comes from `self.model`, so that call sites
+        # fall back to `self.revision` the same way they fall back to `self.model`.
+        self._hf_config_revision = None
+        if self.hf_config_path and self.hf_config_path != self.model:
+            self._hf_config_revision = resolve_revision(
+                self.hf_config_path,
                 self.revision,
                 self.hf_token,
             )
 
         if (
-            can_resolve_model_revision
-            and self.tokenizer == self.model
+            self.tokenizer == self.model
             and self.tokenizer_revision == requested_revision
         ):
             self.tokenizer_revision = self.revision
@@ -628,7 +633,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self.revision,
+            self._hf_config_revision or self.revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -1706,7 +1711,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
+                revision=self._hf_config_revision or self.revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
