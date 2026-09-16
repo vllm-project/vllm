@@ -7,13 +7,14 @@ oracle selects. Routing either mimics aiter's fused shared expert (last expert,
 every token, weight 1) or is the routed-only top-k of ModelOpt MXFP8.
 """
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only"),
@@ -23,7 +24,13 @@ pytestmark = [
 HIDDEN, INTER, NUM_ROUTED, TOPK = 6144, 768, 128, 4
 NUM_EXPERTS = NUM_ROUTED + 1
 SWIGLU_ALPHA, SWIGLU_LIMIT = 1.702, 7.0
-CHECK_TOKENS = 64
+CHECK_TOKENS = 16
+# Translate the original angular budgets via ||a-b||/||b|| = sqrt(2*(1-c))
+# for equal norms. Actual relative L2 also penalizes magnitude errors. These
+# are empirical layer regression limits; the reducer test below uses a bound.
+MATCHED_ERROR = (2 * (1 - 0.9999)) ** 0.5
+QUANTIZED_ERROR = (2 * (1 - 0.998)) ** 0.5
+FP8_PARTIAL_ERROR = (2 * (1 - 0.997)) ** 0.5
 
 
 def _quantize_mxfp8(w: torch.Tensor):
@@ -41,9 +48,7 @@ def _quantize_mxfp8(w: torch.Tensor):
 def _routing(m: int, device, shared: bool = True):
     """Top-k over the routed experts (weights renormalized x2) plus, with
     ``shared``, aiter's fused shared expert: the last expert with weight 1."""
-    routed = torch.stack(
-        [torch.randperm(NUM_ROUTED, device=device)[:TOPK] for _ in range(m)]
-    )
+    routed = torch.rand((m, NUM_ROUTED), device=device).topk(TOPK, dim=1).indices
     w = torch.rand((m, TOPK), device=device)
     w = w / w.sum(dim=1, keepdim=True) * 2.0
     if shared:
@@ -52,41 +57,93 @@ def _routing(m: int, device, shared: bool = True):
     return routed.to(torch.int32).contiguous(), w.to(torch.float32).contiguous()
 
 
-def _dequant(q: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    n, k = q.shape
-    sc = torch.ldexp(torch.ones_like(s, dtype=torch.float32), s.to(torch.int32) - 127)
-    return (q.float().view(n, k // 32, 32) * sc.unsqueeze(-1)).view(n, k)
+def _gamma(n: int, dtype=torch.bfloat16) -> float:
+    u = torch.finfo(dtype).eps / 2
+    return n * u / (1 - n * u)
 
 
-def _float_reference(x, raw, topk_ids, topk_weights, tokens, stage1_bf16: bool):
-    """Dequantized experts in fp32; ``stage1_bf16`` rounds the intermediate to
-    bf16 as the decode chain does (the fp8 chains quantize it instead)."""
-    w13_q, w13_s, w2_q, w2_s = raw
-    out = torch.zeros((len(tokens), HIDDEN), dtype=torch.float32, device=x.device)
-    xf = x.float()
-    for i, t in enumerate(tokens):
-        for j in range(topk_ids.shape[1]):
-            e = int(topk_ids[t, j])
-            h = xf[t] @ _dequant(w13_q[e], w13_s[e]).T
-            g = h[:INTER].clamp(max=SWIGLU_LIMIT)
-            u = h[INTER:].clamp(-SWIGLU_LIMIT, SWIGLU_LIMIT)
-            a = g * torch.sigmoid(SWIGLU_ALPHA * g) * (u + 1.0)
-            if stage1_bf16:
-                a = a.to(torch.bfloat16).float()
-            out[i] += float(topk_weights[t, j]) * (a @ _dequant(w2_q[e], w2_s[e]).T)
-    return out
+def _sample_rows(m: int, count: int = CHECK_TOKENS) -> list[int]:
+    """Keep endpoints and evenly spaced deterministic rows, without duplicates."""
+    return torch.linspace(0, m - 1, min(m, count), dtype=torch.float64).long().tolist()
 
 
-def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.float().flatten(), b.float().flatten()
-    return float((a @ b) / (a.norm() * b.norm() + 1e-12))
+def _dequantize(q: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    scale = torch.ldexp(
+        torch.ones_like(scales, dtype=torch.float32), scales.int() - 127
+    )
+    return (q.float().unflatten(-1, (-1, 32)) * scale.unsqueeze(-1)).flatten(-2)
+
+
+def _mxfp8_roundtrip(x: torch.Tensor) -> torch.Tensor:
+    """RNE E4M3, using the kernel's FP32 ceil-power-of-two scale algorithm."""
+    groups = x.float().unflatten(-1, (-1, 32))
+    bits = (groups.abs().amax(-1, keepdim=True) * (1.0 / 448.0)).view(torch.int32)
+    exponent = ((bits >> 23) & 255) + (((bits & 0x7FFFFF) != 0) & ((bits >> 23) < 255))
+    exponent = torch.where(bits == 0, 127, exponent)
+    scale = torch.ldexp(torch.ones_like(groups[..., :1]), exponent - 127)
+    quantized = (groups / scale).to(torch.float8_e4m3fn).float()
+    return (quantized * scale).flatten(-2)
+
+
+def _activation(h: torch.Tensor) -> torch.Tensor:
+    g, up = h.chunk(2, dim=-1)
+    g, up = g.clamp(max=7.0), up.clamp(-7.0, 7.0)
+    # Preserve the two multiplications used by the new epilogues.
+    sigmoid = torch.reciprocal(1.0 + torch.exp2((g * 1.702) * -1.4426950408889634))
+    return (g * sigmoid) * (up + 1.0)
+
+
+@dataclass
+class Reference:
+    value: torch.Tensor
+    float_value: torch.Tensor
+
+
+def _reference(x, raw, ids, weights, tokens, *, mode="decode") -> Reference:
+    """Compute an independent reference, grouping selected rows by expert.
+
+    Modes: decode, mid, bf16 (prefill), fp8 (prefill). Centers are FP32 sums
+    before final output rounding. Decode models three down-projection partials
+    per expert through M=64, otherwise one. All inputs must be finite, with no
+    FP32 scaling overflow/underflow; zero blocks are supported.
+    """
+    w13q, s13, w2q, s2 = raw
+    x_ref = x[tokens].float()
+    selected_ids, selected_weights = ids[tokens], weights[tokens].float()
+    x_quant = x_ref if mode == "decode" else _mxfp8_roundtrip(x_ref)
+    split = 3 if mode == "decode" and x.shape[0] <= 64 else 1
+    value = torch.zeros_like(x_ref)
+    float_value = torch.zeros_like(x_ref)
+    # Reference accumulation in FP64 avoids order-dependent reference output.
+    accum = value.double()
+    float_accum = float_value.double()
+    for expert in selected_ids.unique().tolist():
+        rows, slots = torch.where(selected_ids == expert)
+        route = selected_weights[rows, slots, None]
+        w13 = _dequantize(w13q[expert], s13[expert])
+        w2 = _dequantize(w2q[expert], s2[expert])
+        a_float = _activation(x_ref[rows] @ w13.T)
+        if mode == "decode":
+            a_float = a_float.bfloat16().float()
+            a_quant = a_float
+        else:
+            a_quant = _mxfp8_roundtrip(_activation(x_quant[rows] @ w13.T))
+        float_accum.index_add_(0, rows, (route * (a_float @ w2.T)).double())
+        for a_slice, w_slice in zip(a_quant.chunk(split, -1), w2.chunk(split, -1)):
+            partial = a_slice @ w_slice.T
+            if mode == "fp8":
+                partial = _mxfp8_roundtrip(partial)
+            partial = route * partial
+            accum.index_add_(0, rows, partial.double())
+    value = accum.float()
+    return Reference(value, float_accum.float())
 
 
 @pytest.fixture(scope="module")
 def m3_weights():
     from vllm._aiter_ops import rocm_aiter_ops
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     device = torch.device("cuda")
     w13 = torch.randn(
         (NUM_EXPERTS, 2 * INTER, HIDDEN), dtype=torch.bfloat16, device=device
@@ -120,8 +177,10 @@ def _run_aiter(shuffled, x, topk_ids, topk_weights):
     )
 
 
-def _kw():
-    return dict(hidden_size=HIDDEN, intermediate_size=INTER, num_experts=NUM_EXPERTS)
+def _kw(shuffled):
+    return dict(
+        hidden_size=HIDDEN, intermediate_size=INTER, num_experts=shuffled[0].shape[0]
+    )
 
 
 def _decode(shuffled, x, topk_ids, topk_weights, fused_shared_expert=True):
@@ -139,7 +198,7 @@ def _decode(shuffled, x, topk_ids, topk_weights, fused_shared_expert=True):
         swiglu_alpha=SWIGLU_ALPHA,
         swiglu_limit=SWIGLU_LIMIT,
         fused_shared_expert=fused_shared_expert,
-        **_kw(),
+        **_kw(shuffled),
     )
 
 
@@ -147,7 +206,9 @@ def _mid(shuffled, x, topk_ids, topk_weights):
     from vllm.models.minimax_m3.amd.ops.moe_mxfp8 import mid
 
     w13, w2, w13_s, w2_s = shuffled
-    return mid.a8w8_mid_moe(x, w13, w13_s, w2, w2_s, topk_weights, topk_ids, **_kw())
+    return mid.a8w8_mid_moe(
+        x, w13, w13_s, w2, w2_s, topk_weights, topk_ids, **_kw(shuffled)
+    )
 
 
 def _prefill(shuffled, x, topk_ids, topk_weights, out_mode="bf16"):
@@ -155,309 +216,399 @@ def _prefill(shuffled, x, topk_ids, topk_weights, out_mode="bf16"):
 
     w13, w2, w13_s, w2_s = shuffled
     return prefill.a8w8_prefill_moe(
-        x, w13, w13_s, w2, w2_s, topk_weights, topk_ids, out_mode=out_mode, **_kw()
+        x,
+        w13,
+        w13_s,
+        w2,
+        w2_s,
+        topk_weights,
+        topk_ids,
+        out_mode=out_mode,
+        **_kw(shuffled),
     )
 
 
-# ---------------------------------------------------------------- decode (a16w8)
-
-
-@pytest.mark.parametrize("m", [1, 2, 4, 8, 12, 16, 17, 32, 64, 128, 256])
-def test_a16w8_decode_matches_reference(m3_weights, m):
-    """M <= 16: inline-sort path; 17..256: sort_decode + sorted GEMMs (the
-    wide-first layout of the fused shared expert from 40 tokens)."""
-    from vllm.models.minimax_m3.amd.ops import moe_mxfp8 as k
-
-    assert k.supports_shapes(HIDDEN, INTER) and m <= k.MAX_DECODE_TOKENS
+def _weights_for(m3_weights, shared):
     raw, shuffled = m3_weights
-    torch.manual_seed(m)
-    device = shuffled[0].device
-    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    topk_ids, topk_weights = _routing(m, device)
-    out = _decode(shuffled, x, topk_ids, topk_weights)
-    ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights)
-    torch.accelerator.synchronize()
-    assert out.shape == (m, HIDDEN) and out.dtype == torch.bfloat16
-    ref = _float_reference(x, raw, topk_ids, topk_weights, range(m), stage1_bf16=True)
-    scale = ref.abs().max().item()
-    assert _cos(out, ref) > 0.9999
-    assert (out.float() - ref).abs().max().item() < 0.02 * scale
-    # aiter quantizes the activations to MXFP8 as well: ~0.999 against the float
-    # reference, and the same distance from us
-    assert _cos(out, ref_aiter) > 0.998
+    count = NUM_ROUTED + int(shared)
+    return tuple(w[:count] for w in raw), tuple(w[:count] for w in shuffled)
 
 
-@pytest.mark.parametrize("m", [16, 256])
-def test_a16w8_decode_graph_replay(m3_weights, m):
-    """HIP-graph capture with different routing per call (how vLLM runs it)."""
-    _, shuffled = m3_weights
-    torch.manual_seed(1)
-    device = shuffled[0].device
+def _run_chain(shuffled, x, ids, weights, out_mode="bf16"):
+    if x.shape[0] <= 256:
+        return _decode(shuffled, x, ids, weights, shuffled[0].shape[0] == NUM_EXPERTS)
+    if x.shape[0] <= 3071:
+        return _mid(shuffled, x, ids, weights)
+    return _prefill(shuffled, x, ids, weights, out_mode)
+
+
+def _assert_relative_l2(actual, expected, *, limit, per_row=True):
+    assert actual.shape == expected.shape
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
+    dim = -1 if per_row else None
+    scale = expected.float().norm(dim=dim)
+    error = (actual.float() - expected.float()).norm(dim=dim)
+    failed = error > limit * scale
+    assert not failed.any(), (
+        f"{int(failed.sum())} comparisons exceed the error budget; "
+        f"max relative L2={float((error / scale.clamp_min(1e-30)).max()):.6g}"
+    )
+
+
+# Each case exercises a kernel variant or a dispatch boundary. In particular,
+# M=2/4 have dedicated GEMM1 tiles and M=64/65 changes GEMM2 split-K.
+@pytest.mark.parametrize(
+    "m,shared,out_mode",
+    [
+        (1, True, "bf16"),
+        (2, False, "bf16"),
+        (4, True, "bf16"),
+        (16, True, "bf16"),
+        (17, False, "bf16"),
+        (40, True, "bf16"),
+        (40, False, "bf16"),
+        (64, True, "bf16"),
+        (65, True, "bf16"),
+        (256, False, "bf16"),
+        (257, False, "bf16"),
+        (768, False, "bf16"),
+        (1536, True, "bf16"),
+        (3071, False, "bf16"),
+        (3072, True, "bf16"),
+        (16384, False, "bf16"),
+        (32768, False, "bf16"),
+        (4096, False, "fp8"),
+    ],
+)
+def test_mxfp8_moe_accuracy(m3_weights, m, shared, out_mode):
+    raw, shuffled = _weights_for(m3_weights, shared)
+    set_random_seed(m)
+    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=shuffled[0].device)
+    ids, weights = _routing(m, x.device, shared)
+    # Always exercise the last routed expert; retain distinct IDs per token.
+    ids[-1, :TOPK] = torch.tensor([0, 1, 2, NUM_ROUTED - 1], device=x.device)
+    if m in (768, 16384):
+        ids[: m // 2, :TOPK] = ids[-1, :TOPK].clone()
+        x[0].zero_()
+        weights[-1].zero_()
+    out = _run_chain(shuffled, x, ids, weights, out_mode)
+    assert out.shape == x.shape and out.dtype == torch.bfloat16
+    if shared:
+        baseline = _run_aiter(shuffled, x, ids, weights)
+        _assert_relative_l2(
+            out, baseline, limit=QUANTIZED_ERROR if m <= 256 else MATCHED_ERROR
+        )
+    # AITER's tuned shared-expert topology supplies an all-row differential
+    # check above. For routed-only experts, check every row independently.
+    tokens = _sample_rows(m) if shared else list(range(m))
+    mode = "decode" if m <= 256 else "mid" if m <= 3071 else out_mode
+    ref = _reference(x, raw, ids, weights, tokens, mode=mode)
+    # Small GEMM differences can cross a quantizer midpoint. Check matched
+    # precision in aggregate and float-reference quality on every tested row.
+    _assert_relative_l2(out[tokens], ref.value, limit=MATCHED_ERROR, per_row=False)
+    _assert_relative_l2(
+        out[tokens],
+        ref.float_value,
+        limit=MATCHED_ERROR
+        if m <= 256
+        else FP8_PARTIAL_ERROR
+        if out_mode == "fp8"
+        else QUANTIZED_ERROR,
+    )
+    if m >= 3072:
+        repeated = _run_chain(shuffled, x, ids, weights, out_mode)
+        assert torch.equal(out, repeated)
+    if m in (768, 16384):
+        assert torch.count_nonzero(out[[0, m - 1]]) == 0
+
+
+@pytest.mark.parametrize(
+    "m,shared", [(16, True), (256, False), (768, False), (3072, False)]
+)
+def test_mxfp8_moe_graph_replay(m3_weights, m, shared):
+    """Multiple calls reuse scratch; each replay reads new input/routing values."""
+    _, shuffled = _weights_for(m3_weights, shared)
+    set_random_seed(m)
     inputs = [
         (
-            torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device),
-            *_routing(m, device),
+            torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=shuffled[0].device),
+            *_routing(m, shuffled[0].device, shared),
         )
-        for _ in range(4)
+        for _ in range(2)
     ]
-    eager = [_decode(shuffled, *inp).clone() for inp in inputs]
-    s = torch.cuda.Stream()
-    s.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(s):
-        _decode(shuffled, *inputs[0])
-    torch.cuda.current_stream().wait_stream(s)
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-        outs = [_decode(shuffled, *inp) for inp in inputs]
-    g.replay()
-    g.replay()
-    torch.accelerator.synchronize()
-    for got, want in zip(outs, eager):
-        assert _cos(got, want) > 0.9999
-
-
-@pytest.mark.parametrize("m", [40, 192, 256])
-def test_a16w8_decode_separate_shared_expert(m3_weights, m):
-    """The routing vLLM produces for ModelOpt MXFP8, where the shared expert is
-    a separate module: top-k over the routed experts only, no expert routed by
-    every token. The wide-first sort layout (from 40 tokens) budgets the last
-    expert's blocks from M and must stay off; these M broke without the flag."""
-    from vllm.models.minimax_m3.amd.ops.moe_mxfp8 import decode
-
-    assert decode.wide_for(m)
-    raw, shuffled = m3_weights
-    torch.manual_seed(m)
-    device = shuffled[0].device
-    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    topk_ids, topk_weights = _routing(m, device, shared=False)
-    out = _decode(shuffled, x, topk_ids, topk_weights, fused_shared_expert=False)
-    ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights)
-    torch.accelerator.synchronize()
-    ref = _float_reference(x, raw, topk_ids, topk_weights, range(m), stage1_bf16=True)
-    assert _cos(out, ref) > 0.9999
-    assert _cos(out, ref_aiter) > 0.998
-
-
-# ------------------------------------------------------------- mid batch (a8w8)
-
-
-@pytest.mark.parametrize("m", [300, 512, 1024, 2048, 3071])
-def test_a8w8_mid_matches_aiter(m3_weights, m):
-    from vllm.models.minimax_m3.amd.ops.moe_mxfp8 import (
-        MAX_MID_TOKENS,
-        MIN_MID_TOKENS,
-        mid,
-    )
-
-    assert MIN_MID_TOKENS <= m <= MAX_MID_TOKENS
-    assert mid.block_m_for(m) in (32, 64, 128)
-    raw, shuffled = m3_weights
-    torch.manual_seed(m)
-    device = shuffled[0].device
-    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    topk_ids, topk_weights = _routing(m, device)
-    out = _mid(shuffled, x, topk_ids, topk_weights)
-    out2 = _mid(shuffled, x, topk_ids, topk_weights)
-    ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights)
-    torch.accelerator.synchronize()
-    assert out.shape == (m, HIDDEN) and out.dtype == torch.bfloat16
-    assert not torch.isnan(out).any()
-    # the bf16 atomics of gemm2 add the topk terms in arrival order: the same
-    # inputs differ in the last bit of a few elements, never more
-    assert _cos(out, out2) > 0.99999
-    assert (out.float() - out2.float()).abs().max() < 0.1
-    # aiter's a8w8 chain quantizes x and the intermediate the same way and its
-    # stage 2 accumulates with bf16 atomics as well: cos 0.99999
-    assert _cos(out, ref_aiter) > 0.9999
-    # both are ~0.999 to the float reference (the fp8 activation quant
-    # dominates); ours must be as close as aiter's own kernels
-    tokens = torch.randperm(m, device=device)[:CHECK_TOKENS].tolist()
-    ref = _float_reference(x, raw, topk_ids, topk_weights, tokens, stage1_bf16=False)
-    c_ours = _cos(out[tokens], ref)
-    c_aiter = _cos(ref_aiter[tokens], ref)
-    assert c_ours > 0.998 and c_ours > c_aiter - 1e-4, (c_ours, c_aiter)
-
-
-# --------------------------------------------------------------- prefill (a8w8)
-
-
-@pytest.mark.parametrize("m", [3072, 4096, 16384])
-def test_a8w8_prefill_matches_aiter(m3_weights, m):
-    """3072/4096: 128-row sort blocks; 16384: 256-row blocks (gemm1 BM256,
-    gemm2 skipping the all-padding 128-row tiles)."""
-    _check_prefill(m3_weights, m, "bf16")
-
-
-def test_a8w8_prefill_fp8_route_out(m3_weights):
-    """gemm2's fp8 output mode (AITER_FLYDSL_STAGE2_FP8=1): fp8 partials +
-    reduce_fp8, deterministic, one more quantization."""
-    _check_prefill(m3_weights, 4096, "fp8")
-
-
-def _check_prefill(m3_weights, m, out_mode):
-    from vllm.models.minimax_m3.amd.ops.moe_mxfp8 import prefill
-
-    assert prefill.supports_shapes(HIDDEN, INTER)
-    assert prefill.block_m_for(m) == (256 if m >= 16384 else 128)
-    raw, shuffled = m3_weights
-    torch.manual_seed(m)
-    device = shuffled[0].device
-    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    topk_ids, topk_weights = _routing(m, device)
-    out = _prefill(shuffled, x, topk_ids, topk_weights, out_mode)
-    out2 = _prefill(shuffled, x, topk_ids, topk_weights, out_mode)
-    ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights)
-    torch.accelerator.synchronize()
-    assert out.shape == (m, HIDDEN) and out.dtype == torch.bfloat16
-    # deterministic: the same inputs give the same bits (a race shows up here)
-    assert torch.equal(out, out2)
-    # aiter's a8w8 chain quantizes x and the intermediate the same way but its
-    # stage 2 accumulates with bf16 atomics: cos 0.99999, not bit-identical; the
-    # fp8 partials add one more quantization (cos ~0.9985)
-    assert _cos(out, ref_aiter) > (0.998 if out_mode == "fp8" else 0.9999)
-    # both are ~0.999 to the float reference (the fp8 activation quant
-    # dominates); ours must be as close as aiter's own kernels (fp8 mode: a
-    # little further, by its extra quantization)
-    tokens = torch.randperm(m, device=device)[:CHECK_TOKENS].tolist()
-    ref = _float_reference(x, raw, topk_ids, topk_weights, tokens, stage1_bf16=False)
-    ours = out[tokens].float()
-    theirs = ref_aiter[tokens].float()
-    slack = 2e-3 if out_mode == "fp8" else 1e-3
-    assert _cos(ours, ref) > 0.997
-    assert _cos(ours, ref) >= _cos(theirs, ref) - slack
-    err_ours = (ours - ref).abs().max().item()
-    err_theirs = (theirs - ref).abs().max().item()
-    assert err_ours <= err_theirs * (2.0 if out_mode == "fp8" else 1.1) + 1e-3, (
-        err_ours,
-        err_theirs,
-    )
-
-
-# ------------------------------------------------- the package and the experts class
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for inp in inputs:
+            _run_chain(shuffled, *inp)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        outputs = [_run_chain(shuffled, *inp) for inp in inputs]
+    for replay in range(2):
+        for x, ids, weights in inputs:
+            x.normal_()
+            new_ids, new_weights = _routing(m, x.device, shared)
+            if replay == 0:
+                new_ids[:, :TOPK] = torch.tensor(
+                    [0, 1, 2, NUM_ROUTED - 1], device=x.device
+                )
+            else:
+                new_weights[0].zero_()
+            ids.copy_(new_ids)
+            weights.copy_(new_weights)
+        eager = [_run_chain(shuffled, *inp).clone() for inp in inputs]
+        graph.replay()
+        torch.accelerator.synchronize()
+        for got, want in zip(outputs, eager):
+            if m >= 3072:
+                assert torch.equal(got, want)
+            else:
+                _assert_relative_l2(got, want, limit=MATCHED_ERROR)
 
 
 def test_mxfp8_moe_gates():
     from vllm.models.minimax_m3.amd.ops import moe_mxfp8 as k
 
-    assert k.MAX_DECODE_TOKENS + 1 == k.MIN_MID_TOKENS
-    assert k.MAX_MID_TOKENS + 1 == k.MIN_PREFILL_TOKENS == 3072
-    assert k.MAX_TOKENS == k.MAX_PREFILL_TOKENS == 65536
-    assert k.supports_shapes(6144, 768)
-    assert not k.supports_shapes(6144, 1536)  # TP2: the fp8 gemm2 pipeline is K = 768
-    assert not k.supports_shapes(6144 + 128, 768)  # gemm1 unroll: (K/128 - 4) % 4
+    assert k.supports_shapes(HIDDEN, INTER)
+    for hidden, inter in [(1536, INTER), (4096, INTER), (HIDDEN, 1536)]:
+        assert not k.supports_shapes(hidden, inter)
+    x = torch.empty((k.MAX_TOKENS, HIDDEN), dtype=torch.bfloat16, device="meta")
+    assert k.supports_batch(x[:1]) and k.supports_batch(x)
+    for bad in [
+        x[:0],
+        x.float(),
+        x.t(),
+        x[:, :-1],
+        x[::2],
+        x.new_empty((k.MAX_TOKENS + 1, HIDDEN)),
+    ]:
+        assert not k.supports_batch(bad)
+    assert not k.supports_batch(x, topk=8)
+    assert k.supports_routing(128, 4, fused_shared_expert=False)
+    assert k.supports_routing(129, 5, fused_shared_expert=True)
+    assert not k.supports_routing(129, 4, fused_shared_expert=False)
+    assert not k.supports_routing(257, 5, fused_shared_expert=True)
+
+
+def test_decode_cache_distinguishes_routing_width():
+    """The inline routing stride is a compiled constant, including for one token."""
+    from vllm.models.minimax_m3.amd.ops.moe_mxfp8 import decode
+
+    kw = dict(D_INTER=INTER, NE=NUM_EXPERTS, n_tokens=1, inline_sort=True)
+    for get, shape in [
+        (decode.get_gemm1, dict(D_HIDDEN=HIDDEN)),
+        (decode.get_gemm2, dict(N_OUT=HIDDEN)),
+    ]:
+        routed = get(TOPK=4, **shape, **kw)
+        shared = get(TOPK=5, **shape, **kw)
+        assert routed is not shared
+        assert get(TOPK=4, **shape, **kw) is routed
+
+
+@pytest.mark.parametrize("out_mode", ["bf16", "fp8"])
+def test_prefill_reduction_rounding_bound(out_mode):
+    """Bound the actual reduction inputs, including cancellation and tiny scales.
+
+    With no upstream GEMM/activation error, FP32 accumulation contributes
+    gamma_(k-1) for BF16 inputs or gamma_k for weighted FP8 FMAs, followed by
+    one BF16 rounding. The bound scales with sum(abs(partials)), not abs(sum).
+    See Higham, The Accuracy of Floating Point Summation, equations 2.2-2.6.
+    """
+    from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
+        _get_reduce_bf16,
+        _run_compiled,
+    )
+    from vllm.models.minimax_m3.amd.ops.moe_mxfp8.prefill import _get_reduce_fp8
+
+    set_random_seed(0)
+    m, topk = 3, TOPK + 1
     device = torch.device("cuda")
-    ok = torch.empty((k.MAX_TOKENS, HIDDEN), dtype=torch.bfloat16, device="meta")
-    assert k.supports_batch(ok[:1]) and k.supports_batch(ok)
-    assert not k.supports_batch(ok[:0])
-    assert not k.supports_batch(ok.float())
-    assert not k.supports_batch(ok.t())
-    assert not k.supports_batch(
-        torch.empty((k.MAX_TOKENS + 1, HIDDEN), dtype=torch.bfloat16, device="meta")
-    )
-    assert k.supports_batch(
-        torch.empty((4, HIDDEN), dtype=torch.bfloat16, device=device)
-    )
+    values = torch.randn((m, topk, HIDDEN), device=device)
+    values[0, :, :4] = values.new_tensor([256, 1, -256, 0, 0])[:, None]
+    output = torch.full((m, HIDDEN), float("nan"), dtype=torch.bfloat16, device=device)
+    if out_mode == "bf16":
+        values = values.bfloat16()
+        partials = values.double()
+        _run_compiled(
+            _get_reduce_bf16(HIDDEN, topk),
+            values.flatten(),
+            output.flatten(),
+            m,
+            torch.cuda.current_stream(),
+        )
+        additions = topk - 1
+    else:
+        values = values.to(torch.float8_e4m3fn)
+        scales = torch.randint(
+            118, 136, (m, topk, HIDDEN // 32), dtype=torch.uint8, device=device
+        )
+        weights = torch.rand((m, topk), device=device)
+        # E8M0 byte zero represents 2**-127, not an IEEE zero scale.
+        scales[1, :, :1] = 0
+        values[1, :, :32] = 128
+        weights[1] = 1
+        scale = torch.ldexp(
+            torch.ones_like(scales, dtype=torch.float64), scales.int() - 127
+        ).repeat_interleave(32, dim=-1)
+        partials = values.double() * scale * weights.double().unsqueeze(-1)
+        _run_compiled(
+            _get_reduce_fp8(HIDDEN, topk),
+            values.view(torch.uint8).flatten(),
+            scales.flatten(),
+            weights.flatten(),
+            output.flatten(),
+            m,
+            torch.cuda.current_stream(),
+        )
+        additions = topk
+    reference = partials.sum(dim=1)
+    unit_roundoff = torch.finfo(torch.bfloat16).eps / 2
+    # Also include the much smaller rounding allowance for the FP64 oracle sum.
+    accumulation_error = (
+        _gamma(additions, torch.float32) + _gamma(topk - 1, torch.float64)
+    ) * partials.abs().sum(dim=1)
+    bound = (1 + unit_roundoff) * accumulation_error + unit_roundoff * reference.abs()
+    assert torch.isfinite(output).all()
+    assert ((output.double() - reference).abs() <= bound).all()
 
 
-def test_mxfp8_moe_dispatch_and_warm_up(m3_weights, monkeypatch):
-    """``mxfp8_moe`` picks the chain by batch size, runs the one-time warm-up on
-    the first prefill-range call (the profile run) and writes into ``out``."""
+def test_cached_reduction_on_multiple_devices():
+    """A cached HIP function handle must belong to the launch's device."""
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Requires two GPUs")
+    from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
+        _get_reduce_bf16,
+        _run_compiled,
+    )
+
+    topk = TOPK + 1
+    launch = _get_reduce_bf16(HIDDEN, topk)
+    for value, device in enumerate([0, 1, 0], start=1):
+        with torch.accelerator.device_index(device):
+            partials = torch.full(
+                (3, topk, HIDDEN), value, dtype=torch.bfloat16, device=f"cuda:{device}"
+            )
+            output = torch.empty(
+                (3, HIDDEN), dtype=partials.dtype, device=partials.device
+            )
+            _run_compiled(
+                launch,
+                partials.flatten(),
+                output.flatten(),
+                3,
+                torch.cuda.current_stream(),
+            )
+            assert torch.equal(output, torch.full_like(output, value * topk))
+
+
+def test_mxfp8_moe_dispatch_and_warm_up(monkeypatch):
+    """Warm every routing/output variant once, retry failures, and avoid capture."""
     from vllm.models.minimax_m3.amd.ops import moe_mxfp8 as k
 
-    raw, shuffled = m3_weights
-    w13, w2, w13_s, w2_s = shuffled
-    device = w13.device
-    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(k, "_warmed", {})
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    calls = []
+    fail = False
 
-    def record(name, module, attr):
-        real = getattr(module, attr)
-
-        def wrapped(x, *args, **kwargs):
+    def chain(name):
+        def run(x, *args, out=None, **kwargs):
             calls.append((name, x.shape[0]))
-            return real(x, *args, **kwargs)
+            if fail and x.shape[0] == 4096:
+                raise RuntimeError("compile failed")
+            return x.new_empty(x.shape) if out is None else out
 
-        monkeypatch.setattr(module, attr, wrapped)
+        return run
 
-    record("decode", k.decode, "a16w8_decode_moe")
-    record("mid", k.mid, "a8w8_mid_moe")
-    record("prefill", k.prefill, "a8w8_prefill_moe")
-    monkeypatch.setattr(k, "_warmed", False)
+    monkeypatch.setattr(k.decode, "a16w8_decode_moe", chain("decode"))
+    monkeypatch.setattr(k.mid, "a8w8_mid_moe", chain("mid"))
+    monkeypatch.setattr(k.prefill, "a8w8_prefill_moe", chain("prefill"))
 
-    def run(x, ids, w, **kwargs):
-        return k.mxfp8_moe(x, w13, w13_s, w2, w2_s, w, ids, **_kw(), **kwargs)
+    def run(m, shared=False, out=None):
+        e, topk = NUM_ROUTED + int(shared), TOPK + int(shared)
+        x = torch.empty((m, HIDDEN), dtype=torch.bfloat16, device="meta")
+        w = torch.empty(e, device="meta")
+        ids = torch.empty((m, topk), dtype=torch.int32, device="meta")
+        return k.mxfp8_moe(
+            x,
+            w,
+            w,
+            w,
+            w,
+            ids.float(),
+            ids,
+            hidden_size=HIDDEN,
+            intermediate_size=INTER,
+            num_experts=e,
+            fused_shared_expert=shared,
+            out=out,
+        )
 
-    torch.manual_seed(0)
-    x = torch.randn((4096, HIDDEN), dtype=torch.bfloat16, device=device)
-    ids, w = _routing(4096, device)
-    run(x[:256], ids[:256], w[:256], fused_shared_expert=True)
-    assert calls == [("decode", 256)]
+    for m, name in [(256, "decode"), (257, "mid"), (3071, "mid")]:
+        calls.clear()
+        out = torch.empty((m, HIDDEN), dtype=torch.bfloat16, device="meta")
+        assert run(m, out=out) is out
+        assert calls == [(name, m)]
+    fail = True
+    with pytest.raises(RuntimeError, match="compile failed"):
+        run(4096)
+    fail = False
     calls.clear()
-    out = torch.empty((512, HIDDEN), dtype=torch.bfloat16, device=device)
-    res = run(x[:512], ids[:512], w[:512], out=out)
-    assert res is out and calls == [("mid", 512)]
+    run(4096)
+    assert calls[-1] == ("prefill", 4096)
+    assert {k.mid.block_m_for(m) for name, m in calls if name == "mid"} == {32, 64, 128}
     calls.clear()
-    out = run(x, ids, w)
-    assert calls == [
-        ("mid", 512),
-        ("mid", 768),
-        ("mid", 1536),
-        ("prefill", 3072),
-        ("prefill", 4096),
-    ]
-    assert out.shape == (4096, HIDDEN) and out.dtype == torch.bfloat16
-    assert _cos(out, _run_aiter(shuffled, x, ids, w)) > 0.9999
-    calls.clear()
-    run(x, ids, w)
+    run(4096)
     assert calls == [("prefill", 4096)]
-
-
-def test_oracle_prefers_flydsl_experts_for_aiter_backend():
-    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
-        AiterMxfp8Experts,
-    )
-    from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
-        MiniMaxM3FlyDSLMxfp8Experts,
-    )
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
-        _mxfp8_backend_to_kernel_cls,
-    )
-
-    assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
-        MiniMaxM3FlyDSLMxfp8Experts,
-        AiterMxfp8Experts,
-    ]
-    assert issubclass(MiniMaxM3FlyDSLMxfp8Experts, AiterMxfp8Experts)
+    calls.clear()
+    run(32768)
+    assert calls[-1] == ("prefill", 32768)
+    assert any(name == "prefill" and 4096 < m < 32768 for name, m in calls)
+    for shared, mode in [(True, "bf16"), (False, "fp8")]:
+        monkeypatch.setenv("AITER_FLYDSL_STAGE2_FP8", str(int(mode == "fp8")))
+        calls.clear()
+        run(4096, shared)
+        assert any(name == "mid" for name, m in calls)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    calls.clear()
+    run(4096, shared=True)
+    assert calls == [("prefill", 4096)]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    calls.clear()
+    run(4096, shared=True)
+    assert any(name == "mid" for name, m in calls)
 
 
 def _fake_moe_config(**overrides):
+    from dataclasses import replace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-    cfg = dict(
+    cfg = make_dummy_moe_config(
         num_experts=NUM_ROUTED,
+        num_local_experts=NUM_ROUTED,
         experts_per_token=TOPK,
-        is_act_and_mul=True,
+        hidden_dim=HIDDEN,
+        intermediate_size=INTER * 4,
+        max_num_tokens=65536,
         activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+    cfg = replace(
+        cfg,
+        moe_parallel_config=replace(cfg.moe_parallel_config, tp_size=4),
+        intermediate_size_per_partition_unpadded=INTER,
         swiglu_alpha=SWIGLU_ALPHA,
         swiglu_beta=1.0,
         swiglu_limit=SWIGLU_LIMIT,
-        hidden_dim=HIDDEN,
-        hidden_dim_unpadded=HIDDEN,
-        intermediate_size_per_partition=INTER,
-        intermediate_size_per_partition_unpadded=INTER,
-        has_bias=False,
-        is_lora_enabled=False,
-        routing_method=None,
-        router_logits_dtype=torch.float32,
-        moe_parallel_config=SimpleNamespace(
-            use_ep=False, dp_size=1, tp_size=4, use_batched_activation_format=False
-        ),
     )
-    cfg.update(overrides)
-    return SimpleNamespace(**cfg)
+    return replace(cfg, **overrides)
 
 
 def test_experts_class_supported_config(monkeypatch):
+    from dataclasses import replace
+
+    import vllm.envs as envs
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
         MiniMaxM3FlyDSLMxfp8Experts as Cls,
@@ -467,63 +618,51 @@ def test_experts_class_supported_config(monkeypatch):
         kMxfp8Static,
     )
 
+    monkeypatch.setattr(envs, "VLLM_ROCM_USE_M3_FLYDSL_MOE", True)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
     def check(cfg):
         return Cls.is_supported_config(
             Cls, cfg, kMxfp8Static, kMxfp8Dynamic, mk.FusedMoEActivationFormat.Standard
         )
 
-    assert check(_fake_moe_config()) == (True, None)
-    ok, reason = check(_fake_moe_config(intermediate_size_per_partition=1536))
-    assert not ok and "1536" in reason  # TP2
-    ok, reason = check(
-        _fake_moe_config(
-            moe_parallel_config=SimpleNamespace(use_ep=True, dp_size=1, tp_size=4)
-        )
-    )
-    assert not ok and "expert parallelism" in reason
-    ok, reason = check(_fake_moe_config(swiglu_limit=None))
-    assert not ok and "swiglu_limit" in reason
-    ok, reason = check(_fake_moe_config(hidden_dim_unpadded=HIDDEN - 256))
-    assert not ok and "padded" in reason
-    import vllm.envs as envs
-
+    cfg = _fake_moe_config()
+    assert check(cfg) == (True, None)
+    assert check(replace(cfg, num_local_experts=129)) == (True, None)
+    rejected = [
+        dict(hidden_dim=1536, hidden_dim_unpadded=1536),
+        dict(hidden_dim=4096, hidden_dim_unpadded=4096),
+        dict(intermediate_size=1536 * 4),
+        dict(num_experts=257, num_local_experts=257),
+        dict(num_local_experts=130),
+        dict(experts_per_token=8),
+        dict(
+            moe_parallel_config=replace(cfg.moe_parallel_config, use_ep=True, ep_size=2)
+        ),
+        dict(has_bias=True),
+        dict(hidden_dim_unpadded=HIDDEN - 256),
+        dict(swiglu_limit=None),
+        dict(swiglu_limit=SWIGLU_LIMIT + 1e-10),
+        dict(swiglu_alpha=SWIGLU_ALPHA + 1e-10),
+        dict(swiglu_beta=1.0 + 1e-10),
+    ]
+    for changes in rejected:
+        ok, reason = check(replace(cfg, **changes))
+        assert not ok and reason, changes
     monkeypatch.setattr(envs, "VLLM_ROCM_USE_M3_FLYDSL_MOE", False)
-    ok, reason = check(_fake_moe_config())
-    assert not ok and "VLLM_ROCM_USE_M3_FLYDSL_MOE" in reason
+    assert not check(cfg)[0]
 
 
-@pytest.mark.parametrize(
-    "m, fused", [(16, True), (256, False), (512, False), (4096, True)]
-)
-def test_experts_class_apply(m3_weights, monkeypatch, m, fused):
-    """``apply`` as the modular kernel calls it: the routed output lands in
-    ``output``; a fused shared expert is recognised from the weights having one
-    expert more than ``global_num_experts``."""
-    from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
-        MiniMaxM3FlyDSLMxfp8Experts as Cls,
-    )
-    from vllm.models.minimax_m3.amd.ops import moe_mxfp8 as k
-
-    raw, shuffled = m3_weights
-    w13, w2, w13_s, w2_s = shuffled
-    device = w13.device
-    monkeypatch.setattr(k, "_warmed", True)  # the dispatch test covers the warm-up
-    experts = object.__new__(Cls)
-    experts.moe_config = _fake_moe_config()
-    experts.w1_scale_val, experts.w2_scale_val = w13_s, w2_s
-    torch.manual_seed(m)
-    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    ids, w = _routing(m, device, shared=fused)
-    output = torch.empty((m, HIDDEN), dtype=torch.bfloat16, device=device)
-    experts.apply(
-        output,
-        x,
-        w13,
-        w2,
-        w,
-        ids,
+def _apply(experts, output, x, shuffled, ids, weights, **overrides):
+    args = dict(
+        output=output,
+        hidden_states=x,
+        w1=shuffled[0],
+        w2=shuffled[1],
+        topk_weights=weights,
+        topk_ids=ids,
         activation=experts.moe_config.activation,
-        global_num_experts=NUM_ROUTED if fused else NUM_EXPERTS,
+        global_num_experts=NUM_ROUTED,
         expert_map=None,
         a1q_scale=None,
         a2_scale=None,
@@ -532,5 +671,80 @@ def test_experts_class_apply(m3_weights, monkeypatch, m, fused):
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
     )
-    torch.accelerator.synchronize()
-    assert _cos(output, _run_aiter(shuffled, x, ids, w)) > 0.998
+    args.update(overrides)
+    experts.apply(**args)
+
+
+@pytest.mark.parametrize(
+    "m,shared,out_dtype", [(16, True, torch.bfloat16), (257, False, torch.float32)]
+)
+def test_experts_class_apply(m3_weights, m, shared, out_dtype):
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+    from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
+        MiniMaxM3FlyDSLMxfp8Experts as Cls,
+    )
+
+    raw, shuffled = _weights_for(m3_weights, shared)
+    _, _, scale13, scale2 = shuffled
+    cfg = _fake_moe_config(num_local_experts=NUM_ROUTED + int(shared))
+    quant = FusedMoEQuantConfig.make(
+        quant_dtype="mxfp8",
+        block_shape=[1, 32],
+        w1_scale=scale13,
+        w2_scale=scale2,
+        gemm1_alpha=SWIGLU_ALPHA,
+        gemm1_beta=1.0,
+        gemm1_clamp_limit=SWIGLU_LIMIT,
+    )
+    experts = Cls(cfg, quant)
+    assert experts.w1_scale_val is scale13 and experts.w2_scale_val is scale2
+    set_random_seed(m)
+    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=shuffled[0].device)
+    ids, weights = _routing(m, x.device, shared)
+    output = torch.full(x.shape, float("nan"), dtype=out_dtype, device=x.device)
+    _apply(experts, output, x, shuffled, ids, weights)
+    reference = _reference(
+        x, raw, ids, weights, list(range(m)), mode="decode" if m <= 256 else "mid"
+    )
+    _assert_relative_l2(output, reference.value, limit=MATCHED_ERROR)
+
+
+@pytest.mark.parametrize(
+    "case", ["dtype", "strided", "router_weight", "expert_mask", "routing_width"]
+)
+def test_experts_class_falls_back(monkeypatch, case):
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+        AiterMxfp8Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
+        MiniMaxM3FlyDSLMxfp8Experts as Cls,
+    )
+
+    experts = object.__new__(Cls)
+    experts.moe_config = _fake_moe_config()
+    x = torch.zeros((2, HIDDEN), dtype=torch.bfloat16)
+    ids = torch.zeros((2, TOPK), dtype=torch.int32)
+    weights = ids.float()
+    overrides = {}
+    if case == "dtype":
+        x = x.float()
+    elif case == "strided":
+        x = torch.zeros((2, HIDDEN * 2), dtype=torch.bfloat16)[:, ::2]
+    elif case == "router_weight":
+        overrides["apply_router_weight_on_input"] = True
+    elif case == "expert_mask":
+        overrides["expert_map"] = torch.ones(NUM_ROUTED + 1, dtype=torch.int32)
+    else:
+        ids, weights = ids[:, :3], weights[:, :3]
+    out = torch.empty_like(x)
+    calls = []
+
+    def fallback(self, output, hidden_states, *args):
+        calls.append((hidden_states, args))
+        output.copy_(hidden_states + 1)
+
+    monkeypatch.setattr(AiterMxfp8Experts, "apply", fallback)
+    w = torch.empty((NUM_ROUTED, 0, 0))
+    _apply(experts, out, x, (w, w), ids, weights, **overrides)
+    assert len(calls) == 1 and calls[0][0] is x
+    torch.testing.assert_close(out, x + 1, rtol=0, atol=0)

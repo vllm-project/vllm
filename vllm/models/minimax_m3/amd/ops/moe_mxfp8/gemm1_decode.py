@@ -162,7 +162,7 @@ def compile_gemm1(
     name = (
         f"m3_gemm1_a16w8_h{K}_i{INTER}_ne{NE}_tn{TILE_N}_kw{KW}_kb{KB}_pf{PREFETCH}"
         f"_bcm{W_CACHE_MOD}"
-        + (f"_isort{max_pairs}" if inline_sort else "")
+        + (f"_isort{max_pairs}_k{TOPK}" if inline_sort else "")
         + (f"_bm{BM}" if BM != 16 else "")
         + (
             f"_wide{WIDE_BM}t{WIDE_TILE[0]}k{WIDE_TILE[1]}b{WIDE_TILE[2]}"

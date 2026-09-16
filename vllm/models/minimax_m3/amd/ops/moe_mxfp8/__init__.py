@@ -27,31 +27,44 @@ assert MAX_MID_TOKENS + 1 == MIN_PREFILL_TOKENS
 # the fp8 chains fuse SwiGLU-OAI with these constants (decode takes them as arguments)
 SWIGLU_ALPHA = prefill.GEMM1_SWIGLU_ALPHA
 SWIGLU_LIMIT = prefill.GEMM1_SWIGLU_LIMIT
+HIDDEN_SIZE = 6144
+INTERMEDIATE_SIZE = 768
+NUM_ROUTED_EXPERTS = 128
+ROUTED_TOPK = 4
+_MAX_BUFFER_BYTES = 0xFFFFFFFF
 
 # One batch size per kernel configuration the profile batch does not compile
 # itself (mid sort blocks of 32 / 64 / 128 rows, prefill blocks of 128 / 256
-# rows with gemm2's small-batch n-split): the first prefill-range call, i.e.
-# the model runner's profile run, also runs these on prefixes of its batch so
-# that no request waits on a compile.
+# rows with gemm2's small-batch n-split). Profile calls warm these on prefixes
+# for each device/routing/output configuration before graph capture.
 _WARM_UP_TOKENS = (512, 768, 1536, 3072, 16384)
-_warmed = False
+_warmed: dict[tuple[torch.device, int, int, str], int] = {}
 
 
 def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
-    """Layer shapes all three chains are written for."""
-    return decode.supports_shapes(
-        hidden_size, intermediate_size
-    ) and prefill.supports_shapes(hidden_size, intermediate_size)
+    """MiniMax-M3 TP4 dimensions supported by every kernel configuration."""
+    return (hidden_size, intermediate_size) == (HIDDEN_SIZE, INTERMEDIATE_SIZE)
 
 
-def supports_batch(x: torch.Tensor) -> bool:
-    """Runtime gate for one call: ``[M, hidden]`` bf16, contiguous, up to
-    ``MAX_TOKENS`` rows."""
+def supports_routing(num_experts: int, topk: int, *, fused_shared_expert: bool) -> bool:
+    """Four routed experts per token, optionally followed by one shared expert."""
+    shared = int(fused_shared_expert)
+    return (num_experts, topk) == (
+        NUM_ROUTED_EXPERTS + shared,
+        ROUTED_TOPK + shared,
+    )
+
+
+def supports_batch(x: torch.Tensor, topk: int = ROUTED_TOPK + 1) -> bool:
+    """Contiguous BF16 M3 activations whose BF16 partials fit a buffer resource."""
     return (
         x.dim() == 2
         and 1 <= x.shape[0] <= MAX_TOKENS
+        and x.shape[1] == HIDDEN_SIZE
         and x.dtype == torch.bfloat16
         and x.is_contiguous()
+        and 1 <= topk <= ROUTED_TOPK + 1
+        and x.shape[0] * topk * HIDDEN_SIZE * 2 <= _MAX_BUFFER_BYTES
     )
 
 
@@ -133,7 +146,6 @@ def mxfp8_moe(
     aiter's fused shared expert, routed by every token (decode may then use its
     wide sort layout); False for ModelOpt MXFP8, where vLLM keeps it separate.
     """
-    global _warmed
     kw = dict(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
@@ -143,11 +155,23 @@ def mxfp8_moe(
         fused_shared_expert=fused_shared_expert,
     )
     n_tokens = x.shape[0]
-    assert 1 <= n_tokens <= MAX_TOKENS, n_tokens
-    if not _warmed and n_tokens >= MIN_PREFILL_TOKENS:
-        _warmed = True
+    topk = topk_ids.shape[1]
+    assert supports_shapes(hidden_size, intermediate_size)
+    assert supports_routing(num_experts, topk, fused_shared_expert=fused_shared_expert)
+    assert supports_batch(x, topk)
+    assert topk_ids.shape == topk_weights.shape == (n_tokens, topk)
+    assert w13.shape[0] == w2.shape[0] == num_experts
+    assert swiglu_alpha == SWIGLU_ALPHA and swiglu_limit == SWIGLU_LIMIT
+    warmup_key = (x.device, num_experts, topk, prefill.default_out_mode())
+    warmed_tokens = _warmed.get(warmup_key, 0)
+    warmup = (
+        n_tokens >= MIN_PREFILL_TOKENS
+        and n_tokens > warmed_tokens
+        and not torch.cuda.is_current_stream_capturing()
+    )
+    if warmup:
         for m in _WARM_UP_TOKENS:
-            if m < n_tokens:
+            if warmed_tokens < m < n_tokens:
                 _dispatch(
                     x[:m],
                     w13,
@@ -159,9 +183,12 @@ def mxfp8_moe(
                     out=None,
                     **kw,
                 )
-    return _dispatch(
+    result = _dispatch(
         x, w13, w13_scale, w2, w2_scale, topk_weights, topk_ids, out=out, **kw
     )
+    if warmup:
+        _warmed[warmup_key] = n_tokens
+    return result
 
 
 __all__ = [
@@ -171,6 +198,8 @@ __all__ = [
     "MAX_TOKENS",
     "MIN_MID_TOKENS",
     "MIN_PREFILL_TOKENS",
+    "NUM_ROUTED_EXPERTS",
+    "ROUTED_TOPK",
     "SWIGLU_ALPHA",
     "SWIGLU_LIMIT",
     "decode",
@@ -178,5 +207,6 @@ __all__ = [
     "mxfp8_moe",
     "prefill",
     "supports_batch",
+    "supports_routing",
     "supports_shapes",
 ]

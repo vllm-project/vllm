@@ -5,6 +5,7 @@
 import functools
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 import torch
 
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.reduce_bf16 import (
@@ -19,12 +20,21 @@ def _u8_flat(t: torch.Tensor) -> torch.Tensor:
     return t.view(torch.uint8).view(-1)
 
 
+class _DeviceStream(fx.Stream):
+    def __cache_signature__(self):
+        # FlyDSL module handles belong to the device that loaded them.
+        return (fx.Stream, self.value.device.index)
+
+
 def _run_compiled(exe, *args):
-    """First call compiles and runs (``flyc.compile``); later calls dispatch the
-    cached CompiledFunction (the shim aiter ships in ``ops/flydsl/kernels``)."""
-    cf = getattr(exe, "_cf", None)
+    """Compile and run once per device, then reuse its CompiledFunction."""
+    device = args[-1].device.index
+    cache = getattr(exe, "_cf", None)
+    if cache is None:
+        exe._cf = cache = {}
+    cf = cache.get(device)
     if cf is None:
-        exe._cf = flyc.compile(exe, *args)
+        cache[device] = flyc.compile(exe, *args[:-1], _DeviceStream(args[-1]))
     else:
         cf(*args)
 

@@ -9,8 +9,6 @@ kernels do not cover; the MXFP8 MoE oracle lists this class ahead of it for the
 
 from __future__ import annotations
 
-import math
-
 import torch
 
 from vllm import envs
@@ -30,6 +28,11 @@ def _kernels():
 
 class MiniMaxM3FlyDSLMxfp8Experts(AiterMxfp8Experts):
     """MXFP8 MoE through the MiniMax-M3 FlyDSL chains (gfx950)."""
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        # Decode/mid use BF16 atomics and change activation precision by batch.
+        return False
 
     def __init__(self, moe_config, quant_config):
         super().__init__(moe_config, quant_config)
@@ -70,17 +73,33 @@ class MiniMaxM3FlyDSLMxfp8Experts(AiterMxfp8Experts):
         if not kernels.supports_shapes(hidden, inter):
             return False, (
                 f"hidden={hidden} intermediate_size_per_partition={inter} is not "
-                "tiled by the kernels (MiniMax-M3 at TP4: 6144 / 768)"
+                "supported by the kernels (MiniMax-M3 at TP4: 6144 / 768)"
+            )
+        if (
+            moe_config.num_experts != kernels.NUM_ROUTED_EXPERTS
+            or moe_config.experts_per_token != kernels.ROUTED_TOPK
+            or moe_config.num_local_experts
+            not in (kernels.NUM_ROUTED_EXPERTS, kernels.NUM_ROUTED_EXPERTS + 1)
+        ):
+            return False, (
+                "kernels require 128 routed experts, top-k 4, and at most one "
+                "fused shared expert"
             )
         if (
             moe_config.hidden_dim_unpadded != hidden
             or moe_config.intermediate_size_per_partition_unpadded != inter
         ):
             return False, "kernels do not support padded dimensions"
-        limit = moe_config.swiglu_limit
-        if limit is None or not math.isclose(float(limit), kernels.SWIGLU_LIMIT):
+        alpha, beta, limit = (
+            moe_config.swiglu_alpha,
+            moe_config.swiglu_beta,
+            moe_config.swiglu_limit,
+        )
+        if (alpha, beta, limit) != (kernels.SWIGLU_ALPHA, 1.0, kernels.SWIGLU_LIMIT):
             return False, (
-                f"kernels hardcode swiglu_limit={kernels.SWIGLU_LIMIT}; got {limit}"
+                f"kernels hardcode swiglu_alpha={kernels.SWIGLU_ALPHA}, "
+                f"swiglu_beta=1.0, swiglu_limit={kernels.SWIGLU_LIMIT}; "
+                f"got {alpha}, {beta}, {limit}"
             )
         return True, None
 
@@ -103,7 +122,23 @@ class MiniMaxM3FlyDSLMxfp8Experts(AiterMxfp8Experts):
         apply_router_weight_on_input: bool,
     ):
         kernels = _kernels()
-        if apply_router_weight_on_input or not kernels.supports_batch(hidden_states):
+        moe_config = self.moe_config
+        fused_shared_expert = w1.shape[0] > global_num_experts
+        if (
+            apply_router_weight_on_input
+            or expert_map is not None
+            or global_num_experts != kernels.NUM_ROUTED_EXPERTS
+            or w1.shape[0] != moe_config.num_local_experts
+            or w2.shape[0] != w1.shape[0]
+            or hidden_states.dim() != 2
+            or topk_ids.dim() != 2
+            or topk_weights.shape != topk_ids.shape
+            or topk_ids.shape[0] != hidden_states.shape[0]
+            or not kernels.supports_routing(
+                w1.shape[0], topk_ids.shape[1], fused_shared_expert=fused_shared_expert
+            )
+            or not kernels.supports_batch(hidden_states, topk_ids.shape[1])
+        ):
             return super().apply(
                 output,
                 hidden_states,
@@ -121,7 +156,6 @@ class MiniMaxM3FlyDSLMxfp8Experts(AiterMxfp8Experts):
                 expert_tokens_meta,
                 apply_router_weight_on_input,
             )
-        moe_config = self.moe_config
         alpha, limit = moe_config.swiglu_alpha, moe_config.swiglu_limit
         assert alpha is not None and limit is not None  # is_supported_config
         n_tokens, hidden = hidden_states.shape
@@ -147,7 +181,7 @@ class MiniMaxM3FlyDSLMxfp8Experts(AiterMxfp8Experts):
             swiglu_limit=float(limit),
             # aiter's fused shared expert is appended after the routed experts
             # (RoutedExperts sizes the weights by global + fused experts)
-            fused_shared_expert=w1.shape[0] > global_num_experts,
+            fused_shared_expert=fused_shared_expert,
             out=out,
         )
         if result is not output:

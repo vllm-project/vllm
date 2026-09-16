@@ -21,6 +21,7 @@ import flydsl.expr as fx
 import torch
 from flydsl.expr import const_expr, range_constexpr
 
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import _run_compiled
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort import max_sorted_rows
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_atomic_add_i32
 
@@ -233,7 +234,8 @@ def moe_sort_decode(topk_ids, topk_weights, E, H, block_m, out, wide_first=None)
         max_tokens=64 if n_tokens <= 64 else 256,
         wide_first=wide_first,
     )
-    launch(
+    _run_compiled(
+        launch,
         topk_ids.contiguous().int().view(-1),
         topk_weights.contiguous().float().view(-1),
         sorted_ids,

@@ -5,7 +5,7 @@
     y[tok, :] = sum_k w[tok, k] * dequant(out[tok*topk + k, :])      -> bf16
 
 One wave per (token, 1024-column chunk), 16 fp8 = one dwordx4 per lane per row plus
-one scale byte, ``v_cvt_pk_f32_fp8`` and one fma per value with 2^(e8m0-127) * w;
+one scale byte, ``v_cvt_scalef32_pk_f32_fp8`` and one fma per value with w;
 non-temporal loads, 4 waves per CTA.
 Layouts (bytes): OUT [n_tokens*topk, H] fp8 e4m3; OUT_sc [n_tokens*topk, H/32] e8m0;
 W [n_tokens, topk] f32; Y [n_tokens, H] bf16.
@@ -30,13 +30,13 @@ _NT = 2  # non-temporal cache policy
 _CHUNK = 1024  # fp8 columns per (wave, dwordx4)
 
 
-def _cvt_pk_f32_fp8(dword, hi: bool):
-    """v_cvt_pk_f32_fp8: 2 fp8 (low / high word of ``dword``) -> 2 f32"""
+def _cvt_pk_f32_fp8(dword, scale, hi: bool):
+    """Two FP8 values -> FP32, including E8M0 scale byte 0 (2^-127)."""
     v2f32 = _ir.VectorType.get([2], _T.f32)
     res = _llvm.call_intrinsic(
         v2f32,
-        "llvm.amdgcn.cvt.pk.f32.fp8",
-        [fx.as_ir_value(dword), fx.Boolean(hi).ir_value()],
+        "llvm.amdgcn.cvt.scalef32.pk.f32.fp8",
+        [fx.as_ir_value(dword), fx.as_ir_value(scale), fx.Boolean(hi).ir_value()],
         [],
         [],
     )
@@ -142,11 +142,11 @@ def compile_moe_reduce_fp8(*, H: int, topk: int):
             acc = [[fx.Float32(0.0) for _ in range(16)] for _ in range(CPW)]
             for k in range_constexpr(topk):
                 for i in range_constexpr(CPW):
-                    sw = _as_f32((e8s[k][i] & fx.Int32(0xFF)) << 23) * ws[k]
+                    scale = _as_f32((e8s[k][i] & fx.Int32(0xFF)) << 23)
                     for d in range_constexpr(4):
                         dw = fx.Int32(data[k][i][d])
-                        lo = _cvt_pk_f32_fp8(dw, False)
-                        hi = _cvt_pk_f32_fp8(dw, True)
+                        lo = _cvt_pk_f32_fp8(dw, scale, False)
+                        hi = _cvt_pk_f32_fp8(dw, scale, True)
                         vals = [
                             fx.Float32(lo[0]),
                             fx.Float32(lo[1]),
@@ -154,7 +154,7 @@ def compile_moe_reduce_fp8(*, H: int, topk: int):
                             fx.Float32(hi[1]),
                         ]
                         for q in range_constexpr(4):
-                            acc[i][4 * d + q] = _fma(vals[q], sw, acc[i][4 * d + q])
+                            acc[i][4 * d + q] = _fma(vals[q], ws[k], acc[i][4 * d + q])
             y_dw = (
                 tok * (H // 2) + seg * (CHUNK_DW * 2 * CPW) + lane * 8
             )  # bf16 row in dwords

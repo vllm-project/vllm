@@ -64,6 +64,11 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     consumes_expert_mask = True
 
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        # AITER selects different GEMM and reduction schedules by batch size.
+        return False
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype

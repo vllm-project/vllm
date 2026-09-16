@@ -98,8 +98,9 @@ def a8w8_mid_moe(
     inter = intermediate_size
 
     bufs = SortBuffers.allocate(n_tokens, num_experts, topk, bm, device)
-    _get_sort(num_experts, topk, bm)(
-        *bufs.launch_args(topk_ids, topk_weights, n_tokens)
+    _run_compiled(
+        _get_sort(num_experts, topk, bm),
+        *bufs.launch_args(topk_ids, topk_weights, n_tokens),
     )
     a_q, a_s = fused_dynamic_mx_quant_moe_sort(
         x,

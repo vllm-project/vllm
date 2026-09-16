@@ -90,9 +90,7 @@ def test_aiter_mxfp8_registered():
     """The FlyDSL backend is auto-selectable and reachable via --moe-backend aiter."""
     assert Fp8MoeBackend.AITER_MXFP8 in _SUPPORTED_BACKENDS
     assert _BACKEND_NAME_MAP["aiter"] is Fp8MoeBackend.AITER_MXFP8
-    assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
-        AiterMxfp8Experts
-    ]
+    assert AiterMxfp8Experts in _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -167,3 +165,29 @@ def test_gfx942_picks_emulation():
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
+
+
+def test_batch_invariance_rejects_aiter_candidates(monkeypatch):
+    """Reject both FlyDSL implementations when deterministic batching is required."""
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    cfg = dataclasses.replace(
+        _config(),
+        intermediate_size=768,
+        intermediate_size_per_partition_unpadded=768,
+        swiglu_limit=7.0,
+    )
+    with _gfx950(), _flydsl_installed(True):
+        for cls in _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8):
+            supported, reason = cls.is_supported_config(
+                cls, cfg, kMxfp8Static, kMxfp8Dynamic, FusedMoEActivationFormat.Standard
+            )
+            assert not supported and "batch invariance" in reason
+        cfg.moe_backend = "aiter"
+        with pytest.raises(ValueError, match="batch invariance"):
+            select_mxfp8_moe_backend(cfg)
+        cfg.moe_backend = "auto"
+        backend, cls = select_mxfp8_moe_backend(cfg)
+        assert backend is not Fp8MoeBackend.AITER_MXFP8
+        assert cls._supports_batch_invariance()

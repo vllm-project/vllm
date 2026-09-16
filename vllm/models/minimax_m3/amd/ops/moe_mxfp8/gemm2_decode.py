@@ -126,7 +126,7 @@ def compile_gemm2(
 
     name = (
         f"m3_gemm2_a16w8_ne{NE}_h{N_OUT}_i{K}_tn{TILE_N}_tk{TILE_K}_ks{ksplit}_bcm{b_cache_mod}"
-        + (f"_isort{max_pairs}" if inline_sort else "")
+        + (f"_isort{max_pairs}_k{TOPK}" if inline_sort else "")
         + (f"_bm{BM}" if BM != 16 else "")
         + (f"_wide{WIDE_BM}of{WIDE_SORT_BM}" if wide else "")
     )

@@ -31,11 +31,6 @@ def wide_for(n_tokens: int) -> bool:
     return n_tokens >= WIDE_MIN_TOKENS
 
 
-def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
-    """Dimensions must fit the 256-wide K tiles and the three-way split-K."""
-    return hidden_size % 256 == 0 and intermediate_size % (256 * 3) == 0
-
-
 def _intermediate_workspace(
     device: torch.device, topk: int, intermediate_size: int, num_experts: int
 ) -> torch.Tensor:

@@ -3593,6 +3593,8 @@ steps:
   - tests/kernels/moe
   - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/models/minimax_m3/amd/ops/moe_mxfp8/
+  - vllm/models/minimax_m3/amd/ops/moe_flydsl_common/
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/

@@ -55,22 +55,6 @@ def default_out_mode() -> str:
     return "fp8" if os.environ.get("AITER_FLYDSL_STAGE2_FP8", "0") == "1" else "bf16"
 
 
-_GEMM1_BLOCK_K = 128
-_GEMM2_INTERMEDIATE = 768
-
-
-def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
-    """gemm1 unrolls the K loop by 4 steps of 128 after 4 peeled ones; gemm2's
-    pipeline is written for K = 768."""
-    k_iters = hidden_size // _GEMM1_BLOCK_K
-    return (
-        hidden_size % 256 == 0
-        and k_iters >= 8
-        and (k_iters - 4) % 4 == 0
-        and intermediate_size == _GEMM2_INTERMEDIATE
-    )
-
-
 @functools.cache
 def _get_gemm1(
     hidden_size: int, intermediate_size: int, num_experts: int, block_m: int
@@ -243,8 +227,9 @@ def a8w8_prefill_stage1(
     inter = intermediate_size
 
     bufs = SortBuffers.allocate(n_tokens, num_experts, topk, bm, device)
-    _get_sort(num_experts, topk, bm)(
-        *bufs.launch_args(topk_ids, topk_weights, n_tokens)
+    _run_compiled(
+        _get_sort(num_experts, topk, bm),
+        *bufs.launch_args(topk_ids, topk_weights, n_tokens),
     )
     a_q, a_s = fused_dynamic_mx_quant_moe_sort(
         x,
