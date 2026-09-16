@@ -462,13 +462,31 @@ def test_flashinfer_mixed_sparse_indices_with_image_spans():
     assert actual == exp_rows[1:]
 
 
-def make_builder(vision: bool) -> DeepseekSparseSWAMetadataBuilder:
-    overrides: dict = {"sliding_window": WINDOW}
+def make_builder(
+    vision: bool,
+    window: int = WINDOW,
+    max_image_tokens: int = MAX_IMG,
+    max_num_batched_tokens: int = 64,
+    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    builder_cls: type[
+        DeepseekSparseSWAMetadataBuilder
+    ] = DeepseekSparseSWAMetadataBuilder,
+    mm_prefix_clamp_sliding_window: bool = True,
+) -> DeepseekSparseSWAMetadataBuilder:
+    overrides: dict = {"sliding_window": window}
     if vision:
-        overrides.update(vision_n_layers=2, vision_max_n_token=MAX_IMG)
+        # Emulate the V4 vision config, whose mm_prefix_clamp_sliding_window
+        # gates the in-kernel SWA widening. V4.1 (causal image tokens) leaves
+        # it off.
+        overrides.update(
+            vision_n_layers=2,
+            vision_max_n_token=max_image_tokens,
+            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
+        )
     vllm_config = create_vllm_config(
+        model_name=model_name,
         max_model_len=4096,
-        max_num_batched_tokens=64,
+        max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=8,
         hf_config_override=overrides,
     )
@@ -477,11 +495,11 @@ def make_builder(vision: bool) -> DeepseekSparseSWAMetadataBuilder:
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=WINDOW,
+        sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
     )
-    return DeepseekSparseSWAMetadataBuilder(
+    return builder_cls(
         kv_cache_spec=spec,
         layer_names=["layer0"],
         vllm_config=vllm_config,
@@ -578,3 +596,60 @@ def test_builder_text_model_unchanged():
     )
     assert md.prefill_swa_lens.cpu().tolist() == lens
     assert md.prefill_swa_indices[:, 0].cpu().tolist() == rows
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("compress_ratio", [0, 1, 2])
+@pytest.mark.parametrize("query_len", [100, 4000])
+def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
+    """V4.1 image tokens use the same causal SWA as text, including in chunks."""
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import DeepseekV41SparseSWAMetadataBuilder
+
+    seq_len, window, max_image_tokens = 4000, 128, 2048
+    spans = [(1900, 3947)]
+    builder = make_builder(
+        True,
+        window,
+        max_image_tokens,
+        query_len,
+        builder_cls=DeepseekV41SparseSWAMetadataBuilder,
+        mm_prefix_clamp_sliding_window=False,
+    )
+    assert builder.max_image_tokens == 0
+    md = build_metadata(builder, [seq_len], [query_len], {0: spans})
+    assert md.prefill_left_visible is None
+    assert md.prefill_right_visible is None
+    assert md.prefill_swa_indices.shape[-1] == window
+    plan = md.get_prefill_chunk_plan(
+        compress_ratio, prefill_chunk_size=4, has_compressed=compress_ratio > 0
+    )
+    [(start, end, n, m)] = plan
+    gather_len = int(md.prefill_gather_lens[0])
+    assert (start, end, m - n) == (0, 1, gather_len)
+    assert gather_len == query_len + min(seq_len - query_len, window - 1)
+    indices, lens = combine_v41(
+        torch.empty(query_len, 0, dtype=torch.int32, device="cuda"),
+        md.query_start_loc,
+        md.prefill_seq_lens,
+        md.prefill_gather_lens,
+        window,
+        compress_ratio,
+        0,
+        m,
+        n,
+    )
+    indices, lens = indices.cpu(), lens.cpu().tolist()
+    paged_indices = md.prefill_swa_indices.cpu()
+    paged_lens = md.prefill_swa_lens.cpu().tolist()
+    for token, pos in enumerate(range(seq_len - query_len, seq_len)):
+        lo, hi = max(0, pos - window + 1), pos + 1
+        row = indices[token, : lens[token]]
+        assert lens[token] == hi - lo
+        assert torch.all((row >= n) & (row < m))
+        absolute_keys = row - n + seq_len - gather_len
+        assert absolute_keys.tolist() == list(range(lo, hi))
+        assert paged_lens[token] == hi - lo
+        assert paged_indices[token, 0, : hi - lo].tolist() == list(range(lo, hi))
