@@ -45,6 +45,8 @@ from vllm.utils import random_uuid
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
+    from vllm.v1.metrics.stats import RequestStateStats
+
 logger = logging.getLogger(__name__)
 
 # This is currently needed as the tool type doesn't 1:1 match the
@@ -102,6 +104,11 @@ class TurnMetrics:
 
 class ConversationContext(ABC):
     response_parser: Parser | None = None
+    request_metrics: "RequestStateStats | None" = None
+    # Built-in tools can trigger additional model generations. In that case,
+    # the stored engine timestamps cover only one turn, while token usage is
+    # accumulated across all turns.
+    request_metrics_cover_all_generation_turns: bool = True
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
