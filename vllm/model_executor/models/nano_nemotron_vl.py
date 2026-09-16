@@ -23,6 +23,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -30,6 +31,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
 )
@@ -897,10 +899,21 @@ class NanoNemotronVLDummyInputsBuilder(
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
 class NemotronH_Nano_VL_V2(
-    nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
+    nn.Module,
+    HasInnerState,
+    IsHybrid,
+    SupportsMultiModal,
+    SupportsMultiModalPruning,
+    SupportsLoRA,
 ):
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
+
+    # LoRA covers the language model only
+    is_non_gated_moe = NemotronHForCausalLM.is_non_gated_moe
+    packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
+    embedding_modules = NemotronHForCausalLM.embedding_modules
+    lora_skip_prefixes = NemotronHForCausalLM.lora_skip_prefixes
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1331,7 +1344,19 @@ class NemotronH_Nano_VL_V2(
 
         # Create final video embeddings, merging text embeddings for indicator
         # tokens with video embeddings
-        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
+
+        # LoRA support -
+        # These replacement tokens are produced inside the encoder, so they are
+        # absent from the request-token batch that the LoRA adapter index
+        # mapping is built from, and there can be more
+        # of them than max_num_batched_tokens.
+        # Embed them with the base weights -
+        # the LoRA delta is undefined for tokens with no mapping entry.
+        embed_tokens = self.get_language_model().model.embed_tokens
+        if isinstance(embed_tokens, BaseLayerWithLoRA):
+            embed_tokens = embed_tokens.base_layer
+        text_embeddings = embed_tokens(repl_token_ids)
+
         final_video_embeddings = _merge_multimodal_embeddings(
             inputs_embeds=text_embeddings,
             multimodal_embeddings=video_embeddings,
