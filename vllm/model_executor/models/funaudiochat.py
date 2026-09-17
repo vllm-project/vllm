@@ -695,14 +695,11 @@ class FunAudioChatMultiModalProcessor(
             return_tensors="pt",
         )
 
-        # Pad to the longest item in this request, not the 300s Whisper
-        # max_length. Short clips must not expand to a full-budget feature
-        # tensor before generation.
         wav_inputs = feature_extractor(
             wavs,
             sampling_rate=sr,
             return_attention_mask=True,
-            padding=True,
+            padding="max_length",
             return_tensors="pt",
         )
 

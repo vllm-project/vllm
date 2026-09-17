@@ -126,23 +126,4 @@ def test_profiled_max_audio_is_accepted(funaudiochat_processor):
 
     assert processed["speech_attention_mask"].sum().item() == 7500
     assert feature_extractor.last_kwargs is not None
-    assert feature_extractor.last_kwargs.get("padding") is True
-    assert feature_extractor.last_kwargs.get("padding") != "max_length"
-
-
-def test_short_audio_does_not_pad_features_to_max_length(funaudiochat_processor):
-    processor, feature_extractor = funaudiochat_processor
-    sampling_rate = 16000
-    one_second = np.zeros(sampling_rate, dtype=np.float32)
-    mm_items = processor.info.parse_mm_data(
-        {"audio": [one_second, one_second]}, validate=False
-    )
-
-    processed = processor._apply_hf_processor_main(mm_items, {})
-
-    assert feature_extractor.last_kwargs is not None
-    assert feature_extractor.last_kwargs.get("padding") is True
-    # hop_length=160 → 100 frames per 1s clip, not Whisper's 30000-frame max.
-    assert processed["input_features"].shape[-1] == 100
-    assert processed["input_features"].nbytes < 1_000_000
-    assert processed["speech_attention_mask"].sum(dim=-1).tolist() == [25, 25]
+    assert feature_extractor.last_kwargs.get("padding") == "max_length"
