@@ -645,13 +645,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         if dcp_world_size > 1:
-            # DCP shards full-attention KV across ranks and replicates Mamba
-            # state; other spec types (e.g. sliding window) have no DCP-aware
-            # handling yet, so reject them explicitly.
+            # DCP shards full-attention KV across ranks; Mamba and
+            # sliding-window groups keep replicated per-rank state
+            # (dcp_world_size_for_kv_cache_spec pins their geometry to 1).
+            # Other spec types have no DCP-aware handling yet, so reject
+            # them explicitly.
             for g in kv_cache_config.kv_cache_groups:
-                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+                assert isinstance(
+                    g.kv_cache_spec,
+                    (FullAttentionSpec, MambaSpec, SlidingWindowSpec),
+                ), (
                     "DCP with hybrid KV cache layouts only supports "
-                    "full-attention and Mamba groups, got: "
+                    "full-attention, Mamba, and sliding-window groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache

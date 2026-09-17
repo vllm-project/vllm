@@ -1341,6 +1341,42 @@ def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mamba, dcp) == 1
     assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, 1) == 1
+    sliding = new_sliding_window_spec()
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(sliding, dcp) == 1
+
+
+def test_hybrid_coordinator_accepts_sliding_window_groups_with_dcp():
+    """Sliding-window groups are replicated (dcp_world_size=1) under DCP,
+    like Mamba; the hybrid coordinator must admit them instead of
+    rejecting the config at construction."""
+    from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+
+    dcp = 8
+    block_size = 16
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mla.0"], new_mla_spec(block_size=block_size)),
+            KVCacheGroupSpec(
+                ["swa.0"], new_sliding_window_spec(block_size=block_size)
+            ),
+        ],
+    )
+    coordinator = get_kv_cache_coordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        max_in_flight_tokens=8192,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=dcp,
+        pcp_world_size=1,
+        scheduler_block_size=block_size * dcp,
+        hash_block_size=block_size,
+    )
+    assert coordinator.single_type_managers[0].dcp_world_size == dcp
+    assert coordinator.single_type_managers[1].dcp_world_size == 1
 
 
 @pytest.mark.parametrize(
