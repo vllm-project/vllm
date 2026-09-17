@@ -82,6 +82,15 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             elif quant_config.is_per_act_token:
                 quant_func = get_hip_quant(QuantType.per_Token)
                 a1, scale = quant_func(a1, quant_dtype=current_platform.fp8_dtype())
+            elif quant_config.is_per_tensor:
+                quant_func = get_hip_quant(QuantType.per_Tensor)
+                a1, scale = quant_func(
+                    a1,
+                    scale=quant_config.a1_scale,
+                    quant_dtype=current_platform.fp8_dtype(),
+                )
+                # mori expects one scale slot per token; broadcast.
+                scale = scale.expand(a1.shape[0], 1).contiguous()
 
         (
             dispatch_a1,

@@ -193,6 +193,22 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def test_max_num_active_seqs_caps_admission():
+    """Admission is capped by max_num_active_seqs, not max_num_seqs."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_active_seqs=3)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 3
+    assert len(scheduler.running) == 3
+    assert len(scheduler.waiting) == 7
+    # Execution capacity is untouched.
+    assert scheduler.max_num_running_reqs == 16
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
