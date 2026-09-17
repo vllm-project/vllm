@@ -268,8 +268,7 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
 def test_cache_load_returns_tuple_consistency_tuple_output(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that cache loading correctly handles models that return tuples.
+    """Test that cache loading correctly handles models that return tuples.
 
     This verifies that when a model returns a tuple of tensors, the output
     type is preserved as a tuple between fresh compilation and cache load.
@@ -335,8 +334,7 @@ def test_cache_load_returns_tuple_consistency_tuple_output(
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_shape_env(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that the shape environment is correctly serialized and preserved
+    """Test that the shape environment is correctly serialized and preserved
     when loading from cache.
     """
     with monkeypatch.context() as m:
@@ -374,8 +372,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
 ):
-    """
-    Test that partition wrappers are applied when loading AOT cached functions.
+    """Test that partition wrappers are applied when loading AOT cached functions.
 
     This test verifies the fix for GitHub issue #31439 where AOT compile
     caused 2x latency regression when use_inductor_graph_partition=True.
@@ -498,14 +495,12 @@ def test_standalone_compile_correctness():
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that compiling gpt2 twice results in a cache hit.
+    """Test that compiling gpt2 twice results in a cache hit.
 
     Counter values are read from the EngineCore subprocess via
     ``LLM.collective_rpc`` so the test works under default V1
     multiprocessing (no shared memory between test and engine).
     """
-
     from vllm import LLM
 
     def _snap(self):
@@ -641,7 +636,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_success(self, mock_deserialize):
-        """Test successful loading of all artifacts"""
+        """Test successful loading of all artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact1 = Mock()
@@ -658,7 +653,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_already_loaded(self, mock_deserialize):
-        """Test that load_all skips if already loaded"""
+        """Test that load_all skips if already loaded."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -671,7 +666,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_get_loaded_artifact(self, mock_deserialize):
-        """Test retrieving loaded artifacts"""
+        """Test retrieving loaded artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()

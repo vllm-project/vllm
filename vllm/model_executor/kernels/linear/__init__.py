@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-This module re-exports linear kernel implementations to provide a
+"""This module re-exports linear kernel implementations to provide a
 stable import interface during an ongoing reorganization. Upcoming
 PRs will remove the scaled_mm and mixed_precision subdirectories
 and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
@@ -178,7 +177,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledFp8BlockScaledMMKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
@@ -323,7 +321,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
@@ -467,7 +464,6 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -637,8 +633,7 @@ def choose_scaled_mm_linear_kernel(
     *,
     quantization: str,
 ) -> type[_KernelT]:
-    """
-    Choose a _KernelT that can implement the given config for the
+    """Choose a _KernelT that can implement the given config for the
     given compute capability. Attempts to choose the best kernel in terms of
     performance.
 
@@ -660,8 +655,8 @@ def choose_scaled_mm_linear_kernel(
 
     Returns:
         _KernelT: Chosen kernel.
-    """
 
+    """
     failure_reason_list = []
 
     if force_kernel is not None:
@@ -815,8 +810,7 @@ def init_int8_linear_kernel(
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
-    """
-    Choose an MPLinearKernel that can implement the given config for the given
+    """Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of
      performance.
 
@@ -832,6 +826,7 @@ def choose_mp_linear_kernel(
 
     Returns:
         type[MPLinearKernel]: Chosen kernel.
+
     """
     if compute_capability is None:
         if current_platform is None:
@@ -1193,8 +1188,7 @@ def register_linear_kernel(
     platform: PlatformEnum,
     kernel_type: str = "mp",
 ) -> None:
-    """
-    Register a new linear kernel class to be considered in kernel selection.
+    """Register a new linear kernel class to be considered in kernel selection.
 
     Args:
         kernel_class (type): The kernel class to register.
@@ -1204,6 +1198,7 @@ def register_linear_kernel(
 
     Raises:
         ValueError: If the kernel_type is not recognized.
+
     """
     if kernel_type == "mp":
         if platform not in _POSSIBLE_KERNELS:
@@ -1252,7 +1247,6 @@ __all__ = [
     "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
-    "AiterPreshuffledFp8BlockScaledMMKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
