@@ -132,7 +132,7 @@ class DeepseekV4MLP(nn.Module):
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
             return
-        # aiter's gemm_a8w8_blockscale_bpreshuffle has no working gfx1250 path
+        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
         # Leaving _gateup_scale as None -> "not preshuffled"
         # forward() falls back to the standard gate_up_proj linear
         if on_gfx1250():

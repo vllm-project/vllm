@@ -533,7 +533,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         if not rocm_aiter_ops.is_enabled():
             return
-        # aiter's gemm_a8w8_blockscale_bpreshuffle has no working gfx1250 path.
+        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
         # Leaving the block scales as None -> "not preshuffled"
         # _fused_wqa_wkv_gemm and _o_proj both fall back to the standard linear path
         if on_gfx1250():
