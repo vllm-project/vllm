@@ -130,7 +130,16 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
     handle = {"metadata": {"image_grid_thw": [1, 2, 2]}}
     monkeypatch.setattr(proxy, "NO_REWRITE", True)
     monkeypatch.setattr(
-        proxy, "encode_session", _EncoderSession([{"encoded-hash": handle}])
+        proxy,
+        "encode_session",
+        _EncoderSession(
+            [
+                {
+                    "encoded-hash": handle,
+                    "ec_items": [{"mm_hash": "encoded-hash", "transfer_id": "actual"}],
+                }
+            ]
+        ),
     )
     body = {
         "messages": [
@@ -324,3 +333,152 @@ def test_pooled_connections_are_retired_before_the_server_closes_them(
         assert proxy.decode_session.connector._keepalive_timeout == pooled_for
     finally:
         asyncio.run(proxy.on_shutdown())
+
+
+@pytest.mark.parametrize("source_uuid", [None, "user-media"])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_fallback_preserves_source_identity_and_all_handles(
+    proxy, monkeypatch, source_uuid, expanded
+):
+    """Raw PD preprocessing must start with the same inputs as E."""
+    from copy import deepcopy
+
+    item = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
+    if source_uuid is not None:
+        item["uuid"] = source_uuid
+    body = {
+        "messages": [{"role": "user", "content": [item]}],
+        "mm_processor_kwargs": {"use_audio_in_video": expanded},
+        "media_io_kwargs": {"video": {"num_frames": 8}},
+    }
+    original = deepcopy(body)
+    hashes = ["video-feature", "audio-feature"] if expanded else ["video-feature"]
+    bindings = [{"mm_hash": h, "transfer_id": f"transfer-{h}"} for h in hashes]
+    handles: dict = {h: {"metadata": {}} for h in hashes}
+    if expanded:
+        handles["video-feature"]["metadata"] = {"video_grid_thw": [1, 2, 2]}
+    seen = []
+
+    async def post(url, data, headers):
+        seen.append(msgspec.json.decode(data))
+        return _EncoderResponse({**handles, "ec_items": bindings})
+
+    session = _EncoderSession([])
+    monkeypatch.setattr(session, "post", post)
+    monkeypatch.setattr(proxy, "encode_session", session)
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://e"], "", "tcp://pd")
+    )
+    encoded = seen[0]["messages"][0]["content"][0]
+    forwarded = prepared["messages"][0]["content"][0]
+    assert encoded["uuid"] == (source_uuid or proxy.content_uuid(item))
+    assert forwarded == encoded
+    assert prepared["mm_processor_kwargs"] == seen[0]["mm_processor_kwargs"]
+    assert prepared["media_io_kwargs"] == seen[0]["media_io_kwargs"]
+    assert prepared["ec_transfer_params"] == {**handles, "ec_items": bindings}
+    assert body == original
+
+
+def test_missing_metadata_falls_back_for_the_whole_request(proxy):
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "first"},
+                        "uuid": "first",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "second"},
+                        "uuid": "second",
+                    },
+                ],
+            }
+        ]
+    }
+    assert (
+        proxy.rewrite_for_decode(
+            body,
+            {
+                0: {"mm_hash": "first", "image_grid_thw": [1, 2, 2]},
+            },
+        )
+        == body
+    )
+
+
+def test_rewrite_matches_derived_feature_hash_with_transfer_bindings(
+    proxy, monkeypatch
+):
+    """Transfer entries are not features; child boundaries identify the image."""
+    source_uuid = "user-image"
+    binding = {"mm_hash": "processed-image", "transfer_id": "actual-transfer"}
+    monkeypatch.setattr(
+        proxy,
+        "encode_session",
+        _EncoderSession(
+            [
+                {
+                    "processed-image": {"metadata": {"image_grid_thw": [[1, 2, 2]]}},
+                    "ec_items": [binding],
+                }
+            ]
+        ),
+    )
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "image"},
+                        "uuid": source_uuid,
+                    }
+                ],
+            }
+        ],
+        "mm_processor_kwargs": {"max_pixels": 262144},
+    }
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://e"], "", "tcp://pd")
+    )
+    assert prepared["messages"][0]["content"] == [
+        {
+            "type": "image_embeds",
+            "image_embeds": {"image_grid_thw": [1, 2, 2]},
+            "uuid": source_uuid,
+        }
+    ]
+    assert prepared["ec_transfer_params"]["ec_items"] == [binding]
+
+
+def test_repeated_images_keep_distinct_transfers_and_both_rewrite(proxy, monkeypatch):
+    """A hash-keyed handle alone loses one of two actual encoder transfers."""
+    bindings = [{"mm_hash": "same-feature", "transfer_id": t} for t in ("a", "b")]
+    monkeypatch.setattr(
+        proxy,
+        "encode_session",
+        _EncoderSession(
+            [
+                {
+                    "same-feature": {"metadata": {"image_grid_thw": [1, 2, 2]}},
+                    "ec_items": [binding],
+                }
+                for binding in bindings
+            ]
+        ),
+    )
+    item = {"type": "image_url", "image_url": {"url": "same-image"}}
+    body = {"messages": [{"role": "user", "content": [item, item]}]}
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://e"], "", "tcp://pd")
+    )
+    assert [i["type"] for i in prepared["messages"][0]["content"]] == [
+        "image_embeds",
+        "image_embeds",
+    ]
+    assert prepared["ec_transfer_params"]["ec_items"] == bindings

@@ -38,6 +38,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakePushSpec,
     ECMooncakeWorkerMetadata,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.producer import (
+    _same_destination,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
     SchedulerTransferState,
     SchedulerTransferTable,
@@ -101,12 +104,14 @@ class ECMooncakeScheduler:
         )
         self._scheduler_pending_work = False
         self._pushes_to_prepare: dict[str, ECMooncakePushSpec] = {}
-        self._prepared_push_transfer_ids: set[str] = set()
+        self._prepared_pushes: dict[str, tuple[ECMooncakePushSpec, set[str]]] = {}
         self._event_ready_shards: OrderedDict[str, set[int]] = OrderedDict()
         # Mirror of the engine's encoder cache, maintained from the alloc and
         # free notifications the Scheduler already sends. Tracking it here
         # keeps `ensure_cache_available` on the upstream two-argument shape.
         self._local_cache: set[str] = set()
+        # Requests may wait for several features before any is allocated.
+        self._pending_load_hashes: dict[str, set[str]] = {}
         self._failed_saves: set[str] = set()
 
     def _cancel_remote(self, consumer_zmq: str, transfer_id: str) -> bool:
@@ -372,6 +377,18 @@ class ECMooncakeScheduler:
         if not self._is_consumer:
             return True
 
+        pending_hashes = {
+            feature.identifier
+            for feature in request.mm_features
+            if feature.mm_position.offset + feature.mm_position.length
+            > num_computed_tokens
+            and feature.identifier not in self._local_cache
+        }
+        if pending_hashes:
+            self._pending_load_hashes[request.request_id] = pending_hashes
+        else:
+            self._pending_load_hashes.pop(request.request_id, None)
+
         self._drain_push_notifications()
         # One timestamp for the whole decision, so the deadlines it hands out
         # cannot disagree between features.
@@ -417,15 +434,10 @@ class ECMooncakeScheduler:
         mm_hash = request.mm_features[index].identifier
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
-            # Still push: after the proxy has rewritten the item to embeds the
-            # consumer has no media left to fall back on, so a nameless push
-            # beats none. But the consumer knows this transfer by the id it
-            # sent, not by the one invented here, so its cancel will never
-            # reach the reservation this push is about to take.
-            if consumer_zmq:
-                self._warn_unresolved_transfer_id(request, index, "push prepare")
+            # A source item can expand into additional processed features.
+            # Report this generated binding along with the requested ones.
             transfer_id = f"{request.request_id}:{index}"
-        if not consumer_zmq or transfer_id in self._prepared_push_transfer_ids:
+        if not consumer_zmq:
             return
         num_tokens = request.get_num_encoder_embeds(index)
         dtype = self._model_config.dtype
@@ -434,7 +446,7 @@ class ECMooncakeScheduler:
         dtype_name = str(dtype).split(".")[-1]
         shape = (num_tokens, self._encoder_cache_hidden_dim)
         nbytes = math.prod(shape) * dtype.itemsize
-        self._pushes_to_prepare[transfer_id] = ECMooncakePushSpec(
+        spec = ECMooncakePushSpec(
             mm_hash=mm_hash,
             nbytes=nbytes,
             shape=shape,
@@ -443,10 +455,26 @@ class ECMooncakeScheduler:
             transfer_id=transfer_id,
             request_id=request.request_id,
         )
-        self._prepared_push_transfer_ids.add(transfer_id)
+        if prepared := self._prepared_pushes.get(transfer_id):
+            existing, request_ids = prepared
+            if not _same_destination(existing, spec):
+                logger.error(
+                    "EC Mooncake transfer_id=%s has a conflicting push", transfer_id
+                )
+                self._failed_saves.add(request.request_id)
+                return
+            request_ids.add(request.request_id)
+            return
+        self._pushes_to_prepare[transfer_id] = spec
+        self._prepared_pushes[transfer_id] = (spec, {request.request_id})
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
-        self._local_cache.add(request.mm_features[index].identifier)
+        mm_hash = request.mm_features[index].identifier
+        self._local_cache.add(mm_hash)
+        if pending := self._pending_load_hashes.get(request.request_id):
+            pending.discard(mm_hash)
+            if not pending:
+                del self._pending_load_hashes[request.request_id]
         if self._is_producer:
             self._prepare_push_spec(request, index)
 
@@ -466,14 +494,24 @@ class ECMooncakeScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
-        for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            self._local_cache.discard(mm_hash)
+        freed = list(scheduler_output.free_encoder_mm_hashes)
+        self._local_cache.difference_update(freed)
+        # Retire only outputs with neither an allocation nor a waiting request.
+        # Partial READY results must survive until every feature is ready.
+        pending_hashes: set[str] = set().union(*self._pending_load_hashes.values())
+        freed.extend(
+            sorted(
+                self._transfers.ready_hashes()
+                - self._local_cache
+                - pending_hashes
+                - set(freed)
+            )
+        )
+        for mm_hash in freed:
             self._transfers.release_ready(mm_hash, time.monotonic())
         for transfer_id in self._transfers.drain_orphaned():
             self._queue_cancel(transfer_id)
-        meta = ECMooncakeConnectorMetadata(
-            freed=scheduler_output.free_encoder_mm_hashes
-        )
+        meta = ECMooncakeConnectorMetadata(freed=freed)
         for push_spec in self._pushes_to_prepare.values():
             meta.pushes.append(push_spec)
         self._pushes_to_prepare.clear()
@@ -502,6 +540,7 @@ class ECMooncakeScheduler:
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
         if self._is_consumer:
+            self._pending_load_hashes.pop(request.request_id, None)
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
@@ -512,20 +551,34 @@ class ECMooncakeScheduler:
                     mm_hash=request.mm_features[index].identifier,
                     request_id=request.request_id,
                 )
-        if self._is_producer and self._prepared_push_transfer_ids:
-            for index in range(len(request.mm_features)):
-                transfer_id = self._request_transfer_id(request, index)
-                if transfer_id is None:
-                    transfer_id = f"{request.request_id}:{index}"
-                self._prepared_push_transfer_ids.discard(transfer_id)
+            # Some transfers may not correspond to a consumed feature (or
+            # another transfer with the same hash satisfied it).
+            params = getattr(request, "ec_transfer_params", None) or {}
+            for item in params.get("ec_items") or []:
+                if item.get("transfer_id"):
+                    transfer_id = str(item["transfer_id"])
+                    self._queue_cancel(
+                        transfer_id,
+                        mm_hash=item.get("mm_hash") or "",
+                        request_id=request.request_id,
+                    )
         if not self._is_producer:
             return False, None
 
-        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
-        for index, feature in enumerate(request.mm_features):
-            transfer_id = self._request_transfer_id(request, index)
-            if transfer_id is not None:
-                items[feature.identifier]["transfer_id"] = transfer_id
+        items: dict[str, Any] = collect_ec_item_metadata(
+            request.mm_features, self._metadata_resolver
+        )
+        bindings = []
+        for transfer_id, (spec, request_ids) in list(self._prepared_pushes.items()):
+            if request.request_id not in request_ids:
+                continue
+            bindings.append({"mm_hash": spec.mm_hash, "transfer_id": transfer_id})
+            items[spec.mm_hash]["transfer_id"] = transfer_id
+            request_ids.remove(request.request_id)
+            if not request_ids:
+                del self._prepared_pushes[transfer_id]
+        if bindings:
+            items["ec_items"] = bindings
 
         if not items:
             return False, None

@@ -101,7 +101,7 @@ def test_mooncake_independent_prefill_routing_fails_fast(proxy):
 
 
 def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
-    request = {
+    request: dict = {
         "messages": [
             {
                 "role": "user",
@@ -110,13 +110,14 @@ def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
         ]
     }
 
+    request["ec_transfer_params"] = {
+        "ec_items": [{"mm_hash": "engine-derived-hash", "transfer_id": "transfer"}]
+    }
     rewritten = proxy.rewrite_for_decode(
         request,
         {
             0: {
                 "mm_hash": "proxy-uuid",
-                "ec_mm_hash": "engine-derived-hash",
-                "transfer_id": "transfer",
                 "image_grid_thw": [1, 2, 3],
             }
         },

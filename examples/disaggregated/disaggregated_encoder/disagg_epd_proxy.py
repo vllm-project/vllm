@@ -29,6 +29,7 @@ import random
 import time
 import uuid
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from typing import Any
 
 import aiohttp
@@ -136,7 +137,6 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     here -- a second derivation could disagree with the encoder's.
     """
     rewritten = 0
-    transfer_items = []
     idx = 0
     new_messages = []
     for msg in req_data.get("messages", []):
@@ -152,8 +152,6 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             meta = dict(item_meta.get(idx) or {})
             idx += 1
             item_uuid = meta.pop("mm_hash", None)
-            ec_mm_hash = meta.pop("ec_mm_hash", None) or item_uuid
-            transfer_id = meta.pop("transfer_id", None)
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
@@ -167,35 +165,19 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 for k, v in meta.items()
             }
             if not metadata or not item_uuid:
-                # Nothing to size the placeholder range with. A processor cache
-                # hit is not a cause on its own: with the default `lru` type the
-                # engine restores the item before the scheduler reports it. It
-                # goes missing when the encode request failed, or under
-                # `--mm-processor-cache-type shm`, where a hit replaces the item
-                # with its shared-memory address and only the worker restores
-                # it. Send the media so the decoder can derive the grid itself.
-                new_content.append(item)
-                continue
+                # The parser cannot mix raw and embeds for one modality.
+                return req_data
             embeds_type = EMBEDS_TYPES[item["type"]]
             new_content.append(
                 {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
-            if transfer_id is not None:
-                transfer_items.append(
-                    {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
-                )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
     if not rewritten:
         return req_data
     logger.info("Rewrote %d media item(s) as metadata references", rewritten)
-    rewritten_request = {**req_data, "messages": new_messages}
-    if transfer_items:
-        ec_transfer_params = dict(req_data.get("ec_transfer_params") or {})
-        ec_transfer_params["ec_items"] = transfer_items
-        rewritten_request["ec_transfer_params"] = ec_transfer_params
-    return rewritten_request
+    return {**req_data, "messages": new_messages}
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
@@ -246,7 +228,6 @@ async def fanout_encoder_primer(
 
     tasks = []
     item_uuids: dict[int, str] = {}
-    item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
     ec_params: dict[str, Any] = {}
 
@@ -265,14 +246,14 @@ async def fanout_encoder_primer(
         headers = {"x-request-id": child_req_id, "Content-Type": "application/json"}
 
         # With --no-rewrite the decoder still receives the raw image and derives
-        # the cache key by hashing it, so the encoder must do the same -- passing
-        # a uuid here would make the two disagree and silently defeat the EC
-        # transfer, leaving the decoder to encode the image itself.
-        item_uuid = None if NO_REWRITE else content_uuid(item)
+        # its identity from the original UUID or content. Do not inject a new
+        # UUID on only the encoder side.
+        item_uuid = item.get("uuid")
+        if item_uuid is None and not NO_REWRITE:
+            item_uuid = content_uuid(item)
         if item_uuid is not None:
             item_uuids[idx] = item_uuid
         transfer_id = uuid.uuid4().hex
-        item_transfer_ids[idx] = transfer_id
 
         encoder_req = {
             "model": orig_request.get("model"),
@@ -304,7 +285,8 @@ async def fanout_encoder_primer(
             # would fail the connector's hash match and make the producer
             # invent its own transfer id, which the consumer could then never
             # cancel. Omitting it lets the connector match by position, which
-            # is exact: one encoder request carries exactly one item.
+            # names the first feature. The encoder reports any additional
+            # bindings if this source item expands into multiple features.
             encoder_req["ec_transfer_params"] = {
                 "consumer_zmq": consumer_zmq,
                 "ec_items": [{"transfer_id": transfer_id}],
@@ -349,44 +331,30 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
-        # The encoder reports each mm_hash's metadata (e.g. the grid) here,
-        # keyed by the same uuid this proxy assigned above.
+        # Metadata is keyed by the encoder's feature identifiers, which may
+        # be derived from source UUIDs and processing options.
         try:
             params = msgspec.json.decode(await r.read()).get("ec_transfer_params") or {}
         except Exception:
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
             params = {}
-        if params:
-            # One encoder request carries exactly one item, so there is a
-            # single reported entry. Do not key it by this proxy's uuid: when
-            # media_io_kwargs or mm_processor_kwargs are set the engine
-            # re-hashes the uuid together with them, so the encoder's own
-            # `mm_features[i].identifier` is a derived value this proxy cannot
-            # predict. Fall back to the sole entry, and carry the key the
-            # encoder actually used through as `ec_mm_hash`.
-            ec_mm_hash = item_uuids.get(idx)
-            reported = params.get(ec_mm_hash)
-            if reported is None and len(params) == 1:
-                ((ec_mm_hash, reported),) = params.items()
-            if reported:
-                metadata = reported.get("metadata") or {}
-                if metadata:
-                    item_meta[idx] = {
-                        **metadata,
-                        "mm_hash": item_uuids.get(idx, ec_mm_hash),
-                        "ec_mm_hash": ec_mm_hash,
-                    }
-                    if idx in item_transfer_ids:
-                        item_meta[idx]["transfer_id"] = item_transfer_ids[idx]
-                # Whatever the encoder reported alongside `metadata` is the
-                # connector's own handle on the published embedding (for NIXL,
-                # peer_host/peer_port/size_bytes). The decoder's connector
-                # looks it up by mm_hash on the request, so carry it through.
-                ec_params[ec_mm_hash] = reported
-                if NO_REWRITE and consumer_zmq is not None:
-                    ec_params.setdefault("ec_items", []).append(
-                        {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
-                    )
+        # Connector handles remain useful even when placeholder metadata is
+        # unavailable or one source item expands into several features.
+        bindings = params.pop("ec_items", [])
+        ec_params.update(params)
+        if bindings:
+            ec_params.setdefault("ec_items", []).extend(bindings)
+        # The child request identifies the source even when its hash is
+        # derived. Multi-feature expansion needs a combined placeholder
+        # contract; selecting just one entry would drop the other features.
+        if len(params) == 1:
+            ((ec_mm_hash, reported),) = params.items()
+            metadata = reported.get("metadata") or {}
+            if metadata:
+                item_meta[idx] = {
+                    **metadata,
+                    "mm_hash": item_uuids.get(idx, ec_mm_hash),
+                }
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
@@ -578,6 +546,13 @@ async def prepare_for_decode(
     `req_data` is left untouched so a retry starts from the original media
     rather than from a body whose images are already metadata references.
     """
+    if not NO_REWRITE:
+        # Share source identities with E even if the response cannot be
+        # rewritten. Never feed a processed feature hash back as a raw UUID.
+        req_data = deepcopy(req_data)
+        for item in extract_mm_items(req_data):
+            if item.get("uuid") is None:
+                item["uuid"] = content_uuid(item)
     _t0 = time.perf_counter()
     item_meta, ec_params = await fanout_encoder_primer(
         req_data, e_urls, req_id, consumer_zmq
