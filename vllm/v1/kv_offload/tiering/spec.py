@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
+"""TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
 
 This spec creates a TieringOffloadingManager with a CPU primary tier
 and configurable secondary tiers (e.g., Storage, Network).
@@ -82,8 +81,7 @@ logger = init_logger(__name__)
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
-    """
-    Spec for multi-tier KV cache offloading.
+    """Spec for multi-tier KV cache offloading.
 
     Creates a TieringOffloadingManager with:
     - Primary tier: CPU (LRU or ARC eviction policy)
@@ -276,8 +274,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def get_manager(self) -> OffloadingManager:
-        """
-        Get the TieringOffloadingManager.
+        """Get the TieringOffloadingManager.
 
         Creates a TieringOffloadingManager with:
         - Primary tier: CPU (LRU or ARC)
@@ -285,6 +282,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         Returns:
             TieringOffloadingManager instance
+
         """
         if not self._manager:
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
