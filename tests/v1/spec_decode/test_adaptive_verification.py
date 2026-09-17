@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -58,11 +59,22 @@ def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expe
     )
 
 
-def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
+@pytest.mark.parametrize(
+    "target_support,device_offsets,error",
+    [
+        (AttentionCGSupport.ALWAYS, True, None),
+        (AttentionCGSupport.VARLEN_DECODE, True, None),
+        (AttentionCGSupport.UNIFORM_BATCH, True, "VARLEN_DECODE or ALWAYS"),
+        (AttentionCGSupport.VARLEN_DECODE, False, "trims verification requests"),
+    ],
+)
+def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(
+    monkeypatch, target_support, device_offsets, error
+):
     class Backend:
         @classmethod
         def supports_device_cpu_query_lens_mismatch(cls):
-            return True
+            return device_offsets
 
     class Builder:
         def __init__(self, support):
@@ -82,7 +94,7 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
 
     groups = [
         [
-            group("target", AttentionCGSupport.ALWAYS),
+            group("target", target_support),
             group("draft", AttentionCGSupport.UNIFORM_BATCH),
         ]
     ]
@@ -96,19 +108,19 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
         lambda *_args, **_kwargs: created,
     )
 
-    manager = maybe_create_adaptive_verification_manager(
-        enable_adaptive_verification=True,
-        attn_groups=groups,
-        attn_cg_support=runner_support,
-        req_states=object(),
-        query_start_loc=object(),
-        num_bonus_tokens=1,
-        max_total_logits=1,
-        vllm_config=None,
-        target_layer_names={"target"},
-    )
-
-    assert manager is created
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        manager = maybe_create_adaptive_verification_manager(
+            enable_adaptive_verification=True,
+            attn_groups=groups,
+            attn_cg_support=runner_support,
+            req_states=object(),
+            query_start_loc=object(),
+            num_bonus_tokens=1,
+            max_total_logits=1,
+            vllm_config=None,
+            target_layer_names={"target"},
+        )
+        assert manager is created
     assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
 
 
