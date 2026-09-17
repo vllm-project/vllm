@@ -456,12 +456,17 @@ def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
 
 
 def test_prompt_logprob_token_ids_require_v2_model_runner():
-    """Only the V2 runner scores them; the V1 runner would return None."""
+    """Only the V2 runner scores them; the V1 runner would return None, and
+    kv-sharing fast prefill would score rows the cross-decoder never ran."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
             return_sampling_mask=False, enable_trace_replay=False
         ),
-        vllm_config=SimpleNamespace(reasoning_config=None, use_v2_model_runner=False),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            use_v2_model_runner=False,
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        ),
         speculative_config=None,
         structured_outputs_config=None,
         tokenizer=None,
@@ -472,6 +477,9 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
             InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.use_v2_model_runner = True
         InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
+        with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
 
 
 def test_none_logprobs(vllm_model, example_prompts):
