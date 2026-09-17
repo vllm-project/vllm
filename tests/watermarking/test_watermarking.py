@@ -1081,6 +1081,69 @@ def test_gpu_sampler_builds_chunked_multi_request_speculative_contexts():
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_draft_context_deduplication_broadcasts_the_draft_step():
+    """The draft step is one 0-d tensor broadcast over the batch.
+
+    The context occurs four positions back, which `max_history - step` puts
+    just outside the scanned window, so a row that mistakes another row's step
+    for its own reports the opposite verdict. The neighbours leg is the
+    deterministic control: a row that reads a step of 0 instead of 2 widens its
+    window by two positions and finds the context. The production leg asserts
+    the layout the speculators pass, where the stride-less read lands outside
+    the allocation and can return the right value by chance.
+    """
+    num_rows = 4
+    all_token_ids = torch.tensor([[3, 4, 9, 9, 9, 9], [3, 4, 9, 9, 9, 9]])
+    req_indices = torch.tensor([0, 0, 1, 1])
+    prompt_lens = torch.tensor([0, 0])
+    total_lens = torch.tensor([6, 6])
+    prior_contexts = torch.zeros(num_rows, 3, 2, dtype=torch.int64)
+    contexts = torch.tensor([[3, 4]]).expand(num_rows, 2).contiguous()
+    enabled = torch.ones(num_rows, dtype=torch.bool)
+
+    def run(steps, device):
+        prior = prior_contexts.clone().to(device)
+        active = draft_watermarking_mask(
+            all_token_ids.to(device),
+            req_indices.to(device),
+            prompt_lens.to(device),
+            total_lens.to(device),
+            prior,
+            contexts.to(device),
+            steps,
+            enabled.to(device),
+            max_history=4,
+            include_prompt=False,
+        )
+        return active.cpu(), prior.cpu()
+
+    expected, expected_prior = run(torch.full((num_rows,), 2), torch.device("cpu"))
+    assert torch.equal(expected, torch.ones(num_rows, dtype=torch.bool))
+
+    materialized, materialized_prior = run(
+        torch.full((num_rows,), 2).cuda(), torch.device("cuda")
+    )
+    assert torch.equal(materialized, expected)
+    assert torch.equal(materialized_prior, expected_prior)
+
+    # Neighbouring steps are the value a row reads when the broadcast stride is
+    # ignored; the production tensor reads uninitialized memory instead.
+    neighbours = torch.tensor([2, 0, 0, 0]).cuda()
+    broadcast, broadcast_prior = run(
+        neighbours[0].expand(num_rows), torch.device("cuda")
+    )
+    assert torch.equal(broadcast, expected)
+    assert torch.equal(broadcast_prior, expected_prior)
+
+    step = torch.tensor(2).cuda()
+    production, production_prior = run(step.expand(num_rows), torch.device("cuda"))
+    assert torch.equal(production, expected)
+    assert torch.equal(production_prior, expected_prior)
+
+
 def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
     class StubSpeculator(DraftModelSpeculator):
         def capture(self): ...
