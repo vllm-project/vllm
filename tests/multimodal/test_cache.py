@@ -4,6 +4,7 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -760,9 +761,17 @@ def test_processor_cache_shared_across_loras():
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("reject_release", [False, True])
+@pytest.mark.parametrize(
+    "release_error",
+    [
+        None,
+        "requires a completed pause first",
+        "requires all executor memory to be resident",
+    ],
+    ids=["released", "not-paused", "nonresident-memory"],
+)
 @pytest.mark.asyncio
-async def test_release_kv_cache_resends_mm_payload(use_async, reject_release):
+async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     """Release must not leave a sender hit pointing at a cleared receiver."""
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.llm_engine import LLMEngine
@@ -782,8 +791,8 @@ async def test_release_kv_cache_resends_mm_payload(use_async, reject_release):
     renderer.clear_mm_cache = partial(BaseRenderer.clear_mm_cache, renderer)
 
     def release():
-        if reject_release:
-            raise RuntimeError("requires a completed pause first")
+        if release_error:
+            raise RuntimeError(release_error)
         receiver.clear_cache()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -799,7 +808,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, reject_release):
                 release_kv_cache_memory=release,
                 release_kv_cache_memory_async=make_async(release, executor=executor),
             ),
-            logger_manager=None,
+            logger_manager=Mock(),
         )
 
         async def call_release():
@@ -808,11 +817,13 @@ async def test_release_kv_cache_resends_mm_payload(use_async, reject_release):
             else:
                 LLMEngine.release_kv_cache_memory(engine)
 
-        if reject_release:
-            with pytest.raises(RuntimeError, match="completed pause"):
+        if release_error:
+            with pytest.raises(RuntimeError, match=release_error):
                 await call_release()
+            engine.logger_manager.record_sleep_state.assert_not_called()
         else:
             await call_release()
+            engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
 
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
     assert payload is item

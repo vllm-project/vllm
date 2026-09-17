@@ -345,14 +345,13 @@ class Executor(ABC):
         return bool(self.sleeping_tags)
 
     def sleep(self, level: int = 1):
-        remaining = SLEEP_TAGS - self.sleeping_tags
         if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags |= remaining
+        self.sleeping_tags |= SLEEP_TAGS
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
@@ -396,7 +395,7 @@ class Executor(ABC):
         logger.info(
             "It took %.6f seconds to discard tags %s.",
             time_after_discard - time_before_discard,
-            tags,
+            tags_to_discard,
         )
 
     def reinitialize_distributed(

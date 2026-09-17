@@ -952,8 +952,9 @@ class EngineCore:
         return fully_awake
 
     def release_kv_cache_memory(self) -> None:
-        """Discard KV cache physical memory. Requires a completed pause:
-        request fate and quiescence belong to pause_scheduler.
+        """Discard KV cache physical memory. Requires a completed pause
+        and all executor memory to be resident. Kept requests are recomputed
+        after wake-up.
         """
         if not (
             self.is_scheduler_paused()
@@ -962,6 +963,10 @@ class EngineCore:
         ):
             raise RuntimeError(
                 "release_kv_cache_memory() requires a completed pause first"
+            )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "release_kv_cache_memory() requires all executor memory to be resident"
             )
         self._reset_caches()
         self.model_executor.discard(("kv_cache",))
