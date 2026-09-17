@@ -3,11 +3,12 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -524,6 +525,13 @@ def _gfx942_monokernel() -> bool:
 
 
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # V4.1 fp8 SWA cache + NVFP4 compressed cache
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV41"
@@ -549,6 +557,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
     _use_aiter_sparse_mla = False
+    # Only the gfx950 sparse decode tile reads the NVFP4 compressed record.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = _ON_GFX950
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
