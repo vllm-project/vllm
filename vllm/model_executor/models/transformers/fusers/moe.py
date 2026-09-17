@@ -207,6 +207,7 @@ class MoEBlockFuser:
         # vLLM always scores every expert, so matching a router that softmaxes
         # the selection alone takes renormalizing. Otherwise look for the
         # division, reading its absence as "no" only from a complete trace.
+        renormalize: bool | None
         if (post_topk and is_softmax) or _renormalizes(topk):
             renormalize = True
         else:
