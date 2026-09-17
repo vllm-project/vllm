@@ -497,6 +497,10 @@ def dsv4_dcp_finalize_indexer_mxfp4_attn_kernel(
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
 ):
+    # TODO: make sure to test both dsv4_dcp_finalize_indexer_mxfp4_attn_kernel and dsv4_dcp_finalize_indexer_attn_kernel
+    #       so we don't artificially report worse performance on mxfp4-capable hardware.
+    # TODO: Triton implementations of heavy ops should all eventually migrated to specialized AITER equivalents for
+    #       the best performance, this is currently the correctnes path
     token_idx = tl.program_id(0)
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
     if kv_slot_idx < 0:
