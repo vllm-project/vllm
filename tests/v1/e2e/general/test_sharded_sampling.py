@@ -14,14 +14,18 @@ import pytest
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 # Boot-state numeric noise bound (measured <= 0.25 on identical contexts).
 LOGPROB_TOL = 0.5
-# Near-tie greedy/seeded flips from boot-state noise; measured <= 1 per
-# engine boot across ~16 completions, plus one of headroom.
-MAX_DIVERGENT_PROMPTS = 3
+# Near-tie greedy/seeded flips from boot-state noise. On CUDA this is measured
+# <= 1 per engine boot across ~16 completions. ROCm boots land in noisier
+# kernel/collective states (5-7 divergent prompts observed on MI300), so allow
+# more headroom there. A real sharding bug diverges on nearly every prompt, far
+# above either bound.
+MAX_DIVERGENT_PROMPTS = 8 if current_platform.is_rocm() else 3
 
 PROMPTS = [
     "The capital of France is",
