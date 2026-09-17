@@ -50,11 +50,7 @@ def test_detect_space_prefix_empty_encode():
 
 
 class _FakeTokenizer:
-    """Minimal tokenizer exposing only what ``VocabMapping`` needs.
-
-    ``encode`` raises so space-prefix detection falls back to the known
-    prefixes; our tokens carry no prefix, so normalization is the identity.
-    """
+    """Minimal tokenizer exposing only what ``VocabMapping`` needs."""
 
     def __init__(self, vocab, unk_token_id=None, eos_token_id=None):
         self._vocab = dict(vocab)
