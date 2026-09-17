@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -45,6 +45,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     resume_device_comms,
@@ -63,6 +64,7 @@ from vllm.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
+    create_graph_capture_profiler,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -96,6 +98,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -141,6 +144,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -533,6 +537,7 @@ class Worker(WorkerBase):
         Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
+
         """
         maybe_apply_startup_plan(self)
 
@@ -691,7 +696,6 @@ class Worker(WorkerBase):
 
         Returned dict is keyed by `(pp_rank, tp_rank)`.
         """
-
         if not has_kv_transfer_group():
             return None
 
@@ -703,6 +707,14 @@ class Worker(WorkerBase):
 
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            tp_rank += (
+                get_pcp_group().rank_in_group * parallel_config.tensor_parallel_size
+            )
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -723,7 +735,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -762,7 +773,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
@@ -801,7 +815,8 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._get_cudagraph_capture_context():
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -939,6 +954,21 @@ class Worker(WorkerBase):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
+        """Let the configured profiler observe CUDA graph capture."""
+        if not self.use_v2_model_runner:
+            return nullcontext()
+        if self.profiler is None:
+            model_runner = cast("GPUModelRunnerV2", self.model_runner)
+            if not model_runner.needs_cudagraph_capture():
+                return nullcontext()
+            self.profiler = create_graph_capture_profiler(
+                self.profiler_config, global_rank=self.rank
+            )
+            if self.profiler is None:
+                return nullcontext()
+        return self.profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -1214,6 +1244,8 @@ class Worker(WorkerBase):
         )
         self._pp_send_work = handles[1:]
 
+        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
+            return self.model_runner.pool()  # type: ignore
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -1241,6 +1273,9 @@ class Worker(WorkerBase):
                 trace_name = f"{profile_prefix}_{rank_suffix}"
             else:
                 trace_name = rank_suffix
+
+            if profiler_type == "proton" and self.profiler is not None:
+                self.profiler.set_output_name(trace_name)
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
@@ -1278,7 +1313,9 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton":
+                if self.profiler_config.profiler == "proton" and not (
+                    self.profiler.has_cuda_graph_session
+                ):
                     # Proton output names are fixed when the wrapper is constructed.
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
@@ -1333,12 +1370,12 @@ class Worker(WorkerBase):
             )
 
     def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """
-        Initialize weight transfer mechanism.
+        """Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
 
         Args:
             init_info: Dictionary containing backend-specific initialization info
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1347,8 +1384,7 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def start_weight_update(self) -> None:
-        """
-        Start a new weight update session.
+        """Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
@@ -1358,8 +1394,7 @@ class Worker(WorkerBase):
             self._start_weight_update()
 
     def start_draft_weight_update(self) -> None:
-        """
-        Like start_weight_update, but retargets the engine at the speculative
+        """Like start_weight_update, but retargets the engine at the speculative
         draft model for this session.
         """
         with set_current_vllm_config(self.vllm_config):
@@ -1392,8 +1427,7 @@ class Worker(WorkerBase):
         self._weight_update_is_draft = is_draft
 
     def update_weights(self, update_info: dict | list[dict]) -> None:
-        """
-        Receive one weight update chunk from the trainer.
+        """Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
@@ -1403,6 +1437,7 @@ class Worker(WorkerBase):
         Args:
             update_info: Backend-specific update info, or a list indexed by
                 global worker rank across data parallel replicas.
+
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None

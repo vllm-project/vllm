@@ -85,6 +85,11 @@ class ServingScores(PoolingServing):
         request_id = ctx.request_id
         created_time = ctx.created_time
         model_name = ctx.model_name
+        assert ctx.engine_inputs is not None
+        num_prompt_tokens = sum(
+            self._extract_prompt_len(engine_input["prompts"])
+            for engine_input in ctx.engine_inputs
+        )
 
         if isinstance(ctx.request, ScoreRequest):
             return self._request_output_to_score_response(
@@ -92,6 +97,7 @@ class ServingScores(PoolingServing):
                 request_id,
                 created_time,
                 model_name,
+                num_prompt_tokens,
             )
         elif isinstance(ctx.request, RerankRequest):
             return self._request_output_to_rerank_response(
@@ -100,6 +106,7 @@ class ServingScores(PoolingServing):
                 model_name,
                 ctx.request.documents,
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
+                num_prompt_tokens,
             )
         else:
             raise ValueError(f"Invalid {self.request_id_prefix} request type")
@@ -110,9 +117,9 @@ class ServingScores(PoolingServing):
         request_id: str,
         created_time: int,
         model_name: str,
+        num_prompt_tokens: int,
     ) -> JSONResponse:
         items: list[ScoreResponseData] = []
-        num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
@@ -121,10 +128,7 @@ class ServingScores(PoolingServing):
                 index=idx,
                 score=classify_res.outputs.score,
             )
-            prompt_token_ids = final_res.prompt_token_ids
-
             items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
@@ -148,12 +152,12 @@ class ServingScores(PoolingServing):
         model_name: str,
         documents: ScoreInput | list[ScoreInput],
         top_n: int,
+        num_prompt_tokens: int,
     ) -> JSONResponse:
         if not isinstance(documents, list):
             documents = [documents]
 
         results: list[RerankResult] = []
-        num_prompt_tokens = 0
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
@@ -171,8 +175,6 @@ class ServingScores(PoolingServing):
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
-            prompt_token_ids = final_res.prompt_token_ids
-            num_prompt_tokens += len(prompt_token_ids)
 
         # sort by relevance, then return the top n if set
         results.sort(key=lambda x: x.relevance_score, reverse=True)
