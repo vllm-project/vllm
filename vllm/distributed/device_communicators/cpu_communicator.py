@@ -69,8 +69,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             logger.info("Using allgather_reducescatter all2all manager.")
 
     def _all_group_ranks_share_shm_group_name(self) -> bool:
-        """
-        CPUSHM requires all ranks in this group to agree on one SHM group name.
+        """CPUSHM requires all ranks in this group to agree on one SHM group name.
         This is a lightweight consistency check for VLLM_DIST_IDENT/name inputs.
         """
         local_name = _CPUSHMDistributed.make_group_name(self)
@@ -89,8 +88,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -180,11 +178,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -204,8 +200,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -220,8 +215,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None

@@ -373,6 +373,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
         Returns:
             bool: True if connector metadata exists, False otherwise.
+
         """
         try:
             return self._connector_metadata is not None
@@ -381,7 +382,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MoRIIOConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(
         self,
@@ -579,8 +580,7 @@ class MoRIIOConnectorScheduler:
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
-        """
-        For remote prefill, pull all prompt blocks from remote
+        """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
         Args:
@@ -592,6 +592,7 @@ class MoRIIOConnectorScheduler:
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
+
         """
         if self.is_producer:
             return 0, False
@@ -1007,11 +1008,9 @@ class MoRIIOConnectorScheduler:
         request: "Request",
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Once a request is finished, determine whether request blocks
+        """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-
         request_id = request.request_id
         params = request.kv_transfer_params
         # Consumer: can unmap transfer_id<->request_id immediately since done_recving
@@ -1177,7 +1176,7 @@ class MoRIIOConnectorScheduler:
 
 
 class MoRIIOConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
@@ -1435,8 +1434,8 @@ class MoRIIOConnectorWorker:
             kv_layer: KV cache tensor
             remote_notify_port: Port for completion notification
             remote_ip: IP address of remote node
-        """
 
+        """
         # synchronization to prevent dirty reads between
         # transfer and attention operations
         # we can consider removing this synchronization after ibgda is enabled.
@@ -1581,7 +1580,6 @@ class MoRIIOConnectorWorker:
         layer_name_to_local_kv_cache_metadata: dict,
     ):
         """Background thread for getting new MoRIIO handshakes."""
-
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
@@ -1637,7 +1635,6 @@ class MoRIIOConnectorWorker:
         local-rank mapping _remote_tp_rank -- byte-identical for callers not yet
         TP-aware.
         """
-
         start_time = time.perf_counter()
 
         # NOTE(rob): we need each rank to have a unique port. This is
@@ -1856,7 +1853,6 @@ class MoRIIOConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
-
         self.kv_caches = kv_caches  # layer name to kv cache
         self.kv_cache_shapes = {
             layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
@@ -2020,12 +2016,10 @@ class MoRIIOConnectorWorker:
         self.moriio_wrapper.async_wait_reqid()
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        """
-        Get requests that are done sending or recving on this specific worker.
+        """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
-
         done_sending, done_recving = set(), set()
 
         if self.is_producer:
@@ -2416,8 +2410,7 @@ class MoRIIOConnectorWorker:
             self._eager_handshaked_engines.add(remote_engine_id)
 
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
-        """
-        Start loading by triggering non-blocking moriio_xfer.
+        """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
@@ -2686,8 +2679,13 @@ class MoRIIOConnectorWorker:
             local_block_ids: IDs of local blocks
             remote_block_ids: IDs of remote blocks
             remote_moriio_meta: Metadata of the remote MoRIIO agent
+            remote_tp_size: Tensor parallel size of the remote engine. Falls
+                back to the locally recorded value when None.
+            remote_engine_id: Id of the remote engine the blocks live on.
+
         Returns:
             Tuple of (local_offsets, remote_offsets, transfer_sizes)
+
         """
         validate_moriio_heterogeneous_tp_kv_heads(
             local_tp_size=self.world_size,
