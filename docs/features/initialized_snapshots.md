@@ -10,6 +10,13 @@ token log probability before returning.
 This path is intended for repeatedly activating the same model and engine
 configuration on the same machine. It is not a portable model artifact.
 
+A snapshot is in place by default: the artifact stays where it was created, the
+host keeps the generated caches the engine depends on, and restore refuses to
+run once one of them changes. `vllm snapshot create --portable` instead marks
+the artifact as one to restore in another container or on another host, and
+`vllm snapshot restore` requires `--portable` to match what the manifest
+recorded, so neither mode can be mistaken for the other.
+
 ## Requirements
 
 Snapshots currently require:

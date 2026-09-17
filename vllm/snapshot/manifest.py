@@ -56,6 +56,7 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     boundary: Literal["post-engine-init-reloadable-state-released"]
     created_at: str
     artifact_bytes: Annotated[int, Field(ge=0)]
+    portable: Literal[True, False] = False
     model: str
     served_model_name: str
     model_revision: str

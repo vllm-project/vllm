@@ -120,6 +120,14 @@ class SnapshotSubcommand(CLISubcommand):
         else:
             create_parser.add_argument("model_tag", nargs="?")
         create_parser.add_argument("--snapshot-dir", required=True)
+        create_parser.add_argument(
+            "--portable",
+            action="store_true",
+            default=False,
+            help="Include the generated caches the engine depends on, so the "
+            "artifact can be restored in another container or on another "
+            "host. A plain checkpoint stays in place and includes nothing.",
+        )
         create_parser.set_defaults(snapshot_dispatch=run_create)
 
         inspect_parser = actions.add_parser(
@@ -134,6 +142,12 @@ class SnapshotSubcommand(CLISubcommand):
         restore_parser.add_argument("snapshot_dir")
         restore_parser.add_argument("--host", default=None)
         restore_parser.add_argument("--port", type=int, default=8000)
+        restore_parser.add_argument(
+            "--portable",
+            action="store_true",
+            default=False,
+            help="Restore an artifact created with --portable.",
+        )
         restore_parser.set_defaults(snapshot_dispatch=run_restore)
 
         return parser

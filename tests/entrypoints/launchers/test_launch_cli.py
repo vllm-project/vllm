@@ -335,6 +335,26 @@ def test_snapshot_create_forwards_only_engine_options(option, joined, monkeypatc
     assert child.enable_sleep_mode
 
 
+def test_snapshot_create_strips_the_portable_option(monkeypatch):
+    argv = [
+        "create",
+        "Qwen/Qwen3-0.6B",
+        "--revision",
+        _MODEL_REVISION,
+        "--portable",
+        "--dtype",
+        "float16",
+    ]
+    args = parse_snapshot(*argv)
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", *argv])
+
+    child_argv = list(_child_engine_argv(args, None))
+
+    # The flag carries no value, so the option after it survives.
+    assert "--portable" not in child_argv
+    assert "--dtype" in child_argv
+
+
 @pytest.mark.parametrize("model_in_cli", [False, True])
 def test_snapshot_create_config_preserves_cli_precedence(
     tmp_path, monkeypatch, model_in_cli
@@ -842,6 +862,40 @@ def test_snapshot_restore_rejects_identity_mismatch(tmp_path: Path):
     identity_mismatch.restore.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("manifest_portable", "requested_portable"),
+    [
+        (True, None),
+        (True, False),
+        (False, True),
+    ],
+)
+def test_snapshot_restore_requires_portable_to_match(
+    tmp_path: Path,
+    manifest_portable: bool,
+    requested_portable: bool | None,
+):
+    args = _restore_fixture(tmp_path)
+    write_manifest_atomic(tmp_path / "snapshot", _manifest(portable=manifest_portable))
+    if requested_portable is not None:
+        args.portable = requested_portable
+
+    mismatch = _fake_snapshot_tools()
+    with pytest.raises(SnapshotRestoreError, match="requires --portable to match"):
+        restore_snapshot(args, tools=mismatch)
+    mismatch.restore.assert_not_called()
+
+
+def test_snapshot_restore_accepts_matching_portable(tmp_path: Path):
+    args = _restore_fixture(tmp_path)
+    write_manifest_atomic(tmp_path / "snapshot", _manifest(portable=True))
+    args.portable = True
+
+    tools = _fake_snapshot_tools()
+    restore_snapshot(args, tools=tools)
+    tools.restore.assert_called_once()
+
+
 def test_snapshot_identity_mismatch_names_every_differing_field():
     with pytest.raises(SnapshotCompatibilityError) as mismatch:
         validate_identity(
@@ -878,6 +932,7 @@ def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
             {"oracle_sampled_token_logprob": float("nan")},
             "oracle_sampled_token_logprob",
         ),
+        ({"portable": "yes"}, "portable"),
     ],
 )
 def test_snapshot_manifest_validation(
