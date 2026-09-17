@@ -77,7 +77,7 @@ class Sm100Mxfp8GemmRS(Sm100BlockScaledPersistentDenseGemmKernel):
     """
 
     def __init__(self, rank, world_size):
-        super().__init__(32, (128, 128), (1, 1), enable_pdl=False)
+        super().__init__(32, (256, 128), (2, 1), enable_pdl=True)
         self.rank = rank
         self.world_size = world_size
         self.threads_per_cta = 320
@@ -1242,7 +1242,9 @@ class Sm100Mxfp8GemmRS(Sm100BlockScaledPersistentDenseGemmKernel):
 
             cute.arch.barrier(barrier_id=3, number_of_threads=128)
             if comm_tid == 0:
-                exit_flag = grid_m * cute.ceil_div(N, 128) + bidz
+                gdimx, gdimy, gdimz = cute.arch.grid_dim()
+                cta_id = (bidz * gdimy + bidy) * gdimx + bidx
+                exit_flag = grid_m * cute.ceil_div(N, 128) + cta_id
                 utils.distributed.multimem_red_add1(
                     flags_mc_ptr + exit_flag, order="release", scope="gpu"
                 )

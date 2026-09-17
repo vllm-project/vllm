@@ -42,7 +42,7 @@ def _compile(rank: int, world_size: int, n: int, k: int, num_sms: int):
         flags_mc,
         peers,
         alpha,
-        num_sms,
+        num_sms // 2,  # (256,128) MMA pairs CTAs into (2,1) clusters
         make_fake_stream(use_tvm_ffi_env_stream=True),
         options="--opt-level 2 --enable-tvm-ffi",
     )
