@@ -19,7 +19,6 @@ logger = init_logger(__name__)
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs."""
-
     qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.indexer_qsa")
     attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
     if qsa_module is None or attn_module is None:

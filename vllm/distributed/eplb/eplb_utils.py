@@ -14,8 +14,7 @@ logger = init_logger(__name__)
 
 
 class CpuGpuEvent:
-    """
-    Combines a CUDA event with a CPU threading event to enforce record->wait
+    """Combines a CUDA event with a CPU threading event to enforce record->wait
     ordering across two threads.
 
     This class is designed for exactly two threads: one producer that calls
@@ -35,8 +34,7 @@ class CpuGpuEvent:
         self._recorded = threading.Event()
 
     def wait(self, stream: torch.cuda.Stream | None = None):
-        """
-        Blocks the calling thread until record finishes. Used to guarantee that the
+        """Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
 
         Should only be called by the Async Eplb thread.
@@ -46,8 +44,7 @@ class CpuGpuEvent:
         self._recorded.clear()
 
     def record(self, stream: torch.cuda.Stream | None = None):
-        """
-        Unblocks the waiting thread after calling event.record().
+        """Unblocks the waiting thread after calling event.record().
 
         Should only be called by the main thread.
         """
@@ -65,12 +62,12 @@ def override_envs_for_eplb(
     parallel_config: ParallelConfig,
     moe_backend: str | None = None,
 ) -> None:
-    """
-    Override environment variables for EPLB when specific conditions are met.
+    """Override environment variables for EPLB when specific conditions are met.
 
     Args:
         parallel_config: The parallel configuration object.
         moe_backend: The configured MoE backend (e.g. ``deep_gemm_mega_moe``).
+
     """
     is_data_parallel = parallel_config.data_parallel_size > 1
     is_eplb_enabled = parallel_config.enable_eplb

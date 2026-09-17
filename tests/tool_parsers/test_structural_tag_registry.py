@@ -623,7 +623,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
         tool_choice="auto",
     )
     parser = TestParser(MagicMock(), tools=sample_tools_strict)
-    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
 
     parser.adjust_request(request)
 

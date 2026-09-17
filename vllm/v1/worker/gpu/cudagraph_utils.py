@@ -408,6 +408,8 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
+            progress_bar_desc: Description shown on the capture progress bar.
+
         """
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
@@ -503,7 +505,6 @@ class CudaGraphManager:
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-
         effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:

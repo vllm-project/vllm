@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for INT8 (W8A8) fused-MoE oracle backend selection.
+"""Tests for INT8 (W8A8) fused-MoE oracle backend selection.
 
 These exercise ``select_int8_moe_backend`` only (no kernels are launched), so
 they run on any platform where the Triton INT8 MoE kernel is available — CUDA
