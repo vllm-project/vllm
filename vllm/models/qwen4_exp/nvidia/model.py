@@ -46,7 +46,6 @@ from vllm.model_executor.models.qwen3_5 import (
 )
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
-    Qwen3NextMLP,
     Qwen3NextSparseMoeBlock,
 )
 from vllm.model_executor.models.qwen3_vl import (
@@ -233,25 +232,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        mlp_only_layers = getattr(config, "mlp_only_layers", [])
-        num_experts = getattr(config, "num_experts", 0) or 0
-        absolute_layer_id = self.layer_idx + 1
-        is_moe_layer = self.layer_idx not in mlp_only_layers and (
-            num_experts > 0
-            and absolute_layer_id % getattr(config, "decoder_sparse_step", 1) == 0
+        # Every Qwen4Exp layer is MoE; the architecture has no dense variant.
+        self.mlp = Qwen4ExpSparseMoeBlock(
+            vllm_config=vllm_config, prefix=f"{prefix}.mlp"
         )
-        if is_moe_layer:
-            self.mlp = Qwen4ExpSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
-            )
-        else:
-            self.mlp = Qwen3NextMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
