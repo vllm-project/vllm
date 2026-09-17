@@ -39,7 +39,6 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     that produce a sampled token this step, and therefore must have that token
     (and the draft block proposed from it) propagated to the earlier PP stages.
     Returns None if no request in the batch produces a sample."""
-
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     # Exclude non-final prefill chunks (they don't produce a sample).

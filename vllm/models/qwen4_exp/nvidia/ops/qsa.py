@@ -22,6 +22,12 @@ def _is_sm120() -> bool:
     return current_platform.get_device_capability() == (12, 0)
 
 
+@lru_cache(maxsize=1)
+def _is_sm90() -> bool:
+    """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
+    return current_platform.get_device_capability() == (9, 0)
+
+
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
@@ -509,6 +515,33 @@ def _select_sm120_config(
     return 32, 4, 1
 
 
+def _select_sm90_config(
+    base_programs: int, use_prefill_config: bool, is_fp8: bool
+) -> tuple[int, int, int]:
+    """(block_n, target_splits, num_warps) tuned on sm_90 (H20)."""
+    if base_programs > 2048:
+        return (32, 1, 1) if use_prefill_config else (64, 1, 2)
+    if is_fp8:
+        if base_programs <= 24:
+            return 64, 64, 2
+        if base_programs <= 32:
+            return 32, 16, 1
+        if base_programs <= 64:
+            return 32, 8, 1
+        if base_programs <= 128:
+            return 32, 4, 1
+        if base_programs <= 256:
+            return 32, 8, 1
+        return 32, 4, 1
+    if base_programs <= 32:
+        return 64, 64, 2
+    if base_programs <= 64:
+        return 32, 16, 1
+    if base_programs <= 256:
+        return 32, 8, 1
+    return 32, 4, 1
+
+
 def _select_config(
     num_rows: int,
     num_kv_heads: int,
@@ -521,11 +554,16 @@ def _select_config(
     Keyed on base_programs = num_rows * num_kv_heads. The bp > 2048 region splits
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
     the uniform decode/verify length). This default table was tuned on GB300;
-    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead.
+    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
+    and sm_90 (Hopper) to _select_sm90_config.
     """
     base_programs = num_rows * num_kv_heads
     if _is_sm120():
         BLOCK_N, target_splits, num_warps = _select_sm120_config(
+            base_programs, use_prefill_config, is_fp8
+        )
+    elif _is_sm90():
+        BLOCK_N, target_splits, num_warps = _select_sm90_config(
             base_programs, use_prefill_config, is_fp8
         )
     elif base_programs > 2048:
@@ -727,7 +765,6 @@ def warmup_qsa_sparse_paged_attention(
     selection_width: int,
 ) -> tuple[tuple[int, int, int], ...]:
     """Compile every production-reachable split-K/merge specialization."""
-
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
@@ -870,7 +907,6 @@ def qsa_store_cache_rows(
     rows: torch.Tensor,
 ) -> None:
     """Store fixed-width rows in a QSA cache without boolean indexing."""
-
     if not cache.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA cache stores require Triton")
     if cache.ndim != 4 or cache.shape[2] != 1:
@@ -916,7 +952,6 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-
     if not raw_keys.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA compression requires Triton")
     rows = token_to_req.numel()
