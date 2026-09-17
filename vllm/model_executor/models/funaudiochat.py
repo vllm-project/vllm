@@ -532,7 +532,7 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
             revision=self.ctx.model_config.tokenizer_revision,
         )
 
-    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.feature_extractor
 
     def get_speech_tokenizer(self) -> TokenizersBackend:
@@ -568,6 +568,26 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         audio_cfg = getattr(cfg, "audio_config", None)
         return int(getattr(audio_cfg, "group_size", 5))
 
+    def get_max_speech_frames(self) -> int:
+        """Maximum 25 Hz speech frames admitted for one audio item.
+
+        The discrete encoder emits ``max_source_positions`` replacement tokens
+        after grouping frames by ``group_size`` (1500 * 5 = 7500 frames, 300s).
+        """
+        cfg = self.get_hf_config()
+        audio_cfg = getattr(cfg, "audio_config", None)
+        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
+        return max(1, max_audio_tokens) * max(1, self.get_audio_group_size())
+
+    def get_max_audio_samples(self, sampling_rate: int) -> int:
+        """Waveform samples that fill the profiled per-item speech-frame budget."""
+        token_fps = int(self.token_fps)
+        target_num_frames = self.get_max_speech_frames()
+        return max(
+            1,
+            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
+        )
+
 
 class FunAudioChatDummyInputsBuilder(
     BaseDummyInputsBuilder[FunAudioChatProcessingInfo]
@@ -587,16 +607,7 @@ class FunAudioChatDummyInputsBuilder(
 
         # Dummy inputs are used for profiling; construct the worst-case audio
         # length that maximizes the number of encoder tokens.
-        cfg = self.info.get_hf_config()
-        audio_cfg = getattr(cfg, "audio_config", None)
-        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
-        group_size = self.info.get_audio_group_size()
-        token_fps = int(getattr(self.info, "token_fps", 25))
-        target_num_frames = max(1, max_audio_tokens) * max(1, group_size)
-        audio_len = max(
-            1,
-            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
-        )
+        audio_len = self.info.get_max_audio_samples(sampling_rate)
         num_audios = int(mm_counts.get("audio", 0))
 
         audio_overrides = mm_options.get("audio")
@@ -641,6 +652,8 @@ class FunAudioChatMultiModalProcessor(
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
+        max_samples = self.info.get_max_audio_samples(sr)
+        max_speech_frames = self.info.get_max_speech_frames()
 
         wavs: list[np.ndarray] = []
         speech_strs: list[str] = []
@@ -655,6 +668,15 @@ class FunAudioChatMultiModalProcessor(
             if min_samples > 0 and audio_np.shape[0] < min_samples:
                 audio_np = np.pad(
                     audio_np, (0, min_samples - audio_np.shape[0]), mode="constant"
+                )
+
+            if audio_np.shape[0] > max_samples:
+                duration_s = float(audio_np.shape[0]) / float(sr)
+                max_duration_s = float(max_samples) / float(sr)
+                raise ValueError(
+                    "Audio is too long for FunAudioChat: "
+                    f"{duration_s:.1f}s exceeds the profiled maximum of "
+                    f"{max_duration_s:.1f}s ({max_speech_frames} speech frames)."
                 )
 
             wavs.append(audio_np)
@@ -673,11 +695,14 @@ class FunAudioChatMultiModalProcessor(
             return_tensors="pt",
         )
 
+        # Pad to the longest item in this request, not the 300s Whisper
+        # max_length. Short clips must not expand to a full-budget feature
+        # tensor before generation.
         wav_inputs = feature_extractor(
             wavs,
             sampling_rate=sr,
             return_attention_mask=True,
-            padding="max_length",
+            padding=True,
             return_tensors="pt",
         )
 
