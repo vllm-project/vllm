@@ -47,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
     """Return exact per-token positions as ``[tokens, 1, 3]`` int64 rows."""
-
     if positions.ndim == 1:
         positions = positions.unsqueeze(0).expand(3, -1)
     elif positions.ndim != 2 or positions.shape[0] not in (1, 3):
@@ -115,7 +114,6 @@ def circular_qsa_slot_mapping(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Map each request to its fixed physical block as a circular token ring."""
-
     if compressor_state_size <= 0:
         raise ValueError("QSA circular buffer size must be positive")
     if block_table.ndim != 2:
@@ -167,7 +165,6 @@ def compressed_qsa_slot_mapping(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build boundary-only slots for an ``MLAAttentionSpec`` QSA cache."""
-
     if storage_block_size <= 0 or compress_ratio <= 0:
         raise ValueError("QSA block size and compression ratio must be positive")
     compressed_positions = torch.div(

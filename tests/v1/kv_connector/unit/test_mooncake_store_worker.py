@@ -4540,7 +4540,7 @@ def test_topology_standalone_store_with_disk_offload(tmp_path, monkeypatch):
 
 
 def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
-    """embedded + CPU-only: no mode key (defaults to embedded),
+    """Embedded + CPU-only: no mode key (defaults to embedded),
     global_segment_size>0, enable_offload absent, no preferred_segment.
     This is the PR-40900 baseline recipe."""
     store = MagicMock()
