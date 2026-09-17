@@ -24,7 +24,7 @@ __all__ = [
     "LogitsProcessorRequestState",
     "LogitsContext",
     "LogitsProcessor",
-    "build_logitsprocs",
+    "build_custom_logits_processors",
 ]
 
 
@@ -132,7 +132,7 @@ def _load_v2_logitsprocs(
     )
 
 
-def build_logitsprocs(
+def build_custom_logits_processors(
     vllm_config: "VllmConfig",
     req_states: RequestState,
     is_pooling_model: bool,

@@ -144,7 +144,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     all_to_all_logits,
     gather_sampler_output,
 )
-from vllm.v1.worker.gpu.sample.logits_processor import build_logitsprocs
+from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_processors
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -449,7 +449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Initialize samplers. Model states may override via custom_sampler().
-        custom_logits_processors = build_logitsprocs(
+        custom_logits_processors = build_custom_logits_processors(
             self.vllm_config,
             self.req_states,
             self.is_pooling_model,

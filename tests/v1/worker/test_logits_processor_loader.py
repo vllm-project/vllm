@@ -90,7 +90,7 @@ def test_loads_v2_processors(monkeypatch: pytest.MonkeyPatch, source: ProcSource
         # Plugins load before user-specified processors.
         custom = [f"{__name__}:AltV2Processor"]
 
-    procs = loader.build_logitsprocs(None, fake_req_states, False, custom)
+    procs = loader.build_custom_logits_processors(None, fake_req_states, False, custom)
 
     if source is ProcSource.ENTRYPOINT:
         assert [type(p) for p in procs] == [DummyV2Processor, AltV2Processor]
@@ -157,11 +157,11 @@ def test_rejects_invalid(
         )
 
     with pytest.raises(exc_type, match=msg_fragment):
-        loader.build_logitsprocs(None, None, False, custom)
+        loader.build_custom_logits_processors(None, None, False, custom)
 
 
 def test_pooling_model_rejects_custom_logitsprocs():
     """Pooling models reject custom processors instead of ignoring them."""
     with pytest.raises(ValueError, match="Pooling models do not support"):
-        loader.build_logitsprocs(None, None, True, [DummyV2Processor])
-    assert loader.build_logitsprocs(None, None, True, []) == []
+        loader.build_custom_logits_processors(None, None, True, [DummyV2Processor])
+    assert loader.build_custom_logits_processors(None, None, True, []) == []
