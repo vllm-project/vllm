@@ -95,6 +95,10 @@ def _expected_bytes_per_block(groups) -> int:
     return max(sum(pages[n] for n in g.layer_names) for g in groups)
 
 
+def _num_blocks(groups, memory: int = MEMORY) -> int:
+    return memory // _expected_bytes_per_block(groups)
+
+
 def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
 
@@ -232,14 +236,14 @@ class TestCSALinearGrouping:
     def test_every_group_fits_one_packed_block(self):
         config = _shared_layout_config()
         groups = _default_builder.get_kv_cache_groups(config, _make_csa_linear_specs())
-        bytes_per_block = _default_builder._get_kv_cache_bytes_per_block(groups)
+        bytes_per_block = _default_builder._get_pool_bytes_per_block(config, groups)
 
         pages = _pages(groups)
         for group in groups:
             assert sum(pages[n] for n in group.layer_names) <= bytes_per_block
 
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-            config, groups, available_memory=bytes_per_block * 32
+            config, groups, num_blocks=32
         )
         assert kv_cache_config.num_blocks == 32
         # Groups overlay from byte 0 of each block, so a layer never addresses
@@ -256,7 +260,7 @@ class TestCSALinearGrouping:
         config.cache_config.enable_prefix_caching = True
         groups = _default_builder.get_kv_cache_groups(config, _make_csa_linear_specs())
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-            config, groups, available_memory=BYTES_PER_BLOCK * 64
+            config, groups, num_blocks=64
         )
         scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])
         manager = KVCacheManager(
@@ -295,7 +299,7 @@ class TestCSALinearGrouping:
         }
         groups = _default_builder.get_kv_cache_groups(config, specs)
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
+            config, groups, num_blocks=_num_blocks(groups, 8 * MAIN_KV_PAGE_BYTES)
         )
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
 
@@ -317,7 +321,7 @@ class TestCSALinearGrouping:
         }
         groups = _default_builder.get_kv_cache_groups(config, specs)
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
+            config, groups, num_blocks=_num_blocks(groups, 8 * MAIN_KV_PAGE_BYTES)
         )
         # The hash granularity is the GCD over prefix-cacheable groups only;
         # the 4-token scratch ring is excluded (it would drag it to 4).
@@ -352,7 +356,7 @@ class TestCSALinearGrouping:
         }
         groups = _default_builder.get_kv_cache_groups(config, specs)
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
+            config, groups, num_blocks=_num_blocks(groups, 8 * MAIN_KV_PAGE_BYTES)
         )
 
         # Hashes are computed every 4 tokens, but without an align-mode Mamba
@@ -396,7 +400,7 @@ class TestCSALinearGrouping:
         groups = _get_packed_kv_cache_groups(config, specs)
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
-        assert _default_builder._get_kv_cache_bytes_per_block(groups) == sum(
+        assert _default_builder._get_pool_bytes_per_block(config, groups) == sum(
             specs[name].page_size_bytes for name in specs if name.startswith("wide.")
         )
         # That block holds every GDN state at once, so the repeat pattern alone
@@ -443,7 +447,7 @@ class TestSlidingWindowBucketCap:
         pages = _pages(groups)
         main = next(g for g in groups if "layers.2.attn" in g.layer_names)
         main_bytes = sum(pages[n] for n in main.layer_names)
-        assert _default_builder._get_kv_cache_bytes_per_block(groups) == main_bytes
+        assert _default_builder._get_pool_bytes_per_block(config, groups) == main_bytes
         swa_groups = [g for g in groups if g.layer_names[0].endswith(".swa")]
         per_group = main_bytes // pages["layers.0.swa"]
         assert len(swa_groups) == -(-43 // per_group)
@@ -457,12 +461,12 @@ class TestSlidingWindowBucketCap:
 class TestDensePacking:
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
-        assert _default_builder._get_kv_cache_bytes_per_block(
-            groups
+        assert _default_builder._get_pool_bytes_per_block(
+            _mock_vllm_config("BLHNC"), groups
         ) == _expected_bytes_per_block(groups)
 
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLHNC"), groups, MEMORY
+            _mock_vllm_config("BLHNC"), groups, _num_blocks(groups)
         )
         # Groups overlay: both start at offset 0.
         assert [tensor.offset for tensor in config.kv_cache_tensors].count(0) == 2
@@ -476,7 +480,7 @@ class TestDensePacking:
         groups, _, _ = _mixed_page_groups()
         pages = _pages(groups)
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLHNC"), groups, MEMORY
+            _mock_vllm_config("BLHNC"), groups, _num_blocks(groups)
         )
         offsets = {
             name: tensor.offset + i * tensor.layer_stride
@@ -494,7 +498,7 @@ class TestDensePacking:
         specs = {f"l.{i}": _full() for i in range(4)}
         groups = [KVCacheGroupSpec(list(specs), _full())]
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, _num_blocks(groups)
         )
         (tensor,) = config.kv_cache_tensors
         page = _full().page_size_bytes
@@ -514,7 +518,7 @@ class TestDensePacking:
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, _num_blocks(groups)
         )
         block_stride = _expected_bytes_per_block(groups)
         mla_tensor, idx_tensor = config.kv_cache_tensors
@@ -537,11 +541,11 @@ class TestDensePacking:
         # Overlay models resolve to a block-outer layout at backend selection (the
         # model's backend declares it); mirror that here.
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLNHC"), groups, MEMORY
+            _mock_vllm_config("BLNHC"), groups, _num_blocks(groups)
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _default_builder._pool_bytes_per_block(
-            groups
+        assert _default_builder._get_pool_bytes_per_block(
+            _mock_vllm_config("BLNHC"), groups
         ) == _expected_bytes_per_block(groups)
 
         views = _bind(config, "BLNHC")
@@ -576,14 +580,14 @@ class TestDensePacking:
             ValueError, match="cannot express this model's mixed page sizes"
         ):
             _default_builder.get_kv_cache_config_from_groups(
-                _mock_vllm_config("LBNHC"), groups, MEMORY
+                _mock_vllm_config("LBNHC"), groups, _num_blocks(groups)
             )
 
     def test_unresolved_layout_rejected(self):
         groups, _, _ = _mixed_page_groups()
         with pytest.raises(ValueError, match="has not been resolved"):
             _default_builder.get_kv_cache_config_from_groups(
-                _mock_vllm_config(None), groups, MEMORY
+                _mock_vllm_config(None), groups, _num_blocks(groups)
             )
 
     def test_head_outer_layout_rejected_for_mixed_pages(self):
@@ -592,7 +596,7 @@ class TestDensePacking:
             ValueError, match="cannot express this model's mixed page sizes"
         ):
             _default_builder.get_kv_cache_config_from_groups(
-                _mock_vllm_config("LHBNC"), groups, MEMORY
+                _mock_vllm_config("LHBNC"), groups, _num_blocks(groups)
             )
 
     @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
@@ -600,7 +604,7 @@ class TestDensePacking:
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
         config = _default_builder.get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, _num_blocks(groups)
         )
         views = _bind(config, layout)
         for i, name in enumerate(specs):
@@ -655,8 +659,7 @@ class TestCompressorRingGroup:
         kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
             config,
             groups,
-            available_memory=64
-            * _default_builder._get_kv_cache_bytes_per_block(groups),
+            num_blocks=64,
         )
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 64)
         manager = KVCacheManager(
@@ -697,15 +700,17 @@ class TestSWABoundedReplayGrouping:
         for layer in range(4):
             specs[f"layers.{layer}.attn.swa_cache"] = swa
 
-        groups = get_kv_cache_groups(config, specs)
+        groups = _default_builder.get_kv_cache_groups(config, specs)
         # The worker reads the replay window off the (packed) group specs to
         # arm the window clamp; the wrapper must forward it like cacheability.
         assert sorted(
             (g.kv_cache_spec.prefix_cacheable, g.kv_cache_spec.prefix_replay_tokens)
             for g in groups
         ) == [(False, 128)] * 4 + [(True, 0)]
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
+        kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
+            config,
+            groups,
+            num_blocks=64,
         )
         manager = KVCacheManager(
             generate_scheduler_kv_cache_config([kv_cache_config]),

@@ -1,109 +1,109 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pluggable KV cache config builder resolution."""
+"""Interface and resolution for pluggable KV cache config builders."""
 
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
         KVCacheGroupSpec,
-        KVCacheLayout,
         KVCacheSpec,
     )
 
-logger = init_logger(__name__)
 
+class KVCacheConfigBuilder(ABC):
+    """Interface for model- or platform-specific KV cache planning.
 
-class KVCacheConfigBuilder:
-    """Active KV cache config builder, resolved on first use.
-
-    Resolution priority is owned by the platform hook
-    (:meth:`vllm.platforms.interface.Platform.get_kv_cache_config_builder_cls`);
-    this class only caches the resolved builder and delegates to it.
+    Subclasses normally inherit from ``DefaultKVCacheConfigBuilder`` and
+    override only the hooks they need. A platform may replace the top-level
+    planning method when it cannot use Core's cross-worker planning flow.
     """
 
-    _active: "DefaultKVCacheConfigBuilder | None" = None
-
-    @classmethod
-    def _resolve(cls, vllm_config: "VllmConfig") -> "DefaultKVCacheConfigBuilder":
-        if cls._active is None:
-            from vllm.platforms import current_platform
-
-            builder_cls = resolve_obj_by_qualname(
-                current_platform.get_kv_cache_config_builder_cls(vllm_config)
-            )
-            cls._active = builder_cls()
-        return cls._active
-
-    @classmethod
-    def reset(cls) -> None:
-        cls._active = None
-
-    @classmethod
+    @abstractmethod
     def get_kv_cache_configs(
-        cls,
+        self,
         vllm_config: "VllmConfig",
         kv_cache_specs: list[dict[str, "KVCacheSpec"]],
         available_memory: list[int],
     ) -> list["KVCacheConfig"]:
-        return cls._resolve(vllm_config).get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_memory
-        )
+        """Generate the full KV cache configurations for every worker.
 
-    @classmethod
+        The main entry point: takes the per-worker KV cache specs and the
+        memory available on each worker, runs the whole planning pipeline
+        (merge specs, group layers, project to workers, auto-fit
+        max_model_len, admission checks, per-worker layouts, min-blocks
+        convergence), and returns one ready-to-allocate
+        :class:`~vllm.v1.kv_cache_interface.KVCacheConfig` per worker.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_kv_cache_groups(
-        cls,
+        self,
         vllm_config: "VllmConfig",
         kv_cache_spec: dict[str, "KVCacheSpec"],
     ) -> list["KVCacheGroupSpec"]:
-        return cls._resolve(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
+        """Split a worker's layers into logical KV cache groups."""
+        raise NotImplementedError
 
-    @classmethod
+    @abstractmethod
     def get_kv_cache_config_from_groups(
-        cls,
+        self,
         vllm_config: "VllmConfig",
         kv_cache_groups: list["KVCacheGroupSpec"],
-        available_memory: int,
+        num_blocks: int,
     ) -> "KVCacheConfig":
-        return cls._resolve(vllm_config).get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, available_memory
-        )
+        """Materialize groups for exactly ``num_blocks`` global block IDs.
 
-    @classmethod
-    def validate_kv_cache_layout(
-        cls,
-        layout: "KVCacheLayout",
-        kv_cache_groups: list["KVCacheGroupSpec"],
-        vllm_config: "VllmConfig | None" = None,
-    ) -> None:
-        if vllm_config is None:
-            from vllm.config import get_current_vllm_config
+        Every non-host-resident tensor must name the same device backing size,
+        which must scale linearly with ``num_blocks``. Host-resident tensors,
+        such as HiSparse source storage, are excluded from GPU accounting.
+        """
+        raise NotImplementedError
 
-            vllm_config = get_current_vllm_config()
-        return cls._resolve(vllm_config).validate_kv_cache_layout(
-            layout, kv_cache_groups
-        )
 
-    @classmethod
-    def may_override_num_blocks(cls, vllm_config: "VllmConfig", num_blocks: int) -> int:
-        return cls._resolve(vllm_config).may_override_num_blocks(
-            vllm_config, num_blocks
-        )
+def get_kv_cache_config_builder(
+    vllm_config: "VllmConfig",
+) -> KVCacheConfigBuilder:
+    """Resolve the builder selected by the current platform.
 
-    @classmethod
-    def _get_kv_cache_bytes_per_block(
-        cls,
-        kv_cache_groups: list["KVCacheGroupSpec"],
-        vllm_config: "VllmConfig | None" = None,
-    ) -> int:
-        if vllm_config is None:
-            from vllm.config import get_current_vllm_config
+    Resolution priority is owned by the platform hook
+    (:meth:`vllm.platforms.interface.Platform.get_kv_cache_config_builder_cls`).
+    Builders are stateless (every method takes ``vllm_config``), so a fresh
+    instance is returned per call and engines with different configs in the
+    same process always get the correct builder.
+    """
+    from vllm.platforms import current_platform
 
-            vllm_config = get_current_vllm_config()
-        return cls._resolve(vllm_config)._get_kv_cache_bytes_per_block(kv_cache_groups)
+    builder_cls = resolve_obj_by_qualname(
+        current_platform.get_kv_cache_config_builder_cls(vllm_config)
+    )
+    return builder_cls()
+
+
+def get_profiling_kv_cache_config(
+    vllm_config: "VllmConfig",
+    kv_cache_spec: dict[str, "KVCacheSpec"],
+    min_blocks: int,
+) -> "KVCacheConfig":
+    """Build the smallest KV cache config for CUDA graph profiling.
+
+    The config is sized to ``min_blocks`` blocks (at least one block per
+    captured sequence) so the profiling run can capture every graph without
+    consuming real KV cache memory. It goes through the active builder's
+    normal grouping and placement hooks, so custom builders do not need to
+    re-implement the profiling choreography.
+
+    Consumed by the cudagraph profiling workers (``cudagraph_utils.py`` and
+    ``gpu_model_runner.py``).
+    """
+    builder = get_kv_cache_config_builder(vllm_config)
+    groups = builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    return builder.get_kv_cache_config_from_groups(
+        vllm_config, groups, max(min_blocks, 1)
+    )

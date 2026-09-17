@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
 from vllm.v1.hisparse.layout import (
     get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
@@ -121,7 +122,7 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
+def _unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """This function tries to convert the KV cache specs to one type if the model
     is a hybrid model with multiple type of KV cache. It will convert all
     SlidingWindowSpec to FullAttentionSpec if both types are present.
@@ -130,7 +131,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
 
     """
-    if is_kv_cache_spec_uniform(
+    if _is_kv_cache_spec_uniform(
         kv_cache_spec
     ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
         return
@@ -144,7 +145,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     kv_cache_spec.update(_promote_local_kv_cache_specs(kv_cache_spec))
 
 
-def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+def _is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     # kv_cache_spec is an empty dict for attention free models
     return not kv_cache_spec
 
@@ -162,7 +163,7 @@ def _get_kv_cache_groups_uniform_spec(
         The generated KVCacheGroupSpecs
 
     """
-    return create_kv_cache_group_specs(kv_cache_specs, [list(kv_cache_specs.keys())])
+    return _create_kv_cache_group_specs(kv_cache_specs, [list(kv_cache_specs.keys())])
 
 
 def _uses_trailing_mtp_layers(vllm_config: VllmConfig) -> bool:
@@ -532,7 +533,7 @@ def _get_kv_cache_groups_glm5_next(
     return (
         [KVCacheGroupSpec(list(attn_specs), uniform_spec)]
         + ([tail_group] if tail_group is not None else [])
-        + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
+        + _create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
     )
 
 
@@ -624,7 +625,7 @@ def _glm5_next_tensor_layout(
     )
 
 
-def unify_kv_cache_spec_page_size(
+def _unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
     """Unify the page size of the given KVCacheSpec. If the page size of all layers
@@ -770,7 +771,7 @@ def _get_kv_cache_groups_uniform_page_size(
     attention type. One exception is that, when
     `--disable-hybrid-kv-cache-manager` is true, the single group for full
     attention layers may also include attention layers using sliding window or
-    LLaMA 4 local attention. See `unify_hybrid_kv_cache_specs` for more details.
+    LLaMA 4 local attention. See `_unify_hybrid_kv_cache_specs` for more details.
     6. Support for multiple attention types: The design for most components is
     general to an arbitrary number of attention types. But
     `find_longest_cache_hit` only supports one attention type or two
@@ -863,10 +864,10 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
+    return _create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
-def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
+def _get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """Get the page size of the KV cache."""
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
@@ -906,7 +907,7 @@ def _promote_local_kv_cache_specs(
     """
     promoted_specs = kv_cache_spec.copy()
 
-    if is_kv_cache_spec_uniform(
+    if _is_kv_cache_spec_uniform(
         promoted_specs
     ) or UniformTypeKVCacheSpecs.is_uniform_type(promoted_specs):
         return promoted_specs
@@ -963,7 +964,7 @@ def _promote_local_kv_cache_specs(
             )
 
     if not (
-        is_kv_cache_spec_uniform(promoted_specs)
+        _is_kv_cache_spec_uniform(promoted_specs)
         or UniformTypeKVCacheSpecs.is_uniform_type(promoted_specs)
     ):
         raise ValueError("Failed to promote local KV cache specs to one unified type.")
@@ -971,7 +972,7 @@ def _promote_local_kv_cache_specs(
     return promoted_specs
 
 
-def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+def _is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """Whether all layers in the given KVCacheSpec have the same KV cache spec.
     Note that we regard FullAttentionSpec with and without sliding window as
     the same type.
@@ -995,7 +996,7 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return True
 
 
-def create_kv_cache_group_specs(
+def _create_kv_cache_group_specs(
     kv_cache_spec: dict[str, KVCacheSpec], grouped_layer_names: list[list[str]]
 ) -> list[KVCacheGroupSpec]:
     """Create KVCacheGroupSpec object for each kv cache group layer.
@@ -1065,7 +1066,7 @@ def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],
     max_model_len: int,
-    estimate_max_model_len: Callable[[int], int],
+    _estimate_max_model_len: Callable[[int], int],
 ):
     if available_memory <= 0:
         raise ValueError(
@@ -1080,7 +1081,7 @@ def _check_enough_kv_cache_memory(
     needed_memory = get_needed_memory()
 
     if needed_memory > available_memory:
-        estimated_max_len = estimate_max_model_len(available_memory)
+        estimated_max_len = _estimate_max_model_len(available_memory)
         estimated_msg = ""
         if estimated_max_len > 0:
             estimated_msg = (
@@ -1101,7 +1102,7 @@ def _check_enough_kv_cache_memory(
         )
 
 
-def estimate_max_model_len(
+def _estimate_max_model_len(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     available_memory: int,
@@ -1129,7 +1130,7 @@ def estimate_max_model_len(
         # Temporarily modify the max_model_len for this calculation
         vllm_config.model_config.max_model_len = model_len
         # Calculate memory needed for the given model length
-        memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
+        memory_needed = _max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
         return memory_needed <= available_memory
 
     try:
@@ -1165,19 +1166,86 @@ def _get_per_layer_spec(
     return spec
 
 
-def max_memory_usage_bytes(
+def _max_memory_usage_bytes(
     vllm_config: VllmConfig, kv_cache_specs: Iterable[KVCacheSpec]
 ) -> int:
     """Get the maximum memory usage in bytes for the given KV cache specs."""
     return sum(spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
 
 
-class DefaultKVCacheConfigBuilder:
-    """Default KV cache config builder.
+def _validate_kv_cache_config(
+    layout: KVCacheLayout,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Validate that ``layout`` can express the groups' packing.
 
-    Every planning step delegates to the module-level function of the same
-    name in :mod:`vllm.v1.core.kv_cache_planning`. Subclass and override the
-    steps to customize KV cache planning for a model or platform.
+    Raises:
+        ValueError: If the layout cannot express the groups.
+
+    """
+    page_sizes = {
+        _get_per_layer_spec(group, layer_name).page_size_bytes
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    if len(page_sizes) == 1:
+        # A rectangular layer dim exists; every layout can express it.
+        return
+
+    # Mixed page sizes pack pages side by side within a block, which needs each page
+    # to be one contiguous chunk inside its block (a block-compact layout) and, with
+    # multiple KV cache groups, the layer dim inside the block dim.
+    if not layout.is_block_compact or (
+        len(kv_cache_groups) > 1 and layout.is_layer_compact
+    ):
+        raise ValueError(
+            f"KV cache layout {layout.name} cannot express this model's "
+            f"mixed page sizes ({sorted(page_sizes)}); a backend should "
+            "declare block-outermost supported layouts (e.g. BLHNC), or "
+            "set VLLM_KV_CACHE_LAYOUT=BLHNC."
+        )
+
+
+def _get_kv_cache_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+    """Return the largest cache group's bytes per block.
+
+    This is the layout bytes one global block ID covers, used to size the
+    shared KV cache backing allocation.
+    """
+    bytes_per_block = max(
+        sum(
+            _get_per_layer_spec(group, layer_name).page_size_bytes
+            for layer_name in group.layer_names
+        )
+        for group in kv_cache_groups
+    )
+    assert bytes_per_block > 0
+    hot_page_sizes = [
+        group.kv_cache_spec.page_size_bytes
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    if hot_page_sizes:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
+    stride_alignments = [
+        spec.block_stride_alignment
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
+        and spec.block_stride_alignment
+    ]
+    if stride_alignments:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
+    return bytes_per_block
+
+
+class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
+    """Core-owned KV cache planning with two customization hooks.
+
+    Model and platform builders can customize logical grouping and exact-block
+    physical placement. Core retains the cross-worker planning flow and its
+    global invariants (spec validation, ``num_gpu_blocks_override``, null-block
+    reservation, auto-fit, admission checks, and cross-rank convergence).
     """
 
     def get_kv_cache_configs(
@@ -1186,35 +1254,7 @@ class DefaultKVCacheConfigBuilder:
         kv_cache_specs: list[dict[str, KVCacheSpec]],
         available_memory: list[int],
     ) -> list[KVCacheConfig]:
-        """Generates the KV cache configurations for a model.
-        Since we use a shared centralized controller for all workers, we need the
-        `kv_cache_config` to be consistent across all workers to make sure
-        the KV cache allocation can be applied to all workers. However, different
-        workers may have different memory available, and different type of layers
-        (when pipeline parallel is enabled). To handle the difference between
-        workers, the current implementation is:
-        1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
-        the whole model.
-        2. Generate the KV cache groups based on the layer ratio of the whole model.
-        This also handles spec unification for hybrid models.
-        3. Handle auto-fit max_model_len and memory checks using per-worker
-        projected groups to account for PP sharding.
-        4. Generate the KV cache configs for each worker based on the KV cache
-        grouping strategy. (This is reasonable because the layer ratio of
-        different PP stages are similar.)
-        5. Change the num_blocks of each worker to the smallest among all workers
-        and shrink tensor sizes proportionally to avoid allocating unused memory.
-
-        Args:
-            vllm_config: The global VllmConfig
-            kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
-            available_memory: Memory available for KV cache in bytes for each
-                worker.
-
-        Returns:
-            The generated KVCacheConfigs for each worker.
-
-        """
+        """See ``KVCacheConfigBuilder.get_kv_cache_configs``."""
         # Merge the KV cache specs of all workers. Different PP stages may have
         # different layer names, and different TP ranks of the same PP stage should
         # have the same KV cache spec.
@@ -1257,37 +1297,51 @@ class DefaultKVCacheConfigBuilder:
             for worker_spec in kv_cache_specs
         ]
 
-        # If `num_gpu_blocks_override` is set, the cache size that will actually
-        # be allocated is decoupled from the profiled `available_memory`:
-        # `may_override_num_blocks` in `get_kv_cache_config_from_groups` clamps
-        # `num_blocks` to the override. Reflect that in `available_memory` here so
-        # auto-fit, the admission check, and the per-worker config builder all
-        # plan against the same effective capacity.
-        override = vllm_config.cache_config.num_gpu_blocks_override
-        if override is not None:
-            adjusted_memory: list[int] = []
-            for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
-                if not groups:
-                    adjusted_memory.append(avail_mem)
-                    continue
-                bytes_per_block = self._pool_bytes_per_block(groups)
-                logger.info(
-                    "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-                    avail_mem // bytes_per_block,
-                    override,
-                )
-                adjusted_memory.append(override * bytes_per_block)
-            available_memory = adjusted_memory
-
         if vllm_config.attention_config.hisparse_config is not None:
             available_memory = [min(available_memory)] * len(available_memory)
 
-        # Reserve the null block BlockPool permanently holds back, so auto-fit and
-        # the capacity check both plan against usable blocks. Allocation below
-        # still uses the full memory.
+        # One global block ID costs a fixed amount of GPU memory. Derive it from
+        # a hypothetical one-block pool so the divisor stays in sync with the
+        # placement hook, then convert memory into an exact block count. The
+        # `num_gpu_blocks_override` decouples the allocated size from the
+        # profiled memory, so reflect it in `num_blocks` here and let auto-fit,
+        # the admission check, and the per-worker config builder all plan
+        # against the same effective capacity.
+        pool_bytes_per_worker = [
+            self._get_pool_bytes_per_block(vllm_config, groups) if groups else 0
+            for groups in projected_groups_per_worker
+        ]
+        override = vllm_config.cache_config.num_gpu_blocks_override
+        num_blocks_per_worker: list[int] = []
+        for groups, avail_mem, bytes_per_block in zip(
+            projected_groups_per_worker,
+            available_memory,
+            pool_bytes_per_worker,
+        ):
+            if not groups:
+                num_blocks_per_worker.append(1)
+                continue
+            profiled_num_blocks = avail_mem // bytes_per_block
+            if override is not None:
+                logger.info(
+                    "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
+                    profiled_num_blocks,
+                    override,
+                )
+            num_blocks_per_worker.append(
+                override if override is not None else profiled_num_blocks
+            )
+
+        # BlockPool permanently holds back one null block. Capacity checks use
+        # only complete, usable blocks and ignore an unallocatable byte tail.
         check_memory = [
-            avail_mem - self._pool_bytes_per_block(groups) if groups else avail_mem
-            for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
+            max(num_blocks - 1, 0) * bytes_per_block if groups else avail_mem
+            for groups, avail_mem, bytes_per_block, num_blocks in zip(
+                projected_groups_per_worker,
+                available_memory,
+                pool_bytes_per_worker,
+                num_blocks_per_worker,
+            )
         ]
 
         if vllm_config.model_config.original_max_model_len == -1:
@@ -1301,7 +1355,11 @@ class DefaultKVCacheConfigBuilder:
                 continue
             _check_enough_kv_cache_memory(
                 avail_mem,
-                partial(self._max_memory_usage_bytes_from_groups, vllm_config, groups),
+                partial(
+                    self._get_max_memory_usage_bytes_from_groups,
+                    vllm_config,
+                    groups,
+                ),
                 vllm_config.model_config.max_model_len,
                 partial(self._estimate_max_model_len_from_groups, vllm_config, groups),
             )
@@ -1310,14 +1368,14 @@ class DefaultKVCacheConfigBuilder:
         for (
             projected_groups,
             kv_cache_spec_one_worker,
-            available_memory_one_worker,
-        ) in zip(projected_groups_per_worker, kv_cache_specs, available_memory):
+            num_blocks,
+        ) in zip(projected_groups_per_worker, kv_cache_specs, num_blocks_per_worker):
             assert sum(len(group.layer_names) for group in projected_groups) == len(
                 kv_cache_spec_one_worker
             ), "Some layers are not assigned to any group."
             kv_cache_configs.append(
                 self.get_kv_cache_config_from_groups(
-                    vllm_config, projected_groups, available_memory_one_worker
+                    vllm_config, projected_groups, num_blocks
                 )
             )
 
@@ -1330,11 +1388,11 @@ class DefaultKVCacheConfigBuilder:
         for i, kv_cache_config in enumerate(kv_cache_configs):
             if kv_cache_config.num_blocks == min_num_blocks:
                 continue
-            # Re-plan with exactly the memory the smallest rank can afford, so
-            # strides and offsets stay consistent with the shrunken allocation.
+            # Re-materialize with the exact common capacity so strides and
+            # offsets stay consistent with the shrunken allocation.
             groups = kv_cache_config.kv_cache_groups
             kv_cache_configs[i] = self.get_kv_cache_config_from_groups(
-                vllm_config, groups, min_num_blocks * self._pool_bytes_per_block(groups)
+                vllm_config, groups, min_num_blocks
             )
 
         return kv_cache_configs
@@ -1344,20 +1402,11 @@ class DefaultKVCacheConfigBuilder:
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec],
     ) -> list[KVCacheGroupSpec]:
-        """Split the layers in the model into groups with the same KV cache spec.
-
-        Args:
-            vllm_config: The global VllmConfig
-            kv_cache_spec: The kv cache spec of each attention layer in the model
-
-        Returns:
-            The generated KVCacheGroups
-
-        """
+        """See ``KVCacheConfigBuilder.get_kv_cache_groups``."""
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-            unify_hybrid_kv_cache_specs(kv_cache_spec)
+            _unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-        if is_kv_cache_type_attention_free(kv_cache_spec):
+        if _is_kv_cache_type_attention_free(kv_cache_spec):
             # This returns an empty list to allow for the KVCacheManager to handle
             # attention free models.
             return []
@@ -1365,7 +1414,7 @@ class DefaultKVCacheConfigBuilder:
         if hisparse_groups := get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
             return hisparse_groups
 
-        if is_kv_cache_spec_uniform(kv_cache_spec):
+        if _is_kv_cache_spec_uniform(kv_cache_spec):
             # KV cache of all layers are the same, which is true for
             # most models. Allocate the same amount of memory for
             # each layer.
@@ -1402,7 +1451,7 @@ class DefaultKVCacheConfigBuilder:
         # Prefer preserving each layer's cache semantics. If physical pages cannot
         # be unified, try a supported allocation-only fallback before failing.
         try:
-            filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+            filtered_spec = _unify_kv_cache_spec_page_size(filtered_spec)
         except NotImplementedError:
             fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
             if fallback_groups is None:
@@ -1412,7 +1461,7 @@ class DefaultKVCacheConfigBuilder:
 
         # Add hidden-state layers back with page aligned to the common page.
         if hidden_specs:
-            common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+            common_page = _get_uniform_page_size([g.kv_cache_spec for g in groups])
             # TP may shrink the common page below hidden-state per-token cost.
             groups, common_page = _ensure_min_page_size(
                 groups, common_page, hidden_specs
@@ -1449,19 +1498,9 @@ class DefaultKVCacheConfigBuilder:
         self,
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
-        available_memory: int,
+        num_blocks: int,
     ) -> KVCacheConfig:
-        """Generate the KV cache configuration from the KV cache groups and spec
-        of each layer.
-
-        Args:
-            vllm_config: The global VllmConfig
-            kv_cache_groups: The KV cache groups
-            available_memory: Memory available for KV cache in bytes
-        Returns:
-            The generated KVCacheConfig
-
-        """
+        """See ``KVCacheConfigBuilder.get_kv_cache_config_from_groups``."""
         if len(kv_cache_groups) == 0:
             # Attention free models do not have KV cache.
             # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -1477,7 +1516,7 @@ class DefaultKVCacheConfigBuilder:
         if vllm_config.attention_config.hisparse_config is not None:
             host_budget = get_hisparse_host_pool_bytes(vllm_config)
             return get_hisparse_kv_cache_config(
-                vllm_config, kv_cache_groups, available_memory, host_budget
+                vllm_config, kv_cache_groups, num_blocks, host_budget
             )
 
         if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
@@ -1492,9 +1531,6 @@ class DefaultKVCacheConfigBuilder:
                 _,
             ) = glm5_layout
             bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
-            num_blocks = self.may_override_num_blocks(
-                vllm_config, available_memory // bytes_per_block
-            )
             size = bytes_per_block * num_blocks
             attn_specs = cast(
                 UniformTypeKVCacheSpecs, attn_group.kv_cache_spec
@@ -1548,15 +1584,13 @@ class DefaultKVCacheConfigBuilder:
             )
 
         layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-        self.validate_kv_cache_layout(layout, kv_cache_groups)
+        _validate_kv_cache_config(layout, kv_cache_groups)
 
-        bytes_per_block = self._get_kv_cache_bytes_per_block(kv_cache_groups)
+        bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
         interleaved_block_stride = (
             bytes_per_block if layout.is_block_outermost else None
         )
 
-        num_blocks = available_memory // bytes_per_block
-        num_blocks = self.may_override_num_blocks(vllm_config, num_blocks)
         size = bytes_per_block * num_blocks
 
         # Groups alias from byte 0. Spec regions are laid out differently:
@@ -1614,91 +1648,40 @@ class DefaultKVCacheConfigBuilder:
             ),
         )
 
-    def validate_kv_cache_layout(
+    def _get_pool_bytes_per_block(
         self,
-        layout: KVCacheLayout,
+        vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> None:
-        """Validate that the resolved layout can express this model's packing.
-
-        The layout was chosen once in the engine core from the backends' supported
-        sets; a backend whose model packs pages side by side (e.g. the DeepSeek-V4
-        indexer) declares block-outermost layouts there, so an inexpressible
-        layout reaching this point is an error.
-        """
-        page_sizes = {
-            _get_per_layer_spec(group, layer_name).page_size_bytes
-            for group in kv_cache_groups
-            for layer_name in group.layer_names
-        }
-        if len(page_sizes) == 1:
-            # A rectangular layer dim exists; every layout can express it.
-            return
-
-        # Mixed page sizes pack pages side by side within a block, which needs each page
-        # to be one contiguous chunk inside its block (a block-compact layout) and, with
-        # multiple KV cache groups, the layer dim inside the block dim.
-        if not layout.is_block_compact or (
-            len(kv_cache_groups) > 1 and layout.is_layer_compact
-        ):
-            raise ValueError(
-                f"KV cache layout {layout.name} cannot express this model's "
-                f"mixed page sizes ({sorted(page_sizes)}); a backend should "
-                "declare block-outermost supported layouts (e.g. BLHNC), or "
-                "set VLLM_KV_CACHE_LAYOUT=BLHNC."
-            )
-
-    def may_override_num_blocks(self, vllm_config: VllmConfig, num_blocks: int) -> int:
-        """Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
-        The override is logged once, at the call site in `get_kv_cache_configs`.
-        """
-        if vllm_config.cache_config.num_gpu_blocks_override is not None:
-            num_blocks = vllm_config.cache_config.num_gpu_blocks_override
-        return num_blocks
-
-    def _get_kv_cache_bytes_per_block(
-        self, kv_cache_groups: list[KVCacheGroupSpec]
     ) -> int:
-        """Return the largest cache group's bytes per block."""
-        if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-            _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
-            return len(mla_names) * mla_page + len(idx_names) * idx_page
+        """Return the GPU bytes one global block ID consumes.
 
-        bytes_per_block = max(
-            sum(
-                _get_per_layer_spec(group, layer_name).page_size_bytes
-                for layer_name in group.layer_names
-            )
-            for group in kv_cache_groups
-        )
-        assert bytes_per_block > 0
-        hot_page_sizes = [
-            group.kv_cache_spec.page_size_bytes
-            for group in kv_cache_groups
-            if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-        ]
-        if hot_page_sizes:
-            bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
-        stride_alignments = [
-            spec.block_stride_alignment
-            for group in kv_cache_groups
-            for layer_name in group.layer_names
-            if isinstance(
-                spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec
-            )
-            and spec.block_stride_alignment
-        ]
-        if stride_alignments:
-            bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
-        return bytes_per_block
+        This is the divisor Core uses to convert ``available_memory`` into
+        ``num_blocks`` and to reserve the null block the block pool holds back.
 
-    def _pool_bytes_per_block(self, kv_cache_groups: list[KVCacheGroupSpec]) -> int:
-        """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
-        the divisor used by `get_kv_cache_config_from_groups` to convert
-        `available_memory` into `num_blocks`. Used to compute the effective KV cache
-        capacity once `num_gpu_blocks_override` is applied.
+        The default implementation materializes the groups with ``num_blocks=1``
+        (a hypothetical one-block pool, without allocating GPU memory) and reads
+        the shared device backing size. A layout with multiple device backing
+        pools (e.g. Ascend GLM-Next) must override this method.
         """
-        return self._get_kv_cache_bytes_per_block(kv_cache_groups)
+        if not kv_cache_groups:
+            return 0
+        unit_config = self.get_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks=1
+        )
+        assert unit_config.num_blocks == 1
+        backing_sizes = {
+            tensor.size
+            for tensor in unit_config.kv_cache_tensors
+            if not tensor.host_resident
+        }
+        if len(backing_sizes) != 1:
+            raise ValueError(
+                "KV cache tensors must share one GPU backing allocation, but "
+                f"got sizes {sorted(backing_sizes)}. Override "
+                "_get_pool_bytes_per_block() for layouts with multiple device "
+                "backing pools."
+            )
+        return backing_sizes.pop()
 
     def _estimate_max_model_len_from_groups(
         self,
@@ -1706,9 +1689,8 @@ class DefaultKVCacheConfigBuilder:
         kv_cache_groups: list[KVCacheGroupSpec],
         available_memory: int,
     ) -> int:
-        """Binary search for the maximum model length that fits in available memory.
-        Returns 0 if even 1 token doesn't fit.
-        """
+        """Binary-search the largest model length that fits
+        ``available_memory``; returns 0 if even one token cannot fit."""
         original_max = vllm_config.model_config.max_model_len
         hisparse_enabled = (
             vllm_config.attention_config.hisparse_config is not None
@@ -1719,8 +1701,11 @@ class DefaultKVCacheConfigBuilder:
             vllm_config.model_config.max_model_len = model_len
             if hisparse_enabled:
                 try:
+                    num_blocks = available_memory // self._get_pool_bytes_per_block(
+                        vllm_config, kv_cache_groups
+                    )
                     config = self.get_kv_cache_config_from_groups(
-                        vllm_config, kv_cache_groups, available_memory
+                        vllm_config, kv_cache_groups, num_blocks
                     )
                 except ValueError:
                     return False
@@ -1730,7 +1715,9 @@ class DefaultKVCacheConfigBuilder:
 
                 return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
             return (
-                self._max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+                self._get_max_memory_usage_bytes_from_groups(
+                    vllm_config, kv_cache_groups
+                )
                 <= available_memory
             )
 
@@ -1750,21 +1737,12 @@ class DefaultKVCacheConfigBuilder:
         finally:
             vllm_config.model_config.max_model_len = original_max
 
-    def _max_memory_usage_bytes_from_groups(
+    def _get_max_memory_usage_bytes_from_groups(
         self,
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int:
-        """Calculate maximum memory usage in bytes from KV cache groups.
-
-        This correctly accounts for padding in hybrid models. For example, if a
-        model has 8 full attention layers and 9 sliding window layers, they will
-        be padded to 9 full + 9 sliding window for uniform group sizes.
-
-        Each group independently claims blocks from the shared pool, so a
-        request consumes the sum of the per-group block counts, i.e.
-        ``bytes_per_block * total_blocks``.
-        """
+        """Calculate maximum memory usage in bytes from KV cache groups."""
         if not kv_cache_groups:
             return 0
 
@@ -1793,11 +1771,11 @@ class DefaultKVCacheConfigBuilder:
             )
             if tail_names:
                 total_blocks += 1
-            return total_blocks * (
-                len(mla_names) * mla_page + len(idx_names) * idx_page
+            return total_blocks * self._get_pool_bytes_per_block(
+                vllm_config, kv_cache_groups
             )
 
-        bytes_per_block = self._pool_bytes_per_block(kv_cache_groups)
+        bytes_per_block = self._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         total_blocks = 0
         for group in kv_cache_groups:
             spec = group.kv_cache_spec
@@ -1817,18 +1795,7 @@ class DefaultKVCacheConfigBuilder:
         projected_groups_per_worker: list[list[KVCacheGroupSpec]],
         available_memory: list[int],
     ) -> None:
-        """When max_model_len is set to -1, this function estimates the largest
-        context length that can be supported with the available GPU memory.
-        It uses binary search to find the maximum length that fits across all
-        workers.
-
-        Args:
-            vllm_config: The global VllmConfig (will be modified in-place)
-            projected_groups_per_worker: KV cache groups projected to each worker.
-            available_memory: Memory available for KV cache in bytes for each
-                worker.
-
-        """
+        """When max_model_len is -1, fit it to the available memory."""
         original_max = vllm_config.model_config.max_model_len
 
         if all(not groups for groups in projected_groups_per_worker):
@@ -1882,19 +1849,8 @@ class DefaultKVCacheConfigBuilder:
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int,
-    ):
-        """Checks whether `available_memory` is enough for the KV cache to hold at
-        least one request with the model's max_model_len.
-
-        Args:
-            vllm_config: The global VllmConfig
-            kv_cache_spec: The kv cache spec of each attention layer in the model
-            available_memory: Memory available for KV cache in bytes.
-
-        Raises:
-            ValueError: If there is not enough memory available for the KV cache.
-
-        """
+    ) -> None:
+        """See ``KVCacheConfigBuilder.check_enough_kv_cache_memory``."""
         # No need to check for available memory if the kv_cache_spec is empty
         if kv_cache_spec:
             # Reserve the null block BlockPool permanently holds back, so the check
@@ -1902,13 +1858,13 @@ class DefaultKVCacheConfigBuilder:
             # of the specs since grouping may unify them in-place.
             groups = self.get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
             check_memory = (
-                available_memory - self._pool_bytes_per_block(groups)
+                available_memory - self._get_pool_bytes_per_block(vllm_config, groups)
                 if groups
                 else available_memory
             )
             _check_enough_kv_cache_memory(
                 check_memory,
-                lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+                lambda: _max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
                 vllm_config.model_config.max_model_len,
-                lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+                lambda am: _estimate_max_model_len(vllm_config, kv_cache_spec, am),
             )

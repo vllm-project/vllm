@@ -1291,8 +1291,7 @@ class Platform:
         the default builder in :mod:`vllm.v1.core.kv_cache_planning`.
 
         Returns:
-            Fully-qualified class path of a
-            ``DefaultKVCacheConfigBuilder`` subclass.
+            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
 
         """
         model_cls_path = vllm_config.model_config.kv_cache_config_builder_cls

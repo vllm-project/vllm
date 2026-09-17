@@ -31,7 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
-    is_kv_cache_spec_uniform,
+    _is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
@@ -485,7 +485,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     specs = _dsa_specs(num_layers, block_size)
     # Differing head sizes make the specs non-identical but same-type, which is
     # what lands both caches of a layer in one group.
-    assert not is_kv_cache_spec_uniform(specs)
+    assert not _is_kv_cache_spec_uniform(specs)
     assert UniformTypeKVCacheSpecs.is_uniform_type(specs)
     group = KVCacheGroupSpec(
         list(specs),
@@ -505,7 +505,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
     kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * num_blocks
+        vllm_config, [group], num_blocks=4
     )
     assert kv_cache_config.num_blocks == num_blocks
     assert len(set(pages)) > 1, "the mixed page sizes are what this test covers"
@@ -564,7 +564,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     kv_cache_config = _default_builder.get_kv_cache_config_from_groups(
-        vllm_config, [group], sum(pages) * rank_blocks
+        vllm_config, [group], num_blocks=rank_blocks
     )
     assert kv_cache_config.num_blocks == rank_blocks
 
@@ -613,9 +613,8 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.attention_config.hisparse_config = None
         vllm_config.kv_transfer_config = None
 
-        page_bytes = sum(spec.page_size_bytes for spec in specs.values())
         config = _default_builder.get_kv_cache_config_from_groups(
-            vllm_config, [group], page_bytes * 4
+            vllm_config, [group], num_blocks=4
         )
         scheduler_block_size, _ = resolve_kv_cache_block_sizes(config, vllm_config)
         assert scheduler_block_size == 128 * dcp_size

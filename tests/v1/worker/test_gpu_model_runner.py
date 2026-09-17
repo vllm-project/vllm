@@ -43,7 +43,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
-    estimate_max_model_len,
+    _estimate_max_model_len,
 )
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -1105,7 +1105,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     assert len(kv_cache_config.kv_cache_tensors) == 1
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    max_context_len = _estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
@@ -1179,7 +1179,7 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     # compared to no KV sharing
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
-    max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+    max_context_len = _estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
 
