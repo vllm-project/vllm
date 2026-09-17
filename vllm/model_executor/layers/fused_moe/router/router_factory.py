@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
     AiterSharedRoutedFusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.cpu_router import CPURouter
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
+from vllm.platforms import current_platform
 
 
 def create_fused_moe_router(
@@ -60,9 +62,11 @@ def create_fused_moe_router(
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    # Deepseek V4 vision routing bias parameters
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> FusedMoERouter:
-    """
-    Factory function to create the appropriate FusedMoERouter subclass based on
+    """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
 
     The selection logic follows this priority order:
@@ -109,8 +113,8 @@ def create_fused_moe_router(
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
-    """
 
+    """
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(
@@ -136,6 +140,26 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
+        )
+
+    if current_platform.is_cpu():
+        # CPURouter covers every routing scheme CPU MoE experts support
+        # (plain softmax, grouped topk, custom routing functions, and
+        # DeepSeek V4's sqrtsoftplus/hash routing) in a single class, so it
+        # takes priority over the scheme-specific routers below.
+        return CPURouter(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            custom_routing_function=custom_routing_function,
+            hash_indices_table=hash_indices_table,
+            eplb_state=eplb_state,
         )
 
     if use_grouped_topk:
@@ -211,6 +235,8 @@ def create_fused_moe_router(
             hash_indices_table=hash_indices_table,
             num_fused_shared_experts=num_fused_shared_experts,
             shared_expert_weight=shared_expert_weight,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     if (

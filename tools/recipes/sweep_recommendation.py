@@ -10,7 +10,7 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any
 
 try:
@@ -23,6 +23,7 @@ DEFAULT_CONFIG_PATH: str | None = None
 DEFAULT_ENV_PATH: str | None = None
 DEFAULT_TTFT_SLA_MS: float | None = None
 DEFAULT_TPOT_SLA_MS: float | None = None
+DEFAULT_MINIMUM_COMPLIANCE: float = 0.99
 
 
 def _number(value: object) -> float | None:
@@ -35,6 +36,16 @@ def _mean(rows: list[dict[str, Any]], key: str) -> float | None:
     values = [_number(row.get(key)) for row in rows]
     numbers = [value for value in values if value is not None]
     return mean(numbers) if numbers else None
+
+
+def _percentile_summary(
+    rows: list[dict[str, Any]], key: str
+) -> tuple[float | None, float | None, float | None]:
+    values = [_number(row.get(key)) for row in rows]
+    numbers = [value for value in values if value is not None]
+    if not numbers:
+        return None, None, None
+    return mean(numbers), median(numbers), max(numbers)
 
 
 def _positive_int(row: dict[str, Any], key: str) -> int | None:
@@ -69,6 +80,9 @@ def _aggregate_candidates(
     rows: list[dict[str, Any]],
     *,
     use_goodput: bool,
+    ttft_sla_ms: float | None = None,
+    tpot_sla_ms: float | None = None,
+    minimum_compliance: float = DEFAULT_MINIMUM_COMPLIANCE,
 ) -> list[dict[str, Any]]:
     grouped: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
 
@@ -83,9 +97,28 @@ def _aggregate_candidates(
     for (seqs, batch), runs in sorted(grouped.items()):
         failed_requests = sum(int(_number(run.get("failed")) or 0) for run in runs)
         output_throughput = _mean(runs, "output_throughput")
+        request_throughput = _mean(runs, "request_throughput")
         request_goodput = _mean(runs, "request_goodput")
-        p99_ttft_ms = _mean(runs, "p99_ttft_ms")
-        p99_tpot_ms = _mean(runs, "p99_tpot_ms")
+        mean_p99_ttft_ms, median_p99_ttft_ms, worst_p99_ttft_ms = _percentile_summary(
+            runs, "p99_ttft_ms"
+        )
+        mean_p99_tpot_ms, median_p99_tpot_ms, worst_p99_tpot_ms = _percentile_summary(
+            runs, "p99_tpot_ms"
+        )
+
+        completed_requests = sum(
+            int(_number(run.get("completed")) or 0) for run in runs
+        )
+        estimated_compliant_requests = sum(
+            (_number(run.get("request_goodput")) or 0.0)
+            * (_number(run.get("duration")) or 0.0)
+            for run in runs
+        )
+        combined_compliance_ratio = (
+            estimated_compliant_requests / completed_requests
+            if completed_requests > 0
+            else None
+        )
 
         valid = failed_requests == 0 and output_throughput is not None
         reason = None
@@ -96,6 +129,25 @@ def _aggregate_candidates(
             valid = False
             reason = "request_goodput is missing; rerun sweep with SLO goodput enabled"
 
+        p99_sla_eligible = valid
+        if ttft_sla_ms is not None:
+            p99_sla_eligible = bool(
+                p99_sla_eligible
+                and median_p99_ttft_ms is not None
+                and median_p99_ttft_ms <= ttft_sla_ms
+            )
+        if tpot_sla_ms is not None:
+            p99_sla_eligible = bool(
+                p99_sla_eligible
+                and median_p99_tpot_ms is not None
+                and median_p99_tpot_ms <= tpot_sla_ms
+            )
+        compliance_eligible = bool(
+            valid
+            and combined_compliance_ratio is not None
+            and combined_compliance_ratio >= minimum_compliance
+        )
+
         candidates.append(
             {
                 "max_num_seqs": seqs,
@@ -103,9 +155,26 @@ def _aggregate_candidates(
                 "run_count": len(runs),
                 "failed_requests": failed_requests,
                 "mean_request_goodput": request_goodput,
+                "mean_request_throughput": request_throughput,
                 "mean_output_throughput": output_throughput,
-                "mean_p99_ttft_ms": p99_ttft_ms,
-                "mean_p99_tpot_ms": p99_tpot_ms,
+                "mean_p99_ttft_ms": mean_p99_ttft_ms,
+                "median_p99_ttft_ms": median_p99_ttft_ms,
+                "worst_p99_ttft_ms": worst_p99_ttft_ms,
+                "mean_p99_tpot_ms": mean_p99_tpot_ms,
+                "median_p99_tpot_ms": median_p99_tpot_ms,
+                "worst_p99_tpot_ms": worst_p99_tpot_ms,
+                "estimated_compliant_requests": estimated_compliant_requests,
+                "completed_requests": completed_requests,
+                "combined_compliance_ratio": combined_compliance_ratio,
+                "combined_compliance_percent": (
+                    combined_compliance_ratio * 100
+                    if combined_compliance_ratio is not None
+                    else None
+                ),
+                "benchmark_valid": valid,
+                "p99_sla_eligible": p99_sla_eligible,
+                "compliance_eligible": compliance_eligible,
+                "sla_eligible": p99_sla_eligible and compliance_eligible,
                 "valid": valid,
                 "invalid_reason": reason,
                 "summary_files": sorted({str(run["_summary_path"]) for run in runs}),
@@ -119,7 +188,7 @@ def _select_candidate(
     candidates: list[dict[str, Any]],
     *,
     use_goodput: bool,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
     valid = [candidate for candidate in candidates if candidate["valid"]]
     if not valid:
         raise ValueError(
@@ -128,21 +197,37 @@ def _select_candidate(
         )
 
     if use_goodput:
-        objective = "highest_mean_request_goodput"
-        winner = max(
+        objective = "p99_constrained_throughput"
+        best_effort = max(
             valid,
             key=lambda candidate: (
                 candidate["mean_request_goodput"],
+                candidate["combined_compliance_ratio"] or 0.0,
                 candidate["mean_output_throughput"],
                 -candidate["max_num_batched_tokens"],
                 -candidate["max_num_seqs"],
             ),
         )
-        if winner["mean_request_goodput"] <= 0:
+        if best_effort["mean_request_goodput"] <= 0:
             raise ValueError(
                 "No sweep configuration produced non-zero request goodput for "
                 "the supplied TTFT/TPOT objectives."
             )
+        eligible = [candidate for candidate in valid if candidate["sla_eligible"]]
+        winner = (
+            max(
+                eligible,
+                key=lambda candidate: (
+                    candidate["mean_output_throughput"],
+                    candidate["combined_compliance_ratio"],
+                    candidate["mean_request_goodput"],
+                    -candidate["max_num_batched_tokens"],
+                    -candidate["max_num_seqs"],
+                ),
+            )
+            if eligible
+            else None
+        )
     else:
         objective = "highest_mean_output_throughput"
         winner = max(
@@ -153,8 +238,9 @@ def _select_candidate(
                 -candidate["max_num_seqs"],
             ),
         )
+        best_effort = winner
 
-    return winner, objective
+    return winner, best_effort, objective
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -220,6 +306,15 @@ def parse_args() -> argparse.Namespace:
         help="TPOT objective used to generate request goodput.",
     )
     parser.add_argument(
+        "--minimum-compliance",
+        type=float,
+        default=DEFAULT_MINIMUM_COMPLIANCE,
+        help=(
+            "Minimum duration-weighted fraction of completed requests that must "
+            "meet all supplied objectives (default: 0.99)."
+        ),
+    )
+    parser.add_argument(
         "--output-config",
         default="recommended-config.yml",
         help="Recommended config output path.",
@@ -234,6 +329,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not 0.0 < args.minimum_compliance <= 1.0:
+        raise ValueError("--minimum-compliance must be greater than 0 and at most 1.")
     script_dir = Path(__file__).resolve().parent
 
     config_path = _resolve(script_dir, args.config)
@@ -258,23 +355,64 @@ def main() -> int:
         raise ValueError(f"No summary.json sweep results found under {results_dir}.")
 
     use_goodput = args.ttft_sla_ms is not None or args.tpot_sla_ms is not None
-    candidates = _aggregate_candidates(rows, use_goodput=use_goodput)
-    winner, objective = _select_candidate(candidates, use_goodput=use_goodput)
-
-    initial_config = _load_config(config_path)
-    recommended_config = dict(initial_config)
-    recommended_config["max-num-seqs"] = winner["max_num_seqs"]
-    recommended_config["max-num-batched-tokens"] = winner["max_num_batched_tokens"]
-
-    _write_config(
-        output_config,
-        source_path=config_path,
-        config=recommended_config,
-        objective=objective,
+    candidates = _aggregate_candidates(
+        rows,
+        use_goodput=use_goodput,
+        ttft_sla_ms=args.ttft_sla_ms,
+        tpot_sla_ms=args.tpot_sla_ms,
+        minimum_compliance=args.minimum_compliance,
+    )
+    winner, best_effort, objective = _select_candidate(
+        candidates, use_goodput=use_goodput
     )
 
+    initial_config = _load_config(config_path)
+    if winner is not None:
+        recommended_config = dict(initial_config)
+        recommended_config["max-num-seqs"] = winner["max_num_seqs"]
+        recommended_config["max-num-batched-tokens"] = winner["max_num_batched_tokens"]
+        _write_config(
+            output_config,
+            source_path=config_path,
+            config=recommended_config,
+            objective=objective,
+        )
+    elif output_config.exists():
+        output_config.unlink()
+
+    measured = None
+    recommended = None
+    if winner is not None:
+        recommended = {
+            "max_num_seqs": winner["max_num_seqs"],
+            "max_num_batched_tokens": winner["max_num_batched_tokens"],
+        }
+        measured = {
+            key: winner[key]
+            for key in (
+                "run_count",
+                "mean_request_throughput",
+                "mean_request_goodput",
+                "mean_output_throughput",
+                "combined_compliance_ratio",
+                "combined_compliance_percent",
+                "estimated_compliant_requests",
+                "completed_requests",
+                "mean_p99_ttft_ms",
+                "median_p99_ttft_ms",
+                "worst_p99_ttft_ms",
+                "mean_p99_tpot_ms",
+                "median_p99_tpot_ms",
+                "worst_p99_tpot_ms",
+            )
+        }
+
     recommendation = {
+        "status": (
+            "sla_feasible" if winner is not None else "no_sla_feasible_configuration"
+        ),
         "selection_objective": objective,
+        "minimum_compliance_ratio": args.minimum_compliance,
         "slo": {
             "ttft_ms": args.ttft_sla_ms,
             "tpot_ms": args.tpot_sla_ms,
@@ -283,16 +421,14 @@ def main() -> int:
             "max_num_seqs": initial_config.get("max-num-seqs"),
             "max_num_batched_tokens": initial_config.get("max-num-batched-tokens"),
         },
-        "recommended": {
-            "max_num_seqs": winner["max_num_seqs"],
-            "max_num_batched_tokens": winner["max_num_batched_tokens"],
-        },
-        "measured": {
-            "run_count": winner["run_count"],
-            "mean_request_goodput": winner["mean_request_goodput"],
-            "mean_output_throughput": winner["mean_output_throughput"],
-            "mean_p99_ttft_ms": winner["mean_p99_ttft_ms"],
-            "mean_p99_tpot_ms": winner["mean_p99_tpot_ms"],
+        "recommended": recommended,
+        "measured": measured,
+        "best_effort": {
+            "max_num_seqs": best_effort["max_num_seqs"],
+            "max_num_batched_tokens": best_effort["max_num_batched_tokens"],
+            "mean_request_goodput": best_effort["mean_request_goodput"],
+            "combined_compliance_ratio": best_effort["combined_compliance_ratio"],
+            "p99_sla_eligible": best_effort["p99_sla_eligible"],
         },
         "candidates": candidates,
     }
@@ -300,6 +436,12 @@ def main() -> int:
         json.dumps(recommendation, indent=2) + "\n",
         encoding="utf-8",
     )
+
+    if winner is None:
+        print("No SLA-feasible runtime configuration was found.")
+        print(f"Wrote diagnostic evidence to {output_json}")
+        print("No recommended config was written.")
+        return 2
 
     print("Recommended runtime configuration")
     print()
@@ -309,11 +451,12 @@ def main() -> int:
     print(f"Selection objective: {objective}")
     if use_goodput:
         print(f"  mean request goodput:   {winner['mean_request_goodput']:.2f} req/s")
+        print(f"  combined compliance:   {winner['combined_compliance_percent']:.2f}%")
     print(f"  mean output throughput: {winner['mean_output_throughput']:.2f} tok/s")
-    if winner["mean_p99_ttft_ms"] is not None:
-        print(f"  mean P99 TTFT:          {winner['mean_p99_ttft_ms']:.2f} ms")
-    if winner["mean_p99_tpot_ms"] is not None:
-        print(f"  mean P99 TPOT:          {winner['mean_p99_tpot_ms']:.2f} ms")
+    if winner["median_p99_ttft_ms"] is not None:
+        print(f"  median P99 TTFT:        {winner['median_p99_ttft_ms']:.2f} ms")
+    if winner["median_p99_tpot_ms"] is not None:
+        print(f"  median P99 TPOT:        {winner['median_p99_tpot_ms']:.2f} ms")
     print()
     print(f"Wrote {output_config}")
     print(f"Wrote {output_json}")

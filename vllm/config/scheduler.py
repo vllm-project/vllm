@@ -67,9 +67,61 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    max_num_active_seqs: int | None = Field(default=None, ge=1)
+    """Maximum number of requests the scheduler admits into RUNNING.
+
+    ``max_num_seqs`` sizes the model runner (per-request buffers and CUDA
+    graph capture) and is also the default admission limit. Setting this
+    lowers only the number of requests that may occupy RUNNING, so decode
+    batches stay smaller without shrinking runner or graph capacity. Must
+    be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
+
+    max_num_queued_reqs: int | None = Field(default=None, ge=0)
+    """Maximum number of requests that can be in-flight (waiting or running)
+    at the same time, or None for no limit. When the limit is reached, new
+    requests are rejected with HTTP 503 so the client can retry on another
+    instance. This bounds vLLM's otherwise unbounded request queue and is
+    primarily a coarse capacity valve.
+
+    Unlike ``max_num_seqs``, which applies per data-parallel rank, this
+    limit is enforced in the API server process and counts in-flight
+    requests across all DP ranks it routes to. Size it as roughly
+    ``data_parallel_size * max_num_seqs`` plus the desired queue depth if
+    it should not bind before per-rank admission does."""
+
+    max_num_queued_tokens: int | None = Field(default=None, ge=0)
+    """Maximum total prompt tokens of requests currently in the prefill
+    phase, or None for no limit. When the limit is reached, new requests
+    are rejected with HTTP 503.
+
+    This is a TTFT QoS mechanism: by setting it to
+    ``target_TTFT * prefill_throughput`` you reject requests when the
+    prefill backlog would exceed the latency target.  In a disaggregated
+    prefill-decode setup this maps directly to the prefill pool's
+    capacity.
+
+    Like ``max_num_queued_reqs``, this limit is enforced in the API
+    server process and covers the prefill backlog across all DP ranks it
+    routes to, so ``prefill_throughput`` in the formula above is the
+    aggregate throughput of the deployment.
+
+    Note: the count is conservative.  A partially prefilled request
+    still contributes its full ``prompt_len`` until it transitions out
+    of the prefill phase, because the scheduler's per-iteration
+    ``num_computed_tokens`` progress is not propagated to the API
+    server process during prefill (``EngineCoreOutput`` is only
+    emitted once the request starts producing tokens).  Similarly,
+    prefix-cache hits (``num_cached_tokens``) are only known to the
+    OutputProcessor after prefill completes.  This overestimates the
+    real backlog, causing earlier rejection than strictly necessary
+    — the safe direction for QoS.  The impact is limited to long
+    prompts under chunked prefill; short prompts that prefill in a
+    single iteration are unaffected."""
 
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
@@ -158,9 +210,7 @@ class SchedulerConfig:
 
     @staticmethod
     def default_factory(**kwargs):
-        """
-        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
-        """
+        """Create a `SchedulerConfig` with default values for its `InitVar`s."""
         if "max_model_len" not in kwargs:
             kwargs["max_model_len"] = 8192
         if "is_encoder_decoder" not in kwargs:
@@ -191,8 +241,7 @@ class SchedulerConfig:
         return resolve_obj_by_qualname(self.scheduler_cls)
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -214,6 +263,10 @@ class SchedulerConfig:
         #   impact on that. For more details, please check
         #   https://github.com/vllm-project/vllm/issues/29585
         factors.append(self.max_num_batched_tokens)
+
+        # PLE and other model components allocate static per-request buffers.
+        # Their shapes are captured in compiled graphs.
+        factors.append(self.max_num_seqs)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -265,6 +318,15 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs})."
+            )
+
+        if (
+            self.max_num_active_seqs is not None
+            and self.max_num_active_seqs > self.max_num_seqs
+        ):
+            raise ValueError(
+                f"max_num_active_seqs ({self.max_num_active_seqs}) cannot be "
+                f"greater than max_num_seqs ({self.max_num_seqs})."
             )
 
         if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
