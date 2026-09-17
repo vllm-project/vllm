@@ -41,9 +41,7 @@ pytestmark = pytest.mark.cpu_test
 def test_resolve_visual_encoder_outputs(
     select_layers, num_layers_loaded, max_possible_layers, expected_features
 ):
-    """
-    Test that offsets are correctly handled for vision feature layers.
-    """
+    """Test that offsets are correctly handled for vision feature layers."""
     encoder_outputs = [torch.tensor([idx]) for idx in range(num_layers_loaded + 1)]
     output_tensor = resolve_visual_encoder_outputs(
         encoder_outputs=encoder_outputs,
@@ -94,11 +92,9 @@ def test_run_dp_sharded_vision_model(batch_size: int):
 def run_dp_sharded_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_vision_model produces the same results as
+    """Test that run_dp_sharded_vision_model produces the same results as
     calling the model directly.
     """
-
     # Set random seed for reproducibility
     set_random_seed(0)
 
@@ -282,8 +278,7 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
 def run_dp_sharded_mrope_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_mrope_vision_model produces the same results as
+    """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
     """
     # Set random seed for reproducibility
