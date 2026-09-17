@@ -42,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -518,6 +519,36 @@ def test_worker_reports_load_and_store_completion():
     assert result.completed_loads == {"load"}
     assert result.completed_stores == {"store"}
     assert worker.get_finished({"req"}) == ({"req"}, {"req"})
+
+
+def test_worker_emits_block_stored_event_after_store_completion():
+    worker = UMBPStoreConnectorWorker(_WorkerHandle())
+    plan = BlockTransferPlan(
+        key="event-key",
+        block_id=3,
+        block_hash=b"event-hash",
+        parent_block_hash=b"parent",
+        token_ids=(1, 2, 3, 4),
+        block_size=4,
+        group_id=0,
+    )
+    metadata = UMBPConnectorMetadata(
+        store_plans=[plan],
+        store_requests={"req": [plan]},
+    )
+
+    worker.enqueue_stores(metadata)
+    worker.wait_for_save()
+    result = worker.build_connector_worker_meta()
+
+    assert len(result.kv_events) == 1
+    assert result.kv_events[0].block_hashes == [
+        maybe_convert_block_hash(b"event-hash")
+    ]
+    assert result.kv_events[0].parent_block_hash == maybe_convert_block_hash(
+        b"parent"
+    )
+    assert result.kv_events[0].token_ids == [1, 2, 3, 4]
 
 
 def test_worker_preserves_scheduler_supplied_ranges():

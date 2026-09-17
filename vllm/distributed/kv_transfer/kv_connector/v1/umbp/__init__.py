@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .connector import UMBPStoreConnector
+from .connector import UMBPStoreConnector, UMBPStoreKVEvents
 from .data import (
     BlockIdentityCodec,
     BlockTransferPlan,
@@ -28,6 +28,7 @@ from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
 
 __all__ = [
     "UMBPStoreConnector",
+    "UMBPStoreKVEvents",
     "BlockIdentityCodec",
     "BlockTransferPlan",
     "KVLayoutPlanner",

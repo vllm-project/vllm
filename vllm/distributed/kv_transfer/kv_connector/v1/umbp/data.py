@@ -528,6 +528,12 @@ class BlockTransferPlan:
     ranges: tuple[KVRange, ...] = ()
     request_id: str | None = None
     generation: int = 0
+    group_id: int | None = None
+    block_hash: bytes | None = None
+    parent_block_hash: bytes | None = None
+    token_ids: tuple[int, ...] = ()
+    block_size: int = 0
+    medium: str = "CPU"
 
 
 @dataclass
@@ -726,6 +732,7 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
     completed_loads: set[str] = field(default_factory=set)
     completed_stores: set[str] = field(default_factory=set)
+    kv_events: list[Any] = field(default_factory=list)
     failed_loads: dict[str, str] = field(default_factory=dict)
     failed_store_errors: dict[str, str] = field(default_factory=dict)
     failed_stores: set[str] = field(default_factory=set)
@@ -742,6 +749,7 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             raise TypeError("cannot aggregate incompatible UMBP worker metadata")
         self.completed_loads.update(other.completed_loads)
         self.completed_stores.update(other.completed_stores)
+        self.kv_events.extend(other.kv_events)
         self.failed_loads.update(other.failed_loads)
         self.failed_store_errors.update(other.failed_store_errors)
         self.failed_stores.update(other.failed_stores)

@@ -398,6 +398,22 @@ class UMBPStoreConnectorScheduler:
                         block_id=block_id,
                         request_id=request.req_id,
                         generation=tracker.generation,
+                        group_id=group_id,
+                        block_hash=self._object_hash(
+                            request.block_hashes, index
+                        ),
+                        parent_block_hash=(
+                            self._object_hash(request.block_hashes, index - 1)
+                            if index > 0
+                            else None
+                        ),
+                        token_ids=tuple(
+                            getattr(request, "prompt_token_ids", [])
+                        )[
+                            index * self.block_size : (index + 1)
+                            * self.block_size
+                        ],
+                        block_size=self.block_size,
                     )
                 )
         return plans
