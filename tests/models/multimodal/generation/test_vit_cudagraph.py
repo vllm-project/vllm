@@ -577,9 +577,7 @@ def test_eonly_vit_cudagraph_outputs(
         dtype=config.dtype,
         mm_encoder_only=True,
         # FA padding NaNs are tracked separately in #57136.
-        mm_encoder_attn_backend=(
-            "FLASHINFER" if model_id == "qwen2_5_vl" else "TRITON_ATTN"
-        ),
+        mm_encoder_attn_backend="FLASHINFER",
         enable_prefix_caching=False,
         max_model_len=4096,
         max_num_seqs=2,
