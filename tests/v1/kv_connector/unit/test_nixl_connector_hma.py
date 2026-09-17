@@ -169,7 +169,7 @@ def test_region_pull_ignores_allocation_padding(
 @pytest.mark.parametrize("num_pages", [0, 3, 19])
 @pytest.mark.parametrize("region_groups", [(0, 1), (1, 0, 1)])
 def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
-    """Read each uncached page from its DCP stripe; notify empty stripes."""
+    """Read each uncached page from its DCP rank; notify ranks with no pages."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         RemoteMeta,
         ReqMeta,
