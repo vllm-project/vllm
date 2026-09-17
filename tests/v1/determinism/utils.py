@@ -53,7 +53,7 @@ if os.getenv("VLLM_TEST_MODEL"):
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
         )
-    elif getattr(text_config, "model_type", None) == "qwen3_5":
+    elif getattr(text_config, "model_type", None) in ("qwen3_5", "qwen3_5_text"):
         # GDN_ATTN is for Qwen3.5/Qwen3.6 models only (auto-selected by arch).
         # GDN_ATTN is excluded from the default list: it is only valid for
         # models that use GDN layers (Qwen3.5/Qwen3.6), so we add it only
