@@ -53,6 +53,8 @@ def _make_offloading_config(
     data_parallel_size: int = 1,
     data_parallel_rank_local: int | None = None,
     is_parallelism_agnostic: bool = False,
+    local_world_size: int | None = None,
+    executor_backend: str | None = None,
     replicated_layout: bool = False,
     extra_config: dict[str, Any] | None = None,
 ) -> OffloadingConfig:
@@ -87,6 +89,8 @@ def _make_offloading_config(
             data_parallel_size=data_parallel_size,
             data_parallel_rank_local=data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            local_world_size=local_world_size,
+            executor_backend=executor_backend,
         ),
         replicated_layout=replicated_layout,
     )
@@ -150,8 +154,7 @@ def test_cpu_spec_sizes_normalized_worker_layout():
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
-        tp_size=3,
-        pp_size=2,
+        tp_size=6,
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -169,6 +172,30 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
     assert spec.num_chunks == 0
 
 
+def test_cpu_spec_uses_local_world_size_for_node_local_region():
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    cpu_bytes_to_use = worker_kv_bytes_per_block * 32
+
+    global_sized = _create_spec(
+        cpu_bytes_to_use=cpu_bytes_to_use,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=8,
+    )
+    local_sized = _create_spec(
+        cpu_bytes_to_use=cpu_bytes_to_use,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=8,
+        local_world_size=4,
+    )
+
+    assert isinstance(global_sized, CPUOffloadingSpec)
+    assert isinstance(local_sized, CPUOffloadingSpec)
+    assert global_sized.num_chunks == 4
+    assert local_sized.num_chunks == 8
+    assert local_sized.kv_bytes_per_chunk == worker_kv_bytes_per_block * 4
+    assert local_sized.cpu_page_size_per_worker == worker_kv_bytes_per_block
+
+
 def test_tiering_spec_aligns_row_size():
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
@@ -177,8 +204,7 @@ def test_tiering_spec_aligns_row_size():
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
-        tp_size=3,
-        pp_size=2,
+        tp_size=6,
     )
 
     assert isinstance(spec, TieringOffloadingSpec)
@@ -251,6 +277,7 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
         worker_kv_bytes_per_block=4096,
         rank=1,
         world_size=4,
+        local_world_size=4,
     )
     assert isinstance(spec, TieringOffloadingSpec)
 
@@ -462,16 +489,33 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "rank", "device_index", "world_size", "expected_rank"),
+    (
+        "replicated_layout",
+        "rank",
+        "device_index",
+        "world_size",
+        "local_world_size",
+        "expected_rank",
+    ),
     [
-        (True, 1, 5, 4, 0),
-        (True, 0, 0, 4, 0),
-        (False, 1, 5, 4, 1),
-        (False, 3, 6, 4, 3),
+        (True, 1, 5, 4, None, 0),
+        (True, 0, 0, 4, None, 0),
+        (False, 1, 5, 4, None, 1),
+        (False, 3, 6, 4, None, 3),
+        (True, 5, 5, 8, 4, 0),
+        (False, 5, 5, 8, None, 5),
+        (False, 5, 5, 8, 4, 1),
+        (False, 7, 7, 8, 4, 3),
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, rank, device_index, world_size, expected_rank
+    monkeypatch,
+    replicated_layout,
+    rank,
+    device_index,
+    world_size,
+    local_world_size,
+    expected_rank,
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -483,6 +527,7 @@ def test_cpu_spec_create_worker_rank_assignment(
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         rank=rank,
         world_size=world_size,
+        local_world_size=local_world_size,
         replicated_layout=replicated_layout,
     )
 
@@ -504,6 +549,74 @@ def test_cpu_spec_create_worker_rank_assignment(
 def test_offloading_spec_has_replicated_layout_default():
     spec = SingleArgExternalOffloadingSpec(_make_offloading_config())
     assert spec.replicated_layout is False
+
+
+@pytest.mark.parametrize(
+    "spec_name,world_size,rank_offset",
+    [
+        ("CPUOffloadingSpec", 2, 0),
+        ("CPUOffloadingSpec", 4, 0),
+        ("CPUOffloadingSpec", 4, 2),
+        ("TieringOffloadingSpec", 2, 0),
+    ],
+)
+@pytest.mark.parametrize("device_indices", [(0, 2), (2, 0), (0, 0)])
+def test_worker_slots_are_distinct_despite_device_remapping(
+    monkeypatch, spec_name, world_size, rank_offset, device_indices
+):
+    """Visible device ordinals need not be dense or shared across processes."""
+    import vllm.v1.kv_offload.cpu.spec as cpu_module
+    import vllm.v1.kv_offload.tiering.spec as tiering_module
+
+    module = cpu_module if spec_name == "CPUOffloadingSpec" else tiering_module
+    monkeypatch.setattr(cpu_module.current_platform, "is_cuda_alike", lambda: True)
+    regions = []
+
+    def region(**kwargs):
+        regions.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(module, "SharedOffloadRegion", region)
+    monkeypatch.setattr(module, "CPUOffloadingWorker", MagicMock())
+    for rank, device in enumerate(device_indices, start=rank_offset):
+        monkeypatch.setattr(
+            torch.accelerator, "current_device_index", lambda device=device: device
+        )
+        spec = _create_spec(
+            spec_name=spec_name,
+            rank=rank,
+            world_size=world_size,
+            local_world_size=2,
+            worker_kv_bytes_per_block=4096,
+        )
+        spec.create_worker(MagicMock())
+
+    assert [r["rank"] for r in regions] == [0, 1]
+
+
+@pytest.mark.parametrize("local_world_size", [-1, 0, 3, 8])
+def test_cpu_spec_rejects_invalid_node_geometry(local_world_size):
+    with pytest.raises(ValueError, match="local_world_size"):
+        _create_spec(world_size=4, local_world_size=local_world_size)
+
+
+def test_tiering_rejects_remote_cpu_shards_before_allocating():
+    with pytest.raises(ValueError, match="secondary.*multi-node|multi-node.*secondary"):
+        _create_spec(
+            spec_name="TieringOffloadingSpec", world_size=4, local_world_size=2
+        )
+
+
+@pytest.mark.parametrize("pp_size,pcp_size", [(2, 1), (1, 2)])
+def test_cpu_spec_rejects_unnegotiated_worker_geometry(pp_size, pcp_size):
+    with pytest.raises(ValueError, match="pipeline|prefill context"):
+        _create_spec(world_size=4, pp_size=pp_size, pcp_size=pcp_size)
+
+
+@pytest.mark.parametrize("backend", ["ray", "external_launcher", "custom"])
+def test_cpu_spec_requires_known_multiworker_topology(backend):
+    with pytest.raises(ValueError, match="topology"):
+        _create_spec(world_size=4, executor_backend=backend)
 
 
 def test_offloading_spec_uses_normalized_chunk_geometry():

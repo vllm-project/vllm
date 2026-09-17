@@ -277,6 +277,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        if self.local_world_size != config.parallel.world_size:
+            raise ValueError(
+                "Native secondary tiers do not support multi-node replicas: "
+                "the scheduler cannot access remote CPU cache shards. "
+                "Use CPUOffloadingSpec for multi-node CPU-only offloading."
+            )
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
 
