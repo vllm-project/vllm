@@ -166,7 +166,20 @@ class MoEMixin(MixtureOfExperts):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = self.model_config.get_num_experts_per_token()
+        # Not `model_config.get_num_experts_per_token()`: that collapses a
+        # per-layer list to its max, and `maybe_per_layer` needs the list.
+        top_k = getattr_iter(
+            text_config,
+            [
+                "num_experts_per_tok",
+                "num_experts_per_token",
+                "top_k_experts",
+                "moe_topk",
+                "moe_top_k",
+                "top_k",
+            ],
+            None,
+        )
         assert top_k is not None
         hidden_size = text_config.hidden_size
         intermediate_size = getattr_iter(
