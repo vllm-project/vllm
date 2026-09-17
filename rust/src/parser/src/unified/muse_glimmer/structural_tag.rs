@@ -28,22 +28,15 @@ use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, T
 use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
+use super::{EOM, EOT, INVOKE_CLOSE, PARAMETER_CLOSE, START};
 use crate::tool::Tool;
 
 pub(super) static MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER: MuseGlimmerStructuralTagBuilder =
     MuseGlimmerStructuralTagBuilder;
 
-// Channel framing markers, redefined locally: the parser core
-// (`unified/muse_glimmer.rs`) owns its own copies and the two must not be
-// coupled while both evolve.
 const CHANNEL_SEPARATOR: &str = "<|start|>assistant";
-const CHANNEL_START: &str = "<|start|>";
-const END_OF_MESSAGE: &str = "<|eom|>";
-const END_OF_TURN: &str = "<|eot|>";
 const REASONING_BEGIN: &str = " to=self<|message|>";
 const ANSWER_BEGIN: &str = " to=user<|message|>";
-const INVOKE_CLOSE: &str = "</atem:invoke>";
-const PARAMETER_CLOSE: &str = "</atem:parameter>";
 
 const INTEGER_PATTERN: &str = "-?(0|[1-9][0-9]*)";
 const NUMBER_PATTERN: &str = r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?";
@@ -158,8 +151,8 @@ fn required_turn(tools: &[Tool]) -> XgrammarResult<StructuralTag> {
 fn reasoning_tag() -> TagFormat {
     TagFormat::new(
         REASONING_BEGIN,
-        Format::any_text_excluding(&[END_OF_MESSAGE, END_OF_TURN, CHANNEL_START]),
-        END_OF_MESSAGE,
+        Format::any_text_excluding(&[EOM, EOT, START]),
+        EOM,
     )
 }
 
@@ -179,9 +172,9 @@ fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> 
                 .with_any_order(options.any_order)
                 .with_max_whitespace_cnt(options.max_whitespace_cnt),
         ),
-        None => Format::any_text_excluding(&[END_OF_TURN, END_OF_MESSAGE, CHANNEL_START]),
+        None => Format::any_text_excluding(&[EOT, EOM, START]),
     };
-    TagFormat::new(ANSWER_BEGIN, content, END_OF_MESSAGE)
+    TagFormat::new(ANSWER_BEGIN, content, EOM)
 }
 
 /// Tool channel tags: one begin variant per model-known recipient spelling.
@@ -197,7 +190,7 @@ fn tool_tags(tool: &Tool) -> Vec<TagFormat> {
         .into_iter()
         // `<|eom|>`-only ends: see `answer_tag` for why `<|eot|>` must stay
         // out of the grammar.
-        .map(|begin| TagFormat::new(begin, content.clone(), END_OF_MESSAGE))
+        .map(|begin| TagFormat::new(begin, content.clone(), EOM))
         .collect()
 }
 
@@ -218,7 +211,7 @@ fn tool_channel_content(tool: &Tool) -> Format {
             "<atem:function_calls>\n<atem:invoke name=\"{}\">\n",
             tool.name
         )),
-        Format::any_text_excluding(&[INVOKE_CLOSE, END_OF_MESSAGE, END_OF_TURN, CHANNEL_START]),
+        Format::any_text_excluding(&[INVOKE_CLOSE, EOM, EOT, START]),
         Format::const_string("\n</atem:invoke>\n</atem:function_calls>"),
     ])
 }
@@ -294,15 +287,7 @@ fn parameter_value(schema: &Value) -> Format {
     // parser cuts the invoke body at the first `</atem:invoke>` and treats
     // quoted framing as a channel boundary, so the grammar must never force
     // bytes the parser cannot round-trip.
-    let text = || {
-        Format::any_text_excluding(&[
-            PARAMETER_CLOSE,
-            INVOKE_CLOSE,
-            END_OF_MESSAGE,
-            END_OF_TURN,
-            CHANNEL_START,
-        ])
-    };
+    let text = || Format::any_text_excluding(&[PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]);
     let Some(json_type) = schema.get("type").and_then(Value::as_str) else {
         return text();
     };
@@ -330,15 +315,9 @@ fn scalar_enum_pattern(schema: &Value) -> Option<String> {
             Value::Bool(boolean) => boolean.to_string(),
             _ => return None,
         };
-        if [
-            PARAMETER_CLOSE,
-            INVOKE_CLOSE,
-            END_OF_MESSAGE,
-            END_OF_TURN,
-            CHANNEL_START,
-        ]
-        .iter()
-        .any(|marker| literal.contains(marker))
+        if [PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]
+            .iter()
+            .any(|marker| literal.contains(marker))
         {
             return None;
         }
@@ -377,8 +356,10 @@ mod tests {
     use serde_json::json;
     use xgrammar_structural_tag::builders::StructuralTagOptions;
 
+    use super::super::{ASSISTANT, MESSAGE, START};
     use super::{
-        MuseGlimmerStructuralTagBuilder, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
+        ANSWER_BEGIN, CHANNEL_SEPARATOR, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
+        ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
     };
 
     fn tool(name: &str, parameters: serde_json::Value) -> Tool {
@@ -395,6 +376,13 @@ mod tests {
             strict: Some(false),
             ..tool(name, json!({"type": "object"}))
         }
+    }
+
+    #[test]
+    fn composite_markers_are_built_from_shared_parts() {
+        assert_eq!(CHANNEL_SEPARATOR, format!("{START}{ASSISTANT}"));
+        assert_eq!(REASONING_BEGIN, format!(" to=self{MESSAGE}"));
+        assert_eq!(ANSWER_BEGIN, format!(" to=user{MESSAGE}"));
     }
 
     #[test]
