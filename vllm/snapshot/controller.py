@@ -48,6 +48,9 @@ def _child_engine_argv(
         if len(option) > 2 and "--snapshot-dir".startswith(option):
             if not separator:
                 next(iterator, None)
+        elif len(option) > 2 and "--portable".startswith(option):
+            # A store_true flag: nothing to consume after it.
+            continue
         else:
             child_argv.append(item)
     if "--enable-sleep-mode" not in child_argv:
@@ -100,6 +103,14 @@ def restore_snapshot(
     toolset = tools or LocalSnapshotTools()
     toolset.preflight("restore", artifact)
     manifest = read_manifest(artifact)
+    requested_portable = bool(getattr(args, "portable", False))
+    if requested_portable != manifest.portable:
+        raise SnapshotRestoreError(
+            "snapshot restore requires --portable to match the artifact: "
+            f"artifact is {'portable' if manifest.portable else 'in place'}, "
+            f"restore requested "
+            f"{'portable' if requested_portable else 'in place'}"
+        )
     validate_identity(manifest, toolset.current_identity(manifest.gpu_uuid))
 
     root_pid: int | None = None
