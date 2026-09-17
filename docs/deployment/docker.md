@@ -8,6 +8,47 @@ toc_depth: 2
 
 --8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
 
+## Run a vLLM Recipes configuration
+
+[vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
+and `env.sh`. See the
+[Recipes conversion tool README](../../tools/recipes/README.md) for usage.
+
+For Docker, mount both files and source `env.sh` inside the container before
+starting vLLM:
+
+```bash
+docker run --rm --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v "$PWD/config.yaml:/recipe/config.yaml:ro" \
+    -v "$PWD/env.sh:/recipe/env.sh:ro" \
+    -p 8000:8000 \
+    --ipc=host \
+    --entrypoint /bin/bash \
+    vllm/vllm-openai:latest \
+    -lc 'source /recipe/env.sh && exec vllm serve --config /recipe/config.yaml'
+```
+
+## Persist the compile cache across containers
+
+Mounting the Hugging Face cache keeps model weights across containers, but each
+new container still starts with an empty `VLLM_CACHE_ROOT` (default
+`~/.cache/vllm`) and recompiles the model's `torch.compile` artifacts. Mount a
+named volume at that path to reuse the inductor, Triton, and AOT artifacts from
+the second container onward:
+
+```bash
+docker run --rm --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-cache:/root/.cache/vllm \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    meta-llama/Llama-3.1-8B-Instruct
+```
+
+See [Faster Startup](../configuration/optimization.md#faster-startup) for the
+mechanism and for what invalidates the cache.
+
 ## Run as a non-root user
 
 The CUDA `vllm/vllm-openai` image runs as root by default for backward

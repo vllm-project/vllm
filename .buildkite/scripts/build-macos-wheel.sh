@@ -7,10 +7,8 @@
 
 set -euo pipefail
 
-# The Rust frontend build needs protoc.
-if ! command -v protoc >/dev/null 2>&1; then
-  brew install protobuf
-fi
+# The macmini queue uses persistent checkouts, so refresh tags for setuptools-scm.
+git fetch --tags --force origin
 
 # upload-nightly-wheels.sh expects exactly one wheel.
 rm -rf artifacts/dist

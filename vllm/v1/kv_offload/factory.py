@@ -35,6 +35,16 @@ class OffloadingSpecFactory:
             spec_module_path = extra_config.get("spec_module_path")
             if spec_module_path is None:
                 raise ValueError(f"Unsupported spec type: {spec_name}")
+            logger.warning_once(
+                "Loading out-of-tree offloading spec. This API is "
+                "experimental and subject to change in the future "
+                "as we iterate the design."
+            )
+            logger.info(
+                "Loading out-of-tree offloading spec '%s' from '%s'.",
+                spec_name,
+                spec_module_path,
+            )
             spec_module = importlib.import_module(spec_module_path)
             spec_cls = getattr(spec_module, spec_name)
         assert issubclass(spec_cls, OffloadingSpec)

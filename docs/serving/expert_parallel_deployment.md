@@ -31,9 +31,6 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 ## Single Node Deployment
 
-!!! warning
-    EP is an experimental feature. Argument names and default values may change in the future.
-
 ### Configuration
 
 Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:

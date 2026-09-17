@@ -15,6 +15,7 @@ from vllm.envs import (
     env_with_choices,
     environment_variables,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
@@ -34,6 +35,12 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "10.0.0.15")
 
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
+
+
+def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_API_KEY", "sk-super-secret")
+
+    assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
@@ -145,6 +152,15 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
+def test_rust_bench_auto_path_missing_fails_fast() -> None:
+    with (
+        patch.dict(os.environ, {"VLLM_USE_RUST_BENCH": "1"}, clear=True),
+        patch("vllm.envs.os.path.isfile", return_value=False),
+        pytest.raises(FileNotFoundError, match="vllm-rs binary was not found"),
+    ):
+        environment_variables["VLLM_RUST_FRONTEND_PATH"]()
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 
@@ -239,6 +255,21 @@ class TestEnvWithChoices:
                 ValueError, match="Invalid value 'invalid' for TEST_ENV"
             ):
                 env_func()
+
+
+def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_GDN_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
+    assert env_func() == "cuda"
+
+    for value in ("cuda", "triton"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        assert env_func() == value
+
+    for value in ("fused", "invalid"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        with pytest.raises(ValueError, match="VLLM_GDN_DECODE_KERNEL"):
+            env_func()
 
 
 class TestEnvListWithChoices:
@@ -538,7 +569,7 @@ class TestVllmMaxNSequences:
         max_n = envs.VLLM_MAX_N_SEQUENCES
         SamplingParams(n=max_n)
 
-        with pytest.raises(ValueError, match="n must be at most"):
+        with pytest.raises(VLLMValidationError, match="n must be at most"):
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
@@ -554,5 +585,5 @@ class TestVllmMaxNSequences:
 
         SamplingParams(n=128)
 
-        with pytest.raises(ValueError, match="n must be at most 128"):
+        with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)

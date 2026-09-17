@@ -92,7 +92,7 @@ def run_multimodal_gguf_test(
     num_logprobs: int,
 ):
     # Load images at runtime (inside subprocess) to avoid pickle issues
-    images = [ImageAsset(name).pil_image for name in model.image_names]
+    images = [ImageAsset(name).pil_image for name in model.image_names]  # type: ignore[arg-type]
     size_factors = [0.25, 0.5, 1.0]
     inputs_per_image = [
         (

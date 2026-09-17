@@ -52,13 +52,19 @@ class MockModelConfig:
 def test_removed_pooling_parameters(parameter: str, value: Any, message: str):
     data = {"input": "hello", parameter: value}
     for request_type in (EmbeddingRequest, ClassificationRequest, PoolingRequest):
-        with pytest.raises(ValidationError, match=message) as exc_info:
+        with pytest.raises(VLLMValidationError, match=message):
             TypeAdapter(request_type).validate_python(data)
-        assert len(exc_info.value.errors()) == 1
 
-    with pytest.raises(ValidationError, match=message) as exc_info:
-        TypeAdapter(PoolerConfig).validate_python({parameter: value})
-    assert len(exc_info.value.errors()) == 1
+    # PoolerConfig still raises bare ValueError for `normalize`
+    # (wrapped to ValidationError by Pydantic), but `check_removed_pooling_task`
+    # raises VLLMValidationError for removed tasks.
+    if parameter == "normalize":
+        with pytest.raises(ValidationError, match=message) as exc_info:
+            TypeAdapter(PoolerConfig).validate_python({parameter: value})
+        assert len(exc_info.value.errors()) == 1
+    else:
+        with pytest.raises(VLLMValidationError, match=message):
+            TypeAdapter(PoolerConfig).validate_python({parameter: value})
 
     if parameter == "task":
         with pytest.raises(VLLMValidationError, match=message):
@@ -80,7 +86,7 @@ def test_embed():
 
     invalid_parameters = classify_parameters + step_pooling_parameters
     for p in set(invalid_parameters) - set(embed_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -100,7 +106,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
     pooling_params = PoolingParams(task=task, dimensions=None)
     pooling_params.verify(model_config)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         pooling_params = PoolingParams(task=task, dimensions=1)
         pooling_params.verify(model_config)
 
@@ -131,7 +137,7 @@ def test_embed_dimensions_matryoshka_without_list_upper_bound():
 
     PoolingParams(task=task, dimensions=16).verify(model_config)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         PoolingParams(task=task, dimensions=64).verify(model_config)
 
 
@@ -150,7 +156,7 @@ def test_classify(task):
 
     invalid_parameters = embed_parameters + step_pooling_parameters
     for p in set(invalid_parameters) - set(classify_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -176,7 +182,7 @@ def test_token_embed(pooling_type: str):
         invalid_parameters = classify_parameters + step_pooling_parameters
 
     for p in set(invalid_parameters) - set(embed_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -202,6 +208,6 @@ def test_token_classify(pooling_type: str):
         invalid_parameters = embed_parameters + step_pooling_parameters
 
     for p in set(invalid_parameters) - set(classify_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)

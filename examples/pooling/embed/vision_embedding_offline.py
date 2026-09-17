@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for multimodal embedding.
 
 For most models, the prompt format should follow corresponding examples
@@ -154,7 +153,13 @@ def run_siglip(seed: int):
     )
 
     print("Text embedding output:")
-    outputs = llm.embed(text, use_tqdm=False)
+    # SigLIP is trained with padding to a fixed length and no attention mask, so
+    # text embeddings only line up with image embeddings when they are padded.
+    outputs = llm.embed(
+        text,
+        tokenization_kwargs={"padding": "max_length"},
+        use_tqdm=False,
+    )
     print_embeddings(outputs[0].outputs.embedding)
 
     print("Image embedding output:")

@@ -2,10 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import regex as re
 import torch
 
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
 )
 from vllm.platforms import current_platform
@@ -89,80 +95,78 @@ def test_module_with_child_containing_batchnorm_can_autoload():
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1
 
 
-@pytest.mark.cpu_test
-def test_module_skip_prefix():
-    """Ensure the auto weight loader can skip prefix."""
-    mod = ModuleWithNestedBatchNorm()
-    # Run some data through the module with batchnorm
-    mod(torch.Tensor([[1, 2], [3, 4]]))
+VOCAB_SIZE = 16
+HIDDEN_SIZE = 2
 
-    # Try to load the weights to a new instance
-    def weight_generator():
-        # weights needed to be filtered out
-        redundant_weights = {
-            "prefix.bn.weight": torch.Tensor([1, 2]),
-            "prefix.bn.bias": torch.Tensor([3, 4]),
-        }
-        yield from (mod.state_dict() | redundant_weights).items()
 
-    new_mod = ModuleWithNestedBatchNorm()
+class ModuleWithTiedWeights(torch.nn.Module):
+    """Mimics how models tie `lm_head` to the input embeddings."""
 
-    assert not torch.all(
-        new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean
-    )
-    assert not torch.all(
-        new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var
-    )
-    assert new_mod.nested_mod.bn.num_batches_tracked.item() == 0
+    def __init__(self, tie: bool):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
+        self.lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
+        if tie:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
-    loader = AutoWeightsLoader(new_mod, skip_prefixes=["prefix."])
-    loader.load_weights(weight_generator())
 
-    # Ensure the stats are updated
-    assert torch.all(
-        new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean
-    )
-    assert torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
-    assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1
+def make_embedding_weights(value: float) -> torch.Tensor:
+    return torch.full((VOCAB_SIZE, HIDDEN_SIZE), value)
 
 
 @pytest.mark.cpu_test
-def test_module_skip_substr():
-    """Ensure the auto weight loader can skip prefix."""
-    mod = ModuleWithNestedBatchNorm()
-    # Run some data through the module with batchnorm
-    mod(torch.Tensor([[1, 2], [3, 4]]))
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize("tie", [True, False])
+def test_module_skip_tied_weights(tie: bool):
+    """Tied weights must be loaded once, under the first of their names."""
+    mod = ModuleWithTiedWeights(tie)
 
-    # Try to load the weights to a new instance
-    def weight_generator():
-        # weights needed to be filtered out
-        redundant_weights = {
-            "nested_mod.0.substr.weight": torch.Tensor([1, 2]),
-            "nested_mod.0.substr.bias": torch.Tensor([3, 4]),
-            "nested_mod.substr.weight": torch.Tensor([1, 2]),
-            "nested_mod.substr.bias": torch.Tensor([3, 4]),
-        }
-        yield from (mod.state_dict() | redundant_weights).items()
+    weights = [
+        ("model.embed_tokens.weight", make_embedding_weights(1.0)),
+        ("lm_head.weight", make_embedding_weights(2.0)),
+    ]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
 
-    new_mod = ModuleWithNestedBatchNorm()
+    if tie:
+        assert loaded == {"model.embed_tokens.weight"}
+        assert torch.all(mod.lm_head.weight[:VOCAB_SIZE] == 1.0)
+    else:
+        assert loaded == {"model.embed_tokens.weight", "lm_head.weight"}
+        assert torch.all(mod.lm_head.weight[:VOCAB_SIZE] == 2.0)
 
-    assert not torch.all(
-        new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean
-    )
-    assert not torch.all(
-        new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var
-    )
-    assert new_mod.nested_mod.bn.num_batches_tracked.item() == 0
 
-    loader = AutoWeightsLoader(new_mod, skip_substrs=["substr."])
-    loader.load_weights(weight_generator())
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_module_skip_tied_weights_without_canonical():
+    """Skipping a tied weight must not leave the shared weight uninitialized."""
+    mod = ModuleWithTiedWeights(tie=True)
 
-    # Ensure the stats are updated
-    assert torch.all(
-        new_mod.nested_mod.bn.running_mean == mod.nested_mod.bn.running_mean
-    )
-    assert torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
-    assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1
+    weights = [("lm_head.weight", make_embedding_weights(2.0))]
+    with pytest.raises(ValueError, match="model.embed_tokens.weight"):
+        AutoWeightsLoader(mod).load_weights(iter(weights))
+
+
+class ModuleWithSharedParam(torch.nn.Module):
+    """Mimics an MoE router shared between the MLP and its fused experts."""
+
+    def __init__(self):
+        super().__init__()
+        self.experts = torch.nn.Module()
+        self.experts.gate = torch.nn.Linear(2, 2, bias=False)
+        self.gate = self.experts.gate
+
+
+@pytest.mark.cpu_test
+def test_module_load_shared_params_that_are_not_tied_embeddings():
+    """Only tied embeddings are skipped; other shared params must still load."""
+    mod = ModuleWithSharedParam()
+
+    weights = [("gate.weight", torch.Tensor([[1, 2], [3, 4]]))]
+    loaded = AutoWeightsLoader(mod).load_weights(iter(weights))
+
+    assert loaded == {"gate.weight"}
+    assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
 
 
 class raise_if_cuda_sync:
@@ -187,3 +191,29 @@ def test_merge_multimodal_embeddings_no_sync():
         _merge_multimodal_embeddings(
             inputs_embeds, multimodal_embeddings, is_multimodal
         )
+
+
+@pytest.mark.cpu_test
+def test_get_rename_mapper_keeps_only_renames():
+    """`None` means "do not load", which is meaningless to the consumers of
+    this mapper (LoRA name parsing, quantization config layer lists), and
+    applying it would silently shrink their lists."""
+    mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^drop_regex\."): None},
+        orig_to_new_substr={"drop_substr": None, "keep_substr": "kept"},
+        orig_to_new_stacked={".q_proj": (".qkv_proj", "q")},
+        orig_to_new_prefix={"drop_prefix.": None, "keep_prefix.": "kept."},
+        orig_to_new_suffix={".drop_suffix": None},
+    )
+    renames = mapper.get_rename_mapper()
+
+    assert renames.orig_to_new_regex == {}
+    assert renames.orig_to_new_substr == {"keep_substr": "kept"}
+    assert renames.orig_to_new_stacked == {}
+    assert renames.orig_to_new_prefix == {"keep_prefix.": "kept."}
+    assert renames.orig_to_new_suffix == {}
+
+    # Names the full mapper drops now survive unchanged.
+    for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
+        assert mapper._map_name(name) is None
+        assert renames._map_name(name) == name

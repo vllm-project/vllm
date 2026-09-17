@@ -59,8 +59,7 @@ def _fetch_group_ports(key: str, coord_store: Store) -> list[int]:
 
 
 class StatelessGroupCoordinator(GroupCoordinator):
-    """
-    A stateless version of the GroupCoordinator class in parallel_state,
+    """A stateless version of the GroupCoordinator class in parallel_state,
     It will create CPU, device and TCPStore based communication groups
     that are independent of PyTorch's WORLD group. Hence,
     communication groups with a different set of participants GPUs
@@ -79,6 +78,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         host: str = "127.0.0.1",
         global_rank: int = 0,
         global_world_size: int = 1,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -191,6 +191,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                 global_ranks=self.ranks,
                 global_world_size=global_world_size,
                 tcp_store_group=self.tcp_store_group,
+                use_all2all=use_all2all,
             )
 
         self.mq_broadcaster = None

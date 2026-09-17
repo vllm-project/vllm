@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
@@ -18,21 +19,35 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
+use crate::metrics::{IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
-use crate::protocol::request::EngineCoreRequestType;
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
+
+const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
+const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
+
+fn msgpack_zero_copy_threshold() -> usize {
+    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
+}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    /// Per-tensor byte threshold loaded from env variable
+    /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
+    msgpack_zero_copy_threshold: usize,
     scheduler_stats_recorder: SchedulerStatsRecorder,
+    iteration_metrics: BTreeMap<u32, IterationMetricHandles>,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
@@ -50,11 +65,21 @@ impl ClientInner {
     ) -> Self {
         let scheduler_stats_recorder =
             SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
+        let iteration_metrics = engines
+            .iter()
+            .filter_map(|engine| {
+                let engine = engine.engine_id.engine_index()?;
+                let handles = IterationMetricHandles::new(&METRICS.request, &model_name, engine);
+                Some((engine, handles))
+            })
+            .collect();
         Self {
             input_send,
             handle,
             model_name,
+            msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             scheduler_stats_recorder,
+            iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
@@ -101,6 +126,11 @@ impl ClientInner {
     /// the full set without first filtering successful sends.
     pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = u64>) {
         self.utility_reg.lock().unregister_many(call_ids);
+    }
+
+    #[cfg(test)]
+    pub fn pending_utility_call_count(&self) -> usize {
+        self.utility_reg.lock().len()
     }
 
     /// Undo a request registration when `add_request()` fails.
@@ -229,9 +259,29 @@ impl ClientInner {
     where
         T: serde::Serialize + std::fmt::Debug,
     {
-        // TODO: for `EngineCoreRequest`, split outbound tensor raw views into aux
-        // frames instead of always producing a single msgpack frame.
-        let payload = encode_msgpack(payload)?;
+        let payload = Bytes::from(encode_msgpack(payload)?);
+        self.send_encoded_to_engine(engine_id, request_type, payload, Vec::new()).await
+    }
+
+    /// Send an add request, moving large tensor buffers into auxiliary frames.
+    pub async fn send_request_to_engine(
+        &self,
+        engine_id: &EngineId,
+        mut payload: EngineCoreRequest,
+    ) -> Result<()> {
+        let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
+        let payload = Bytes::from(encode_msgpack(&payload)?);
+        self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
+            .await
+    }
+
+    async fn send_encoded_to_engine(
+        &self,
+        engine_id: &EngineId,
+        request_type: EngineCoreRequestType,
+        payload: Bytes,
+        aux_frames: Vec<Bytes>,
+    ) -> Result<()> {
         let mut input_send = self.input_send.clone();
         let engine_id = engine_id.clone();
 
@@ -242,6 +292,7 @@ impl ClientInner {
                     &engine_id,
                     request_type.to_frame(),
                     payload,
+                    aux_frames,
                 )
                 .await
             })
@@ -374,6 +425,8 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
+                    let has_outputs = !batch.outputs.is_empty();
+                    let mut iteration_tokens = 0_u64;
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -381,6 +434,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                             debug!(request_id, "dropping output for inactive request");
                             continue;
                         };
+
+                        iteration_tokens += output.new_token_ids.len() as u64;
+                        if let Some(prefill) = &output.prefill_stats {
+                            // The engine emits prefill_stats once, on the first output.
+                            iteration_tokens += u64::from(prefill.num_computed_tokens);
+                        }
 
                         let wrapped_output = EngineCoreStreamOutput {
                             engine_index: batch.engine_index,
@@ -390,6 +449,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                         if sender.send(Ok(wrapped_output)).is_err() {
                             debug!(request_id, "request output stream receiver dropped");
                         }
+                    }
+
+                    if has_outputs
+                        && let Some(handles) = inner.iteration_metrics.get(&batch.engine_index)
+                    {
+                        handles.iteration_tokens_total.observe(iteration_tokens as f64);
                     }
 
                     // The sender for normally-finished requests should have already been removed
