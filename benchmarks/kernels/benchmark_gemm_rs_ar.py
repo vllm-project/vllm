@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the SM100 Kimi-K3 GEMM-RS/AR kernel.
+"""Benchmark the SM100 GEMM-RS/AR kernel.
 
-All ranks must belong to one NVLink domain. For example, run a TP8 sweep with:
+All ranks must belong to one NVLink domain. For example, run a TP8 sweep over
+the Kimi-K3 projections with:
 
-    torchrun --nproc-per-node=8 \
-        benchmarks/kernels/benchmark_kimi_k3_gemm_rs_ar.py
+    torchrun --nproc-per-node=8 benchmarks/kernels/benchmark_gemm_rs_ar.py
+
+or the DeepSeek-V4.1 MXFP8 ``wo_b`` projection at TP4 with:
+
+    torchrun --nproc-per-node=4 benchmarks/kernels/benchmark_gemm_rs_ar.py \
+        --model deepseek_v41 --backend flashinfer_cutedsl
 """
 
 import argparse
@@ -19,18 +24,23 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
 
-# Shared-expert down-proj and attention O-proj.
-_KIMI_K3_PROJECTION_K = (6144, 12288)
+# Per model: (hidden size N, global input widths K). Kimi-K3 lists the
+# shared-expert down-proj and attention O-proj; DeepSeek-V4.1 lists the
+# ``wo_b`` output projection (o_groups * o_lora_rank).
+_MODEL_PROJECTIONS = {
+    "kimi_k3": (7168, (6144, 12288)),
+    "deepseek_v41": (5120, (8192,)),
+}
 
 
 @dataclass
@@ -56,16 +66,31 @@ def parse_args() -> argparse.Namespace:
         help="Global token counts to benchmark.",
     )
     parser.add_argument(
+        "--model",
+        choices=tuple(_MODEL_PROJECTIONS),
+        default="kimi_k3",
+        help="Model whose projection shapes set the default --n and --k.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("bf16", "flashinfer_cutlass", "flashinfer_cutedsl"),
+        default="bf16",
+        help="Weight dtype/layout: BF16 or an online-MXFP8 FlashInfer kernel.",
+    )
+    parser.add_argument(
         "--k",
         type=int,
         nargs="+",
         help=(
-            "Per-rank input dimensions. By default, derive the Kimi-K3 "
-            "shared-expert down-proj and O-proj dimensions from the TP "
-            "world size."
+            "Per-rank input dimensions. By default, derive the selected "
+            "model's projection dimensions from the TP world size."
         ),
     )
-    parser.add_argument("--n", type=int, default=7168)
+    parser.add_argument(
+        "--n",
+        type=int,
+        help="Output width. Defaults to the selected model's hidden size.",
+    )
     parser.add_argument(
         "--num-workspaces",
         type=int,
@@ -144,9 +169,47 @@ def valid_rows(M: int, local_M: int, rank: int) -> int:
     return min(max(M - rank * local_M, 0), local_M)
 
 
+def make_projection(
+    gemm_rs_ar: GemmRsAr,
+    weight: torch.Tensor,
+    world_size: int,
+    backend: str,
+) -> RowParallelLinear:
+    """Wrap a BF16 [N, K] weight the way the model would hand it to GEMM-RS.
+
+    For the MXFP8 backends this quantizes online through the FlashInfer
+    kernel's post-load step, so the fused kernel and the unfused baseline see
+    the production weight and scale layouts.
+    """
+    N, K = weight.shape
+    quant_config = None
+    if backend != "bf16":
+        from vllm.config.quantization import QuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        quant_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+    with torch.device(weight.device):
+        linear = RowParallelLinear(
+            K * world_size,
+            N,
+            bias=False,
+            params_dtype=weight.dtype,
+            quant_config=quant_config,
+            return_bias=False,
+        )
+    # Select the fused path before online quantization replaces the weights.
+    assert gemm_rs_ar.can_run(linear)
+    linear.weight = torch.nn.Parameter(weight, requires_grad=False)
+    linear.quant_method.process_weights_after_loading(linear)
+    return linear
+
+
 def benchmark_shape(
     gemm_rs_ar: GemmRsAr,
     mode: str,
+    backend: str,
     M: int,
     N: int,
     K: int,
@@ -170,8 +233,13 @@ def benchmark_shape(
         torch.randn(M, K, dtype=torch.bfloat16, device=device, generator=rng)
         for _ in range(num_workspaces)
     ]
-    weights = [
-        torch.randn(N, K, dtype=torch.bfloat16, device=device, generator=rng)
+    projections = [
+        make_projection(
+            gemm_rs_ar,
+            torch.randn(N, K, dtype=torch.bfloat16, device=device, generator=rng),
+            world_size,
+            backend,
+        )
         for _ in range(num_workspaces)
     ]
 
@@ -199,11 +267,20 @@ def benchmark_shape(
         partial[M:].zero_()
         symm_partial[M:].zero_()
 
+    def gemm_into(x: torch.Tensor, linear: RowParallelLinear, out: torch.Tensor):
+        # BF16 writes straight into the collective buffer; the MXFP8 kernels
+        # allocate their own output, so the baseline pays one extra copy, as
+        # the model's unfused path does before its collective.
+        if backend == "bf16":
+            torch.mm(x, linear.weight.T, out=out)
+        else:
+            out.copy_(linear(x))
+
     def make_torch_ring_ll_gemm_collective(
-        x: torch.Tensor, weight: torch.Tensor
+        x: torch.Tensor, linear: RowParallelLinear
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            torch.mm(x, weight.T, out=partial[:M])
+            gemm_into(x, linear, partial[:M])
             if all_reduce:
                 dist.all_reduce(partial, group=device_group)
                 return partial[:M]
@@ -213,10 +290,10 @@ def benchmark_shape(
         return run
 
     def make_torch_ldmc_gemm_collective(
-        x: torch.Tensor, weight: torch.Tensor
+        x: torch.Tensor, linear: RowParallelLinear
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            torch.mm(x, weight.T, out=symm_partial[:M])
+            gemm_into(x, linear, symm_partial[:M])
             if all_reduce:
                 dist.all_reduce(symm_partial, group=device_group)
                 return symm_partial[:M]
@@ -230,15 +307,8 @@ def benchmark_shape(
         return run
 
     def make_fused_gemm_collective(
-        x: torch.Tensor, weight: torch.Tensor
+        x: torch.Tensor, linear: RowParallelLinear
     ) -> Callable[[], torch.Tensor]:
-        with torch.device("meta"):
-            linear = RowParallelLinear(
-                K * world_size, N, bias=False, params_dtype=weight.dtype
-            )
-        linear.weight = torch.nn.Parameter(weight, requires_grad=False)
-        assert gemm_rs_ar.can_run(linear)
-
         def run() -> torch.Tensor:
             return gemm_rs_ar.apply(x, linear)
 
@@ -246,10 +316,11 @@ def benchmark_shape(
 
     def make_torch_gemm(
         x: torch.Tensor,
-        weight: torch.Tensor,
+        linear: RowParallelLinear,
     ) -> Callable[[], torch.Tensor]:
         def run() -> torch.Tensor:
-            return torch.mm(x, weight.T, out=gemm_output)
+            gemm_into(x, linear, gemm_output)
+            return gemm_output
 
         return run
 
@@ -281,22 +352,23 @@ def benchmark_shape(
 
         return run
 
+    pairs = list(zip(inputs, projections))
     candidates = (
         Candidate(
             "ring_ll_us",
-            [make_torch_ring_ll_gemm_collective(x, w) for x, w in zip(inputs, weights)],
+            [make_torch_ring_ll_gemm_collective(x, w) for x, w in pairs],
         ),
         Candidate(
             "ldmc_us",
-            [make_torch_ldmc_gemm_collective(x, w) for x, w in zip(inputs, weights)],
+            [make_torch_ldmc_gemm_collective(x, w) for x, w in pairs],
         ),
         Candidate(
             "gemm_rs_ar_us",
-            [make_fused_gemm_collective(x, w) for x, w in zip(inputs, weights)],
+            [make_fused_gemm_collective(x, w) for x, w in pairs],
         ),
         Candidate(
             "torch_gemm_us",
-            [make_torch_gemm(x, w) for x, w in zip(inputs, weights)],
+            [make_torch_gemm(x, w) for x, w in pairs],
             check_correctness=False,
         ),
         Candidate(
@@ -345,6 +417,7 @@ def benchmark_shape(
     best_nccl_us = min(times["ring_ll_collective_us"], times["ldmc_collective_us"])
     return {
         "mode": mode.upper(),
+        "backend": backend,
         "M": M,
         "N": N,
         "K": K,
@@ -406,8 +479,11 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
 
 def main() -> None:
     args = parse_args()
+    default_n, default_k = _MODEL_PROJECTIONS[args.model]
+    if args.n is None:
+        args.n = default_n
     assert args.m and min(args.m) > 0
-    assert args.n % 256 == 0
+    assert args.n % 128 == 0
     assert args.num_workspaces > 0
     assert args.warmup_replays >= 0
     assert args.samples > 0
@@ -417,16 +493,23 @@ def main() -> None:
     init_distributed_environment()
     world_size = dist.get_world_size()
     if args.k is None:
-        assert all(K % world_size == 0 for K in _KIMI_K3_PROJECTION_K)
-        K_values = [K // world_size for K in _KIMI_K3_PROJECTION_K]
+        assert all(K % world_size == 0 for K in default_k)
+        K_values = [K // world_size for K in default_k]
     else:
         K_values = args.k
-    assert all(K % 64 == 0 for K in K_values)
+    k_alignment = 64 if args.backend == "bf16" else 128
+    assert all(K % k_alignment == 0 for K in K_values)
     # Reserve symmetric memory for the NCCL-managed benchmark allocations.
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
     # NCCL-managed symmetric allocations select the NVLS/LDMC collective path.
     symm_mem.set_backend("NCCL")
-    with set_current_vllm_config(VllmConfig()):
+    config = VllmConfig()
+    config.model_config = ModelConfig(dtype="bfloat16")
+    # Pin the online-MXFP8 kernel the projections quantize through.
+    config.kernel_config.linear_backend = (
+        "auto" if args.backend == "bf16" else args.backend
+    )
+    with set_current_vllm_config(config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     tp_group = get_tp_group()
@@ -447,23 +530,25 @@ def main() -> None:
         N=args.n,
         all_reduce=args.mode == "ar",
     )
-    results = [
-        benchmark_shape(
-            gemm_rs_ar,
-            args.mode,
-            M,
-            args.n,
-            K,
-            args.num_workspaces,
-            args.warmup_replays,
-            args.samples,
-            tp_group.device_group,
-            tp_group.cpu_group,
-            device_barrier,
-        )
-        for K in K_values
-        for M in args.m
-    ]
+    with set_current_vllm_config(config):
+        results = [
+            benchmark_shape(
+                gemm_rs_ar,
+                args.mode,
+                args.backend,
+                M,
+                args.n,
+                K,
+                args.num_workspaces,
+                args.warmup_replays,
+                args.samples,
+                tp_group.device_group,
+                tp_group.cpu_group,
+                device_barrier,
+            )
+            for K in K_values
+            for M in args.m
+        ]
     del gemm_rs_ar
 
     if tp_group.rank_in_group == 0:

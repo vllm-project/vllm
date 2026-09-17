@@ -91,6 +91,10 @@ def _assert_valid_rows_close(
         rtol=5e-2,
         atol=4.0,
     )
+    # Sequence-parallel callers may pass an unpadded M and read the padding
+    # rows back (they flow through per-token kernels before being dropped),
+    # so RS must leave them zero like ``sp_reduce_scatter`` does.
+    assert not actual[valid_rows:].any()
 
 
 def _run_mode(
@@ -104,7 +108,7 @@ def _run_mode(
     backend: str,
 ) -> None:
     # cute_dsl is unavailable off CUDA, so import it only inside the GPU worker.
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
 
     gemm_rs_ar = GemmRsAr(
         max_M=max(M for M, _ in _SHAPES),
@@ -287,9 +291,9 @@ def _worker(local_rank: int, world_size: int, master_port: int, backend: str) ->
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
-    reason="Kimi-K3 GEMM-RS/AR requires SM100",
+    reason="GEMM-RS/AR requires SM100",
 )
-def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+def test_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     world_size = 2
     if torch.accelerator.device_count() < world_size:
         pytest.skip("GEMM-RS/AR requires two GPUs")

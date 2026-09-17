@@ -301,7 +301,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 

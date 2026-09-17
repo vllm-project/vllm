@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""SM100 BF16/MXFP8 GEMM with fused tensor-parallel reduce-scatter/all-reduce."""
+"""SM100 BF16/MXFP8 GEMM with fused tensor-parallel reduce-scatter/all-reduce.
+
+Model-neutral: any row-parallel projection whose output is reduced across TP
+(Kimi-K3 ``o_proj``/``down_proj``, DeepSeek-V4.1 ``wo_b``) can bind to the
+process-wide workspace through ``maybe_init_gemm_rs_ar`` + ``GemmRsAr.apply``.
+"""
 
 # Based on CUTLASS's Blackwell distributed GEMM-RS example at dcf215a.
 # See https://github.com/NVIDIA/cutlass/issues/3117 for memory semantics.
@@ -9,6 +14,7 @@
 # https://github.com/gau-nernst/gn-kernels (sm100_mm_mxfp8.py).
 
 from functools import cache
+from typing import TYPE_CHECKING
 
 import cutlass
 import torch
@@ -36,6 +42,10 @@ from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -857,7 +867,7 @@ class Sm100GemmRsAr:
 
 
 class GemmRsAr:
-    """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
+    """Own the symmetric workspace for GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
 
@@ -1036,6 +1046,14 @@ class GemmRsAr:
         output = None
         if not self.all_reduce:
             output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
+            # The kernel never touches rows at or beyond M. Callers that hand
+            # in an unpadded M (DeepSeek-V4.1 slices the SP all-gather back to
+            # the real token count) expect the same zero padding rows that
+            # ``sp_reduce_scatter`` produces, so clear them here. This is a
+            # no-op whenever M is already a multiple of the TP size.
+            valid_rows = min(max(M - self.rank * local_M, 0), local_M)
+            if valid_rows < local_M:
+                output[valid_rows:].zero_()
         compiled = Sm100GemmRsAr.compile(
             self.rank,
             self.world_size,
@@ -1082,6 +1100,58 @@ def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
         assert _gemm_rs_ar.max_M >= max_M and _gemm_rs_ar.N == N
         return
     _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
+
+
+def maybe_init_gemm_rs_ar(
+    vllm_config: "VllmConfig", *, N: int, all_reduce: bool
+) -> bool:
+    """Collectively initialize the mode-bound GEMM-RS/AR state if supported.
+
+    Callers gate on their own feature flag first; this checks the worker
+    topology (SM100-family CUDA, BF16 model dtype, no ubatching, a TP size in
+    2-16 that divides 128) and the NVLink multicast rendezvous. Returns whether
+    projections may bind to the kernel through ``get_gemm_rs_ar().can_run``.
+    """
+    mode = "GEMM-AR" if all_reduce else "GEMM-RS"
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.use_ubatching:
+        reason = "ubatching is enabled"
+    elif vllm_config.model_config.dtype != torch.bfloat16:
+        reason = "the model dtype is not BF16"
+    elif not current_platform.is_cuda():
+        reason = "the device is not CUDA"
+    elif not current_platform.is_device_capability_family(100):
+        reason = "the device is not SM100-family"
+    elif not 1 < tp_size <= 16:
+        reason = "TP size is not in the supported range 2-16"
+    elif 128 % tp_size != 0:
+        reason = "TP size does not divide 128"
+    elif N % 128 != 0:
+        reason = f"the output width {N} is not a multiple of 128"
+    else:
+        reason = None
+
+    if reason is not None:
+        logger.warning_once("%s is disabled because %s.", mode, reason)
+        return False
+
+    try:
+        init_gemm_rs_ar(
+            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            N=N,
+            all_reduce=all_reduce,
+        )
+    except RuntimeError as e:
+        logger.warning_once(
+            "%s is disabled because initialization failed: %s. This may mean "
+            "the TP ranks do not share one NVLink domain.",
+            mode,
+            e,
+        )
+        return False
+    logger.info_once("%s is enabled.", mode)
+    return True
 
 
 def warmup_gemm_rs_ar() -> int:
