@@ -23,6 +23,7 @@ from .data import (
     RankCompletenessPolicy,
     RankTopology,
     RequestTracker,
+    LookupState,
     TPShardMapping,
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
@@ -56,6 +57,7 @@ class UMBPStoreConnectorScheduler:
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
         self.enable_lookup = bool(extra.get("enable_lookup", True))
+        self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         if extra.get("enable_partial_hash_hits", False):
             raise ValueError(
                 "UMBP partial hash hits require a runtime tail-key protocol"
@@ -68,11 +70,16 @@ class UMBPStoreConnectorScheduler:
             )
         self._pending_loads: dict[str, list[BlockTransferPlan]] = {}
         self._load_specs: dict[str, LoadSpec] = {}
+        self._lookup_states: dict[str, LookupState] = {}
+        self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._next_generation = 0
         self._pending_stores: list[BlockTransferPlan] = []
         self._gpu_block_pool: BlockPool | None = None
         self._pinned_store_blocks: dict[tuple[str, int], list[int]] = {}
+        self._store_plan_requests: dict[
+            tuple[str, int], tuple[str, int]
+        ] = {}
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
 
     def _build_local_tp_mapping(self) -> TPShardMapping | None:
@@ -98,6 +105,9 @@ class UMBPStoreConnectorScheduler:
     ) -> tuple[int | None, bool]:
         if not self.enable_lookup:
             return 0, False
+        lookup_state = self._lookup_states.setdefault(
+            request.request_id, LookupState(request.request_id)
+        )
         hashes = list(request.block_hashes)
         align = (
             self.hash_block_size
@@ -123,9 +133,17 @@ class UMBPStoreConnectorScheduler:
                 block_hash, self.topology, group_ids
             )
         ]
-        hits = list(self.runtime.lookup(keys))
+        try:
+            hits = list(self.runtime.lookup(keys))
+        except Exception as exc:
+            lookup_state.fail(str(exc))
+            return 0, False
+        if len(hits) != len(keys):
+            lookup_state.fail("lookup returned an invalid result length")
+            return 0, False
         per_block = self.completeness.required_rank_count * len(group_ids)
         if per_block == 0 or len(hits) != len(keys):
+            lookup_state.fail("lookup returned an invalid result length")
             return 0, False
         matched_units = 0
         for offset in range(0, len(hits), per_block):
@@ -139,6 +157,7 @@ class UMBPStoreConnectorScheduler:
         )
         matched_tokens = matched_units * unit_size
         matched_tokens = min(matched_tokens, request.num_tokens)
+        lookup_state.complete(matched_tokens)
         need_to_load = max(matched_tokens - num_computed_tokens, 0)
         if need_to_load <= 0:
             return 0, False
@@ -155,7 +174,10 @@ class UMBPStoreConnectorScheduler:
         num_external_tokens: int,
     ) -> None:
         if num_external_tokens <= 0:
+            self._pending_loads.pop(request.request_id, None)
+            self._load_specs.pop(request.request_id, None)
             return
+        self._requests[request.request_id] = request
         num_blocks = num_external_tokens // self.block_size
         block_groups = blocks.get_block_ids(
             group_ids=self.kv_cache_config.prefix_cacheable_group_ids
@@ -208,6 +230,8 @@ class UMBPStoreConnectorScheduler:
             self._pending_loads.pop(request_id, None)
             self._load_specs.pop(request_id, None)
             self._request_trackers.pop(request_id, None)
+            self._requests.pop(request_id, None)
+            self._lookup_states.pop(request_id, None)
         for request in scheduler_output.scheduled_new_reqs:
             load_plans = self._pending_loads.pop(request.req_id, [])
             self._load_specs.pop(request.req_id, None)
@@ -224,6 +248,10 @@ class UMBPStoreConnectorScheduler:
                 meta.store_plans.extend(store_plans)
                 if store_plans:
                     meta.store_requests[request.req_id] = store_plans
+            if request.req_id in self._lookup_states:
+                meta.lookup_states[request.req_id] = self._lookup_states[
+                    request.req_id
+                ]
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for request_id in cached_reqs.req_ids:
@@ -232,6 +260,24 @@ class UMBPStoreConnectorScheduler:
             if load_plans:
                 meta.load_plans.extend(load_plans)
                 meta.load_requests[request_id] = load_plans
+            elif self.save_decode_cache:
+                request = self._requests.get(request_id)
+                tracker = self._request_trackers.get(request_id)
+                if request is not None and tracker is not None:
+                    total_tokens = (
+                        cached_reqs.num_computed_tokens[
+                            cached_reqs.req_ids.index(request_id)
+                        ]
+                        + scheduler_output.num_scheduled_tokens[request_id]
+                    )
+                    store_plans = self._store_plans(
+                        request,
+                        tracker,
+                        total_tokens,
+                    )
+                    meta.store_plans.extend(store_plans)
+                    if store_plans:
+                        meta.store_requests[request_id] = store_plans
 
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)
@@ -244,7 +290,22 @@ class UMBPStoreConnectorScheduler:
         meta.store_plans.extend(self._pending_stores)
         self._pending_stores.clear()
         self._reference_store_blocks(meta)
+        self._group_layer_plans(meta)
         return meta
+
+    @staticmethod
+    def _group_layer_plans(meta: UMBPConnectorMetadata) -> None:
+        """Expose layer ownership without changing bulk plan semantics."""
+        for plan in meta.load_plans:
+            for item in plan.ranges:
+                meta.load_plans_by_layer.setdefault(item.layer_name, []).append(
+                    plan
+                )
+        for plan in meta.store_plans:
+            for item in plan.ranges:
+                meta.store_plans_by_layer.setdefault(item.layer_name, []).append(
+                    plan
+                )
 
     def _reference_store_blocks(self, metadata: UMBPConnectorMetadata) -> None:
         if self._gpu_block_pool is None:
@@ -253,6 +314,10 @@ class UMBPStoreConnectorScheduler:
         for plan in metadata.store_plans:
             token = (plan.key, plan.generation)
             blocks = self._pinned_store_blocks.setdefault(token, [])
+            if plan.request_id is not None:
+                self._store_plan_requests.setdefault(
+                    token, (plan.request_id, plan.block_id * self.block_size)
+                )
             if plan.block_id not in blocks:
                 blocks.append(plan.block_id)
                 new_block_ids.append(plan.block_id)
@@ -289,12 +354,16 @@ class UMBPStoreConnectorScheduler:
     ) -> list[BlockTransferPlan]:
         """Describe full blocks produced by a scheduled prefill."""
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        previous_saved_tokens = tracker.saved_tokens
         save_to = tracker.mark_saved(token_count, self.block_size)
+        start_block = previous_saved_tokens // self.block_size
         num_blocks = save_to // self.block_size
         plans: list[BlockTransferPlan] = []
         for group_id in group_ids:
             block_ids = request.block_ids[group_id]
-            for index, block_id in enumerate(block_ids[:num_blocks]):
+            for index, block_id in enumerate(
+                block_ids[start_block:num_blocks], start=start_block
+            ):
                 if index >= len(request.block_hashes):
                     break
                 plans.append(
@@ -325,13 +394,24 @@ class UMBPStoreConnectorScheduler:
         terminal_counts = dict(metadata.completed_store_tokens)
         for token, count in metadata.failed_store_tokens.items():
             terminal_counts[token] = terminal_counts.get(token, 0) + count
+        failed_tokens = set(metadata.failed_store_tokens)
         for token, count in terminal_counts.items():
             if count < self._num_workers:
                 continue
             block_ids = self._pinned_store_blocks.pop(token, None)
-            if pool is None or block_ids is None:
-                continue
-            pool.free_blocks(pool.blocks[block_id] for block_id in reversed(block_ids))
+            request_info = self._store_plan_requests.pop(token, None)
+            if pool is not None and block_ids is not None:
+                pool.free_blocks(
+                    pool.blocks[block_id] for block_id in reversed(block_ids)
+                )
+            if request_info is not None:
+                request_id, start_tokens = request_info
+                tracker = self._request_trackers.get(request_id)
+                if tracker is not None:
+                    if token in failed_tokens:
+                        tracker.record_store_failure(start_tokens)
+                    else:
+                        tracker.clear_store_retry()
 
     def has_pending_push_work(self) -> bool:
         return bool(self._pinned_store_blocks)
