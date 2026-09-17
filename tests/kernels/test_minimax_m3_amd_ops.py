@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
@@ -167,6 +168,25 @@ def test_swiglu_oai_split(m, inter, limit, dtype):
     assert _relerr(got, ref) < 5e-3
 
 
+@torch.inference_mode()
+def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
+    # Keep a small value in two MX blocks next to their maxima. The scale must
+    # use E4M3's finite range (448), otherwise that value underflows to zero.
+    # Keep the third block empty to cover the reference's finite tiny clamp.
+    m, inter = 3, 96
+    gate = torch.full((m, inter), 2.0, device=DEVICE, dtype=torch.float16)
+    up = torch.full((m, inter), 2**-10, device=DEVICE, dtype=torch.float16)
+    up[:, :64:32] = 1.0
+    up[:, 64:] = 0.0
+    gate_up = torch.cat((gate, up), dim=-1)
+
+    got_q, got_s = swiglu_oai_quantize_mxfp8(gate_up, alpha=0.0, beta=0.0, limit=None)
+    ref_q, ref_s = _mxfp8_e4m3_quantize_torch(up, is_sf_swizzled_layout=False)
+
+    assert torch.equal(got_s, ref_s)
+    assert torch.equal(got_q, ref_q)
+
+
 # --------------------------------------------------------------------------- #
 # Fused MXFP8 activation quant (Triton vs torch reference)
 # --------------------------------------------------------------------------- #
@@ -179,8 +199,8 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     xq_t, s_t = _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout=False)
     xq_k, s_k = _mxfp8_e4m3_quantize_triton(x)
     assert s_k.shape == s_t.shape == (shape[0], shape[1] // 32)
-    # E8M0 block exponents share the floor(log2(amax))+127 algorithm; allow at
-    # most a 1-step difference at exact powers of two.
+    # Both paths use the E4M3-aware scale calculation; allow a 1-step
+    # difference at exact powers of two due to floating-point rounding.
     assert (s_k.int() - s_t.int()).abs().max().item() <= 1
     # Dequantized values agree to fp8 granularity.
     deq_t = dequant_mxfp8_to_bf16(xq_t, s_t)

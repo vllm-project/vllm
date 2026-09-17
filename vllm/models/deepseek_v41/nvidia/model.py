@@ -20,7 +20,6 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_fused_post_pre_delayed_tilelang,
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
@@ -65,6 +64,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    DeepseekV4MegaAttnAttention,
+)
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -79,6 +81,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
+from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -119,8 +122,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
     so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    Without an explicit backend: SM12 takes FlashInfer, SM100 takes mega
+    attention where the topology allows it, and everything else keeps the
+    FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -140,6 +144,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         if device_capability is not None and device_capability.major == 12:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
@@ -149,6 +155,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    # Mega attention is the SM100 default: it fuses Q RoPE, sparse attention,
+    # the output's inverse RoPE and its FP8 cast into one launch, and brings
+    # the 288 B NVFP4 compressed record -- the format the reference
+    # implementation itself stores. It declines topologies it cannot serve
+    # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
+    # group, a build without the kernel), which then fall through to FlashMLA.
+    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+        return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
 
@@ -403,25 +417,23 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = (
-                mhc_fused_post_pre_delayed_tilelang(
-                    x,
-                    residual,
-                    post_mix,
-                    res_mix,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
-                    self.rms_norm_eps,
-                    self.hc_eps,
-                    self.hc_eps,
-                    self.hc_post_alpha,
-                    self.hc_sinkhorn_iters,
-                    pre_mix=pre_mix,
-                    norm_weight=self.attn_norm.weight,
-                    norm_eps=self.attn_norm.variance_epsilon,
-                    capture_aux=capture_previous_aux,
-                )
+            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+                capture_aux=capture_previous_aux,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -433,24 +445,22 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre, _ = (
-            mhc_fused_post_pre_delayed_tilelang(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=attn_pre,
-                norm_weight=self.ffn_norm.weight,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
+        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=attn_pre,
+            norm_weight=self.ffn_norm.weight,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
@@ -940,6 +950,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
 
+    def finalize_mega_attn_weights(self) -> None:
+        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
+
+        A no-op for every other attention layer, and idempotent, so a second
+        post-load pass cannot permute twice.
+        """
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
+
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1194,6 +1215,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

@@ -84,8 +84,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
         class ClassifierWithReshape(self.classifier.__class__):
-            """
-            Token extraction has already been applied in `pooler.pooling`.
+            """Token extraction has already been applied in `pooler.pooling`.
             Add dim to match expected input shape of `classifier.forward`.
             """
 
