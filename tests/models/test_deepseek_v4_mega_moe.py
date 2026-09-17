@@ -121,20 +121,30 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     if padding:
         hidden_states[-1] = float("nan")
         padding_mask = torch.tensor([False, False, False, True], device="cuda")
-        monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
-        monkeypatch.setattr(
-            "vllm.models.deepseek_v4.nvidia.model.is_forward_context_available",
-            lambda: True,
-        )
-        monkeypatch.setattr(
-            "vllm.models.deepseek_v4.nvidia.model.get_forward_context",
-            lambda: SimpleNamespace(is_padding=padding_mask),
-        )
 
     def check_routing(x, weights, ids, *, activation_clamp):
-        assert torch.isfinite(weights).all()
+        assert torch.isfinite(weights[:num_valid_tokens]).all()
         if padding:
-            assert torch.count_nonzero(x[num_valid_tokens:]) == 0
+            assert torch.isnan(x[num_valid_tokens:]).all()
+            staged_ids = torch.empty_like(ids)
+            staged_weights = torch.empty_like(weights)
+            prepare_megamoe_inputs(
+                x,
+                weights,
+                ids,
+                torch.empty_like(x, dtype=torch.float8_e4m3fn),
+                torch.empty(
+                    (x.shape[0], x.shape[1] // 128),
+                    dtype=torch.int32,
+                    device=x.device,
+                ),
+                staged_ids,
+                staged_weights,
+                is_padding=padding_mask,
+            )
+            assert (staged_ids[num_valid_tokens:] == -1).all()
+            assert (staged_weights[num_valid_tokens:] == 0).all()
+            ids, weights = staged_ids, staged_weights
         torch.testing.assert_close(
             ids[:num_valid_tokens], expected_ids[:num_valid_tokens]
         )
@@ -875,7 +885,8 @@ def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     not torch.cuda.is_available(),
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
-def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding():
+@pytest.mark.parametrize("nonfinite_padding", [False, True])
+def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding(nonfinite_padding):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
 
     device = torch.device("cuda")
@@ -911,6 +922,8 @@ def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding():
         [False, True, False, False, True, False, True],
         device=device,
     )
+    if nonfinite_padding:
+        topk_weights[is_padding] = float("nan")
 
     ref_x, ref_x_sf = per_token_cast_to_fp8(
         hidden_states,

@@ -1068,13 +1068,6 @@ class DeepseekV4MoE(nn.Module):
             fix_routing_mask = mega_gate_metadata.hash_token_mask
 
         org_shape = hidden_states.shape
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-            if is_padding is not None:
-                # Mega-Gate validates every score, including padded rows.
-                hidden_states.masked_fill_(
-                    is_padding[: hidden_states.shape[0]].unsqueeze(1), 0
-                )
         topk_weights, topk_ids = bf16_mega_gate(
             hidden_states,
             self.gate.weight,
