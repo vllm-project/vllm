@@ -1301,14 +1301,7 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
-                        if self._TRANSFER_MODE == "pull":
-                            addresses = self._remote_engine_addresses
-                            self._replaced_remote_engines.update(
-                                old_eid
-                                for old_eid, address in addresses.items()
-                                if address == (host, port) and old_eid != eid
-                            )
-                            addresses[eid] = (host, port)
+                        self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -3481,13 +3474,25 @@ class NixlBaseConnectorWorker:
             and meta.remote is not None
         }
 
+    def _track_remote_engine_replacement(
+        self, engine_id: EngineId, host: str, port: int
+    ) -> None:
+        """Record a confirmed pull peer and mark replaced peers for cleanup."""
+        if self._TRANSFER_MODE != "pull":
+            return
+        self._replaced_remote_engines.update(
+            old_eid
+            for old_eid, address in self._remote_engine_addresses.items()
+            if address == (host, port) and old_eid != engine_id
+        )
+        self._remote_engine_addresses[engine_id] = (host, port)
+
     def _cleanup_replaced_remote_engines(self) -> None:
         """Release replaced pull peers once requests and handshakes have drained."""
-        if not self._replaced_remote_engines:
+        if len(self._replaced_remote_engines) == 0:
             return
         with self._handshake_lock:
-            # Native metadata loads run outside the lock on the handshake executor.
-            if self._handshake_futures:
+            if len(self._handshake_futures) > 0:
                 return
             busy = {
                 meta.remote.engine_id
