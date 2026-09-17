@@ -684,10 +684,13 @@ def test_builtin_embedded_runtime_register_store_and_load():
     worker_connector.register_kv_caches(destination_caches)
     worker_connector.bind_connector_metadata(load_metadata)
     worker_connector.start_load_kv(None)
-    worker_connector.wait_for_layer_load("layer0")
-    embedded_worker = worker_connector.connector_worker
-    assert embedded_worker is not None
-    assert len(embedded_worker.runtime.last_load_plans[0].ranges) == 2
+    worker_connector.wait_for_layer_load("layer1")
+    assert worker_connector.get_finished({"builtin-consumer"}) == (None, None)
+    worker_connector.wait_for_layer_load("layer2")
+    assert worker_connector.get_finished({"builtin-consumer"}) == (
+        None,
+        {"builtin-consumer"},
+    )
     load_errors = worker_connector.get_block_ids_with_load_errors()
     if load_errors:
         raise AssertionError(f"embedded load errors: {sorted(load_errors)}")
