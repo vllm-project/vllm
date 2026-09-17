@@ -887,13 +887,6 @@ class GemmRsAr:
         self.N = N
         self.device = device
         self.all_reduce = all_reduce
-        # dtypes with at least one compatible projection, as recorded by
-        # can_run; warmup compiles the dispatches for each of them.
-        self.dtypes: set[str] = {"bf16"}
-        # MXFP8 weight scales registered by can_run, keyed by the weight's
-        # data_ptr (transpose views share it), so callers only pass the
-        # weight to __call__.
-        self._weight_scales: dict[int, torch.Tensor] = {}
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
@@ -934,69 +927,19 @@ class GemmRsAr:
 
     def can_run(self, linear: LinearBase) -> bool:
         # Validate projection-invariant requirements once during model init.
-        if isinstance(linear.quant_method, UnquantizedLinearMethod):
-            w = linear.weight
-            if w.ndim != 2:
-                return False
-            K = w.shape[1]
-            return (
-                w.shape == (self.N, K)
-                and K % 64 == 0
-                and w.dtype == torch.bfloat16
-                and w.device == self.device
-                and w.is_contiguous()
-            )
-        return self._can_run_mxfp8(linear)
-
-    def _can_run_mxfp8(self, linear: LinearBase) -> bool:
-        # Only the FlashInfer MXFP8 kernels keep the [N, K] row-major weight
-        # plus a flat swizzled scale, which is what the kernel consumes.
-        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-            FlashInferCutedslMxfp8LinearKernel,
-            FlashInferCutlassMxfp8LinearKernel,
-        )
-
-        kernel = getattr(linear.quant_method, "kernel", None)
-        if not isinstance(
-            kernel,
-            (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel),
-        ):
+        if not isinstance(linear.quant_method, UnquantizedLinearMethod):
             return False
-        operands = self._mxfp8_operands(linear)
-        if operands is None:
-            return False
-        w, w_sf, K = operands
-        if K % 128 != 0:
-            return False
-        self._weight_scales[w.data_ptr()] = w_sf
-        self.dtypes.add("mxfp8")
-        return True
-
-    def _mxfp8_operands(
-        self, linear: LinearBase
-    ) -> tuple[torch.Tensor, torch.Tensor, int] | None:
-        """Return (weight [N, K] FP8, flat swizzled scale, K), or None."""
         w = linear.weight
-        w_sf = getattr(linear, "weight_scale", None)
-        if (
-            w.ndim != 2
-            or w.dtype != torch.float8_e4m3fn
-            or w.device != self.device
-            or w_sf is None
-            or w_sf.ndim != 1
-            or w_sf.dtype != torch.uint8
-            or not w_sf.is_contiguous()
-        ):
-            return None
-        if w.shape[0] == self.N and w.is_contiguous():
-            pass
-        elif w.shape[1] == self.N and w.t().is_contiguous():
-            # FlashInfer CuTe-DSL stores the weight as a [K, N] column-major
-            # view of the row-major [N, K] buffer.
-            w = w.t()
-        else:
-            return None
-        return w, w_sf, w.shape[1]
+        if w.ndim != 2:
+            return False
+        K = w.shape[1]
+        return (
+            w.shape == (self.N, K)
+            and K % 64 == 0
+            and w.dtype == torch.bfloat16
+            and w.device == self.device
+            and w.is_contiguous()
+        )
 
     def warn_incompatible_projection(self) -> None:
         logger.warning_once(
@@ -1022,6 +965,7 @@ class GemmRsAr:
         assert x.dtype == torch.bfloat16
         assert x.device == self.device
         assert x.is_contiguous()
+        assert w.device == self.device
         N = self.N
         dtype = "mxfp8" if w.dtype == torch.float8_e4m3fn else "bf16"
         x_sf = None
@@ -1030,12 +974,12 @@ class GemmRsAr:
                 mxfp8_e4m3_quantize,
             )
 
-            if w_sf is None:
-                w_sf = self._weight_scales.get(w.data_ptr())
             assert w_sf is not None
+            assert w_sf.dtype == torch.uint8 and w_sf.device == self.device
             assert w_sf.ndim == 1 and w_sf.is_contiguous()
-            if w.shape[0] != N:
-                assert w.shape[1] == N
+            assert w_sf.numel() == N * (K // 32)
+            # CuTe-DSL stores [K, N] column-major, including when K == N.
+            if not w.is_contiguous():
                 w = w.t()
             assert w.shape == (N, K) and K % 128 == 0
             assert w.is_contiguous()
@@ -1048,7 +992,6 @@ class GemmRsAr:
             assert w_sf is None
             assert w.shape == (N, K) and K % 64 == 0
             assert w.dtype == torch.bfloat16
-            assert w.device == self.device
             assert w.is_contiguous()
         padded_M = (M + self.world_size - 1) // self.world_size
         padded_M *= self.world_size
@@ -1120,19 +1063,15 @@ def warmup_gemm_rs_ar() -> int:
     # Initialization can be disabled or fail when multicast is unavailable.
     if _gemm_rs_ar is None:
         return 0
-    # Keep these profiles in sync with the dispatch in GemmRsAr.__call__.
-    count = 0
-    for dtype in sorted(_gemm_rs_ar.dtypes):
-        for cta_group in (1, 2):
-            Sm100GemmRsAr.compile(
-                _gemm_rs_ar.rank,
-                _gemm_rs_ar.world_size,
-                cta_group,
-                _gemm_rs_ar.all_reduce,
-                dtype=dtype,
-            )
-            count += 1
-    return count
+
+    for cta_group in (1, 2):
+        Sm100GemmRsAr.compile(
+            _gemm_rs_ar.rank,
+            _gemm_rs_ar.world_size,
+            cta_group,
+            _gemm_rs_ar.all_reduce,
+        )
+    return 2
 
 
 def get_gemm_rs_ar() -> GemmRsAr:
