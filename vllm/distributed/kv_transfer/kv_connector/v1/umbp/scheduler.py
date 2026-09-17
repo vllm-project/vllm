@@ -173,12 +173,7 @@ class UMBPStoreConnectorScheduler:
         blocks: KVCacheBlocks,
         num_external_tokens: int,
     ) -> None:
-        if num_external_tokens <= 0:
-            self._pending_loads.pop(request.request_id, None)
-            self._load_specs.pop(request.request_id, None)
-            return
         self._requests[request.request_id] = request
-        num_blocks = num_external_tokens // self.block_size
         block_groups = blocks.get_block_ids(
             group_ids=self.kv_cache_config.prefix_cacheable_group_ids
         )
@@ -193,6 +188,11 @@ class UMBPStoreConnectorScheduler:
             self._next_generation += 1
             self._request_trackers[request.request_id] = tracker
         tracker.update_blocks(tuple(list(group) for group in block_groups))
+        if num_external_tokens <= 0:
+            self._pending_loads.pop(request.request_id, None)
+            self._load_specs.pop(request.request_id, None)
+            return
+        num_blocks = num_external_tokens // self.block_size
         spec = self._load_specs.get(request.request_id)
         if spec is not None:
             spec.can_load = (
@@ -264,16 +264,25 @@ class UMBPStoreConnectorScheduler:
                 request = self._requests.get(request_id)
                 tracker = self._request_trackers.get(request_id)
                 if request is not None and tracker is not None:
+                    request_index = cached_reqs.req_ids.index(request_id)
+                    new_block_ids = cached_reqs.new_block_ids[request_index]
+                    if new_block_ids:
+                        tracker.update_blocks(
+                            tuple(
+                                new_block_ids[group_id]
+                                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+                            )
+                        )
                     total_tokens = (
-                        cached_reqs.num_computed_tokens[
-                            cached_reqs.req_ids.index(request_id)
-                        ]
+                        cached_reqs.num_computed_tokens[request_index]
                         + scheduler_output.num_scheduled_tokens[request_id]
                     )
+                    tracker.token_len = total_tokens
                     store_plans = self._store_plans(
                         request,
                         tracker,
                         total_tokens,
+                        block_ids_override=tracker.block_ids,
                     )
                     meta.store_plans.extend(store_plans)
                     if store_plans:
@@ -350,17 +359,31 @@ class UMBPStoreConnectorScheduler:
         return hashes[hash_index]
 
     def _store_plans(
-        self, request: Any, tracker: RequestTracker, token_count: int
+        self,
+        request: Any,
+        tracker: RequestTracker,
+        token_count: int,
+        block_ids_override: tuple[list[int], ...] | None = None,
     ) -> list[BlockTransferPlan]:
         """Describe full blocks produced by a scheduled prefill."""
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
-        previous_saved_tokens = tracker.saved_tokens
+        previous_saved_tokens = (
+            tracker.retry_from_tokens
+            if tracker.retry_from_tokens is not None
+            else tracker.saved_tokens
+        )
         save_to = tracker.mark_saved(token_count, self.block_size)
         start_block = previous_saved_tokens // self.block_size
         num_blocks = save_to // self.block_size
         plans: list[BlockTransferPlan] = []
+        block_groups = (
+            block_ids_override
+            if block_ids_override is not None
+            else tuple(request.block_ids[group_id] for group_id in group_ids)
+        )
         for group_id in group_ids:
-            block_ids = request.block_ids[group_id]
+            block_index = group_ids.index(group_id)
+            block_ids = block_groups[block_index]
             for index, block_id in enumerate(
                 block_ids[start_block:num_blocks], start=start_block
             ):
@@ -384,6 +407,7 @@ class UMBPStoreConnectorScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
+        self._requests.pop(request.request_id, None)
         return False, None
 
     def update_connector_output(self, output: KVConnectorOutput) -> None:
