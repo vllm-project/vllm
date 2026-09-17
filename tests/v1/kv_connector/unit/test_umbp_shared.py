@@ -359,6 +359,10 @@ class _SchedulerHandle:
     def close(self):
         pass
 
+    def clear(self):
+        self.hits = []
+        return True
+
 
 def test_scheduler_tracks_consecutive_load_plan():
     config = _kv_cache_config()
@@ -419,6 +423,22 @@ def test_scheduler_async_lookup_defers_then_returns_hit():
     scheduler.close()
 
     assert result == (32, False)
+
+
+def test_scheduler_reset_clears_pending_lookup_state():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("reset")),
+    )
+    scheduler._lookup_states["req"] = LookupState("req")
+    scheduler._load_specs["req"] = LoadSpec(0, 16)
+
+    assert scheduler.reset_store()
+    assert scheduler._lookup_states == {}
+    assert scheduler._load_specs == {}
+    scheduler.close()
 
 
 def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
