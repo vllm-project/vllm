@@ -23,7 +23,6 @@ def test_hf_overrides_model_type_returns_correct_config_class():
     checkpoint has a *different* model_type on disk, get_config() must return
     an instance of the registered config class — not the class that matches
     the on-disk model_type."""
-
     # Register the custom config
     _CONFIG_REGISTRY["test_custom_model"] = _TestCustomConfig
 

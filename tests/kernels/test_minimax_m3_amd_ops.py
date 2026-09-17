@@ -10,6 +10,7 @@ tests assert the two agree within tolerance:
   * Fused MXFP8 activation quant (Triton)        -> _mxfp8_e4m3_quantize_torch
   * Native MXFP8 linear (dot_scaled)             -> dequant-to-bf16 @ matmul
   * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
+  * Strided K/V sparse-PA cache insert           -> contiguous-copy insert
 
 The native MXFP8 GEMMs also guard the ``dot_scaled`` rhs-scale orientation: the
 scale is loaded ``[N, K//32]`` and passed WITHOUT transpose; a stray ``.T``
@@ -39,9 +40,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     _mxfp8_e4m3_quantize_triton,
     dequant_mxfp8_to_bf16,
 )
+from vllm.models.minimax_m3.amd.model import _kv_insert_operand  # noqa: E402
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
@@ -167,6 +170,25 @@ def test_swiglu_oai_split(m, inter, limit, dtype):
     assert _relerr(got, ref) < 5e-3
 
 
+@torch.inference_mode()
+def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
+    # Keep a small value in two MX blocks next to their maxima. The scale must
+    # use E4M3's finite range (448), otherwise that value underflows to zero.
+    # Keep the third block empty to cover the reference's finite tiny clamp.
+    m, inter = 3, 96
+    gate = torch.full((m, inter), 2.0, device=DEVICE, dtype=torch.float16)
+    up = torch.full((m, inter), 2**-10, device=DEVICE, dtype=torch.float16)
+    up[:, :64:32] = 1.0
+    up[:, 64:] = 0.0
+    gate_up = torch.cat((gate, up), dim=-1)
+
+    got_q, got_s = swiglu_oai_quantize_mxfp8(gate_up, alpha=0.0, beta=0.0, limit=None)
+    ref_q, ref_s = _mxfp8_e4m3_quantize_torch(up, is_sf_swizzled_layout=False)
+
+    assert torch.equal(got_s, ref_s)
+    assert torch.equal(got_q, ref_q)
+
+
 # --------------------------------------------------------------------------- #
 # Fused MXFP8 activation quant (Triton vs torch reference)
 # --------------------------------------------------------------------------- #
@@ -179,8 +201,8 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     xq_t, s_t = _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout=False)
     xq_k, s_k = _mxfp8_e4m3_quantize_triton(x)
     assert s_k.shape == s_t.shape == (shape[0], shape[1] // 32)
-    # E8M0 block exponents share the floor(log2(amax))+127 algorithm; allow at
-    # most a 1-step difference at exact powers of two.
+    # Both paths use the E4M3-aware scale calculation; allow a 1-step
+    # difference at exact powers of two due to floating-point rounding.
     assert (s_k.int() - s_t.int()).abs().max().item() <= 1
     # Dequantized values agree to fp8 granularity.
     deq_t = dequant_mxfp8_to_bf16(xq_t, s_t)
@@ -588,3 +610,77 @@ def test_routed_experts_expert_map_delegates_to_kernel():
     assert torch.equal(resolve(True), mask)  # AITER kernel -> 0/1 mask
     assert torch.equal(resolve(False), canonical)  # non-AITER -> canonical map
     assert torch.equal(resolve(False, has_moe_kernel=False), canonical)  # non-modular
+
+
+# --------------------------------------------------------------------------- #
+# Strided K/V operand for the AITER sparse-PA cache insert
+# --------------------------------------------------------------------------- #
+def _fused_qkv_kv_slices(num_tokens, num_kv_heads, head_dim, num_q_heads=16):
+    """K/V as the sparse-PA insert sees them: column slices of a fused qkv."""
+    kv = num_kv_heads * head_dim
+    row = num_q_heads * head_dim + 2 * kv + 2 * head_dim
+    qkv = torch.randn((num_tokens, row), dtype=torch.bfloat16, device=DEVICE)
+    k_start = num_q_heads * head_dim
+    k = qkv[:, k_start : k_start + kv].view(num_tokens, num_kv_heads, head_dim)
+    v = qkv[:, k_start + kv : k_start + 2 * kv].view(num_tokens, num_kv_heads, head_dim)
+    return k, v
+
+
+def _asm_kv_cache(pages, num_kv_heads, head_dim):
+    """Page-16 K/V cache views matching ``_ensure_aiter_sparse_pa_kv_cache``."""
+    x = 16 // torch.tensor([], dtype=torch.bfloat16).element_size()
+    key = torch.zeros(
+        (pages, num_kv_heads, head_dim // x, 16, x),
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    value = torch.zeros(
+        (pages, num_kv_heads, 16 // x, head_dim, x),
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    return key, value
+
+
+@pytest.mark.parametrize("num_tokens", [1, 8, 129, 1024])
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+def test_kv_insert_operand_matches_contiguous(num_tokens, num_kv_heads):
+    """A strided K/V slice must insert bit-identically to a contiguous copy."""
+    reshape_and_cache = pytest.importorskip("aiter").reshape_and_cache
+    head_dim = 128
+    pages = num_tokens // 16 + 4
+    slots = torch.randperm(pages * 16, device=DEVICE)[:num_tokens].to(torch.int32)
+
+    torch.manual_seed(num_tokens)
+    k, v = _fused_qkv_kv_slices(num_tokens, num_kv_heads, head_dim)
+    assert num_tokens == 1 or not k.is_contiguous()
+
+    caches = []
+    for operand in (lambda t: t.contiguous(), _kv_insert_operand):
+        key_cache, value_cache = _asm_kv_cache(pages, num_kv_heads, head_dim)
+        reshape_and_cache(
+            operand(k),
+            operand(v),
+            key_cache,
+            value_cache,
+            slots,
+            kv_cache_dtype="auto",
+            asm_layout=True,
+        )
+        caches.append((key_cache, value_cache))
+
+    (ref_k, ref_v), (got_k, got_v) = caches
+    assert torch.equal(ref_k, got_k)
+    assert torch.equal(ref_v, got_v)
+
+
+def test_kv_insert_operand_copies_unsupported_layouts():
+    """Only a row-strided slice passes through; anything else is copied."""
+    k, _ = _fused_qkv_kv_slices(32, 2, 128)
+    assert _kv_insert_operand(k) is k
+
+    inner_strided = k[:, :, ::2]
+    assert _kv_insert_operand(inner_strided).is_contiguous()
+
+    flat = k.reshape(32, -1)
+    assert _kv_insert_operand(flat).is_contiguous()

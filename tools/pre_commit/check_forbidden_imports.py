@@ -60,8 +60,6 @@ CHECK_IMPORTS = {
             "benchmarks/kernels/benchmark_lora.py",
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/v1/executor/ray_executor.py",

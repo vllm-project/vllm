@@ -4,9 +4,10 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 from torch._ops import OpOverload
 
 import vllm.envs as envs
@@ -34,6 +35,63 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+KB = 1024
+MB = 1024 * KB
+
+
+def _get_or_create_aiter_qr_rmsnorm_comm(
+    device_comm: Any,
+) -> tuple[int, int, bool] | None:
+    """Create the AITER QR communicator used by fused QR+RMSNorm.
+
+    vLLM's normal QuickReduce communicator owns vLLM C++ QR buffers. The fused
+    QR+RMSNorm kernel added in AITER needs an AITER DeviceComms instance, so we
+    lazily create one on the same TP CPU group and keep it on the vLLM device
+    communicator for reuse.
+    """
+    existing = getattr(device_comm, "_aiter_qr_rmsnorm_comm", None)
+    if existing is False:
+        return None
+    if existing is not None:
+        return existing
+
+    try:
+        import aiter
+    except Exception:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    if not hasattr(aiter, "qr_all_reduce_rmsnorm"):
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    group = getattr(device_comm, "cpu_group", None)
+    if group is None:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    world_size = dist.get_world_size(group=group)
+    rank = dist.get_rank(group=group)
+    if world_size not in (2, 4, 8):
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    qr_max_size_mb = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
+    qr_max_size = None if qr_max_size_mb is None else qr_max_size_mb * MB
+
+    try:
+        ptr = aiter.init_custom_qr(rank, world_size, qr_max_size)
+        handle = aiter.qr_get_handle(ptr)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+        aiter.qr_open_handles(ptr, handles)
+    except Exception:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    comm = (ptr, world_size, envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16)
+    device_comm._aiter_qr_rmsnorm_comm = comm
+    return comm
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -175,26 +233,18 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    csv_path: str,
-    filters: tuple[tuple[str, object], ...],
-    key_cols: tuple[str, ...] = ("N", "K", "M"),
-) -> set[tuple[int, ...]]:
+    q_dtype_w: torch.dtype, csv_path: str
+) -> set[tuple[int, int, int]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        for col, val in filters:
-            if col not in df.columns:
-                continue
-            if isinstance(val, int):
-                df = df[df[col].astype(int) == val]
-            else:
-                df = df[df[col].astype(str) == str(val)]
-        return set(zip(*(df[c].astype(int) for c in key_cols)))
+        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
     except Exception:
         return set()
 
 
 def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(csv_path, (("q_dtype_w", q_dtype_w),))
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -583,10 +633,11 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs: dict[str, float | torch.Tensor | None] = {
+    kwargs: dict[str, float | torch.Tensor | None | bool] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
@@ -595,6 +646,8 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    kwargs["causal"] = causal
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -995,6 +1048,53 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
     use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
+
+    if not use_1stage:
+        from vllm.distributed import get_tp_group
+
+        device_comm = get_tp_group().device_communicator
+        qr_comm = getattr(device_comm, "qr_comm", None)
+        hidden_dim = input_.shape[-1]
+        row_size = hidden_dim * input_.element_size()
+        fused_qr_rmsnorm_ok = (
+            qr_comm is not None
+            and not getattr(qr_comm, "disabled", True)
+            and hasattr(qr_comm, "should_quick_allreduce")
+            and qr_comm.should_quick_allreduce(input_)
+            and input_.shape == residual.shape
+            and input_.dtype in (torch.bfloat16, torch.float16)
+            and input_.dtype == residual.dtype
+            and input_.dtype == weight.dtype
+            and weight.dim() == 1
+            and weight.numel() == hidden_dim
+            and input_.numel() % hidden_dim == 0
+            and row_size > 0
+            and row_size <= 32 * KB
+            and (32 * KB) % row_size == 0
+        )
+        if fused_qr_rmsnorm_ok:
+            assert qr_comm is not None
+            aiter_qr_comm = _get_or_create_aiter_qr_rmsnorm_comm(device_comm)
+            if aiter_qr_comm is not None:
+                import aiter
+
+                ptr, _, cast_bf2half = aiter_qr_comm
+                quant_level = qr_comm._get_qr_quant_level(input_)
+                out = torch.empty_like(input_)
+                residual_out = torch.empty_like(residual)
+                aiter.qr_all_reduce_rmsnorm(
+                    ptr,
+                    input_,
+                    residual,
+                    residual_out,
+                    out,
+                    weight,
+                    epsilon,
+                    hidden_dim,
+                    quant_level,
+                    cast_bf2half,
+                )
+                return out, residual_out
 
     result = ca.custom_fused_ar_rms(
         input_,
@@ -1749,6 +1849,30 @@ def _mhc_delayed_pre_tail(
 _OPS_REGISTERED = False
 
 
+def _sync_aiter_situv2_moe_env() -> None:
+    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+
+    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
+    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
+    When VLLM_ROCM_USE_AITER_MOE_SITUV2 is enabled we route to a4w4
+    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
+
+    Requires AITER with ROCm/aiter#4463 (first tagged in v0.1.20): a4w4
+    dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
+    afp4 FlyDSL but falls back to heuristic configs, which is not the
+    tuned a4w4 path this recipe is meant to use.
+    """
+    import os
+
+    import vllm.envs as envs
+
+    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
+        os.environ["AITER_SITUV2_A4W4"] = "1"
+        os.environ.pop("AITER_SITUV2_A8W4", None)
+    else:
+        os.environ.pop("AITER_SITUV2_A4W4", None)
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -1771,7 +1895,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
+        VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1808,6 +1932,7 @@ class rocm_aiter_ops:
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
+
     """
 
     _MOE_DISPATCH_POLICY: int | None = None
@@ -1838,7 +1963,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1847,8 +1972,7 @@ class rocm_aiter_ops:
 
     @classmethod
     def refresh_env_variables(cls):
-        """
-        Since the environment variables are assigned when the module is imported,
+        """Since the environment variables are assigned when the module is imported,
         This is a helper function to reload all the env variables from
         the environment variables.
         for example, after monkey patching the env variables in the unit test,
@@ -1867,13 +1991,13 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+        _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
-        """
-        Given an activation type as a string, returns the corresponding aiter ActivationType enum.
+        """Given an activation type as a string, returns the corresponding aiter ActivationType enum.
         Supported activation types: "no", "none", "silu", "gelu", "swiglu".
         Returns None if the mapping fails.
 
@@ -1882,6 +2006,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter ActivationType enum value, or None if not found.
+
         """
         # Import only locally, since aiter may not always be available.
         try:
@@ -1905,8 +2030,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
-        """
-        Given a quantization type as a string, returns the corresponding aiter QuantType enum.
+        """Given a quantization type as a string, returns the corresponding aiter QuantType enum.
         Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
         Returns None if the mapping fails.
 
@@ -1915,6 +2039,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter QuantType enum value, or None if not found.
+
         """
         try:
             from aiter import QuantType
@@ -1980,10 +2105,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_fused_moe_situv2_a8w4_enabled(cls) -> bool:
-        # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
+    def is_fused_moe_situv2_enabled(cls) -> bool:
+        # _MOE_SITUV2 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
-        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2
 
     @classmethod
     @if_aiter_supported
@@ -2035,6 +2160,26 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def mla_decode_supports_non_causal(cls) -> bool:
+        """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
+
+        Added in aiter v0.1.20. A missing argument is a hard error rather
+        than a boolean the caller can use to pick another MLA backend.
+        """
+        import inspect
+
+        from aiter.mla import mla_decode_fwd
+
+        if "causal" not in inspect.signature(mla_decode_fwd).parameters:
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @classmethod
     @if_aiter_supported
@@ -2858,6 +3003,7 @@ class rocm_aiter_ops:
         reduce_indptr: torch.Tensor | None = None,
         reduce_final_map: torch.Tensor | None = None,
         reduce_partial_map: torch.Tensor | None = None,
+        causal: bool = True,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -2878,6 +3024,7 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+            causal=causal,
         )
 
     @staticmethod
@@ -3280,20 +3427,6 @@ class rocm_aiter_ops:
         return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
     @staticmethod
-    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
-        if not current_platform.is_rocm():
-            return False
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-        gfx = aiter_gemm_a8w8_ops.get_gfx()
-        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
-        return (n, k) in _load_gemm_tuned_configs(
-            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
-        )
-
-    @staticmethod
     def shuffle_weight(
         tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
@@ -3307,8 +3440,7 @@ class rocm_aiter_ops:
         nLane: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the weight tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the weight tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input weight tensor to be shuffled.
@@ -3317,6 +3449,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled tensor.
+
         """
         from aiter.ops.shuffle import shuffle_weight_a16w4
 
@@ -3328,8 +3461,7 @@ class rocm_aiter_ops:
         num_experts: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the scale tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the scale tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input scale tensor to be shuffled.
@@ -3338,6 +3470,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled scale tensor.
+
         """
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
@@ -3354,8 +3487,7 @@ class rocm_aiter_ops:
     def shuffle_weights(
         *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Applies shuffle_weight function from AITER to each
+        """Applies shuffle_weight function from AITER to each
         input tensor and returns them.
 
         Rearranges (shuffles) the input tensor/s
@@ -3368,6 +3500,7 @@ class rocm_aiter_ops:
 
         Returns:
         A Tuple of shuffled tensors.
+
         """
         from aiter.ops.shuffle import shuffle_weight
 
@@ -3417,8 +3550,7 @@ class rocm_aiter_ops:
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
     ):
-        """
-        Flash attention with variable length sequences.
+        """Flash attention with variable length sequences.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3487,8 +3619,7 @@ class rocm_aiter_ops:
         V_QScale: torch.Tensor,
         out_: torch.Tensor,
     ):
-        """
-        Paged attention forward pass using assembly kernel.
+        """Paged attention forward pass using assembly kernel.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3530,8 +3661,7 @@ class rocm_aiter_ops:
         out_: torch.Tensor,
         kv_cache_dtype: str,
     ):
-        """
-        Paged attention common function.
+        """Paged attention common function.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3575,8 +3705,7 @@ class rocm_aiter_ops:
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for mHC pre block.
+        """Forward pass for mHC pre block.
 
         Args:
             residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
@@ -3595,6 +3724,7 @@ class rocm_aiter_ops:
             post_mix: shape (..., hc_mult), dtype torch.float32
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
+
         """
         from aiter.ops.mhc import mhc_pre
 
@@ -3685,7 +3815,7 @@ class rocm_aiter_ops:
         comb_res_mix: torch.Tensor | None = None,
         residual_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """mHC pre using the pre-mix carried from the previous sublayer.
+        """MHC pre using the pre-mix carried from the previous sublayer.
 
         Same gates as :meth:`mhc_pre`, but the stream collapse applies the
         caller's ``pre_mix`` instead of the one computed here, and the one
@@ -3712,6 +3842,7 @@ class rocm_aiter_ops:
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
             next_pre_mix: shape (..., hc_mult), dtype torch.float32
+
         """
         from aiter.ops.mhc import (
             get_mhc_fused_post_pre_config,
@@ -4004,3 +4135,4 @@ class rocm_aiter_ops:
 
 
 rocm_aiter_ops.register_ops_once()
+_sync_aiter_situv2_moe_env()
