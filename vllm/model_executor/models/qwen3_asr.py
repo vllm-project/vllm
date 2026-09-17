@@ -23,7 +23,7 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 import regex as re
 import torch
@@ -302,7 +302,11 @@ class Qwen3ASRMultiModalProcessor(
         hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        audios = cast(list[AudioItem], hf_data["audio"])
+        audios = hf_data.get("audio")
+        if not audios:
+            return BatchFeature()
+        assert isinstance(audios, list)
+
         if len(audios) == 1:
             return super()._call_hf_processor(hf_data, hf_kwargs)
 
@@ -328,7 +332,7 @@ class Qwen3ASRMultiModalProcessor(
         hf_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if not hf_data:
+        if "input_features" not in processed_data:
             return processed_data
 
         features = processed_data.pop("input_features")

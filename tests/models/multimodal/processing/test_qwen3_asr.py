@@ -5,6 +5,7 @@
 import numpy as np
 import pytest
 import torch
+from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_asr import Qwen3ASRProcessor
 
 from vllm.config import ModelConfig
@@ -145,6 +146,24 @@ def test_text_only_processing(asr_processor):
     )
     assert actual["prompt_token_ids"] == native.tokenizer.encode(prompt)
     assert actual["mm_kwargs"].get_data() == {}
+
+
+@pytest.mark.parametrize("hf_data", [{}, {"text": ""}, {"audio": None}, {"audio": []}])
+def test_hf_processor_without_audio(asr_processor, hf_data):
+    """The media hook must not require audio or call HF for absent waveforms."""
+    processor, _ = asr_processor
+    assert not processor._call_hf_processor(hf_data, {})
+
+
+@pytest.mark.parametrize("hf_data", [{}, {"text": ""}])
+def test_postprocessing_without_audio_features(asr_processor, hf_data):
+    """Non-audio output must pass through even when HF input is nonempty."""
+    processor, _ = asr_processor
+    processed = BatchFeature({"input_ids": torch.tensor([[1, 2]])})
+    actual = processor._postprocess_hf_mm_data(hf_data, {}, processed)
+    assert actual is processed
+    assert set(actual) == {"input_ids"}
+    torch.testing.assert_close(actual["input_ids"], torch.tensor([[1, 2]]))
 
 
 def test_chat_template_processing(asr_processor):
