@@ -403,6 +403,38 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
+def test_gpu_model_runner_shutdown_stops_eplb_before_cleanup(monkeypatch):
+    eplb_stopped = False
+    cleanup_started = False
+
+    def stop_eplb():
+        nonlocal eplb_stopped
+        eplb_stopped = True
+
+    def cleanup_kv_cache():
+        nonlocal cleanup_started
+        assert eplb_stopped
+        cleanup_started = True
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.eplb_state = SimpleNamespace(stop_async_loop=stop_eplb)
+    runner._cleanup_profiling_kv_cache = cleanup_kv_cache
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model = object()
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.v1.worker.workspace.reset_workspace_manager",
+        lambda: None,
+    )
+
+    runner.shutdown()
+
+    assert eplb_stopped
+    assert cleanup_started
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])

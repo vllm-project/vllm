@@ -33,15 +33,23 @@ class CpuGpuEvent:
         self._event = torch.cuda.Event()
         self._recorded = threading.Event()
 
-    def wait(self, stream: torch.cuda.Stream | None = None):
-        """Blocks the calling thread until record finishes. Used to guarantee that the
+    def wait(
+        self,
+        stream: torch.cuda.Stream | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        """
+        Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
 
         Should only be called by the Async Eplb thread.
         """
-        self._recorded.wait()
+        while not self._recorded.wait(timeout=0.1):
+            if stop_event is not None and stop_event.is_set():
+                return False
         self._event.wait(stream)
         self._recorded.clear()
+        return True
 
     def record(self, stream: torch.cuda.Stream | None = None):
         """Unblocks the waiting thread after calling event.record().

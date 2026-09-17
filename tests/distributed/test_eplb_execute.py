@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+import time
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,13 +16,20 @@ from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
 )
+from vllm.distributed.eplb.eplb_state import (
+    EplbState,
+    EplbStats,
+)
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
 )
 from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
     ensure_model_parallel_initialized,
+    get_eplb_group,
     get_tp_group,
 )
 
@@ -431,6 +440,105 @@ def _test_async_transfer_layer_without_mtp_worker(
     )
 
 
+def _test_shutdown_drains_inflight_async_transfer(env, world_size: int) -> None:
+    set_env_vars_and_device(env)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+    vllm_config.parallel_config.enable_eplb = True
+    rank = torch.distributed.get_rank()
+    device = torch.device(f"cuda:{rank}")
+    state = None
+
+    try:
+        with set_current_vllm_config(vllm_config):
+            ensure_model_parallel_initialized(
+                tensor_model_parallel_size=world_size,
+                pipeline_model_parallel_size=1,
+            )
+            eplb_coordinator = get_eplb_group()
+            num_layers = 1
+            num_local_experts = 2
+            num_logical_experts = 2
+            total_physical_experts = world_size * num_local_experts
+            old_mapping = torch.tensor([[0, 0, 1, 1]], dtype=torch.long)
+            new_mapping = torch.tensor([[1, 1, 0, 0]], dtype=torch.long)
+            expert_weights = create_expert_weights(
+                num_layers,
+                num_local_experts,
+                [16],
+                rank,
+                device,
+                old_mapping,
+            )
+            expert_buffer = [torch.empty_like(weight) for weight in expert_weights[0]]
+            communicator = create_eplb_communicator_or_raise(
+                group_coordinator=eplb_coordinator,
+                backend="torch_gloo",
+                expert_weights=expert_weights,
+                expert_buffer=expert_buffer,
+            )
+
+            class FixedPolicy:
+                @staticmethod
+                def rebalance_experts(*args):
+                    return new_mapping
+
+            model = SimpleNamespace(
+                num_moe_layers=num_layers,
+                expert_weights=expert_weights,
+            )
+            physical_to_logical_map = old_mapping.to(device)
+            model_state = SimpleNamespace(
+                physical_to_logical_map=physical_to_logical_map,
+                model=model,
+                expert_buffer=expert_buffer,
+                rebalanced=True,
+                eplb_stats=EplbStats(
+                    global_expert_load_window=torch.zeros(
+                        num_layers,
+                        num_logical_experts,
+                        device=device,
+                    ),
+                    num_replicas=total_physical_experts,
+                    num_groups=1,
+                    num_nodes=1,
+                    num_gpus=world_size,
+                ),
+                communicator=communicator,
+                pending_result=None,
+            )
+            state = EplbState(vllm_config.parallel_config, device)
+            state.is_async = True
+            state.policy = FixedPolicy
+            state.model_states["test-model"] = model_state
+            state.start_async_loop()
+            worker = state.async_worker
+            assert worker is not None
+
+            state.rearrange_event.record()
+            deadline = time.monotonic() + 30
+            while model_state.pending_result is None and worker.is_alive():
+                assert time.monotonic() < deadline, (
+                    "Timed out waiting for the async EPLB transfer"
+                )
+                time.sleep(0.01)
+            assert model_state.pending_result is not None
+
+            state.stop_async_loop()
+
+            assert model_state.pending_result is None
+            assert not model_state.rebalanced
+            assert state.async_worker is None
+            assert not worker.is_alive()
+            torch.accelerator.synchronize()
+    finally:
+        if state is not None and state.async_worker is not None:
+            state.stop_async_loop()
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
 def _test_rearrange_expert_weights_with_redundancy(
     env,
     world_size,
@@ -687,6 +795,17 @@ def test_async_transfer_layer_without_mtp(
         num_local_experts,
         num_logical_experts,
         eplb_communicator,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2])
+def test_shutdown_drains_inflight_async_transfer(world_size: int):
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+
+    distributed_run(
+        _test_shutdown_drains_inflight_async_transfer,
+        world_size,
     )
 
 

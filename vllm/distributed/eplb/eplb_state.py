@@ -286,6 +286,10 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_worker_stop_event = threading.Event()
+        """
+        Event used to stop the async worker before distributed groups are destroyed.
+        """
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
@@ -959,10 +963,22 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self.async_worker_stop_event.clear()
             self.async_worker = start_async_worker(
                 self,
+                stop_event=self.async_worker_stop_event,
                 is_profile=is_profile,
             )
+
+    def stop_async_loop(self) -> None:
+        """Stop the async worker before destroying its distributed groups."""
+        if self.async_worker is None:
+            return
+
+        self.drain_async()
+        self.async_worker_stop_event.set()
+        self.async_worker.join()
+        self.async_worker = None
 
     def drain_async(self) -> None:
         """Drain in-flight async EPLB by consuming all remaining layer results.

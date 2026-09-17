@@ -21,9 +21,13 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
+    stop_event: threading.Event,
     is_profile: bool = False,
 ) -> threading.Thread:
-    rank = get_eplb_group().device_group.rank()
+    eplb_coordinator = get_eplb_group()
+    eplb_group = eplb_coordinator.device_group
+    eplb_cpu_group = eplb_coordinator.cpu_group
+    rank = eplb_group.rank()
     device_index = state.cuda_device_index
     assert state.is_async
 
@@ -35,6 +39,9 @@ def start_async_worker(
             transfer_run_periodically(
                 state=state,
                 cuda_stream=cuda_stream,
+                stop_event=stop_event,
+                eplb_group=eplb_group,
+                eplb_cpu_group=eplb_cpu_group,
                 is_profile=is_profile,
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -74,13 +81,16 @@ def run_rebalance_experts(
 def transfer_run_periodically(
     state: "EplbState",
     cuda_stream: torch.cuda.Stream,
+    stop_event: threading.Event,
+    eplb_group: torch.distributed.ProcessGroup,
+    eplb_cpu_group: torch.distributed.ProcessGroup,
     is_profile: bool = False,
 ) -> None:
-    while True:
-        state.rearrange_event.wait(stream=cuda_stream)
-
-        eplb_group = get_eplb_group().device_group
-        eplb_cpu_group = get_eplb_group().cpu_group
+    while not stop_event.is_set():
+        if not state.rearrange_event.wait(stream=cuda_stream, stop_event=stop_event):
+            break
+        if stop_event.is_set():
+            break
         ep_rank = eplb_group.rank()
 
         assert state.is_async

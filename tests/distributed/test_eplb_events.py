@@ -95,3 +95,30 @@ def test_producer_consumer():
 
     t.join(timeout=10.0)
     assert not errors, f"Buffer ordering errors: {errors}"
+
+
+def test_wait_can_be_stopped_before_record():
+    wait_started = threading.Event()
+
+    class ObservableEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            wait_started.set()
+            return super().wait(timeout)
+
+    event = CpuGpuEvent.__new__(CpuGpuEvent)
+    event._event = None
+    event._recorded = ObservableEvent()
+    stop_event = threading.Event()
+    wait_result: list[bool] = []
+
+    thread = threading.Thread(
+        target=lambda: wait_result.append(event.wait(stop_event=stop_event))
+    )
+    thread.start()
+    assert wait_started.wait(timeout=1.0)
+
+    stop_event.set()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert wait_result == [False]
