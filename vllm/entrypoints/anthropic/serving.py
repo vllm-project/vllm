@@ -3,7 +3,7 @@
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py
 
-"""Anthropic Messages API serving handler"""
+"""Anthropic Messages API serving handler."""
 
 import json
 import logging
@@ -29,6 +29,11 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat,
+    ResponseFormat,
+    StreamOptions,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -37,14 +42,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    JsonSchemaResponseFormat,
-    ResponseFormat,
-    StreamOptions,
-    UsageInfo,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -96,7 +95,7 @@ def wrap_data_with_event(data: str, event: str):
 
 
 class AnthropicServingMessages(OpenAIServingChat):
-    """Handler for Anthropic Messages API requests"""
+    """Handler for Anthropic Messages API requests."""
 
     def __init__(
         self,
@@ -196,7 +195,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> ChatCompletionRequest:
-        """Convert Anthropic message format to OpenAI format"""
+        """Convert Anthropic message format to OpenAI format."""
         openai_messages: list[dict[str, Any]] = []
 
         cls._convert_system_message(
@@ -224,7 +223,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic system message to OpenAI format"""
+        """Convert Anthropic system message to OpenAI format."""
         system_parts: list[str] = []
 
         # Top-level system field
@@ -278,7 +277,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
     ) -> None:
-        """Convert Anthropic messages to OpenAI format"""
+        """Convert Anthropic messages to OpenAI format."""
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -310,7 +309,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_msg: dict[str, Any],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert complex message content blocks"""
+        """Convert complex message content blocks."""
         content_parts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         reasoning_parts: list[str] = []
@@ -349,7 +348,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         reasoning_parts: list[str],
         openai_messages: list[dict[str, Any]],
     ) -> None:
-        """Convert individual content block"""
+        """Convert individual content block."""
         if block.type == "text" and block.text:
             content_parts.append({"type": "text", "text": block.text})
         elif block.type == "image" and block.source:
@@ -374,7 +373,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
-        """Convert tool_use block to OpenAI function call format"""
+        """Convert tool_use block to OpenAI function call format."""
         tool_call = {
             "id": block.id,
             "type": "function",
@@ -393,7 +392,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
         content_parts: list[dict[str, Any]],
     ) -> None:
-        """Convert tool_result block to OpenAI format"""
+        """Convert tool_result block to OpenAI format."""
         if role == "user":
             cls._convert_user_tool_result(block, openai_messages)
         else:
@@ -406,7 +405,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_user_tool_result(
         cls, block, openai_messages: list[dict[str, Any]]
     ) -> None:
-        """Convert user tool_result with text and image support"""
+        """Convert user tool_result with text and image support."""
         tool_text = ""
         tool_image_urls: list[str] = []
         tool_reference: list[dict[str, Any]] = []
@@ -468,7 +467,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
     ) -> ChatCompletionRequest:
-        """Build base ChatCompletionRequest"""
+        """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return ChatCompletionRequest(
                 model=anthropic_request.model,
@@ -498,7 +497,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle output configuration such as output format and effort"""
+        """Handle output configuration such as output format and effort."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
@@ -519,7 +518,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
-        """Handle streaming configuration"""
+        """Handle streaming configuration."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
             return
         if anthropic_request.stream:
@@ -534,7 +533,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tool_choice to OpenAI format"""
+        """Convert Anthropic tool_choice to OpenAI format."""
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
             return
@@ -563,7 +562,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
-        """Convert Anthropic tools to OpenAI format"""
+        """Convert Anthropic tools to OpenAI format."""
         if anthropic_request.tools is None:
             return
 
@@ -593,8 +592,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         request: AnthropicMessagesRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | AnthropicMessagesResponse | ErrorResponse:
-        """
-        Messages API similar to Anthropic's API.
+        """Messages API similar to Anthropic's API.
 
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
@@ -842,7 +840,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 stop_delta = AnthropicDelta(
                                     stop_reason=self.stop_reason_map.get(
                                         finish_reason or "stop"
-                                    )
+                                    ),
+                                    # Set explicitly so exclude_unset=True keeps it.
+                                    stop_sequence=None,
                                 )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",

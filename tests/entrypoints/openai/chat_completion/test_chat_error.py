@@ -13,11 +13,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -122,7 +121,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 
 @pytest.mark.asyncio
 async def test_chat_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -247,7 +246,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
