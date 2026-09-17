@@ -1005,8 +1005,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 
 
 def get_properties(schema: Any) -> dict[str, Any]:
-    """
-    Find the 'properties' field in JSON schema
+    """Find the 'properties' field in JSON schema
 
     IMPORTANT(arpera):
     JSON schema may have some fields called combinators:
