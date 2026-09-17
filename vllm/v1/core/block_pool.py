@@ -354,9 +354,11 @@ class BlockPool:
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
-        Shared by ``cache_full_blocks`` (newly cached blocks) and
-        ``emit_cached_block_events`` (prefix-cache-reused blocks) so both emit
-        identical event shapes for downstream consumers.
+        Shared by ``cache_full_blocks`` (newly cached full blocks) and
+        ``cache_partial_block`` (newly cached partial blocks) for write paths,
+        and ``emit_cached_block_events`` (prefix-cache-reused blocks) for the
+        cache-hit path, so all three emit identical event shapes for downstream
+        consumers.
         """
         return BlockStored(
             block_hashes=block_hashes,
@@ -537,21 +539,15 @@ class BlockPool:
                 request, block_start, block_end, curr_mm_idx
             )
             self.kv_event_queue.append(
-                BlockStored(
+                self._build_block_stored_event(
+                    request,
                     block_hashes=[maybe_convert_block_hash(block_hash)],
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.all_token_ids[block_start:block_end],
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
                     block_size=block_end - block_start,
-                    lora_id=request.lora_request.adapter_id
-                    if request.lora_request
-                    else None,
-                    medium=self.medium,
-                    lora_name=request.lora_request.name
-                    if request.lora_request
-                    else None,
-                    extra_keys=[extra_keys],
-                    group_idx=kv_cache_group_id,
-                    session_id=request.session_id,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
                 )
             )
         return block_hash_with_group_id
