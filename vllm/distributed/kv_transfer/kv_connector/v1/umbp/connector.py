@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -36,6 +37,35 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+
+class UMBPStoreKVEvents(KVConnectorKVEvents):
+    """Worker-local UMBP events passed through vLLM's event aggregator."""
+
+    def __init__(self, events: list[KVCacheEvent] | None = None) -> None:
+        self._events = list(events or [])
+        self._num_workers = 1
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        self._events.extend(events)
+
+    def aggregate(self) -> "UMBPStoreKVEvents":
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        if count <= 0:
+            raise ValueError("count must be positive")
+        self._num_workers += count
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return list(self._events)
+
+    def get_number_of_workers(self) -> int:
+        return self._num_workers
+
+    def clear_events(self) -> None:
+        self._events.clear()
+        self._num_workers = 1
 
 
 class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
@@ -198,6 +228,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_kv_cache_events(self) -> UMBPStoreKVEvents | None:
+        assert self.connector_worker is not None
+        events = self.connector_worker.get_kv_events()
+        return UMBPStoreKVEvents(events) if events else None
 
     def shutdown(self) -> None:
         if self.connector_scheduler is not None:

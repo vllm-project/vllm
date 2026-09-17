@@ -9,8 +9,10 @@ from typing import Any
 
 import torch
 
+from vllm.distributed.kv_events import BlockStored
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from .data import (
     BlockTransferPlan,
@@ -122,6 +124,26 @@ class UMBPStoreConnectorWorker:
             if result.status == TransferJobStatus.COMPLETED:
                 self.runtime.publish(result)
             self._worker_meta.completed_stores.update(result.completed_keys)
+            for plan in result.plans:
+                if plan.key not in result.completed_keys or plan.block_hash is None:
+                    continue
+                self._worker_meta.kv_events.append(
+                    BlockStored(
+                        block_hashes=[maybe_convert_block_hash(plan.block_hash)],
+                        parent_block_hash=(
+                            maybe_convert_block_hash(plan.parent_block_hash)
+                            if plan.parent_block_hash is not None
+                            else None
+                        ),
+                        token_ids=list(plan.token_ids),
+                        block_size=plan.block_size,
+                        lora_id=None,
+                        medium=plan.medium,
+                        lora_name=None,
+                        group_idx=plan.group_id,
+                        locality="LOCAL",
+                    )
+                )
             for key in result.completed_keys:
                 self._worker_meta.completed_store_counts[key] = (
                     self._worker_meta.completed_store_counts.get(key, 0) + 1
@@ -250,6 +272,11 @@ class UMBPStoreConnectorWorker:
         result = self._worker_meta
         self._worker_meta = UMBPConnectorWorkerMetadata()
         return result
+
+    def get_kv_events(self) -> list[Any]:
+        events = self._worker_meta.kv_events
+        self._worker_meta.kv_events = []
+        return events
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         failed = self._worker_meta.failed_block_ids
