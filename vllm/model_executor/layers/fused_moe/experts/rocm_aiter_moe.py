@@ -385,10 +385,22 @@ def rocm_aiter_fused_experts(
 
         gate_mode = ""
         if activation == MoEActivation.SITU:
+            from vllm.platforms.rocm import on_gfx1250
+
             # SiTUv2 flydsl (VLLM_ROCM_USE_AITER_MOE_SITUV2=1) uses a4w4
             # fp4 activations with separated gate/up weights (AITER #4463);
-            # default a16w4 SiTU also stays separated.
-            gate_mode = GateMode.SEPARATED.value
+            # default a16w4 SiTU also stays separated. On gfx1250 SiTUv2
+            # runs the gate/up-interleaved a8w4 kernels instead. This has to
+            # track the shuffle `oracle/mxfp4.py` actually applied, so key it
+            # on the same predicate.
+            situv2_gfx1250 = (
+                on_gfx1250() and rocm_aiter_ops.is_fused_moe_situv2_enabled()
+            )
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if situv2_gfx1250
+                else GateMode.SEPARATED.value
+            )
         elif quant_config.use_mxfp4_w4a16:
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
@@ -493,8 +505,21 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         if weight_key == kMxfp4Static:
             from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-            if not on_gfx950() or on_gfx1250():
-                return False
+            if on_gfx950():
+                return True
+
+            # gfx1250 mxfp4 support covers the SiTUv2 recipe only: that is
+            # the one path `convert_weight_to_mxfp4_moe_kernel_format`
+            # shuffles into the gfx1250 layout. Other mxfp4 models keep
+            # falling back to the Triton backends, whose weight converters
+            # are arch-agnostic.
+            if on_gfx1250():
+                return (
+                    activation_key is None
+                    and rocm_aiter_ops.is_fused_moe_situv2_enabled()
+                )
+
+            return False
         return True
 
     @staticmethod

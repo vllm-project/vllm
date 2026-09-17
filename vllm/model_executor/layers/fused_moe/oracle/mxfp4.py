@@ -126,7 +126,7 @@ class Mxfp4MoeBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
     # ROCm AITER backends
-    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950)
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950/gfx1250)
     # Legacy alias, resolves to the CK kernel. New code should name either
     # AITER_MXFP4_BF16 (CK) or AITER_TRITON_MXFP4_BF16 (Triton) explicitly.
     AITER = "AITER_MXFP4_BF16"
@@ -1581,7 +1581,78 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and not is_gfx1250:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250:
+        try:
+            from aiter.ops.shuffle import (
+                interleave_gate_up_rows,
+                moe_shuffle_scale,
+                moe_shuffle_weight,
+            )
+        except ImportError as exc:
+            raise ImportError(
+                "mxfp4 MoE on gfx1250 needs an AITER providing the arch-aware "
+                "aiter.ops.shuffle.moe_shuffle_weight/moe_shuffle_scale "
+                "helpers. Rebuild AITER, or unset "
+                "VLLM_ROCM_USE_AITER_MOE_SITUV2 to fall back to the Triton "
+                "mxfp4 backend."
+            ) from exc
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # Must stay in lockstep with the GateMode `AiterExperts` passes:
+        # INTERLEAVE reads w13 as GUGU, SEPARATED as GGUU.
+        guinterleave = True
+        if activation == MoEActivation.SITU:
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_enabled()
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+            if guinterleave:
+                w13_bias = interleave_gate_up_rows(w13_bias)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+
+        fp4_dtype = torch.float4_e2m1fn_x2
+        e8m0_dtype = torch.float8_e8m0fnu
+        w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
+        w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+
+        # `moe_shuffle_*` are the arch-aware entry points: on gfx1250 they
+        # interleave gate/up at the row level and then apply the WMMA 16x16
+        # tile / n32k4 scale layouts. The CDNA branch below applies the
+        # lane-level interleave instead -- via the `*_a16w4` helpers for SiTU
+        # and `shuffle_{weight,scale}` for DeepSeek-V4 -- which gfx1250
+        # kernels do not read.
+        w13 = moe_shuffle_weight(
+            w13_weight.data.view(fp4_dtype),
+            experts_cnt=num_experts,
+            is_guinterleave=guinterleave,
+            gate_up=True,
+        )
+        w2 = moe_shuffle_weight(
+            w2_weight.data.view(fp4_dtype),
+            experts_cnt=num_experts,
+            is_guinterleave=False,
+            gate_up=False,
+        )
+        w13_scale = moe_shuffle_scale(
+            w13_scale_raw.view(-1, w13_scale_raw.shape[-1]),
+            experts_cnt=num_experts,
+            is_guinterleave=guinterleave,
+            gate_up=True,
+        )
+        w2_scale = moe_shuffle_scale(
+            w2_scale_raw.view(-1, w2_scale_raw.shape[-1]),
+            experts_cnt=num_experts,
+            is_guinterleave=False,
+            gate_up=False,
+        )
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+
+        return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         # Initially introduced for DeepSeekV4
 
         if w13_bias is not None:
@@ -1670,9 +1741,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend in TRITON_BACKENDS or (
-        mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
-    ):
+    elif mxfp4_backend in TRITON_BACKENDS:
         if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
             # AITER moe_gemm_a16w4 needs gate/up interleaved
             def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:

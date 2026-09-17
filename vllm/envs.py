@@ -1262,6 +1262,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # recipes; it does not select a8w4 kernels.
     # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
     # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
+    # gfx1250 is the exception: it has no tuned a4w4 configs, so this flag
+    # sets AITER_FORCE_A8W4 there and the weights are shuffled gate/up
+    # interleaved to match.
     "VLLM_ROCM_USE_AITER_MOE_SITUV2": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0").lower() in ("true", "1")
         or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
