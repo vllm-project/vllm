@@ -106,6 +106,48 @@ IS_RMS_NORM = [True, False]
 SEEDS = [0, 42]
 
 
+@pytest.mark.parametrize("num_rows", [1, 48, 96, 384, 4096])
+def test_batch_invariant_row_tile(monkeypatch, num_rows):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert calc_rows_per_block(num_rows, torch.device(DEVICE)) == 1
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("seed", [0, 42])
+@torch.inference_mode()
+def test_gated_rms_norm_batch_invariant(monkeypatch, dtype, seed):
+    """GDN heads must retain their serial results in a speculative batch."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    set_random_seed(seed)
+    heads, width, positions = 48, 128, 8
+    x = torch.randn(positions * heads, width, device=DEVICE, dtype=dtype)
+    z = torch.randn_like(x)
+    weight = torch.randn(width, device=DEVICE, dtype=dtype)
+
+    def run(values, gate):
+        return layer_norm_fwd(
+            values,
+            weight,
+            None,
+            1e-6,
+            z=gate,
+            norm_before_gate=True,
+            is_rms_norm=True,
+        )
+
+    batched, _, batched_rstd = run(x, z)
+    for position in range(positions):
+        start, end = position * heads, (position + 1) * heads
+        serial, _, serial_rstd = run(x[start:end], z[start:end])
+        torch.testing.assert_close(batched[start:end], serial, rtol=0, atol=0)
+        torch.testing.assert_close(
+            batched_rstd.reshape(-1)[start:end],
+            serial_rstd.reshape(-1),
+            rtol=0,
+            atol=0,
+        )
+
+
 @pytest.mark.parametrize("rows_per_token", [1, 2, 4, 8, 16])
 def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
     rows_per_token: int,
