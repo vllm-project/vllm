@@ -113,14 +113,12 @@ def test_parallel_capture_alignment(use_v2, num_gpus_available):
         pytest.skip("TP2/DP2 requires four GPUs")
     with server(
         model=MODEL,
-        env_dict={
-            "VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2)),
-            "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1",
-        },
+        env_dict={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2))},
         extra_args=[
             "--enable-return-routed-experts",
             "--hf-overrides",
             '{"sliding_window": null}',
+            "--enable-scale-out",
             "--tensor-parallel-size",
             "2",
             "--data-parallel-size",
