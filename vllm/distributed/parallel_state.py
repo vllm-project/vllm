@@ -1566,7 +1566,8 @@ def get_engram_dp_group() -> GroupCoordinator | None:
     """Return the DP replicas that share one engram embedding table.
 
     None when every replica holds a full (TP-sharded) copy, which is the case
-    for models without engram layers and for replicas that span nodes.
+    for models without engram layers, global Store placement, and replicas
+    that span nodes.
     """
     return _ENGRAM_DP
 
@@ -2105,6 +2106,7 @@ def initialize_model_parallel(
         engram_config is not None
         and config.model_config is not None
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
+        and engram_config.mooncake_config_path is None
         and not enable_elastic_ep
     ):
         engram_dp_size = _engram_dp_shard_size(

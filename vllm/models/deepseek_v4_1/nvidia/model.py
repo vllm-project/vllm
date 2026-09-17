@@ -77,7 +77,11 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes, prepare_engram_embeddings
+from .engram import (
+    Engram,
+    gather_engram_hashes,
+    prepare_engram_embeddings,
+)
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -468,8 +472,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer's sliding-window KV cache. Only PP ranks owning an engram
         # layer need it.
         self.engram_hash: NgramHashState | None = None
-        self.engram_dp_shared_memory = bool(
-            vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory
+        engram_config = vllm_config.engram_config
+        self.engram_table_shared_across_dp = bool(
+            engram_config and engram_config.table_shared_across_dp
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
@@ -599,7 +604,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     swa_metadata.slot_mapping,
                     swa_metadata.block_table,
                 )
-            elif not self.engram_dp_shared_memory and get_engram_dp_size() > 1:
+            elif not self.engram_table_shared_across_dp and get_engram_dp_size() > 1:
                 # DP-sharded lookups are collective, so a replica skipping the
                 # hash still has to reach them.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
@@ -607,7 +612,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
                 gathered_hashes = gather_engram_hashes(
-                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+                    engram_hashes,
+                    table_shared_across_dp=self.engram_table_shared_across_dp,
                 )
                 engrams = [
                     engram

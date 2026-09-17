@@ -74,7 +74,7 @@ def engram_gathered_num_tokens() -> int:
 
 
 def gather_engram_hashes(
-    hash_ids: torch.Tensor, *, dp_shared_memory: bool = False
+    hash_ids: torch.Tensor, *, table_shared_across_dp: bool = False
 ) -> torch.Tensor:
     """Collect the n-gram ids of every DP replica sharing one table.
 
@@ -82,7 +82,7 @@ def gather_engram_hashes(
     static under CUDA graph capture (where DP already pads alike).
     """
     dp_group = get_engram_dp_group()
-    if dp_group is None or dp_shared_memory:
+    if dp_group is None or table_shared_across_dp:
         return hash_ids
     slot = engram_gathered_num_tokens()
     if hash_ids.shape[0] > slot:
@@ -242,6 +242,9 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         self.disk_offload_dir = disk_offload_dir
         self.mooncake_config_path = mooncake_config_path
         self.dp_shared_memory = dp_shared_memory
+        self.table_shared_across_dp = (
+            dp_shared_memory or mooncake_config_path is not None
+        )
         self.mooncake_backend = None
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
@@ -254,7 +257,6 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
                     "Check that the node layout and rank placement allow complete "
                     "DP replicas to be co-located."
                 )
-            self.dp_size = 1
         if disk_offload_dir is not None:
             if not cpu_offload:
                 raise ValueError("disk_offload_dir requires cpu_offload=True")
@@ -274,6 +276,11 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             if model_layer_id is None or layer_hash_index is None:
                 raise ValueError("Mooncake Engram requires model layer metadata")
             self._weight_loader = _discard_external_engram_weight
+        if self.table_shared_across_dp:
+            # Shared-memory and global Store placements expose one logical TP
+            # shard to every DP replica, so neither weights nor lookups are
+            # partitioned across DP.
+            self.dp_size = 1
         # Only the pinned-host path needs UVA. Disk and Mooncake stage rows.
         if (
             cpu_offload

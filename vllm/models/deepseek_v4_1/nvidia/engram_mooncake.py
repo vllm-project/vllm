@@ -149,12 +149,14 @@ class _LayerBuffers:
     layer_hash_index: int
     head_start: int
     head_sizes: tuple[int, ...]
+    head_sizes_array: np.ndarray
     global_offsets: np.ndarray
     row_bytes: int
     max_tokens: int = 0
     host_ids: list[torch.Tensor] = field(default_factory=list)
     local_ids: list[np.ndarray] = field(default_factory=list)
     host_dead: list[torch.Tensor] = field(default_factory=list)
+    host_dead_array: list[np.ndarray] = field(default_factory=list)
     device_packed: list[torch.Tensor] = field(default_factory=list)
     device_dead: list[torch.Tensor] = field(default_factory=list)
     device_rows: list[torch.Tensor] = field(default_factory=list)
@@ -213,13 +215,15 @@ class MooncakeEngramBackend:
         if self.manifest.get("num_shards") != num_shards:
             raise ValueError(
                 "Mooncake Engram manifest num_shards does not match the active "
-                f"TP/Engram-DP topology: {self.manifest.get('num_shards')} != "
+                f"tensor-parallel topology: {self.manifest.get('num_shards')} != "
                 f"{num_shards}"
             )
         if not isinstance(self.manifest.get("layers"), dict):
             raise ValueError("Mooncake Engram manifest requires a layers mapping")
 
         self._layers: dict[int, _LayerBuffers] = {}
+        self._combined_host_ids: list[torch.Tensor] = []
+        self._combined_hash_slice: tuple[int, int, int] | None = None
         self._connect_lock = threading.Lock()
         self._store: Any | None = None
         self._table: Any | None = None
@@ -274,6 +278,7 @@ class MooncakeEngramBackend:
             layer_hash_index=layer_hash_index,
             head_start=head_start,
             head_sizes=head_sizes,
+            head_sizes_array=np.asarray(head_sizes, dtype=np.int64),
             global_offsets=np.asarray(offsets, dtype=np.int64),
             row_bytes=expected_row_bytes,
         )
@@ -302,15 +307,15 @@ class MooncakeEngramBackend:
             layer.local_ids.append(
                 np.empty((max_tokens, layer.actual_heads), dtype=np.int64)
             )
-            layer.host_dead.append(
-                torch.empty(
-                    max_tokens,
-                    layer.actual_heads,
-                    dtype=torch.bool,
-                    device="cpu",
-                    pin_memory=True,
-                )
+            host_dead = torch.empty(
+                max_tokens,
+                layer.actual_heads,
+                dtype=torch.bool,
+                device="cpu",
+                pin_memory=True,
             )
+            layer.host_dead.append(host_dead)
+            layer.host_dead_array.append(host_dead.numpy())
             layer.device_packed.append(
                 torch.empty(
                     max_tokens,
@@ -343,6 +348,36 @@ class MooncakeEngramBackend:
         if not layers or any(layer.max_tokens == 0 for layer in layers):
             raise RuntimeError("Mooncake Engram layers are not fully initialized")
         return layers
+
+    def _initialize_combined_host_ids(self) -> None:
+        if self._combined_host_ids:
+            return
+        layers = self._ordered_layers()
+        first = layers[0]
+        if any(
+            layer.max_tokens != first.max_tokens
+            or layer.head_start != first.head_start
+            or layer.actual_heads != first.actual_heads
+            or layer.layer_hash_index != first.layer_hash_index + index
+            for index, layer in enumerate(layers)
+        ):
+            return
+        self._combined_hash_slice = (
+            first.layer_hash_index,
+            first.head_start,
+            first.actual_heads,
+        )
+        self._combined_host_ids = [
+            torch.empty(
+                first.max_tokens,
+                len(layers),
+                first.actual_heads,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            )
+            for _ in range(self.num_slots)
+        ]
 
     def _connect(self) -> None:
         if self._table is not None:
@@ -395,6 +430,7 @@ class MooncakeEngramBackend:
 
             try:
                 needs_gpudirect_flush = _gpudirect_flush_required()
+                self._initialize_combined_host_ids()
                 configs = {}
                 for layer in self._ordered_layers():
                     config = EngramStoreConfig()
@@ -455,8 +491,14 @@ class MooncakeEngramBackend:
         layers = self._ordered_layers()
         active_end = 0
         global_ids_by_layer = []
-        for layer in layers:
-            global_ids = layer.host_ids[slot_index][:num_tokens].numpy()
+        combined_host_ids = (
+            self._combined_host_ids[slot_index] if self._combined_host_ids else None
+        )
+        for layer_index, layer in enumerate(layers):
+            if combined_host_ids is None:
+                global_ids = layer.host_ids[slot_index][:num_tokens].numpy()
+            else:
+                global_ids = combined_host_ids[:num_tokens, layer_index].numpy()
             global_ids_by_layer.append(global_ids)
             active = np.flatnonzero(np.any(global_ids != -1, axis=1))
             if active.size:
@@ -473,19 +515,16 @@ class MooncakeEngramBackend:
         for layer, global_ids in zip(layers, global_ids_by_layer):
             current = layer.local_ids[slot_index][:active_end]
             np.subtract(global_ids[:active_end], layer.global_offsets, out=current)
-            dead = global_ids[:num_tokens] == -1
+            dead = layer.host_dead_array[slot_index][:num_tokens]
+            np.equal(global_ids[:num_tokens], -1, out=dead)
             active_dead = dead[:active_end]
-            valid = active_dead | (
-                (current >= 0)
-                & (current < np.asarray(layer.head_sizes, dtype=np.int64))
-            )
+            valid = active_dead | ((current >= 0) & (current < layer.head_sizes_array))
             if not np.all(valid):
                 raise RuntimeError(
                     f"Engram hashes are outside layer {layer.model_layer_id}'s "
                     "owned head ranges"
                 )
             current[active_dead] = 0
-            layer.host_dead[slot_index][:num_tokens].copy_(torch.from_numpy(dead))
             output = layer.device_packed[slot_index]
             layer_ids.append(layer.store_layer_id)
             local_ids.append(current[None])
@@ -514,15 +553,27 @@ class MooncakeEngramBackend:
 
         num_tokens = gathered_hashes.shape[0]
         layers = self._ordered_layers()
-        for layer in layers:
-            if num_tokens > layer.max_tokens:
-                raise RuntimeError("Mooncake Engram staging buffer is too small")
+        if any(num_tokens > layer.max_tokens for layer in layers):
+            raise RuntimeError("Mooncake Engram staging buffer is too small")
+        if self._combined_host_ids:
+            assert self._combined_hash_slice is not None
+            layer_start, head_start, actual_heads = self._combined_hash_slice
             source = gathered_hashes[
                 :,
-                layer.layer_hash_index,
-                layer.head_start : layer.head_start + layer.actual_heads,
+                layer_start : layer_start + len(layers),
+                head_start : head_start + actual_heads,
             ]
-            layer.host_ids[slot_index][:num_tokens].copy_(source, non_blocking=True)
+            self._combined_host_ids[slot_index][:num_tokens].copy_(
+                source, non_blocking=True
+            )
+        else:
+            for layer in layers:
+                source = gathered_hashes[
+                    :,
+                    layer.layer_hash_index,
+                    layer.head_start : layer.head_start + layer.actual_heads,
+                ]
+                layer.host_ids[slot_index][:num_tokens].copy_(source, non_blocking=True)
         slot.ids_ready.record(torch.cuda.current_stream())
         slot.num_tokens = num_tokens
         slot.writes_flushed = False

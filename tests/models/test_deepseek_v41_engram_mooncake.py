@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.engram import EngramConfig
+from vllm.models.deepseek_v4_1.nvidia import engram as engram_ops
 from vllm.models.deepseek_v4_1.nvidia import engram_mooncake
+from vllm.models.deepseek_v4_1.nvidia.engram import (
+    ParallelEngramEmbedding,
+    gather_engram_hashes,
+)
 from vllm.models.deepseek_v4_1.nvidia.engram_mooncake import (
     MooncakeEngramBackend,
     _consume_previous_lookup,
@@ -41,8 +47,99 @@ class _Table:
         )
 
 
+@pytest.mark.parametrize(
+    ("dp_shared_memory", "mooncake_config_path", "expected"),
+    [
+        (False, None, False),
+        (True, None, True),
+        (False, "layout.json", True),
+    ],
+)
+def test_global_store_shares_one_logical_table_across_dp(
+    dp_shared_memory, mooncake_config_path, expected
+):
+    assert (
+        EngramConfig(
+            cpu_offload=True,
+            dp_shared_memory=dp_shared_memory,
+            mooncake_config_path=mooncake_config_path,
+        ).table_shared_across_dp
+        is expected
+    )
+
+
+def test_global_store_skips_dp_hash_gather(monkeypatch):
+    ids = torch.arange(12).reshape(2, 2, 3)
+    group = SimpleNamespace(
+        all_gather=lambda *_args, **_kwargs: pytest.fail("unexpected DP gather")
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4_1.nvidia.engram.get_engram_dp_group",
+        lambda: group,
+    )
+
+    gathered = gather_engram_hashes(ids, table_shared_across_dp=True)
+
+    assert gathered is ids
+
+
+def test_global_store_uses_tp_only_shards(monkeypatch):
+    captured = []
+
+    def base_init(self, *_args, **_kwargs):
+        self.tp_size = 2
+
+    def base_shard_info(self):
+        assert self.dp_size == 1
+        return self.tp_size, 1
+
+    backend = SimpleNamespace(attach=lambda *_args: None)
+    monkeypatch.setattr(engram_ops.BaseParallelEngramEmbedding, "__init__", base_init)
+    monkeypatch.setattr(
+        engram_ops.BaseParallelEngramEmbedding, "_get_shard_info", base_shard_info
+    )
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 4)
+    monkeypatch.setattr(
+        engram_ops,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(parallel_config=SimpleNamespace(enable_dbo=False)),
+    )
+    monkeypatch.setattr(
+        engram_mooncake,
+        "get_mooncake_engram_backend",
+        lambda path, shards, rank, slots: (
+            captured.append((path, shards, rank, slots)) or backend
+        ),
+    )
+
+    embedding = ParallelEngramEmbedding(
+        20,
+        256,
+        (10, 10),
+        cpu_offload=True,
+        mooncake_config_path="layout.json",
+        model_layer_id=1,
+        layer_hash_index=0,
+    )
+
+    assert embedding.dp_size == 1
+    assert captured == [("layout.json", 2, 1, 1)]
+
+
+def test_global_store_parallel_size_excludes_dp():
+    config = EngramConfig(
+        cpu_offload=True,
+        embedding_across_dp=True,
+        mooncake_config_path="layout.json",
+    )
+    parallel = SimpleNamespace(tensor_parallel_size=2, data_parallel_size=4)
+
+    assert config.get_parallel_size(parallel) == 2
+
+
 def _layer(layer_id, hash_index, offsets):
     tokens, heads, row_bytes = 4, len(offsets), 4
+    host_dead = torch.empty(tokens, heads, dtype=torch.bool)
     return _LayerBuffers(
         embedding=lambda: None,
         model_layer_id=layer_id,
@@ -50,12 +147,14 @@ def _layer(layer_id, hash_index, offsets):
         layer_hash_index=hash_index,
         head_start=0,
         head_sizes=(10,) * heads,
+        head_sizes_array=np.full(heads, 10, dtype=np.int64),
         global_offsets=np.asarray(offsets, dtype=np.int64),
         row_bytes=row_bytes,
         max_tokens=tokens,
         host_ids=[torch.empty(tokens, heads, dtype=torch.int32)],
         local_ids=[np.empty((tokens, heads), dtype=np.int64)],
-        host_dead=[torch.empty(tokens, heads, dtype=torch.bool)],
+        host_dead=[host_dead],
+        host_dead_array=[host_dead.numpy()],
         device_packed=[torch.empty(tokens, heads, row_bytes, dtype=torch.uint8)],
     )
 
@@ -80,6 +179,7 @@ def test_lookup_batches_layers_and_zeros_dead_and_trailing_rows():
     table = _Table()
     backend = MooncakeEngramBackend.__new__(MooncakeEngramBackend)
     backend._layers = {0: first, 1: second}
+    backend._combined_host_ids = []
     backend._slots = [SimpleNamespace(ids_ready=_Event(), rows_consumed=_Event())]
     backend._table = table
 

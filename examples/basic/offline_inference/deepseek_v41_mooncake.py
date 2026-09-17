@@ -136,7 +136,12 @@ def _verify_published_shard(store, table, layer_id: int, buffers) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, type=Path)
-    parser.add_argument("--num-shards", required=True, type=int)
+    parser.add_argument(
+        "--num-shards",
+        required=True,
+        type=int,
+        help="Number of tensor-parallel shards; all DP replicas share them",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 

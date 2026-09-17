@@ -57,7 +57,9 @@ class EngramConfig:
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
-    Otherwise, each DP rank has a separate TP-sharded embedding replica."""
+    Otherwise, each DP rank has a separate TP-sharded embedding replica.
+    Shared-memory and Mooncake placements override this because every DP rank
+    can address the same logical TP shards."""
 
     dp_shared_memory: bool = False
     """Share CPU-offloaded embedding weights between co-located
@@ -86,9 +88,15 @@ class EngramConfig:
     """JSON layout manifest for Engram tables served by Mooncake Store.
 
     Mooncake connection settings are read from the standard ``MOONCAKE_*``
-    environment variables. The backend batches all local Engram layers into
-    one ranged-read submission and only fetches the hash heads owned by this
-    TP/Engram-DP rank. Defaults to VLLM_ENGRAM_MOONCAKE_CONFIG."""
+    environment variables. DP replicas share the same globally stored TP
+    shards without Engram DP collectives. The backend batches all local Engram
+    layers into one ranged-read submission and only fetches the hash heads
+    owned by this TP rank. Defaults to VLLM_ENGRAM_MOONCAKE_CONFIG."""
+
+    @property
+    def table_shared_across_dp(self) -> bool:
+        """Whether all DP replicas address the same logical TP shards."""
+        return self.dp_shared_memory or self.mooncake_config_path is not None
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
@@ -136,6 +144,7 @@ class EngramConfig:
                 raise ValueError("dp_shared_memory is not supported with elastic EP.")
         if (
             self.embedding_across_dp
+            and not self.table_shared_across_dp
             and parallel_config.data_parallel_size > 1
             and parallel_config.enable_elastic_ep
         ):
@@ -174,7 +183,11 @@ class EngramConfig:
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
         size = parallel_config.tensor_parallel_size
-        if self.embedding_across_dp and parallel_config.data_parallel_size > 1:
+        if (
+            self.embedding_across_dp
+            and not self.table_shared_across_dp
+            and parallel_config.data_parallel_size > 1
+        ):
             size *= parallel_config.data_parallel_size
         return size
 

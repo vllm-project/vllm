@@ -96,6 +96,12 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
     "architecture,options,edp_ranks,etp_ranks",
     [
         ("DeepseekV41ForCausalLM", {}, [0, 2], [0, 1]),
+        (
+            "DeepseekV41ForCausalLM",
+            {"cpu_offload": True, "mooncake_config_path": "layout.json"},
+            None,
+            [0, 1],
+        ),
         ("Qwen4ExpForCausalLM", {}, None, [0, 1]),
         (
             "Qwen4ExpForCausalLM",
@@ -408,7 +414,8 @@ def _check_table(
                 num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
             ):
                 gathered = gather_engram_hashes(
-                    ids, dp_shared_memory=layer.dp_shared_memory
+                    ids,
+                    table_shared_across_dp=layer.table_shared_across_dp,
                 )
                 expected_tokens = (
                     num_tokens if dp_shared_memory else max(counts) * dp_size
@@ -511,7 +518,7 @@ def _check_dummy_hash_model_forward(
         use_sequence_parallel=False,
         engram_hash=state,
         engram_swa_prefix="swa",
-        engram_dp_shared_memory=dp_shared_memory,
+        engram_table_shared_across_dp=dp_shared_memory,
         layers=[Decoder(engram=engram)],
         start_layer=0,
         end_layer=1,
@@ -618,7 +625,9 @@ def _check_prefetch_replay(
     )
 
     def step():
-        gathered = gather_engram_hashes(ids.clone(), dp_shared_memory=dp_shared_memory)
+        gathered = gather_engram_hashes(
+            ids.clone(), table_shared_across_dp=dp_shared_memory
+        )
         engram.prepare_embeddings(gathered)
         output.copy_(engram.embed(ids))
 
