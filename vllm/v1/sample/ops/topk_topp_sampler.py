@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-from functools import cache
-
 import torch
 import torch.nn as nn
 
@@ -92,7 +89,6 @@ def flashinfer_sampler_supported() -> bool:
     return False
 
 
-@cache
 def xpu_sampler_supported() -> bool:
     """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
 
