@@ -240,6 +240,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
     assert region_calls[0]["rank"] == 0
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
+    assert region_calls[0]["barrier"] is tiering_spec_module._all_workers_barrier
+    assert region_calls[0]["defer_unlink"] is True
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -271,6 +273,41 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["barrier"] is tiering_spec_module._all_workers_barrier
+    assert region_calls[0]["defer_unlink"] is True
+
+
+def test_tiering_spec_get_manager_unlinks_scheduler_mmap(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=1,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    mock_region = MagicMock()
+    mock_primary = MagicMock()
+    mock_manager = MagicMock()
+
+    monkeypatch.setattr(
+        tiering_spec_module, "SharedOffloadRegion", lambda **kwargs: mock_region
+    )
+    monkeypatch.setattr(
+        tiering_spec_module,
+        "CPUPrimaryTierOffloadingManager",
+        lambda **kwargs: mock_primary,
+    )
+    monkeypatch.setattr(
+        tiering_spec_module, "TieringOffloadingManager", lambda **kwargs: mock_manager
+    )
+
+    manager = spec.get_manager()
+    assert manager is mock_manager
+    mock_region.unlink.assert_called_once()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
