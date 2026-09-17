@@ -1452,3 +1452,41 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         )
 
         engine_core_proc.shutdown()
+
+
+def _ready_response_with_weight_transfer(weight_transfer_config):
+    """Build a ready response against a mock executor."""
+    from vllm.v1.engine.core import EngineCoreProc
+
+    executor = MagicMock()
+    executor.supports_draft_weight_updates.return_value = True
+
+    proc = MagicMock()
+    proc.model_executor = executor
+    proc.vllm_config = MagicMock()
+    proc.vllm_config.weight_transfer_config = weight_transfer_config
+    proc.vllm_config.lora_config = None
+    proc.vllm_config.model_config.enable_sleep_mode = False
+    proc.scheduler = MagicMock()
+
+    response = EngineCoreProc._make_ready_response(proc)
+    return response, executor
+
+
+def test_ready_response_skips_draft_rpc_without_weight_transfer():
+    """No weight-transfer config: the executor must not be consulted."""
+    response, executor = _ready_response_with_weight_transfer(None)
+
+    executor.supports_draft_weight_updates.assert_not_called()
+    assert response.supports_draft_weight_updates is False
+
+
+def test_ready_response_queries_executor_with_weight_transfer():
+    """Weight transfer configured: the executor is still consulted."""
+    weight_transfer_config = MagicMock()
+    weight_transfer_config.backend = "nixl"
+
+    response, executor = _ready_response_with_weight_transfer(weight_transfer_config)
+
+    executor.supports_draft_weight_updates.assert_called_once()
+    assert response.supports_draft_weight_updates is True
