@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""XPU-only batch-invariance units; no model execution or process groups."""
+"""XPU-only batch-invariance tests for norm, collectives, and sampler behavior."""
 
 import pytest
 import torch
@@ -86,23 +86,45 @@ def test_quantized_kv_cache_allowed_without_batch_invariance(monkeypatch):
     assert config.cache_config.cache_dtype == "fp8"
 
 
-@pytest.mark.parametrize("norm_name", ["rms", "gemma"])
+# These dimensions and seeds locally reproduce non-invariant norm mismatches.
+# They make the invariant equality assertion exercise a discriminating case.
+@pytest.mark.parametrize(
+    (
+        "norm_name",
+        "batch_size",
+        "hidden_size",
+        "position",
+        "weight_seed",
+        "input_seed",
+    ),
+    [
+        ("rms", 1024, 16384, 512, 7, 42),
+        ("gemma", 257, 8192, 255, 1, 2),
+    ],
+)
 def test_residual_norm_preserves_batch_invariance(
-    norm_name, monkeypatch, default_vllm_config
+    norm_name,
+    batch_size,
+    hidden_size,
+    position,
+    weight_seed,
+    input_seed,
+    monkeypatch,
+    default_vllm_config,
 ):
     """Residual norm output must not change when its row changes batch position."""
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     norm_cls = RMSNorm if norm_name == "rms" else GemmaRMSNorm
-    norm = norm_cls(512, eps=1e-6).to(device="xpu", dtype=torch.bfloat16)
+    norm = norm_cls(hidden_size, eps=1e-6).to(device="xpu", dtype=torch.bfloat16)
     with torch.no_grad():
+        torch.manual_seed(weight_seed)
         norm.weight.uniform_(-0.5, 0.5)
 
-    torch.manual_seed(42)
-    x = torch.randn(8, 512, device="xpu", dtype=torch.bfloat16)
+    torch.manual_seed(input_seed)
+    x = torch.randn(batch_size, hidden_size, device="xpu", dtype=torch.bfloat16)
     residual = torch.randn_like(x)
-    position = 3
 
     single_output, single_residual = norm(
         x[position : position + 1].clone(),
@@ -156,7 +178,9 @@ def test_collectives_preserve_rank_order_and_partition(monkeypatch, operation, r
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("position", [0, 3, 7])
+# This batch size, vocabulary size, and positions locally reproduce an
+# unseeded non-invariant XPU sampler mismatch.
+@pytest.mark.parametrize("position", [0, 128, 255])
 def test_seeded_sampler_preserves_full_distribution_and_rng(position, monkeypatch):
     """Moving a request must preserve its distribution and per-request RNG."""
     from vllm.triton_utils import HAS_TRITON
@@ -166,11 +190,11 @@ def test_seeded_sampler_preserves_full_distribution_and_rng(position, monkeypatc
     monkeypatch.setattr(envs, "VLLM_XPU_USE_SAMPLER_KERNEL", True)
     sampler = TopKTopPSampler(logprobs_mode="processed_logprobs")
     torch.manual_seed(42)
-    logits = torch.randn(8, 1024, device="xpu", dtype=torch.float32)
+    logits = torch.randn(256, 8192, device="xpu", dtype=torch.float32)
     single_rng = torch.Generator(device="xpu").manual_seed(123)
     batch_rng = torch.Generator(device="xpu").manual_seed(123)
-    k = torch.full((8,), 32, dtype=torch.int32, device="xpu")
-    p = torch.full((8,), 0.9, device="xpu")
+    k = torch.full((256,), 32, dtype=torch.int32, device="xpu")
+    p = torch.full((256,), 0.9, device="xpu")
     for _ in range(3):
         single_token, single_logprobs = sampler(
             logits[position : position + 1].clone(),
