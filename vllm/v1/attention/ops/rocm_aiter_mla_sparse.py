@@ -63,6 +63,11 @@ _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 
 
+def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
+    """V4.0 C4A is block-flat (NORMAL). Ratio 1 and 2 are 16×16 SHUFFLE."""
+    return compress_ratio == 4
+
+
 def _get_aiter_top_k_kernel(
     *,
     is_prefill: bool,
@@ -797,8 +802,7 @@ def rocm_fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
-        compress_ratio: DSv4 compressor layers pass > 1 and take the Triton
-            kernel. DSv3.2/GLM leave the default 1 and stay on AITER.
+        compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -809,10 +813,12 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
-    # skip_k_cache_insert cannot identify this layout: the fused DSv3.2 ROCm
-    # writer also skips the standalone insert. DSv4 already passes
-    # compress_ratio > 1; DSv3.2 leaves the default 1.
-    if (_ON_GFX950 or _ON_GFX942) and compress_ratio > 1 and block_size > 1:
+    # C4A only: Flash/DSv3.2 also skip insert but still write SHUFFLE.
+    if (
+        (_ON_GFX950 or _ON_GFX942)
+        and _indexer_k_is_c4a_block_flat(compress_ratio)
+        and block_size > 1
+    ):
         if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
@@ -1290,7 +1296,9 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
                 token_to_seq=chunk.token_to_seq,
-                cache_layout="NORMAL" if compress_ratio > 1 else None,
+                cache_layout=(
+                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
+                ),
             )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],

@@ -1499,3 +1499,120 @@ def test_fp8_paged_mqa_logits_triton_matches_torch_ref() -> None:
         torch.testing.assert_close(
             got[i, :seq_len], ref[i, :seq_len], atol=2e-3, rtol=2e-3
         )
+
+
+def test_indexer_k_is_c4a_block_flat_gate() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _indexer_k_is_c4a_block_flat,
+    )
+
+    assert not _indexer_k_is_c4a_block_flat(1)
+    assert not _indexer_k_is_c4a_block_flat(2)
+    assert _indexer_k_is_c4a_block_flat(4)
+    assert not _indexer_k_is_c4a_block_flat(128)
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
+    """Ratio 1/2 stay on AITER; ratio 4 takes Triton."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        fp8_paged_mqa_logits_torch,
+        indexer_k_quant_and_cache_triton,
+        rocm_fp8_paged_mqa_logits,
+        rocm_fp8_paged_mqa_logits_triton,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    init_workspace_manager(device)
+    torch.manual_seed(1)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size = 1
+    next_n = 1
+    num_heads = 32
+    head_size = 128
+    block_size = 64
+    seq_len = 180
+    max_model_len = 256
+    num_pages = (seq_len + block_size - 1) // block_size
+    num_tokens = num_pages * block_size
+
+    q = torch.randn(
+        batch_size, next_n, num_heads, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    weights = torch.rand(
+        batch_size * next_n, num_heads, device=device, dtype=torch.float32
+    )
+    context_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
+    block_tables = torch.arange(num_pages, device=device, dtype=torch.int32).view(1, -1)
+    dummy_sched = torch.zeros(8, 2, device=device, dtype=torch.int32)
+
+    k_bf16 = torch.randn(num_tokens, head_size, device=device, dtype=torch.bfloat16)
+    slot = torch.arange(num_tokens, device=device, dtype=torch.int32)
+    cache_shuffle = torch.zeros(
+        num_pages, block_size, head_size + 4, device=device, dtype=torch.uint8
+    )
+    indexer_k_quant_and_cache_triton(k_bf16, cache_shuffle, slot, 128, "ue8m0")
+    cache_shuffle = cache_shuffle.unsqueeze(2)
+
+    aiter = rocm_fp8_paged_mqa_logits(
+        q,
+        cache_shuffle,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=1,
+    )
+    for ratio in (1, 2):
+        got = rocm_fp8_paged_mqa_logits(
+            q,
+            cache_shuffle,
+            weights,
+            context_lens,
+            block_tables,
+            dummy_sched,
+            max_model_len,
+            compress_ratio=ratio,
+        )
+        torch.testing.assert_close(got[:, :seq_len], aiter[:, :seq_len], atol=0, rtol=0)
+
+    cache_flat = torch.empty(
+        num_pages, block_size, 1, head_size + 4, device=device, dtype=torch.uint8
+    )
+    values = torch.randn(
+        num_pages, block_size, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    scales = torch.rand(
+        num_pages, block_size, device=device, dtype=torch.float32
+    ).clamp(min=1e-3)
+    kv_flat = cache_flat.view(num_pages, -1)
+    scale_off = block_size * head_size
+    kv_flat[:, :scale_off] = values.reshape(num_pages, -1).view(torch.uint8)
+    kv_flat[:, scale_off:] = scales.contiguous().view(torch.uint8).view(num_pages, -1)
+
+    gated_c4a = rocm_fp8_paged_mqa_logits(
+        q,
+        cache_flat,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=4,
+    )
+    triton = rocm_fp8_paged_mqa_logits_triton(
+        q, cache_flat, weights, context_lens, block_tables, max_model_len
+    )
+    ref = fp8_paged_mqa_logits_torch(
+        q, cache_flat, weights, context_lens, block_tables, max_model_len
+    )
+    torch.testing.assert_close(
+        gated_c4a[:, :seq_len], triton[:, :seq_len], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
+    )
