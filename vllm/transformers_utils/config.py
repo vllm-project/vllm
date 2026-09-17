@@ -54,6 +54,42 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "total_num_kv_heads": (
+        "n_head_kv",  # Falcon
+        "num_kv_heads",
+        "num_key_value_heads",  # LLaMA-2
+        "multi_query_group_num",  # ChatGLM
+        "num_attention_groups",  # Step3p5
+    ),
+    "num_experts": (
+        "num_experts",  # Jamba
+        "moe_num_experts",  # Dbrx
+        "n_routed_experts",  # DeepSeek
+        "num_local_experts",  # Mixtral
+    ),
+    "num_experts_per_token": (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "top_k_experts",
+        "moe_topk",  # Hunyuan
+        "moe_top_k",
+        "top_k",
+    ),
+    "moe_intermediate_size": (
+        "moe_intermediate_size",
+        "intermediate_size",
+    ),
+    "num_shared_experts": (
+        "n_shared_experts",  # DeepSeek, Docs, GLM
+        "moe_num_shared_experts",  # Aria, Ernie
+    ),
+}
+"""HF config fields that models spell differently, keyed by the name vLLM uses.
+
+`ModelArchConfigConvertorBase` reads a scalar from these; a caller that needs the
+raw value (a per-layer `list`, say) passes the aliases to `getattr_iter` itself."""
+
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",

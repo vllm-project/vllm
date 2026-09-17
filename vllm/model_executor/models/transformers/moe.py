@@ -39,6 +39,7 @@ from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
 from .utils import log_replacement, maybe_per_layer
@@ -165,36 +166,18 @@ class MoEMixin(MixtureOfExperts):
         text_config = self.text_config
 
         # Positional arguments
-        num_experts = self.model_config.get_num_experts()
-        # Not `model_config.get_num_experts_per_token()`: that collapses a
-        # per-layer list to its max, and `maybe_per_layer` needs the list.
-        top_k = getattr_iter(
-            text_config,
-            [
-                "num_experts_per_tok",
-                "num_experts_per_token",
-                "top_k_experts",
-                "moe_topk",
-                "moe_top_k",
-                "top_k",
-            ],
-            None,
-        )
+        num_experts_names = CONFIG_FIELD_ALIASES["num_experts"]
+        num_experts = getattr_iter(text_config, num_experts_names, None)
+        top_k_names = CONFIG_FIELD_ALIASES["num_experts_per_token"]
+        top_k = getattr_iter(text_config, top_k_names, None)
         assert top_k is not None
         hidden_size = text_config.hidden_size
-        intermediate_size = getattr_iter(
-            text_config, ["moe_intermediate_size", "intermediate_size"], None
-        )
+        intermediate_size_names = CONFIG_FIELD_ALIASES["moe_intermediate_size"]
+        intermediate_size = getattr_iter(text_config, intermediate_size_names, None)
         assert intermediate_size is not None
 
-        num_shared_experts = getattr_iter(
-            text_config,
-            [
-                "n_shared_experts",  # DeepSeek, Docs, GLM
-                "moe_num_shared_experts",  # Aria, Ernie
-            ],
-            0,
-        )
+        num_shared_experts_names = CONFIG_FIELD_ALIASES["num_shared_experts"]
+        num_shared_experts = getattr_iter(text_config, num_shared_experts_names, 0)
 
         # Common kwargs
         norm_topk_prob = getattr(text_config, "norm_topk_prob", None)

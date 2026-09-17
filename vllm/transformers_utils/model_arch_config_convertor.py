@@ -14,6 +14,7 @@ from vllm.config.model_arch import (
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
+    CONFIG_FIELD_ALIASES,
     ConfigFormat,
     get_safetensors_params_metadata,
 )
@@ -145,23 +146,11 @@ class ModelArchConfigConvertorBase:
         return qk_rope_head_dim
 
     def get_total_num_kv_heads(self) -> int:
-        attributes = [
-            # For Falcon:
-            "n_head_kv",
-            "num_kv_heads",
-            # For LLaMA-2:
-            "num_key_value_heads",
-            # For ChatGLM:
-            "multi_query_group_num",
-            # For Step3p5:
-            "num_attention_groups",
-        ]
+        names = CONFIG_FIELD_ALIASES["total_num_kv_heads"]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
         default_factory = self.get_total_num_attention_heads
-        return getattr_iter(
-            self.hf_text_config, attributes, default_factory=default_factory
-        )
+        return getattr_iter(self.hf_text_config, names, default_factory=default_factory)
 
     def get_num_experts_from_block_configs(self) -> int:
         """Check block_configs for heterogeneous models (e.g., NemotronH).
@@ -185,13 +174,7 @@ class ModelArchConfigConvertorBase:
 
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
-        num_expert_names = [
-            "num_experts",  # Jamba
-            "moe_num_experts",  # Dbrx
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-
+        num_expert_names = CONFIG_FIELD_ALIASES["num_experts"]
         num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
         if isinstance(num_experts, list):
             # Ernie VL's remote code uses list[int]...
@@ -203,13 +186,7 @@ class ModelArchConfigConvertorBase:
         return num_experts
 
     def get_num_experts_per_token(self) -> int:
-        names = [
-            "num_experts_per_tok",
-            "num_experts_per_token",
-            "top_k_experts",
-            "moe_topk",
-            "moe_top_k",
-        ]
+        names = CONFIG_FIELD_ALIASES["num_experts_per_token"]
         num_experts_per_token = getattr_iter(self.hf_text_config, names, 0)
         if isinstance(num_experts_per_token, list):
             return max(num_experts_per_token, default=0)
