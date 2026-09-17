@@ -36,17 +36,30 @@ pytestmark = pytest.mark.skipif(
 BLOCK_SIZE = 64
 
 
+class _StubSpeculativeConfig:
+    parallel_drafting = False
+
+    def __init__(self, num_speculative_tokens: int) -> None:
+        self.num_speculative_tokens = num_speculative_tokens
+
+    def use_eagle_block_drop(self) -> bool:
+        return False
+
+
 def _builder(
     num_prefill_checkpoint_blocks: int = 1,
     mamba_cache_mode: str = "align",
     block_size: int = BLOCK_SIZE,
     prefix_match_unit: int | None = None,
+    num_spec: int = 0,
 ) -> KimiK3ROCmKDAMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=block_size
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    if num_spec:
+        vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
     return KimiK3ROCmKDAMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=block_size,
@@ -57,6 +70,7 @@ def _builder(
             prefill_checkpoint_alignment=(
                 KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None
             ),
+            num_speculative_blocks=num_spec,
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -139,6 +153,46 @@ def test_checkpoint_metadata_absent_without_reserved_block() -> None:
     assert getattr(md, "checkpoint", None) is None
 
 
+def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
+    # gdn_attn selects the non-spec rows by mask and reclassifies their
+    # one-token decodes as prefills, so the chunk kernel is handed rows 1, 3
+    # and 4 here while a num_decodes: slice would hand it rows 0, 1 and 2.
+    num_spec = 2
+    batch = BatchSpec(
+        seq_lens=[300, 200, 400, 512, 128],
+        query_lens=[num_spec + 1, 200, num_spec + 1, 1, 128],
+    )
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, torch.device("cuda"), arange_block_indices=True
+    )
+    # Align mode reads 1 + num_speculative_blocks columns, so widen the table.
+    rows, cols = common.block_table_tensor.shape
+    width = cols + num_spec
+    common.block_table_tensor = torch.arange(
+        rows * width, dtype=torch.int32, device="cuda"
+    ).view(rows, width)
+
+    md = _builder(num_spec=num_spec).build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(rows, dtype=torch.int32, device="cuda"),
+        num_decode_draft_tokens_cpu=torch.tensor(
+            [num_spec, -1, num_spec, -1, -1], dtype=torch.int32
+        ),
+    )
+
+    assert md.spec_sequence_masks is not None
+    assert md.num_decodes == 0 and md.num_prefills == 3
+    assert md.checkpoint is not None
+    # Row 3 resumes mid-block, so its chunk holds no reusable boundary.
+    torch.testing.assert_close(md.checkpoint.checkpoint_offsets, _i32([192, 0, 64]))
+    # Request r owns blocks r*width.., so slot cdiv(200, 64) - 2 = 2 for
+    # request 1 and cdiv(128, 64) - 2 = 0 for request 4.
+    torch.testing.assert_close(
+        md.checkpoint.state_indices, _i32([width + 2, -1, 4 * width])
+    )
+
+
 def test_checkpoint_metadata_absent_outside_align_mode() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),
@@ -156,8 +210,11 @@ WIDTH = 4
 STATE_LEN = WIDTH - 1
 
 
-def _conv_fixture(seqlens: list[int], slots: int = 16, seed: int = 0):
-    """A cache row as wide as the layer allocates it."""
+def _conv_fixture(
+    seqlens: list[int], slots: int = 16, seed: int = 0, num_spec: int = 0
+):
+    # kda_state_shape widens the conv row to conv_kernel_size - 1 + num_spec,
+    # but the window every reader starts from stays the leading STATE_LEN.
     torch.manual_seed(seed)
     total = sum(seqlens)
     x = torch.randn(total, DIM, device="cuda", dtype=torch.bfloat16)
@@ -167,7 +224,10 @@ def _conv_fixture(seqlens: list[int], slots: int = 16, seed: int = 0):
         dtype=torch.int32,
     )
     conv_state = torch.full(
-        (slots, DIM, STATE_LEN), float("nan"), device="cuda", dtype=torch.bfloat16
+        (slots, DIM, STATE_LEN + num_spec),
+        float("nan"),
+        device="cuda",
+        dtype=torch.bfloat16,
     )
     return x, cu, conv_state
 
@@ -195,13 +255,16 @@ def test_conv_checkpoint_skips_opted_out_sequences() -> None:
     assert torch.equal(conv_state.isnan(), before.isnan())
 
 
-def test_conv_checkpoint_matches_prefill_truncated_at_offset() -> None:
+@pytest.mark.parametrize("num_spec", [0, 2, 8])
+def test_conv_checkpoint_matches_prefill_truncated_at_offset(num_spec: int) -> None:
     # causal_conv1d_fn's own state write is the reference: a prefill that
     # stopped at the offset leaves exactly the row a later prefix-cache hit
-    # reads back.
+    # reads back. Speculative decoding widens the row without moving that
+    # window, so a checkpoint sized off the row would sit num_spec tokens in
+    # the past.
     seqlens = [200, 130]
     offsets = [192, 64]
-    x, cu, conv_state = _conv_fixture(seqlens, seed=3)
+    x, cu, conv_state = _conv_fixture(seqlens, seed=3, num_spec=num_spec)
     weight = torch.randn(DIM, WIDTH, device="cuda", dtype=torch.bfloat16) * 0.3
     bias = torch.randn(DIM, device="cuda", dtype=torch.bfloat16)
     rows = [5, 9]
@@ -230,8 +293,27 @@ def test_conv_checkpoint_matches_prefill_truncated_at_offset() -> None:
         query_start_loc=prefix_cu,
     )
 
-    torch.testing.assert_close(conv_state[rows[0]], reference[1])
-    torch.testing.assert_close(conv_state[rows[1]], reference[2])
+    # causal_conv1d_fn writes only the leading STATE_LEN columns.
+    window = slice(None), slice(None, STATE_LEN)
+    torch.testing.assert_close(conv_state[rows[0]][window], reference[1][window])
+    torch.testing.assert_close(conv_state[rows[1]][window], reference[2][window])
+
+
+def test_conv_checkpoint_leaves_spec_tail_of_row_alone() -> None:
+    # The draft-token columns belong to causal_conv1d_update. Filling the whole
+    # row would hand every reader, which indexes from column 0, a window
+    # shifted num_spec tokens into the past.
+    num_spec = 4
+    x, cu, conv_state = _conv_fixture([200], num_spec=num_spec, seed=11)
+
+    store_conv_checkpoints(x, conv_state, cu, _i32([192]), _i32([5]), STATE_LEN)
+
+    torch.testing.assert_close(
+        conv_state[5, :, :STATE_LEN], x[192 - STATE_LEN : 192].transpose(0, 1)
+    )
+    assert bool(conv_state[5, :, STATE_LEN:].isnan().all()), (
+        "the checkpoint wrote into the speculative-decode tail of the row"
+    )
 
 
 def test_conv_checkpoint_honours_transposed_cache_view() -> None:
@@ -379,7 +461,6 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
         ("use_prefill_checkpoint", False),
         ("use_fused_chunk", False),
         ("use_safe_gate", False),
-        ("num_spec", 8),
     ],
 )
 def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> None:
@@ -387,3 +468,12 @@ def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> No
 
     assert spec.num_prefill_checkpoint_blocks == 0
     assert spec.prefill_checkpoint_alignment is None
+
+
+def test_speculative_decoding_does_not_opt_out(monkeypatch) -> None:
+    # num_spec reaches the kernels as a wider conv row and an interleaved
+    # batch, both of which the layer handles.
+    spec = _spec_for(monkeypatch, num_spec=8)
+
+    assert spec.num_prefill_checkpoint_blocks == 1
+    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT

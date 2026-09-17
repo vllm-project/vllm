@@ -132,7 +132,7 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         return KimiK3ROCmKDAMetadata(
             **{f.name: getattr(attn_metadata, f.name) for f in fields(attn_metadata)},
             checkpoint=self._build_checkpoint_metadata(
-                common_attn_metadata, attn_metadata
+                common_attn_metadata, attn_metadata, num_decode_draft_tokens_cpu
             ),
         )
 
@@ -140,20 +140,23 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self,
         m: CommonAttentionMetadata,
         attn_metadata: GDNAttentionMetadata,
+        num_decode_draft_tokens_cpu: torch.Tensor | None,
     ) -> KDACheckpointMetadata | None:
         if attn_metadata.num_prefills == 0:
             return None
-        # The chunk kernel is handed the prefill tail of a decode-first batch,
-        # so these rows have to be that same contiguous group. A speculative
-        # batch interleaves its non-spec rows instead, which the layer's opt-in
-        # already refuses.
-        if attn_metadata.spec_sequence_masks is not None:
-            return None
         assert m.seq_lens_cpu_upper_bound is not None
+        # request_rows must line up with prefill_query_start_loc, either the
+        # prefill tail of a decode-first batch, or every non-spec row
+        # including padding
         num_decodes = attn_metadata.num_decodes
         request_rows = list(
             range(num_decodes, num_decodes + attn_metadata.num_prefills)
         )
+        if attn_metadata.spec_sequence_masks is not None:
+            assert num_decode_draft_tokens_cpu is not None
+            request_rows = (
+                (num_decode_draft_tokens_cpu < 0).nonzero().flatten().tolist()
+            )
         all_query_lens = m.query_start_loc_cpu.diff().tolist()
         query_lens = [all_query_lens[row] for row in request_rows]
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()

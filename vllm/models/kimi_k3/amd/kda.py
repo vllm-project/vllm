@@ -89,10 +89,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
-            self.use_prefill_checkpoint
-            and self.use_fused_chunk
-            and self.use_safe_gate
-            and self.num_spec == 0
+            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
@@ -534,10 +531,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
 
-                # A mixed non-spec batch is decode-first: the decodes are
-                # length-1 sequences, and the chunk kernel returns NaN for those.
-                # Send them to the recurrent kernel and give the chunk kernel the
-                # prefill tail only.
+                # Decode-first, so peel the length-1 decodes to the recurrent
+                # kernel. A spec batch interleaves its non-spec rows, so the
+                # peel cannot apply and the chunk kernel takes them.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
                 # Without a spec split the non-spec tokens are exactly
@@ -545,7 +541,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # can write their slice straight into it. With one, the tokens
                 # are interleaved and have to be scattered by index afterwards.
                 direct = spec_sequence_masks is None
-                use_fused_chunk = self.use_fused_chunk and spec_sequence_masks is None
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
@@ -619,7 +614,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=use_fused_chunk,
+                    use_fused_chunk=self.use_fused_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
