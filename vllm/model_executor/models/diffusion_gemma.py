@@ -413,6 +413,7 @@ def _compiled_sample_step(
     sc_vocab_end: int,
     tp_size: int,
     tp_group_name: str,
+    compute_sc: bool = True,
 ) -> torch.Tensor:
     """Compiled decode step: temperature → Gumbel sample → probs/confidence →
     accept/renoise → convergence, all as vectorized PyTorch ops.
@@ -538,18 +539,27 @@ def _compiled_sample_step(
     # sc_embeds directly. Storing the [.., hidden] soft embed instead of the full
     # [.., vocab] probs avoids a giant persistent buffer.
     sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
-    # Self-conditioning soft embed = probs @ embed_tokens.weight. Under tensor
-    # parallelism the embedding is vocab-sharded ([vocab/tp, hidden]) while
-    # probs spans the full vocab, so each rank multiplies its local vocab slice
-    # [sc_vocab_start, sc_vocab_end) and the partials are summed across ranks.
-    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
-    soft_embeds = torch.matmul(
-        local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
-    )
-    if tp_size > 1:
-        soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
-    soft_embeds = soft_embeds * normalizer
-    sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
+    if compute_sc:
+        # Self-conditioning soft embed = probs @ embed_tokens.weight. Under
+        # tensor parallelism the embedding is vocab-sharded ([vocab/tp,
+        # hidden]) while probs spans the full vocab, so each rank multiplies
+        # its local vocab slice [sc_vocab_start, sc_vocab_end) and the
+        # partials are summed across ranks.
+        local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
+        soft_embeds = torch.matmul(
+            local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
+        )
+        if tp_size > 1:
+            soft_embeds = torch.ops.vllm.all_reduce(
+                soft_embeds, group_name=tp_group_name
+            )
+        soft_embeds = soft_embeds * normalizer
+        sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
+    else:
+        # Every slot in this tile ends after this step, so the soft embed
+        # would never be read. The matmul is a full pass over the vocabulary
+        # matrix, so skip it.
+        sc_embeds[decode_slots] = 0
 
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
@@ -644,6 +654,8 @@ class DiffusionGemmaRequestStates:
         # forward.
         self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
         self.read_only_slots: set[int] = set()
+        # Slots capped at one denoise step never consume a soft embed.
+        self.single_step_slots: set[int] = set()
 
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
@@ -679,6 +691,7 @@ class DiffusionGemmaRequestStates:
         self.seeded_slots.discard(slot_idx)
         self.read_only[slot_idx].fill_(False)
         self.read_only_slots.discard(slot_idx)
+        self.single_step_slots.discard(slot_idx)
 
     def remove_request(self, slot_idx: int) -> None:
         # add_request resets the GPU flags before a slot is reused. The host
@@ -688,6 +701,7 @@ class DiffusionGemmaRequestStates:
         self.self_conditioning_embeds[slot_idx] = 0
         self.seeded_slots.discard(slot_idx)
         self.read_only_slots.discard(slot_idx)
+        self.single_step_slots.discard(slot_idx)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
         self.seed_canvas[slot_idx] = async_tensor_h2d(
@@ -1083,9 +1097,10 @@ class DiffusionSampler:
         states = self.diffusion_states
         cap = extra.get("diffusion_max_steps")
         if cap is not None:
-            states.max_steps[req_idx].fill_(
-                max(1, min(int(cap), states.max_denoising_steps))
-            )
+            cap = max(1, min(int(cap), states.max_denoising_steps))
+            states.max_steps[req_idx].fill_(cap)
+            if cap == 1:
+                states.single_step_slots.add(req_idx)
         seed = extra.get("diffusion_seed_canvas")
         if seed is not None:
             if len(seed) != self.canvas_length:
@@ -1312,6 +1327,9 @@ class DiffusionSampler:
             end_req = min(start_req + group, num_decode)
             tile = slice(start_req, end_req)
             tile_slots = decode_slots[tile]
+            compute_sc = not states.single_step_slots or not states.single_step_slots.issuperset(
+                decode_slots_np[tile].tolist()
+            )
 
             scaled = _compiled_sample_step(
                 logits[start_req * CL : end_req * CL],
@@ -1348,6 +1366,7 @@ class DiffusionSampler:
                 sc_vocab_end=self.sc_vocab_end,
                 tp_size=self.tp_size,
                 tp_group_name=self.tp_group_name,
+                compute_sc=compute_sc,
             )
 
             # Logprobs for denoise steps that just converged (is_encoder_phase

@@ -98,7 +98,9 @@ def test_remove_request_forgets_the_slot():
     assert not states.read_only_slots
 
 
-def _denoise_once(states: DiffusionGemmaRequestStates, slots: list[int]) -> None:
+def _denoise_once(
+    states: DiffusionGemmaRequestStates, slots: list[int], compute_sc: bool = True
+) -> None:
     """One compiled denoise step over ``slots`` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it."""
     n = len(slots)
@@ -137,7 +139,19 @@ def _denoise_once(states: DiffusionGemmaRequestStates, slots: list[int]) -> None
         sc_vocab_end=VOCAB,
         tp_size=1,
         tp_group_name="",
+        compute_sc=compute_sc,
     )
+
+
+def test_single_step_tile_skips_self_conditioning():
+    states = _states()
+    states.add_request(0)
+    states.is_encoder_phase[0] = False
+    states.self_conditioning_embeds[0] = 1.0
+
+    _denoise_once(states, [0], compute_sc=False)
+
+    assert not states.self_conditioning_embeds[0].any()
 
 
 def test_step_cap_is_per_slot():
