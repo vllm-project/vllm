@@ -29,6 +29,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fused_qk_norm_rope_gate_fp8_quant import (
+    fused_qk_norm_rope_gate_fp8_quant,
+    supports_prequantized_scheduler,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -50,9 +54,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
-)
-from vllm.model_executor.layers.qwen3_next_fp8_qkv import (
-    qwen3_next_fp8_qkv_prep,
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -284,6 +285,7 @@ class Qwen3NextAttention(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        max_num_seqs: int | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -393,13 +395,17 @@ class Qwen3NextAttention(nn.Module):
         self.use_prequantized_qkv = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
             and current_platform.is_rocm()
             and text_only
+            and supports_prequantized_scheduler(max_num_seqs)
             and self.attn.supports_prequantized_qkv_input
-            and rocm_aiter_ops.qwen3_next_fp8_qkv_prep_available()
+            and rocm_aiter_ops.fused_qk_norm_rope_gate_fp8_quant_available()
         )
         if self.use_prequantized_qkv:
-            logger.info_once("Using AITER Qwen3 Next prequantized FP8 QKV preparation")
+            logger.info_once(
+                "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
+            )
 
     def _project_qkv_gate(
         self,
@@ -433,7 +439,7 @@ class Qwen3NextAttention(nn.Module):
                 q_descale,
                 k_descale,
                 v_descale,
-            ) = qwen3_next_fp8_qkv_prep(
+            ) = fused_qk_norm_rope_gate_fp8_quant(
                 q_gate,
                 k,
                 v,
@@ -575,6 +581,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
                 prefix=f"{prefix}.self_attn",
             )
@@ -830,8 +837,6 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
-    num_local_physical_experts: int
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,

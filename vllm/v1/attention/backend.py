@@ -56,6 +56,10 @@ class PrequantizedQKV(NamedTuple):
     kernels use one scale per tensor while others use per-sequence/per-head
     scales. Backends must explicitly opt into this contract via
     ``supports_prequantized_qkv_input``.
+
+    A producer may leave entries for decode-only tokens undefined when the
+    backend explicitly uses the floating-point Q/K/V inputs for decode.
+    Backends must consume this bundle only for phases the producer quantized.
     """
 
     query: torch.Tensor

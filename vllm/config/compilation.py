@@ -785,7 +785,7 @@ class CompilationConfig:
     # mixed piecewise CUDA graphs. Unlike attention ops, these do not affect
     # splitting_ops_contain_attention().
     _piecewise_cudagraph_unsafe_ops: ClassVar[list[str]] = [
-        "vllm::qwen3_next_fp8_qkv_prep",
+        "vllm::fused_qk_norm_rope_gate_fp8_quant",
     ]
 
     def compute_hash(self) -> str:

@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.layers import qwen3_next_fp8_qkv as prep_module
+from vllm.model_executor.layers import (
+    fused_qk_norm_rope_gate_fp8_quant as prep_module,
+)
 from vllm.model_executor.layers.attention import attention as attention_module
 from vllm.model_executor.models import qwen3_next as qwen3_next_model
 from vllm.v1.attention.backend import PrequantizedQKV
@@ -17,8 +19,23 @@ HEAD_DIM = 256
 ROTARY_DIM = 64
 
 
-def test_qwen3_next_fp8_prep_is_cudagraph_unsafe():
-    op = torch.ops.vllm.qwen3_next_fp8_qkv_prep.default
+@pytest.mark.parametrize(
+    ("max_num_seqs", "expected"),
+    [
+        (256, True),
+        (257, False),
+        (None, False),
+    ],
+)
+def test_supports_prequantized_scheduler(
+    max_num_seqs,
+    expected,
+):
+    assert prep_module.supports_prequantized_scheduler(max_num_seqs) is expected
+
+
+def test_fused_qk_norm_rope_gate_fp8_quant_is_cudagraph_unsafe():
+    op = torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant.default
     assert torch.Tag.cudagraph_unsafe in op.tags
 
 
@@ -78,7 +95,7 @@ def _make_outputs(inputs):
     )
 
 
-def test_qwen3_next_fp8_prep_translates_attention_metadata(monkeypatch):
+def test_fused_qk_norm_rope_gate_fp8_quant_translates_attention_metadata(monkeypatch):
     inputs = _make_inputs()
     expected_outputs = _make_outputs(inputs)
     query_start_loc = torch.tensor([0, 1, 7], dtype=torch.int32)
@@ -119,12 +136,12 @@ def test_qwen3_next_fp8_prep_translates_attention_metadata(monkeypatch):
 
     monkeypatch.setattr(
         prep_module.rocm_aiter_ops,
-        "qwen3_next_fp8_qkv_prep",
+        "fused_qk_norm_rope_gate_fp8_quant",
         fake_aiter_prep,
     )
 
     actual_outputs = _make_outputs(inputs)
-    result = prep_module._qwen3_next_fp8_qkv_prep_impl(
+    result = prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
         inputs[0],
         inputs[1],
         inputs[2],
@@ -151,7 +168,9 @@ def test_qwen3_next_fp8_prep_translates_attention_metadata(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph support")
-def test_qwen3_next_fp8_prep_without_metadata_is_cuda_graph_safe(monkeypatch):
+def test_fused_qk_norm_rope_gate_fp8_quant_without_metadata_is_cuda_graph_safe(
+    monkeypatch,
+):
     inputs = tuple(tensor.to(device="cuda") for tensor in _make_inputs())
     monkeypatch.setattr(
         attention_module,
@@ -184,14 +203,14 @@ def test_qwen3_next_fp8_prep_without_metadata_is_cuda_graph_safe(monkeypatch):
 
     monkeypatch.setattr(
         prep_module.rocm_aiter_ops,
-        "qwen3_next_fp8_qkv_prep",
+        "fused_qk_norm_rope_gate_fp8_quant",
         fake_aiter_prep,
     )
 
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
-        prep_module._qwen3_next_fp8_qkv_prep_impl(
+        prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
             *inputs,
             "layer",
             1.0e-6,
@@ -205,7 +224,7 @@ def test_qwen3_next_fp8_prep_without_metadata_is_cuda_graph_safe(monkeypatch):
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        prep_module._qwen3_next_fp8_qkv_prep_impl(
+        prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
             *inputs,
             "layer",
             1.0e-6,
@@ -227,7 +246,7 @@ def test_qwen3_next_fp8_prep_without_metadata_is_cuda_graph_safe(monkeypatch):
         torch.testing.assert_close(actual, expected)
 
 
-def test_qwen3_next_fp8_prep_pure_decode_uses_bf16_fallback(monkeypatch):
+def test_fused_qk_norm_rope_gate_fp8_quant_pure_decode_uses_bf16_fallback(monkeypatch):
     inputs = _make_inputs(tokens=4)
     metadata = SimpleNamespace(
         num_actual_tokens=4,
@@ -270,14 +289,14 @@ def test_qwen3_next_fp8_prep_pure_decode_uses_bf16_fallback(monkeypatch):
     )
     monkeypatch.setattr(
         prep_module.rocm_aiter_ops,
-        "qwen3_next_fp8_qkv_prep",
+        "fused_qk_norm_rope_gate_fp8_quant",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("AITER producer must not run for pure decode")
         ),
     )
 
     outputs = _make_outputs(inputs)
-    result = prep_module._qwen3_next_fp8_qkv_prep_impl(
+    result = prep_module._fused_qk_norm_rope_gate_fp8_quant_impl(
         inputs[0],
         inputs[1],
         inputs[2],
@@ -310,7 +329,7 @@ def test_qwen3_next_fp8_prep_pure_decode_uses_bf16_fallback(monkeypatch):
     assert outputs[6].shape == (256, NUM_KV_HEADS)
 
 
-def test_qwen3_next_fp8_prep_custom_op_meta_shapes():
+def test_fused_qk_norm_rope_gate_fp8_quant_custom_op_meta_shapes():
     inputs = tuple(tensor.to(device="meta") for tensor in _make_inputs())
     outputs = prep_module._allocate_outputs(
         inputs[0],
@@ -320,7 +339,7 @@ def test_qwen3_next_fp8_prep_custom_op_meta_shapes():
         NUM_KV_HEADS,
         HEAD_DIM,
     )
-    result = torch.ops.vllm.qwen3_next_fp8_qkv_prep(
+    result = torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant(
         *inputs,
         "layer",
         1.0e-6,
@@ -363,7 +382,7 @@ def test_qwen3_next_model_builds_prequantized_bundle(monkeypatch):
     attention.attn = SimpleNamespace(layer_name="layer")
     monkeypatch.setattr(
         qwen3_next_model,
-        "qwen3_next_fp8_qkv_prep",
+        "fused_qk_norm_rope_gate_fp8_quant",
         lambda *args, **kwargs: expected_outputs,
     )
 
