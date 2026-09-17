@@ -53,6 +53,7 @@ def moonep_grouped_gemm(
 
     Returns:
         ``[NvS, N]``; rows past ``cu_seqlens[-1]`` are zero-filled.
+
     """
     return torch._grouped_mm(a, w.transpose(1, 2), offs=cu_seqlens)
 

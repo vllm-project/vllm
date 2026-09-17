@@ -1102,8 +1102,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
 
 class MoonEPAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on MoonEP
+    """All2All communication based on MoonEP
     (https://github.com/MoonshotAI/MoonEP).
 
     MoonEP keeps token loads perfectly balanced across EP ranks by planning

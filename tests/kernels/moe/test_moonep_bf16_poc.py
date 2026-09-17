@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test MoonEP dispatch / prefetch / combine logic (BF16 PoC).
+"""Test MoonEP dispatch / prefetch / combine logic (BF16 PoC).
 
 Two paths, both compared against the pure-PyTorch reference MoE:
 - MoonEPPrepareAndFinalize + a reference segment-loop expert runner over
