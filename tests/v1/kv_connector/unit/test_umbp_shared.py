@@ -384,6 +384,46 @@ def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
     assert [plan.block_id for plan in second.store_plans] == [3]
 
 
+def test_scheduler_emits_partial_tail_plan_for_next_step():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "load_async": False}),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("partial")),
+    )
+    request = SimpleNamespace(
+        request_id="partial",
+        req_id="partial",
+        num_tokens=12,
+        block_hashes=[b"a", b"b", b"c"],
+        block_ids=([7],),
+        num_computed_tokens=0,
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([7],)),
+        0,
+    )
+
+    assert scheduler.register_finished_partial_tail(
+        request, ([7],), [(0, 7, 12)]
+    )
+    metadata = scheduler.build_connector_meta(
+        SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={},
+        )
+    )
+
+    assert len(metadata.partial_tail_plans) == 1
+    tail = metadata.partial_tail_plans[0]
+    assert (tail.start_token, tail.end_token) == (0, 12)
+    assert tail.block_id == 7
+
+
 class _WorkerHandle:
     def register_buffers(self, kv_caches):
         self.kv_caches = kv_caches
