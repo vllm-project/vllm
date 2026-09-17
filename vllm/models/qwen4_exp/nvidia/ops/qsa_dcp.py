@@ -4,9 +4,13 @@
 
 The selector runs on a replicated cache, so every rank produces the same global
 selection. The main KV is sharded, so a rank can only attend over the part of
-that selection it owns. This rewrites the packed selection buffer in place:
-owned entries become compact-local ids in a dense prefix, and the trailing count
-column is set to how many survived.
+that selection it owns. This writes a localized copy of the packed selection
+buffer: owned entries become compact-local ids in a dense prefix, and the
+trailing count column holds how many survived.
+
+The copy is not optional. The selection buffer belongs to the layer and MTP
+draft steps reuse the rows frozen at step 0, so localizing in place would
+localize an already-local id on the next step.
 
 Compact-local addressing, with ``W`` ranks and interleave ``I``:
 
@@ -29,8 +33,10 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _qsa_localize_dcp_kernel(
-    indices_ptr,
-    stride_indices_row,
+    src_ptr,
+    dst_ptr,
+    stride_src_row,
+    stride_dst_row,
     num_rows,
     WORLD: tl.constexpr,
     RANK: tl.constexpr,
@@ -42,15 +48,16 @@ def _qsa_localize_dcp_kernel(
     if row >= num_rows:
         return
 
-    base = indices_ptr + row * stride_indices_row
+    src = src_ptr + row * stride_src_row
+    dst = dst_ptr + row * stride_dst_row
     # The trailing column is the count the attention kernel uses as its tile
     # bound. It is never a token id.
-    valid_count = tl.load(base + SELECTION_WIDTH)
+    valid_count = tl.load(src + SELECTION_WIDTH)
 
     columns = tl.arange(0, BLOCK_W)
     in_range = columns < SELECTION_WIDTH
     within_count = columns < valid_count
-    g = tl.load(base + columns, mask=in_range, other=-1)
+    g = tl.load(src + columns, mask=in_range, other=-1)
 
     owned = (g >= 0) & in_range & within_count & (((g // INTERLEAVE) % WORLD) == RANK)
     local = (g // (WORLD * INTERLEAVE)) * INTERLEAVE + (g % INTERLEAVE)
@@ -62,28 +69,33 @@ def _qsa_localize_dcp_kernel(
 
     # Clear first, then scatter, so a stale id from a reused buffer cannot
     # survive past the new count.
-    tl.store(base + columns, -1, mask=in_range)
-    tl.store(base + dest, local, mask=owned)
-    tl.store(base + SELECTION_WIDTH, kept)
+    tl.store(dst + columns, -1, mask=in_range)
+    tl.store(dst + dest, local, mask=owned)
+    tl.store(dst + SELECTION_WIDTH, kept)
 
 
 def qsa_localize_dcp_indices(
     packed_indices: torch.Tensor,
+    out: torch.Tensor,
     dcp_world_size: int,
     dcp_rank: int,
     cp_kv_cache_interleave_size: int,
 ) -> torch.Tensor:
-    """Rewrite a global selection to this rank's owned, compact-local ids.
+    """Write this rank's owned, compact-local ids into ``out``.
 
     ``packed_indices`` is ``[rows, selection_width + 1]``. The final column
-    holds the valid-entry count and is rewritten to the number kept.
+    holds the valid-entry count. ``out`` takes the same shape and receives the
+    kept ids in a dense prefix, with its own count column.
 
-    Returns the same tensor, modified in place.
+    ``packed_indices`` is left untouched, because it is the layer's selection
+    buffer and later MTP steps read it again.
     """
-    if dcp_world_size <= 1:
-        return packed_indices
     if packed_indices.ndim != 2:
         raise ValueError("QSA packed indices must be two-dimensional")
+    if out.shape != packed_indices.shape:
+        raise ValueError("QSA localized output must match the selection shape")
+    if out.dtype != packed_indices.dtype:
+        raise ValueError("QSA localized output must match the selection dtype")
     rows, width_plus_count = packed_indices.shape
     if width_plus_count < 2:
         raise ValueError("QSA packed indices need selection columns plus a count")
@@ -91,13 +103,18 @@ def qsa_localize_dcp_indices(
         raise ValueError("QSA DCP rank is outside the world")
     if cp_kv_cache_interleave_size <= 0:
         raise ValueError("QSA DCP interleave must be positive")
+    if dcp_world_size <= 1:
+        out.copy_(packed_indices)
+        return out
     if rows == 0:
-        return packed_indices
+        return out
 
     selection_width = width_plus_count - 1
     _qsa_localize_dcp_kernel[(rows,)](
         packed_indices,
+        out,
         packed_indices.stride(0),
+        out.stride(0),
         rows,
         WORLD=dcp_world_size,
         RANK=dcp_rank,
@@ -105,7 +122,7 @@ def qsa_localize_dcp_indices(
         SELECTION_WIDTH=selection_width,
         BLOCK_W=triton.next_power_of_2(max(selection_width, 1)),
     )
-    return packed_indices
+    return out
 
 
 def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:

@@ -102,14 +102,18 @@ def test_kernel_matches_the_reference(world, rank, interleave):
         [7],
     ]
     packed = _pack(rows, width).cuda()
-    qsa_localize_dcp_indices(packed, world, rank, interleave)
+    source = packed.clone()
+    local = torch.empty_like(packed)
+    qsa_localize_dcp_indices(packed, local, world, rank, interleave)
+    # The layer's selection buffer must survive: MTP steps read it again.
+    assert torch.equal(packed, source)
     for i, row in enumerate(rows):
         expected, count = _reference_localize(row[:width], world, rank, interleave)
-        assert int(packed[i, width]) == count
-        got = [int(v) for v in packed[i, :count]]
+        assert int(local[i, width]) == count
+        got = [int(v) for v in local[i, :count]]
         assert got == expected
         # everything past the count must be padding
-        assert all(int(v) == PAD for v in packed[i, count:width])
+        assert all(int(v) == PAD for v in local[i, count:width])
 
 
 # --- empty-owner rows -------------------------------------------------------
@@ -187,3 +191,46 @@ def test_neutralizing_clears_a_poisoned_payload():
 
     assert torch.isfinite(merged).all(), "the empty rank poisoned the merge"
     torch.testing.assert_close(merged, good_out)
+
+
+# --- contracts that keep the gate from being applied twice -------------------
+
+
+def test_localize_refuses_a_mismatched_output():
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+
+    packed = _pack([[1, 2, 3]], 8)
+    for bad in (torch.empty(1, 4, dtype=torch.int32), packed.float()):
+        with pytest.raises(ValueError):
+            qsa_localize_dcp_indices(packed, bad, 2, 0, 1)
+
+
+def test_localize_leaves_the_source_alone_without_dcp():
+    """World size 1 still copies, so one call site covers both paths."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+
+    packed = _pack([[5, 6], [7]], 8)
+    source = packed.clone()
+    local = torch.empty_like(packed)
+    qsa_localize_dcp_indices(packed, local, 1, 0, 1)
+    assert torch.equal(packed, source)
+    assert torch.equal(local, source)
+
+
+def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
+    """Guards the one error that has no symptom: sigmoid applied twice."""
+    from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+
+    query = torch.zeros(2, 4, 64, dtype=torch.bfloat16)
+    cache = torch.zeros(1, 16, 2, 64, dtype=torch.bfloat16)
+    indices = _pack([[0], [0]], 8)
+    block_table = torch.zeros(1, 1, dtype=torch.int32)
+    token_to_req = torch.zeros(2, dtype=torch.int32)
+    args = (query, cache, cache, indices, block_table, token_to_req, False)
+
+    with pytest.raises(ValueError, match="do not pass one"):
+        qsa_ops.qsa_sparse_paged_attention(
+            *args, output_gate=torch.zeros_like(query), return_lse=True
+        )
+    with pytest.raises(ValueError, match="requires an output gate"):
+        qsa_ops.qsa_sparse_paged_attention(*args)

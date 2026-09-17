@@ -499,7 +499,7 @@ def qsa_sparse_paged_attention(
     use_prefill_config: bool,
     out: torch.Tensor | None = None,
     *,
-    output_gate: torch.Tensor,
+    output_gate: torch.Tensor | None = None,
     return_lse: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run sparse GQA directly over paged BF16 K/V caches.
@@ -510,7 +510,8 @@ def qsa_sparse_paged_attention(
     tile-loop bound. use_prefill_config only steers the top of the config table; see
     _select_config.
 
-    With return_lse the gate is NOT applied and (out, lse) is returned instead.
+    With return_lse the gate is NOT applied and (out, lse) is returned instead;
+    passing a gate as well is an error, so the caller cannot apply it twice.
     The LSE is fp32 in log2 space, matching the score scale, and -inf for a row
     that saw nothing. Decode context parallelism needs this, because the gate
     must be applied once on the merged result. Applying it per rank before the
@@ -548,8 +549,19 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse output must match its query")
     assert out.dtype == q.dtype and out.device == q.device
     assert out.stride(2) == 1
-    assert output_gate.is_contiguous()
-    output_gate_view = output_gate.view_as(q)
+    if return_lse:
+        if output_gate is not None:
+            raise ValueError(
+                "QSA return_lse leaves the gate to the caller; do not pass one"
+            )
+        # A dead pointer. APPLY_GATE is False on this path, so nothing reads it,
+        # and the caller's gate covers only its own heads anyway.
+        output_gate_view = q
+    else:
+        if output_gate is None:
+            raise ValueError("QSA sparse attention requires an output gate")
+        assert output_gate.is_contiguous()
+        output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
         return out
 
