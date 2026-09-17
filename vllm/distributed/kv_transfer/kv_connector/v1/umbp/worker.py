@@ -322,13 +322,39 @@ class UMBPStoreConnectorWorker:
         )
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
-        """Drain jobs before vLLM reuses preempted GPU block IDs."""
+        """Cancel request-local jobs before vLLM reuses their GPU blocks."""
         if not (
             metadata.preempted_block_ids or metadata.preempted_request_ids
         ):
             return
-        self.wait_for_layer_load("")
-        self.wait_for_save()
+        if not metadata.preempted_request_ids:
+            self.wait_for_layer_load("")
+            self.wait_for_save()
+            return
+
+        preempted = metadata.preempted_request_ids
+        for layer_name in list(self._layer_load_jobs):
+            jobs = self._layer_load_jobs[layer_name]
+            for request_id in preempted & jobs.keys():
+                job = jobs.pop(request_id)
+                self._cancel_job(job)
+            if not jobs:
+                del self._layer_load_jobs[layer_name]
+        for request_id in preempted:
+            self._pending_load_layers.pop(request_id, None)
+            load_job = self._load_jobs.pop(request_id, None)
+            if load_job is not None:
+                self._cancel_job(load_job)
+            store_job = self._store_jobs.pop(request_id, None)
+            if store_job is not None:
+                result = self._cancel_job(store_job)
+                self._finish_job(request_id, result, is_load=False)
+
+    def _cancel_job(self, job: TransferJobState) -> TransferJobState:
+        cancel = getattr(self.runtime, "cancel", None)
+        if callable(cancel):
+            return cancel(job)
+        return self.runtime.wait(job)
 
     def get_finished(
         self, finished_req_ids: set[str]

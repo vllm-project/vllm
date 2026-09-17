@@ -556,6 +556,37 @@ class _LayerRecordingWorkerHandle(_WorkerHandle):
         return super().wait(job)
 
 
+class _CancellableWorkerHandle(_WorkerHandle):
+    def __init__(self):
+        self.cancelled = []
+
+    def cancel(self, job):
+        self.cancelled.append(job)
+        job.cancel("preempted")
+        return job
+
+
+def test_worker_preemption_cancels_only_matching_request():
+    handle = _CancellableWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle)
+    first = BlockTransferPlan("first", 1, request_id="first")
+    second = BlockTransferPlan("second", 2, request_id="second")
+    worker.enqueue_stores(
+        UMBPConnectorMetadata(
+            store_plans=[first, second],
+            store_requests={"first": [first], "second": [second]},
+        )
+    )
+
+    worker.handle_preemptions(
+        UMBPConnectorMetadata(preempted_request_ids={"first"})
+    )
+
+    assert len(handle.cancelled) == 1
+    assert handle.cancelled[0].plans == (first,)
+    assert "second" in worker._store_jobs
+
+
 def test_worker_waits_for_layers_independently():
     handle = _LayerRecordingWorkerHandle()
     worker = UMBPStoreConnectorWorker(handle)

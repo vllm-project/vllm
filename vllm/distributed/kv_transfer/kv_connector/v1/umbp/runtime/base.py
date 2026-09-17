@@ -51,6 +51,9 @@ class UMBPWorkerHandle(Protocol):
     def publish(self, job: TransferJobState) -> None:
         """Make a completed store visible to scheduler lookups."""
 
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        """Cancel if possible, otherwise wait until buffers are safe to reuse."""
+
     def close(self) -> None:
         """Release worker-side resources."""
 
