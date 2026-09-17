@@ -37,10 +37,7 @@ touched per position are written (the previous candidates are reset first), so
 the cache update costs ``O(k)`` instead of ``O(V)`` per step.
 """
 
-import hashlib
 import logging
-import os
-import tempfile
 import time
 
 import torch
@@ -139,9 +136,7 @@ def _markov_walk_kernel(
         # The anchor (bonus) token seeds the chain: it is the input id of query
         # offset 0 for this request, read through the persistent index buffer so a
         # replayed CUDA graph sees the current batch.
-        prev = tl.load(
-            input_ids_ptr + tl.load(anchor_indices_ptr + row)
-        ).to(tl.int64)
+        prev = tl.load(input_ids_ptr + tl.load(anchor_indices_ptr + row)).to(tl.int64)
 
         for step in range(num_steps):
             flat = row * num_steps + step
@@ -182,9 +177,7 @@ def _markov_walk_kernel(
                     ).to(tl.float32),
                 ).to(tl.float32)
             else:
-                cand = tl.load(
-                    cand_ids_ptr + cand_base + offsets, mask=k_mask, other=0
-                )
+                cand = tl.load(cand_ids_ptr + cand_base + offsets, mask=k_mask, other=0)
                 base = tl.load(
                     cand_values_ptr + cand_base + offsets,
                     mask=k_mask,
@@ -212,9 +205,7 @@ def _markov_walk_kernel(
                         w2_ptr
                         + base_cand_ids[:, None].to(tl.int64) * w2_stride
                         + r_offsets[None, :],
-                        mask=is_base_col[:, None]
-                        & k_mask[:, None]
-                        & r_mask[None, :],
+                        mask=is_base_col[:, None] & k_mask[:, None] & r_mask[None, :],
                         other=0.0,
                     ).to(tl.float32)
                     base_bias += tl.sum(weight * embed[None, :], axis=1)
@@ -259,9 +250,7 @@ def _markov_walk_kernel(
             if STORE_IDS:
                 tl.store(union_ids_ptr + cand_base + offsets, cand, mask=k_mask)
             if STORE_REALIZED:
-                tl.store(
-                    realized_ptr + cand_base + offsets, scores, mask=k_mask
-                )
+                tl.store(realized_ptr + cand_base + offsets, scores, mask=k_mask)
             if STORE_EMBED:
                 rank_offsets = tl.arange(0, BLOCK_RANK)
                 rank_mask = rank_offsets < rank
@@ -282,9 +271,7 @@ def _markov_walk_kernel(
             token = tl.sum(tl.where(offsets == index, cand, 0), axis=0)
             if HAS_D2T:
                 token = token + tl.load(d2t_ptr + token)
-            tl.store(
-                draft_tokens_ptr + row * draft_tokens_stride + step, token
-            )
+            tl.store(draft_tokens_ptr + row * draft_tokens_stride + step, token)
             prev = token
 
 
@@ -340,7 +327,6 @@ def compute_markov_bias_top_ids(
     scale: float = 1.0,
     *,
     chunk: int = 512,
-    cache_dir: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Top-``m`` draft ids and fp32 bias values of the bigram bias.
 
@@ -365,70 +351,11 @@ def compute_markov_bias_top_ids(
     dot product for static candidates: each ``(prev, candidate)`` pair's bias
     depends only on the fixed weights, so the walk kernel can load the
     precomputed value directly instead of gathering and reducing a ``W2`` row.
-
-    Building the table reads ``[target_vocab, draft_vocab]``, so it is computed
-    once and cached on disk keyed by a weight checksum; later server starts load
-    it back in a fraction of a second.
     """
     if m <= 0:
         raise ValueError("markov_bias_topk must be > 0 to build a bigram table")
     device = w1.device
     target_vocab, rank = w1.shape
-    draft_vocab = w2.shape[0]
-
-    checksum = hashlib.sha256(
-        "|".join(
-            [
-                str(target_vocab),
-                str(draft_vocab),
-                str(rank),
-                str(m),
-                str(w1.dtype),
-                str(w2.dtype),
-                "-" if scale < 0 else "+",
-                f"{float(w1.float().sum()):.6e}",
-                f"{float(w1.float().abs().sum()):.6e}",
-                f"{float(w2.float().sum()):.6e}",
-                f"{float(w2.float().abs().sum()):.6e}",
-                "v2",  # cache version: includes fp32 bias values
-            ]
-        ).encode()
-    ).hexdigest()[:16]
-    directory = cache_dir or os.environ.get(
-        "VLLM_DSPARK_MARKOV_TOPK_CACHE",
-        os.path.join(tempfile.gettempdir(), "dspark_markov_topk"),
-    )
-    path = os.path.join(directory, f"markov_bias_top{m}_{checksum}.pt")
-    if os.path.exists(path):
-        try:
-            data = torch.load(path, map_location="cpu", weights_only=True)
-            # v2 cache: dict with "ids" and "values" keys.
-            if (
-                isinstance(data, dict)
-                and data["ids"].shape == (target_vocab, m)
-                and data["ids"].dtype == torch.int32
-                and data["values"].shape == (target_vocab, m)
-                and data["values"].dtype == torch.float32
-            ):
-                logging.getLogger(__name__).info(
-                    "DSpark bigram candidate table: loaded %s (%d x %d)",
-                    path,
-                    target_vocab,
-                    m,
-                )
-                return data["ids"].to(device), data["values"].to(device)
-            # v1 cache (ids only): rebuild with values.
-            logging.getLogger(__name__).warning(
-                "DSpark bigram candidate table %s has an outdated format; "
-                "rebuilding with fp32 bias values",
-                path,
-            )
-        except Exception as exc:  # a corrupt entry must never break startup
-            logging.getLogger(__name__).warning(
-                "DSpark bigram candidate table %s could not be loaded (%s); rebuild",
-                path,
-                exc,
-            )
 
     start_time = time.perf_counter()
     # fp32 matmul matches the walk kernel's fp32 accumulation.
@@ -445,21 +372,11 @@ def compute_markov_bias_top_ids(
         del bias, topk
     elapsed = time.perf_counter() - start_time
 
-    try:
-        os.makedirs(directory, exist_ok=True)
-        tmp = os.path.join(directory, f".{os.getpid()}.{os.path.basename(path)}.tmp")
-        torch.save({"ids": ids.cpu(), "values": values.cpu()}, tmp)
-        os.replace(tmp, path)
-    except OSError as exc:  # the table stays usable in memory regardless
-        logging.getLogger(__name__).warning(
-            "DSpark bigram candidate table could not be cached at %s (%s)", path, exc
-        )
     logging.getLogger(__name__).info(
-        "DSpark bigram candidate table: built %d x top-%d in %.1fs (cached at %s)",
+        "DSpark bigram candidate table: built %d x top-%d in %.1fs",
         target_vocab,
         m,
         elapsed,
-        path,
     )
     return ids, values
 
