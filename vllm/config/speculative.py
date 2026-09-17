@@ -598,8 +598,7 @@ class SpeculativeConfig:
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -1546,9 +1545,13 @@ class SpeculativeConfig:
                     )
                 )
 
+                # Use the final draft config, after any architecture overrides,
+                # so EP agrees with ModelConfig's expert-count validation.
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        draft_model_config=self.draft_model_config,
                     )
                 )
 
@@ -1561,8 +1564,16 @@ class SpeculativeConfig:
                 self.index_share_for_mtp_iteration
             )
 
-        if self.method != "dspark" and self.enable_adaptive_verification:
-            raise ValueError("Adaptive verification only supported with DSpark")
+        if (
+            self.method != "dspark"
+            and self.enable_adaptive_verification
+            and self.use_local_argmax_reduction
+        ):
+            raise ValueError(
+                "Adaptive verification estimates per-position acceptance from "
+                "the draft logits, which use_local_argmax_reduction never "
+                "materializes. Disable one of them."
+            )
 
         return self
 
@@ -1619,7 +1630,6 @@ class SpeculativeConfig:
         speculative_max_model_len is mainly used for testing that sequences can
         skip speculation.
         """
-
         if speculative_max_model_len is not None:
             if speculative_max_model_len > draft_max_model_len:
                 raise ValueError(
@@ -1663,6 +1673,7 @@ class SpeculativeConfig:
         Args:
             draft_hf_config: The draft model's HF config, mutated in place.
             target_max_model_len: The target model's max_model_len.
+
         """
         draft_max_position_embeddings = getattr(
             draft_hf_config, "max_position_embeddings", None
@@ -1687,8 +1698,7 @@ class SpeculativeConfig:
         speculative_draft_tensor_parallel_size: int | None,
         draft_hf_config: PretrainedConfig,
     ) -> int:
-        """
-        Verifies and adjusts the tensor parallel size for a draft model
+        """Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
         """
         # If speculative_draft_tensor_parallel_size is unset then set it
@@ -1717,8 +1727,7 @@ class SpeculativeConfig:
         return speculative_draft_tensor_parallel_size
 
     def update_arch_(self):
-        """
-        EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
+        """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
         """
         self.draft_model_config.hf_text_config = get_hf_text_config(
@@ -1738,14 +1747,21 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        draft_model_config: ModelConfig | None = None,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config, except the tp_size.
+        Use the draft TP size and disable inherited EP for known dense drafts.
+        Without a draft model config, preserve the previous EP inheritance.
         """
+        enable_ep = target_parallel_config.enable_expert_parallel
+        if draft_model_config is not None:
+            enable_ep = enable_ep and draft_model_config.is_moe
+
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
+            enable_expert_parallel=enable_ep,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
@@ -1918,6 +1934,13 @@ class SpeculativeConfig:
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
+
+    def uses_draft_kv_cache(self) -> bool:
+        return (
+            self.use_eagle()
+            or self.uses_draft_model()
+            or self.uses_extract_hidden_states()
+        )
 
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"

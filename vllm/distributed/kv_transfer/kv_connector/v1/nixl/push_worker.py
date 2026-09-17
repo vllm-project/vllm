@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -79,6 +82,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
+
+    _supports_pp_hma = True
 
     def __init__(
         self,
@@ -145,7 +150,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
@@ -163,7 +168,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             return
 
         # D-side: track reqs waiting for P to push.
@@ -338,7 +343,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None)
+                self._failed_recv_reqs.put(rid)
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))
@@ -351,14 +356,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _do_send_reg_notif(self, req_id: str, reg_data: dict[str, Any]) -> None:
         engine_id = reg_data["remote_engine_id"]
         notif_msg = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg_data)
-        agents = self._remote_agents.get(engine_id)
+        # _remote_agents is mutated on other threads; snapshot under the lock.
+        with self._handshake_lock:
+            agents = dict(self._remote_agents.get(engine_id) or {})
         if not agents:
             logger.error(
                 "No remote agents for engine %s; cannot send registration for %s",
                 engine_id,
                 req_id,
             )
-            self._handle_failed_transfer(req_id, None)
+            self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
             try:
@@ -522,7 +529,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
+        local_region_groups = self.region_group_ids
+        remote_region_groups = self.dst_region_group_ids[engine_id]
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ and not self._transfer_layer_group_ids:
+            raise NotImplementedError(
+                "NixlPushConnector does not support different producer and "
+                "consumer cache-group layouts"
+            )
 
         # MLA latent is replicated across D's TP ranks: the tp-mapping
         # collapses it to one rank (fine for reads), but push must WRITE every
@@ -536,6 +550,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
         else:
             write_ranks = list(plan.all_source_ranks)
+
+        num_groups = len(local_block_ids)
 
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
@@ -708,9 +724,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # don't have a ``_recving_metadata`` entry to invalidate, so
             # we just release the handle and let the engine reschedule
             # via the lease / watchdog.
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self.xfer_stats.record_failed_transfer()
+            if not self._handle_failed_transfer(request_id, handle):
+                return handle
             return None
 
     # --- Notification handling on engine main thread ------------------ #
@@ -777,18 +792,28 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
         # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
-        done_sending, done_recving = super().get_finished()
+        results = super().get_transfer_results()
+        done_sending = results.finished_sending
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing, failed_pushing = self._pop_done_transfers(
+                self._sending_transfers
+            )
+        # A failed send must never be reported as done: its blocks
+        # are freed via the lease / watchdog instead.
+        done_pushing = {
+            req_id
+            for req_id in done_pushing - failed_pushing
+            if req_id in self._recving_metadata
+        }
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
@@ -803,4 +828,4 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
-        return done_sending, done_recving
+        return results

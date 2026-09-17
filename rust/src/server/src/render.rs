@@ -13,6 +13,7 @@ use vllm_chat::{
     ParserSelection, RendererSelection, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
+use vllm_text::backend::hf::HfOverrides;
 
 use crate::{
     HttpListenerMode, TlsConfig,
@@ -24,6 +25,8 @@ use crate::{
 #[derive(Debug)]
 pub struct RenderConfig {
     pub model: String,
+    pub revision: Option<String>,
+    pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     pub host: String,
     pub port: u16,
@@ -67,6 +70,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
@@ -150,6 +155,8 @@ mod tests {
         let error = serve_render(
             RenderConfig {
                 model: "test-model".to_string(),
+                revision: None,
+                hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),
                 port: 8000,

@@ -206,8 +206,7 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """
-        When enable_tower_connector_lora is True, multi-modal embeddings
+        """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
         generated based on the LoRA request to prevent incorrect cache hits.
         """
@@ -354,12 +353,21 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                prompt_token_ids, prompt_embeds
+            )
+            if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
+                raise VLLMValidationError(
+                    f"routed_experts_prompt_start must be between 0 and "
+                    f"the prompt length ({prompt_len}), inclusive.",
+                    parameter="routed_experts_prompt_start",
+                    value=sampling_params.routed_experts_prompt_start,
+                )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len - prompt_len
                 )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -368,12 +376,7 @@ class InputProcessor:
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
             if sampling_params.trace_decode_token_ids:
-                self._normalize_trace_replay_params(
-                    sampling_params,
-                    length_from_prompt_token_ids_or_embeds(
-                        prompt_token_ids, prompt_embeds
-                    ),
-                )
+                self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
             pooling_params = params.clone()
 

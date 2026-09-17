@@ -4,7 +4,7 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -12,6 +12,25 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA KV offloading."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to one top-k per decode query plus one top-k of LRU slack. The
+    physical allocation is rounded up to the GPU cache block size selected
+    from the active backends.
+    """
+
+    eager_host_mirror: bool = True
+    """Mirror decode-written KV rows to the host pool during the forward so
+    page spills complete without moving data. When disabled, decode rows stay
+    resident-only and evicted pages are copied to host at spill time. Prefill
+    rows are always mirrored during the forward."""
 
 
 @config
@@ -67,6 +86,21 @@ class AttentionConfig:
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
 
+    indexer_sparse_logits: bool = False
+    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
+    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
+    the whole context and masking them. Requires `indexer_kv_dtype="mxfp4"`,
+    an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
+    (the top-k runs on the kernels' bf16 logits). The sparse path costs
+    O(candidate blocks) per query regardless of context length, so it pays off
+    for long contexts (roughly 32K tokens and beyond) and is slower below."""
+
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    with defaults when HiSparseConnector is configured (directly or via
+    MultiConnector); set it explicitly only to tune its fields."""
+
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
@@ -116,8 +150,7 @@ class AttentionConfig:
         return self.indexer_kv_dtype
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
