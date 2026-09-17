@@ -556,6 +556,41 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+
+    def _get_remaining_token_demand(
+        self,
+        running_index: int,
+        threshold: int,
+        defer_prefills: bool
+    ) -> int:
+        demand = 0
+        # 1. Add demand from remaining RUNNING requests
+        if running_index >= 0:
+            for i in range(running_index + 1, len(self.running)):
+                req = self.running[i]
+                if defer_prefills and req.is_prefill_chunk:
+                    continue
+                req_demand = (
+                    req.num_tokens_with_spec
+                    + req.num_output_placeholders
+                    - req.num_computed_tokens
+                )
+                if req_demand > 0:
+                    demand += min(req_demand, threshold) if threshold > 0 else req_demand
+
+        # 2. Add demand from WAITING requests
+        for req in self.waiting:
+            req_demand = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
+            if req_demand > 0:
+                demand += min(req_demand, threshold) if threshold > 0 else req_demand
+                
+        for req in self.skipped_waiting:
+            req_demand = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
+            if req_demand > 0:
+                demand += min(req_demand, threshold) if threshold > 0 else req_demand
+
+        return demand
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -656,8 +691,16 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            threshold = self.scheduler_config.long_prefill_token_threshold
+            if 0 < threshold < num_new_tokens:
+                remaining_demand = self._get_remaining_token_demand(
+                    running_index=req_index,
+                    threshold=threshold,
+                    defer_prefills=defer_prefills
+                )
+                allowed_tokens = max(threshold, token_budget - remaining_demand)
+                if num_new_tokens > allowed_tokens:
+                    num_new_tokens = allowed_tokens
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1073,7 +1116,14 @@ class Scheduler(SchedulerInterface):
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                        remaining_demand = self._get_remaining_token_demand(
+                            running_index=-1,
+                            threshold=threshold,
+                            defer_prefills=defer_prefills
+                        )
+                        allowed_tokens = max(threshold, token_budget - remaining_demand)
+                        if num_new_tokens > allowed_tokens:
+                            num_new_tokens = allowed_tokens
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
