@@ -57,6 +57,66 @@ impl ParserSelection {
     }
 }
 
+/// Server-side floor for tool-call structural tags (`--tool-strict-level`).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    DeserializeFromStr,
+    SerializeDisplay,
+)]
+pub enum ToolStrictLevel {
+    /// Constrain a `tool_choice = "auto"` request only when a tool sets `strict: true`.
+    #[default]
+    Off,
+    /// Constrain the tool-call envelope for every request with tools.
+    Function,
+    /// Additionally pin argument schemas, as if every tool were `strict: true`.
+    Parameter,
+}
+
+impl ToolStrictLevel {
+    pub const OFF_LITERAL: &str = "off";
+    pub const FUNCTION_LITERAL: &str = "function";
+    pub const PARAMETER_LITERAL: &str = "parameter";
+}
+
+impl FromStr for ToolStrictLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::OFF_LITERAL) {
+            Ok(Self::Off)
+        } else if value.eq_ignore_ascii_case(Self::FUNCTION_LITERAL) {
+            Ok(Self::Function)
+        } else if value.eq_ignore_ascii_case(Self::PARAMETER_LITERAL) {
+            Ok(Self::Parameter)
+        } else {
+            Err(format!(
+                "unknown tool strict level {value:?}; expected one of {}, {}, {}",
+                Self::OFF_LITERAL,
+                Self::FUNCTION_LITERAL,
+                Self::PARAMETER_LITERAL
+            ))
+        }
+    }
+}
+
+impl fmt::Display for ToolStrictLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Off => Self::OFF_LITERAL,
+            Self::Function => Self::FUNCTION_LITERAL,
+            Self::Parameter => Self::PARAMETER_LITERAL,
+        })
+    }
+}
+
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,

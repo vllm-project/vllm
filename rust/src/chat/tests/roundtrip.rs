@@ -717,6 +717,7 @@ async fn parse_completion(
     let processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
+            tool_strict_level: vllm_chat::ToolStrictLevel::Off,
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },

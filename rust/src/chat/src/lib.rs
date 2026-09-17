@@ -30,7 +30,7 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
-pub use parser::{ParserSelection, validate_parser_overrides};
+pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
 pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
@@ -74,6 +74,8 @@ pub struct ChatRequestProcessor {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used when preparing generation requests.
     reasoning_parser: ParserSelection,
+    /// Server-side floor for tool-call structural tags.
+    tool_strict_level: ToolStrictLevel,
 }
 
 impl ChatRequestProcessor {
@@ -85,6 +87,7 @@ impl ChatRequestProcessor {
             model_dtype: Some(model_dtype),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            tool_strict_level: ToolStrictLevel::Off,
         }
     }
 
@@ -95,6 +98,7 @@ impl ChatRequestProcessor {
             model_dtype: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            tool_strict_level: ToolStrictLevel::Off,
         }
     }
 
@@ -106,6 +110,12 @@ impl ChatRequestProcessor {
     ) -> Self {
         self.tool_call_parser = tool_call_parser;
         self.reasoning_parser = reasoning_parser;
+        self
+    }
+
+    /// Configure the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+        self.tool_strict_level = tool_strict_level;
         self
     }
 
@@ -207,6 +217,7 @@ impl ChatRequestProcessor {
             NewChatOutputProcessorOptions {
                 tool_call_parser: &self.tool_call_parser,
                 reasoning_parser: &self.reasoning_parser,
+                tool_strict_level: self.tool_strict_level,
             },
         )?;
         let text_request = self.prepare_text_request(request).await?;
@@ -252,6 +263,12 @@ impl ChatLlm {
     /// Set reasoning parser selection.
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
         self.processor.reasoning_parser = selection;
+        self
+    }
+
+    /// Set the server-side floor for tool-call structural tags.
+    pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
+        self.processor.tool_strict_level = tool_strict_level;
         self
     }
 

@@ -14,6 +14,7 @@ use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+    ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_text::backend::hf::HfOverrides;
@@ -229,6 +230,8 @@ pub struct Config {
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for tool-call structural tags.
+    pub tool_strict_level: ToolStrictLevel,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
