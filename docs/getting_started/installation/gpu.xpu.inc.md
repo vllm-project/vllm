@@ -31,7 +31,9 @@ To install the wheel built from the latest main branch:
 ```bash
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
 ```
+
 Note that after upgrading to PyTorch 2.14, xpu graph support requires specific oneAPI packages.
+
 ```bash
 uv pip install \
        "intel-cmplr-lib-rt==2026.1.1" \
