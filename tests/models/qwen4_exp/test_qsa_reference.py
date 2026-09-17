@@ -906,6 +906,108 @@ def test_qsa_block_expansion_correctness() -> None:
     assert actual[:, 11].tolist() == [6, 11]
 
 
+# Production selection width: token top-k 2048 expanded at compress ratio 4.
+_SELECTION_WIDTH = 2051
+
+# base_programs -> (block_n, num_warps, num_tiles, num_splits) at
+# _SELECTION_WIDTH columns, pinned at both sides of every region boundary.
+# use_prefill_config only splits the bp > 2048 region, which every table shares.
+_GB300_SELECTOR_TABLE = {
+    1: (32, 4, 65, 64),
+    24: (32, 4, 65, 64),
+    25: (32, 1, 65, 16),
+    32: (32, 1, 65, 16),
+    33: (32, 1, 65, 8),
+    64: (32, 1, 65, 8),
+    65: (32, 1, 65, 4),
+    128: (32, 1, 65, 4),
+    129: (32, 1, 65, 8),
+    256: (32, 1, 65, 8),
+    257: (64, 2, 33, 4),
+    512: (64, 2, 33, 4),
+    513: (64, 2, 33, 1),
+    2048: (64, 2, 33, 1),
+}
+_SM90_SELECTOR_TABLE = {
+    1: (64, 2, 33, 33),
+    24: (64, 2, 33, 33),
+    25: (64, 2, 33, 33),
+    32: (64, 2, 33, 33),
+    33: (32, 1, 65, 16),
+    64: (32, 1, 65, 16),
+    65: (32, 1, 65, 8),
+    128: (32, 1, 65, 8),
+    129: (32, 1, 65, 8),
+    256: (32, 1, 65, 8),
+    257: (32, 1, 65, 4),
+    512: (32, 1, 65, 4),
+    513: (32, 1, 65, 4),
+    2048: (32, 1, 65, 4),
+}
+# fp8 K/V on sm_90: only the two ends of the table move; bp 25..256 stay default.
+_SM90_FP8_SELECTOR_TABLE = {
+    **_GB300_SELECTOR_TABLE,
+    1: (64, 2, 33, 33),
+    24: (64, 2, 33, 33),
+    257: (32, 1, 65, 4),
+    512: (32, 1, 65, 4),
+    513: (32, 1, 65, 4),
+    2048: (32, 1, 65, 4),
+}
+# bp > 2048 is not re-measured on sm_90; every table keeps the GB300 entry.
+_ABOVE_2048_SELECTOR_ENTRY = {True: (32, 1, 65, 1), False: (64, 2, 33, 1)}
+
+
+@pytest.mark.parametrize("is_sm90", [False, True])
+@pytest.mark.parametrize("use_prefill_config", [False, True])
+def test_qsa_select_config_regions(
+    monkeypatch: pytest.MonkeyPatch, is_sm90: bool, use_prefill_config: bool
+) -> None:
+    """The sm_90 tables and the GB300 fallback pin every region boundary."""
+    monkeypatch.setattr(qsa_ops, "_is_sm120", lambda: False)
+    monkeypatch.setattr(qsa_ops, "_is_sm90", lambda: is_sm90)
+    for is_fp8 in (False, True):
+        if not is_sm90:
+            expected_table = dict(_GB300_SELECTOR_TABLE)
+        else:
+            expected_table = dict(
+                _SM90_FP8_SELECTOR_TABLE if is_fp8 else _SM90_SELECTOR_TABLE
+            )
+        expected_table[2049] = _ABOVE_2048_SELECTOR_ENTRY[use_prefill_config]
+        for base_programs, expected in expected_table.items():
+            # The table is keyed on rows x kv heads, so both factorizations of
+            # a region boundary must land on the same entry.
+            for num_kv_heads in (1, 2):
+                if base_programs % num_kv_heads:
+                    continue
+                actual = qsa_ops._select_config(
+                    base_programs // num_kv_heads,
+                    num_kv_heads,
+                    use_prefill_config,
+                    _SELECTION_WIDTH,
+                    is_fp8,
+                )
+                assert actual == expected, (is_fp8, base_programs, num_kv_heads)
+                block_n, _, num_tiles, num_splits = actual
+                assert num_tiles == math.ceil(_SELECTION_WIDTH / block_n)
+                assert 1 <= num_splits <= num_tiles
+
+    if is_sm90:
+        # The small-batch entry asks for 64 splits and gets 33: one 64-wide
+        # tile per program, instead of a 65-tile/64-split two-tile tail.
+        for base_programs, is_fp8 in ((1, False), (32, False), (24, True)):
+            block_n, _, num_tiles, num_splits = qsa_ops._select_config(
+                base_programs, 1, use_prefill_config, _SELECTION_WIDTH, is_fp8
+            )
+            assert (block_n, num_tiles, num_splits) == (64, 33, 33)
+    else:
+        # The fallback is the GB300 table: a narrow selection clamps splits to
+        # tiles, and the bp <= 2048 decode entry is the single-split one.
+        assert qsa_ops._select_config(1, 1, use_prefill_config, 64) == (32, 4, 2, 2)
+        wide = qsa_ops._select_config(700, 1, use_prefill_config, _SELECTION_WIDTH)
+        assert wide == (64, 2, 33, 1)
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize(
     (
@@ -916,27 +1018,47 @@ def test_qsa_block_expansion_correctness() -> None:
         "use_prefill_config",
         "num_requests",
         "fp8",
+        "force_sm90",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, False, False, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, False, False, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, False, False, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, False, False, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, False, False, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, False, False, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, False, False, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, False, False, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, False, False, id="tp1_r2048_prefill"),
+        pytest.param(
+            2048, 24, 2, 1600, False, 63, False, False, id="tp1_r2048_uniform"
+        ),
         # fp8_e4m3 K/V caches on the TP1 head split.
-        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
-        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
-        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
-        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
+        pytest.param(1, 24, 2, 1600, True, 2, True, False, id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, True, False, id="tp1_r128_fp8"),
+        pytest.param(
+            2048, 24, 2, 1600, True, 63, True, False, id="tp1_r2048_prefill_fp8"
+        ),
+        pytest.param(
+            2048, 24, 2, 1600, False, 63, True, False, id="tp1_r2048_uniform_fp8"
+        ),
+        # One case per distinct config the sm_90 tables can pick (33-split
+        # 64-wide tile, 16/8/4-split 32-wide tiles; bf16 and fp8 kernels), at
+        # both region boundaries and with both kv-head factorizations. These
+        # force the sm_90 table on so they exercise it on any CUDA GPU, not only
+        # when the runner is Hopper. Page sizes reuse the TP4 rows above; the
+        # table is keyed on rows x kv_heads only.
+        pytest.param(4, 3, 1, 800, False, 3, False, True, id="sm90_bp4"),
+        pytest.param(16, 24, 2, 1568, False, 3, False, True, id="sm90_bp32_kv2"),
+        pytest.param(64, 3, 1, 800, False, 7, False, True, id="sm90_bp64"),
+        pytest.param(256, 3, 1, 800, False, 13, False, True, id="sm90_bp256"),
+        pytest.param(512, 24, 2, 1568, False, 17, False, True, id="sm90_bp1024_kv2"),
+        pytest.param(16, 3, 1, 800, False, 3, True, True, id="sm90_bp16_fp8"),
+        pytest.param(512, 3, 1, 784, False, 17, True, True, id="sm90_bp512_fp8"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -947,6 +1069,8 @@ def test_qsa_sparse_paged_attention_correctness(
     use_prefill_config: bool,
     num_requests: int,
     fp8: bool,
+    force_sm90: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """QSA sparse paged attention matches the dense reference.
 
@@ -954,7 +1078,11 @@ def test_qsa_sparse_paged_attention_correctness(
     the scales; the reference dequantizes the same cache with those scales, so
     both paths compare the production kernel against the reference on identical
     inputs. fp8=True additionally covers the host-side scale folding.
+    force_sm90=True pins the sm_90 selector table so its configs run on any GPU.
     """
+    if force_sm90:
+        monkeypatch.setattr(qsa_ops, "_is_sm120", lambda: False)
+        monkeypatch.setattr(qsa_ops, "_is_sm90", lambda: True)
     torch.manual_seed(2)
     # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
     # the trailing count column, block table and row-to-request map.

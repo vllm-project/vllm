@@ -22,6 +22,12 @@ def _is_sm120() -> bool:
     return current_platform.get_device_capability() == (12, 0)
 
 
+@lru_cache(maxsize=1)
+def _is_sm90() -> bool:
+    """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
+    return current_platform.get_device_capability() == (9, 0)
+
+
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
@@ -509,6 +515,39 @@ def _select_sm120_config(
     return 32, 4, 1
 
 
+def _select_sm90_config(
+    base_programs: int, is_fp8: bool
+) -> tuple[int, int, int] | None:
+    """(block_n, target_splits, num_warps) measured on sm_90 (H20), or None where
+    the default table is kept.
+
+    Measured over the full attention + split-K merge + output gate at group
+    3/6/12 with 1 and 2 kv heads, bf16 and fp8 K/V. Two effects drive the table.
+    Small batches are latency-bound and the kernel hands tiles to split programs
+    stride-wise, so the default (32, 64, 4) leaves one program with a two-tile
+    tail (65 tiles over 64 splits) that the whole launch waits for; a 64-wide
+    tile makes 33 tiles, the 64 requested splits clamp to 33 and every program
+    runs exactly one tile. From a few hundred programs up the kernel is
+    gather-bound and wants resident CTAs: BLOCK_N 64 needs 68-76 KB of shared
+    memory per CTA (num_stages=2, head_dim 256), 3 CTAs per SM, against 6 for
+    BLOCK_N 32 with one warp; extra warps only split an already tiny
+    [group, 256] x [256, BLOCK_N] dot. With fp8 caches the default entries for
+    bp 25..256 are already the fastest measured, and the bp > 2048 region was
+    not re-measured for either dtype.
+    """
+    if base_programs > 2048:
+        return None
+    if base_programs <= (24 if is_fp8 else 32):
+        return 64, 64, 2
+    if is_fp8:
+        return None if base_programs <= 256 else (32, 4, 1)
+    if base_programs <= 64:
+        return 32, 16, 1
+    if base_programs <= 256:
+        return 32, 8, 1
+    return 32, 4, 1
+
+
 def _select_config(
     num_rows: int,
     num_kv_heads: int,
@@ -521,13 +560,16 @@ def _select_config(
     Keyed on base_programs = num_rows * num_kv_heads. The bp > 2048 region splits
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
     the uniform decode/verify length). This default table was tuned on GB300;
-    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead.
+    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
+    and sm_90 (Hopper) to _select_sm90_config for the regions it re-measured.
     """
     base_programs = num_rows * num_kv_heads
     if _is_sm120():
         BLOCK_N, target_splits, num_warps = _select_sm120_config(
             base_programs, use_prefill_config, is_fp8
         )
+    elif _is_sm90() and (sm90 := _select_sm90_config(base_programs, is_fp8)):
+        BLOCK_N, target_splits, num_warps = sm90
     elif base_programs > 2048:
         BLOCK_N, target_splits, num_warps = (
             (32, 1, 1) if use_prefill_config else (64, 1, 2)
