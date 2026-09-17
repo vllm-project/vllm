@@ -23,12 +23,13 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import regex as re
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.models.qwen3_asr import Qwen3ASRFeatureExtractor, Qwen3ASRProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -53,7 +54,6 @@ from vllm.model_executor.models.qwen2_5_omni_thinker import (
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeAudioEncoder,
-    Qwen3OmniMoeThinkerMultiModalProcessor,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -79,6 +79,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
@@ -91,9 +92,6 @@ from vllm.transformers_utils.configs.qwen3_asr import (
     Qwen3ASRThinkerConfig,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.qwen3_asr import (
-    Qwen3ASRProcessor,
-)
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -187,19 +185,20 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(Qwen3ASRConfig).thinker_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
-        processor = self.ctx.get_hf_processor(
+        return self.ctx.get_hf_processor(
             Qwen3ASRProcessor,
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-        if not hasattr(processor, "audio_token"):
-            processor.audio_token = "<|audio_pad|>"
-        return processor
 
-    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
+    def get_feature_extractor(
+        self, **kwargs: object
+    ) -> WhisperFeatureExtractor | Qwen3ASRFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor
-        assert isinstance(feature_extractor, WhisperFeatureExtractor)
+        assert isinstance(
+            feature_extractor, (WhisperFeatureExtractor, Qwen3ASRFeatureExtractor)
+        )
         return feature_extractor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -279,8 +278,36 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    BaseMultiModalProcessor[Qwen3ASRProcessingInfo],
 ):
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        features = []
+        masks = []
+        # Extract each clip independently so padding cannot change its features
+        # or make them depend on which other clips hit the processor cache.
+        for audio in cast(list[AudioItem], hf_data["audio"]):
+            hf_inputs = self.info.ctx.call_hf_processor(
+                processor,
+                dict(text=processor.audio_token, audio=audio),
+                hf_kwargs,
+            )
+            mask = hf_inputs["input_features_mask"][0]
+            features.append(hf_inputs["input_features"][0, :, mask.bool()])
+            masks.append(mask)
+
+        return BatchFeature(
+            dict(
+                input_audio_features=torch.cat(features, dim=1),
+                feature_attention_mask=masks,
+                audio_feature_lengths=torch.stack([mask.sum() for mask in masks]),
+            )
+        )
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
