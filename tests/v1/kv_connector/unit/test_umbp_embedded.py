@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
+    KVLayoutPlanner,
     KVRange,
     KVRegion,
     RankTopology,
@@ -181,5 +182,49 @@ def test_embedded_publish_makes_object_visible_atomically():
     worker.publish(completed)
 
     assert scheduler.lookup(["publish-key"]) == [True]
+    worker.close()
+    scheduler.close()
+
+
+def test_embedded_partial_tail_round_trip():
+    topology = RankTopology()
+    descriptor = KVLayoutDescriptor(
+        regions=(KVRegion("layer0", 0, 16, 16, 0, block_size=16),),
+        topology=topology,
+    )
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig("embedded", {"backend": "memory"})
+    )
+    worker = runtime.create_worker_handle("partial-tail", topology, descriptor)
+    scheduler = runtime.create_scheduler_handle("partial-tail", topology, descriptor)
+    source = torch.arange(32, dtype=torch.uint8).reshape(2, 16)
+    destination = torch.zeros((2, 16), dtype=torch.uint8)
+    planner = KVLayoutPlanner(descriptor.regions)
+
+    planner.register_kv_caches({"layer0": source})
+    store_plan = planner.plan_registered_block(
+        "partial-tail-key",
+        block_id=0,
+        token_start=0,
+        token_end=12,
+    )
+    worker.register_buffers({"layer0": source})
+    store_job = worker.store([store_plan])
+    worker.publish(worker.wait(store_job))
+    assert scheduler.lookup(["partial-tail-key"]) == [True]
+
+    planner.register_kv_caches({"layer0": destination})
+    load_plan = planner.plan_registered_block(
+        "partial-tail-key",
+        block_id=1,
+        token_start=0,
+        token_end=12,
+    )
+    worker.register_buffers({"layer0": destination})
+    load_result = worker.wait(worker.load([load_plan]))
+
+    assert load_result.status.value == "completed"
+    assert torch.equal(source[0, :12], destination[1, :12])
+    assert torch.equal(destination[0], torch.zeros(16, dtype=torch.uint8))
     worker.close()
     scheduler.close()
