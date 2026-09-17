@@ -15,6 +15,7 @@ use super::{BenchCommand, Cli, Command};
 fn serve_output_logging_flags_set_output_and_delta_logging() {
     for (flags, outputs, deltas) in [
         (vec![], false, true),
+        (vec!["--no-enable-log-outputs"], false, true),
         (vec!["--enable-log-outputs"], true, true),
         (
             vec!["--enable-log-outputs", "--no-enable-log-deltas"],
@@ -269,6 +270,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_log_outputs: false,
+                        no_enable_log_outputs: false,
                         enable_log_deltas: true,
                         no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,
@@ -1111,6 +1113,7 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_log_outputs: false,
+                        no_enable_log_outputs: false,
                         enable_log_deltas: true,
                         no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,
@@ -1784,6 +1787,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_log_outputs: false,
+                        no_enable_log_outputs: false,
                         enable_log_deltas: true,
                         no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,

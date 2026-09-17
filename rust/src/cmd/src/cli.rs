@@ -329,10 +329,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_outputs: bool,
 
+    /// Disable model output logs.
+    #[arg(long, conflicts_with = "enable_log_outputs")]
+    #[serde(skip)]
+    pub no_enable_log_outputs: bool,
+
     /// If set to False, output deltas will not be logged. Relevant only if
     /// --enable-log-outputs is set.
     #[arg(long, default_value_t = true, default_missing_value = "true", num_args = 0..=1)]
-    #[serde(default = "default_log_deltas")]
+    #[serde(default = "default_true")]
     pub enable_log_deltas: bool,
 
     /// Disable streaming delta logs while retaining the complete output log.
@@ -616,7 +621,7 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
-            enable_log_outputs: self.enable_log_outputs,
+            enable_log_outputs: self.enable_log_outputs && !self.no_enable_log_outputs,
             enable_log_deltas: self.enable_log_deltas && !self.no_enable_log_deltas,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
@@ -638,7 +643,7 @@ fn default_engine_ready_timeout_secs() -> u64 {
     600
 }
 
-fn default_log_deltas() -> bool {
+fn default_true() -> bool {
     true
 }
 
