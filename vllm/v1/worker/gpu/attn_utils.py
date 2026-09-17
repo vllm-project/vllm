@@ -495,6 +495,14 @@ def build_attn_metadata(
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
+            tail_options = attn_metadata_builder.vllm_config.additional_config
+            if isinstance(tail_options, dict) and tail_options.get(
+                "dsv41_exact_decoder_tail", False
+            ):
+                metadata._decoder_tail_source = (
+                    attn_metadata_builder,
+                    common_attn_metadata,
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

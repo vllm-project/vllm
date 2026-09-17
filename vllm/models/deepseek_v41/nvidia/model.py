@@ -542,6 +542,59 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
+        self.decoder_tail = None
+        tail_options = vllm_config.additional_config
+        if isinstance(tail_options, dict) and tail_options.get(
+            "dsv41_exact_decoder_tail", False
+        ):
+            from vllm.config import CompilationMode
+            from vllm.models.deepseek_v41.decoder_tail import DecoderTail
+
+            parallel = vllm_config.parallel_config
+            mm = vllm_config.model_config.multimodal_config
+            if (
+                not vllm_config.use_v2_model_runner
+                or parallel.pipeline_parallel_size != 1
+                or parallel.data_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.use_ubatching
+                or vllm_config.speculative_config is not None
+                or vllm_config.cache_config.enable_prefix_caching
+                or vllm_config.lora_config is not None
+                or vllm_config.model_config.enable_return_routed_experts
+                or vllm_config.model_config.enable_sleep_mode
+                or vllm_config.compilation_config.mode != CompilationMode.NONE
+                or (mm is not None and not mm.language_model_only)
+            ):
+                raise ValueError(
+                    "Exact decoder-tail prototype requires text MRV2, DP1/PP1, "
+                    "no CP/DBO/speculation/APC."
+                )
+            start = max(config.kv_source_layer_ids) + 1
+            assert start > max(config.engram_layer_ids)
+            if any(
+                not isinstance(self.layers[i].attn, DeepseekV4MegaAttnAttention)
+                or self.layers[i].attn.window_size != config.sliding_window
+                for i in range(start, self.end_layer)
+            ):
+                raise ValueError(
+                    "Decoder-tail prototype requires uniform-window mega attention."
+                )
+            assert all(
+                not self.layers[i].attn.is_kv_source
+                for i in range(start, self.end_layer)
+            )
+            self.decoder_tail = DecoderTail(
+                vllm_config,
+                start,
+                self.end_layer,
+                config.sliding_window,
+                self.use_sequence_parallel,
+                self.topk_indices_buffer,
+                self.candidate_block_buffer,
+            )
+
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
         # layer's sliding-window KV cache. Only PP ranks owning an engram
@@ -695,6 +748,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             gathered_hashes[:, engram.layer_hash_index]
                         )
 
+        if self.decoder_tail is not None:
+            self.decoder_tail.reset()
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -717,7 +772,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = layer(
+            states = (
                 hidden_states,
                 positions,
                 input_ids,
@@ -727,13 +782,23 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
-                capture_previous_aux=idx in self.aux_hidden_state_layers,
             )
+            kwargs = {"capture_previous_aux": idx in self.aux_hidden_state_layers}
+            if self.decoder_tail is None:
+                result = layer(*states, **kwargs)
+            else:
+                assert not self.aux_hidden_state_layers
+                result, positions, input_ids = self.decoder_tail.run(
+                    idx, layer, states, kwargs
+                )
+            hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = result
             if previous_aux is not None:
                 # idx is the one-based id of the layer whose post this is.
                 if self.use_sequence_parallel:
                     previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
                 aux_hidden_by_layer[idx] = previous_aux
+        if self.decoder_tail is not None and self.decoder_tail.active:
+            full_num_tokens = positions.shape[0]
         if layer is not None:
             # The last layer has no successor to fold its post into.
             hidden_states = mhc_post_tilelang(
@@ -774,6 +839,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel and self._mtp_hidden_buffer is None:
             # Without MTP, gather only the collapsed and normalized hidden states.
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        if self.decoder_tail is not None and self.decoder_tail.active:
+            hidden_states = self.decoder_tail.restore_output(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
