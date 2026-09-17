@@ -130,6 +130,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
         should_use_gfx1250_mx_scale_swizzle,
+        weight_mx_scale,
     )
 
     if should_use_gfx1250_mx_scale_swizzle():
@@ -154,7 +155,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         hidden_states,
         w1.storage.data,
         None,
-        quant_config.w1_precision.weight_scale.storage.data,
+        weight_mx_scale(quant_config.w1_precision).storage.data,
         quant_config.w1_precision.flex_ctx.lhs_data.scale,
         quant_config.w2_precision.flex_ctx.lhs_data.scale,
         quant_config.w1_bias,
@@ -174,7 +175,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         intermediate_cache1,
         w2.storage.data,
         None,
-        quant_config.w2_precision.weight_scale.storage.data,
+        weight_mx_scale(quant_config.w2_precision).storage.data,
         quant_config.w2_precision.flex_ctx.lhs_data.scale,
         None,
         quant_config.w2_bias,
@@ -190,8 +191,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
 
 class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    Monolithic MXFP4 W4A8 expert using AITER triton kernels.
+    """Monolithic MXFP4 W4A8 expert using AITER triton kernels.
 
     This backend uses:
     - aiter.ops.triton.moe_routing.routing for routing

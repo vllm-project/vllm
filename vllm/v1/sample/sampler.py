@@ -75,8 +75,7 @@ def _aiter_raw_fused_sample(logits: torch.Tensor, sm: SamplingMetadata) -> torch
 
 
 class Sampler(nn.Module):
-    """
-    A layer that samples the next tokens from the model's outputs
+    """A layer that samples the next tokens from the model's outputs
     with the following steps in order:
 
     1. If logprobs are requested:
@@ -231,6 +230,7 @@ class Sampler(nn.Module):
         Returns:
             LogprobsTensors with logprobs for the specified tokens, or None
             if no requests have logprob_token_ids.
+
         """
         if not logprob_token_ids:
             return None
@@ -313,7 +313,6 @@ class Sampler(nn.Module):
         The various logits processing functions called in this method
         may update the logits tensor in-place.
         """
-
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -373,8 +372,7 @@ class Sampler(nn.Module):
         num_logprobs: int,
         token_ids: torch.Tensor,
     ) -> LogprobsTensors:
-        """
-        Gather logprobs for topk and sampled/prompt token.
+        """Gather logprobs for topk and sampled/prompt token.
 
         Args:
           logprobs: (num tokens) x (vocab) tensor
@@ -390,6 +388,7 @@ class Sampler(nn.Module):
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
+
         """
         assert token_ids.dtype == torch.int64
         # Find the topK values.

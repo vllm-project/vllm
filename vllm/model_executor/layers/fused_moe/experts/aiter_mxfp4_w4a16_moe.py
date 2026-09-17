@@ -23,17 +23,6 @@ __all__ = [
 ]
 
 
-def _aiter_raw(t):
-    """Unwrap the `triton_kernels.tensor.Tensor` that `_swizzle_mxfp4` returns."""
-    if t is None or isinstance(t, torch.Tensor):
-        return t
-    assert hasattr(t, "storage"), (
-        f"expected a triton_kernels wrapped tensor with a .storage attribute, "
-        f"got {type(t)}"
-    )
-    return t.storage.data
-
-
 def _aiter_w4a16_silu_via_a8w4(
     hidden_states: torch.Tensor,
     w1_data,
@@ -53,9 +42,7 @@ def _aiter_w4a16_silu_via_a8w4(
     unpadded_N_w2,
     unpadded_K_w2,
 ) -> torch.Tensor:
-    """
-    MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation.
-    """
+    """MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation."""
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
     from aiter.ops.triton.quant import dynamic_mxfp8_quant
 
@@ -195,10 +182,14 @@ def aiter_triton_kernel_w4a16_moe_forward(
     assert quant_config.w1_precision is not None
     assert quant_config.w2_precision is not None
 
-    w1_data = _aiter_raw(w1)
-    w2_data = _aiter_raw(w2)
-    w1_wscale = _aiter_raw(quant_config.w1_precision.weight_scale)
-    w2_wscale = _aiter_raw(quant_config.w2_precision.weight_scale)
+    w1_data = w1.storage.data
+    w2_data = w2.storage.data
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        weight_mx_scale,
+    )
+
+    w1_wscale = weight_mx_scale(quant_config.w1_precision).storage.data
+    w2_wscale = weight_mx_scale(quant_config.w2_precision).storage.data
 
     gammas = routing_data.gate_scal if routing_data else None
 
