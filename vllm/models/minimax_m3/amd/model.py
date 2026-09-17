@@ -579,6 +579,32 @@ class MiniMaxM3Attention(nn.Module):
         return output
 
 
+# Widest row pitch aiter's reshape_and_cache can carry in its `int` stride args.
+_MAX_KV_INSERT_ROW_STRIDE = 2**31 - 1
+
+
+def _kv_insert_operand(t: torch.Tensor) -> torch.Tensor:
+    """K or V operand for ``aiter.reshape_and_cache``, without a needless copy.
+
+    The AITER sparse-PA insert takes K and V as column slices of the fused
+    ``[q | k | v | index_q | index_k]`` projection, so they are row-strided
+    views and never contiguous. ``reshape_and_cache`` does not need them to be:
+    it passes ``key.stride(0)`` to the kernel as the row pitch and reads
+    ``key[token_idx * key_stride + i]`` for ``i`` over ``num_heads *
+    head_size``, so the only requirement is that the trailing
+    ``(num_heads, head_size)`` block be contiguous within a row, which such a
+    slice always satisfies. Any other layout falls back to a copy.
+    """
+    if (
+        t.dim() == 3
+        and t.stride(2) == 1
+        and t.stride(1) == t.shape[2]
+        and t.stride(0) <= _MAX_KV_INSERT_ROW_STRIDE
+    ):
+        return t
+    return t.contiguous()
+
+
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention layer with the lightning-indexer branch.
 
@@ -902,8 +928,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             else "auto"
         )
         reshape_and_cache(
-            k.contiguous(),
-            v.contiguous(),
+            _kv_insert_operand(k),
+            _kv_insert_operand(v),
             key_cache,
             value_cache,
             slot_mapping,
