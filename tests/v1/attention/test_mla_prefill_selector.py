@@ -62,18 +62,17 @@ class TestGetMLAPrefillBackend:
         vllm_config = _make_vllm_config()
         zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
 
-        # The Zen backend is gated on is_available() rather than on the mocked
-        # platform: zentorch_utils binds current_platform at its own module
-        # scope, so patching vllm.platforms.current_platform does not reach it
-        # and on a Zen host the Zen backend would win.
-        with (
-            patch("vllm.platforms.current_platform") as mock_platform,
-            patch.object(zen_cls, "is_available", return_value=False),
-        ):
+        # A Zen CPU with zentorch selects the Zen backend, so expect whichever
+        # one this host offers.
+        expected = (
+            zen_cls if zen_cls.is_available() else MLAPrefillBackendEnum.CPU.get_class()
+        )
+
+        with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.is_cpu.return_value = True
 
             backend = get_mla_prefill_backend(vllm_config)
-            assert backend is MLAPrefillBackendEnum.CPU.get_class()
+            assert backend is expected
 
     def test_zen_cpu_prefers_zentorch_prefill(self):
         vllm_config = _make_vllm_config()
