@@ -1392,14 +1392,12 @@ def _fused_inverse_rope_gptj(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     rope_head_dim: int,
-    rotate_start: int = 0,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """bf16 inverse GPT-J RoPE via a single fused Triton kernel.
 
-    Rows below ``rotate_start`` were rotated by the decode attention epilogue
-    already; the rotation is a per-row bijection that reads both lanes of a
-    pair before storing, so a bf16 input is rotated in place and the untouched
-    rows cost nothing.
+    ``out`` may alias ``o``: the rotation is a per-row bijection whose kernel
+    reads both lanes of a pair before storing either.
     """
     assert o.dim() == 3 and o.stride(-1) == 1, (
         "_fused_inverse_rope_gptj expects a [T, H, D] input with a contiguous last dim"
@@ -1412,24 +1410,20 @@ def _fused_inverse_rope_gptj(
         f"[P, {rope_head_dim}] = cos | sin, got {tuple(cos_sin_cache.shape)}"
     )
     num_tokens, num_heads, head_dim = o.shape
-    inplace = rotate_start > 0
-    if inplace:
-        assert o.dtype == torch.bfloat16, (
-            "partial inverse RoPE rotates in place, so the attention output "
-            f"must already be bf16, got {o.dtype}"
-        )
-        out = o
-    else:
+    if out is None:
         out = torch.empty(
             (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
         )
-    num_rows = num_tokens - rotate_start
-    if num_rows <= 0:
+    else:
+        assert out.dtype == torch.bfloat16, (
+            f"inverse RoPE writes bf16, got an output buffer of {out.dtype}"
+        )
+    if num_tokens == 0:
         return out
-    _inverse_rope_gptj_kernel[(num_rows, num_heads)](
-        o[rotate_start:],
-        out[rotate_start:],
-        positions[rotate_start:],
+    _inverse_rope_gptj_kernel[(num_tokens, num_heads)](
+        o,
+        out,
+        positions,
         cos_sin_cache,
         o.stride(0),
         o.stride(1),
@@ -1442,6 +1436,25 @@ def _fused_inverse_rope_gptj(
         BLOCK_HALF=triton.next_power_of_2(rope_head_dim // 2),
     )
     return out
+
+
+def rocm_inverse_rope_rows_(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_head_dim: int,
+) -> None:
+    """Inverse-RoPE attention output rows in place.
+
+    For rows no attention kernel rotated in its epilogue. Call it from the
+    eager attention segment: which rows still owe a rotation depends on the
+    prefill/decode split, and the o_proj that used to do this runs inside the
+    compiled region, where a batch-dependent Python value would be frozen at
+    trace time.
+    """
+    if o.shape[0] == 0:
+        return
+    _fused_inverse_rope_gptj(o, positions, cos_sin_cache, rope_head_dim, out=o)
 
 
 def _get_cached_wo_a_bf16(
@@ -1500,17 +1513,26 @@ def rocm_inv_rope_einsum(
     n_local_groups: int,
     o_lora_rank: int,
     wo_a: torch.nn.Module,
-    rotate_start: int = 0,
+    inverse_rope: bool = True,
 ) -> torch.Tensor:
     """Inverse-RoPE + WO_A bmm path used on ROCm.
 
     Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16
-    wo_a weight so the per-step dequant disappears. ``rotate_start`` skips the
-    leading rows whose rotation the decode attention epilogue already did.
+    wo_a weight so the per-step dequant disappears. Callers whose attention
+    already rotated every row pass ``inverse_rope=False``; that is a property
+    of the attention backend, not of the batch, so it stays constant across
+    steps and is safe to read from compiled code.
     """
-    o_ref = _fused_inverse_rope_gptj(
-        o, positions, rotary_emb.cos_sin_cache, rope_head_dim, rotate_start
-    )
+    if inverse_rope:
+        o_ref = _fused_inverse_rope_gptj(
+            o, positions, rotary_emb.cos_sin_cache, rope_head_dim
+        )
+    else:
+        assert o.dtype == torch.bfloat16, (
+            "a pre-rotated attention output feeds the wo_a bmm directly, so it "
+            f"must already be bf16, got {o.dtype}"
+        )
+        o_ref = o
     o_ref = o_ref.reshape(o.shape[0], n_local_groups, -1)
 
     wo_a_weight = _get_cached_wo_a_bf16(
@@ -3631,9 +3653,10 @@ def rocm_sparse_attn_decode(
 ) -> int:
     """Run sparse MLA decode into ``output``.
 
-    Returns the number of leading rows whose inverse RoPE the kernel already
-    applied, so the caller knows what its output projection still owes. Zero
-    unless ``inv_rope_positions`` was given and a fusing kernel ran.
+    Passing ``inv_rope_positions`` folds the inverse RoPE into the reduce
+    epilogue. Returns how many leading rows of ``output`` came back rotated,
+    so a caller mixing in a decode path that does not fuse still knows what it
+    owes the standalone pass. Read it from the eager attention segment only.
     """
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "

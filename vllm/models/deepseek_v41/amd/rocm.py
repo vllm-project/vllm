@@ -34,6 +34,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
+    rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -498,9 +499,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
-        # Leading rows of the attention output that the decode reduce already
-        # inverse-RoPE'd, so _o_proj rotates only the prefill tail.
-        self._inv_roped_decode_rows = 0
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -650,7 +648,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.n_local_groups,
             self.o_lora_rank,
             self.wo_a,
-            rotate_start=self._inv_roped_decode_rows,
+            inverse_rope=False,
         )
         zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
@@ -692,7 +690,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
             )
             output.zero_()
-            self._inv_roped_decode_rows = 0
             return
 
         assert isinstance(attn_metadata, dict)
@@ -715,9 +712,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
-        # Only a decode kernel that fuses the inverse RoPE relieves _o_proj of
-        # it, and only for its own rows; _forward_decode reports how many.
-        self._inv_roped_decode_rows = 0
 
         if num_prefills > 0:
             self._forward_prefill(
@@ -729,8 +723,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_metadata=swa_metadata,
             )
+        rotated = 0
         if num_decodes > 0:
-            self._forward_decode(
+            rotated = self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=positions[:num_decode_tokens],
                 kv_cache=self_kv_cache,
@@ -739,6 +734,17 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
+        # Only the decode reduce rotates its own rows, and only the leading
+        # `rotated` of them; prefill rows and any decode path that did not
+        # fuse still owe the standalone pass. Settle that here rather than in
+        # _o_proj: the split is batch-dependent and _o_proj runs compiled,
+        # where such a value freezes at its trace-time value.
+        rocm_inverse_rope_rows_(
+            output[rotated:, : self.n_local_heads, :],
+            positions[rotated:],
+            self.rotary_emb.cos_sin_cache,
+            self.rope_head_dim,
+        )
 
     def _forward_decode(
         self,
@@ -749,7 +755,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
-    ) -> None:
+    ) -> int:
+        """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -775,7 +782,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 is_valid,
             )
 
-        self._inv_roped_decode_rows = rocm_sparse_attn_decode(
+        return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
             swa_k_cache=self.swa_cache_layer.kv_cache,
