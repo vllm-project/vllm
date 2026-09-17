@@ -34,7 +34,7 @@ def test_fused_mla_dual_rms_norm_group_quant_matches_unfused():
         ).to(torch.bfloat16) * kw
 
         q_f, s_f, kv_f = torch.ops.vllm.fused_mla_dual_rms_norm_group_quant(
-            q_c, qw, kv_c, kw, eps, eps, G
+            q_c, qw, kv_c, kw, eps, eps, G, False
         )
         torch.cuda.synchronize()
 
