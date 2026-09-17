@@ -631,4 +631,15 @@ def make_nixl_push_scheduler(
     sched._last_heartbeat_time = 0.0
     sched.blocks_per_sw = []
 
+    # Layer-wise overlapped WRITE-push state + budgeted diagnostics (opt-in;
+    # disabled here so the default push path is exercised). These are set by
+    # NixlPushConnectorScheduler.__init__, which this helper bypasses.
+    sched._layerwise = False
+    sched._lw_need_save = {}
+    sched._lw_pending_save = {}
+    sched._lw_emitted = set()
+    sched._lw_emit_log_budget = 0
+    sched._recv_seed_log_budget = 0
+    sched._dp_dbg_budget = 0
+
     return sched
