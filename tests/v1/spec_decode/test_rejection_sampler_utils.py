@@ -554,6 +554,82 @@ def test_synthetic_zero_rate_suffix_compaction_matches_full_k6(temperature: floa
     )
 
 
+@pytest.mark.parametrize("temperature", [0.7, 1.0])
+def test_synthetic_zero_rate_suffix_compaction_matches_probabilistic_k3(
+    temperature: float,
+):
+    """Three target rows reproduce probabilistic K3 when draft three is rejected."""
+    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 1024
+    k = 3
+    physical_rows = 3
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    target_logits_1d /= temperature
+
+    full = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        k,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    rates = torch.tensor(
+        unconditional_to_conditional_rates([1.0, 1.0, 0.0]),
+        dtype=torch.float32,
+        device=device,
+    )
+    full_sampled, full_num_sampled = rejection_sample(
+        **full,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+    )
+
+    full_draft_sampled = full["draft_sampled"].view(num_trials, k + 1)
+    compact = {
+        **full,
+        "target_logits": full["target_logits"]
+        .view(num_trials, k + 1, -1)[:, :physical_rows]
+        .reshape(num_trials * physical_rows, -1)
+        .contiguous(),
+        "draft_sampled": full_draft_sampled[:, :physical_rows].reshape(-1).contiguous(),
+        "cu_num_logits": torch.arange(num_trials + 1, dtype=torch.int32, device=device)
+        * physical_rows,
+        "pos": full["pos"]
+        .view(num_trials, k + 1)[:, :physical_rows]
+        .reshape(-1)
+        .contiguous(),
+        "expanded_idx_mapping": torch.arange(
+            num_trials, dtype=torch.int32, device=device
+        ).repeat_interleave(physical_rows),
+        "expanded_local_pos": torch.arange(
+            physical_rows, dtype=torch.int32, device=device
+        ).repeat(num_trials),
+    }
+    compact_sampled, compact_num_sampled = rejection_sample(
+        **compact,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+        synthetic_compaction_draft_sampled=full_draft_sampled[:, 1:],
+        synthetic_compaction_mask=torch.ones(
+            num_trials, dtype=torch.bool, device=device
+        ),
+    )
+
+    torch.testing.assert_close(compact_num_sampled, full_num_sampled, rtol=0, atol=0)
+    steps = torch.arange(k + 1, device=device).unsqueeze(0)
+    emitted = steps < full_num_sampled.unsqueeze(1)
+    torch.testing.assert_close(
+        compact_sampled[emitted],
+        full_sampled[emitted],
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
 def test_synthetic_suffix_compaction_supports_mixed_plain_request(
     temperature: float,

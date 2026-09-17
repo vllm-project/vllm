@@ -1608,7 +1608,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
-    # Kimi-K3 DSpark synthetic-greedy only. Preserve the configured draft
+    # Kimi-K3 DSpark synthetic rejection only. Preserve the configured draft
     # count for scheduler accounting, but omit target verifier suffix rows
     # whose committed unconditional acceptance rate is exactly zero.
     "VLLM_KIMI_K3_SYNTHETIC_VERIFY_COMPACTION": lambda: bool(

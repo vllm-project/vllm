@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 
 
 def resolve_synthetic_verify_max_drafts(vllm_config: VllmConfig) -> int | None:
-    """Return the physically required draft rows for Kimi synthetic greedy."""
+    """Return the physically required draft rows for Kimi synthetic rejection."""
     if not envs.VLLM_KIMI_K3_SYNTHETIC_VERIFY_COMPACTION:
         return None
 
@@ -26,10 +26,6 @@ def resolve_synthetic_verify_max_drafts(vllm_config: VllmConfig) -> int | None:
     if spec_config.rejection_sample_method != "synthetic":
         raise ValueError(
             "Kimi synthetic verifier compaction requires synthetic rejection"
-        )
-    if spec_config.draft_sample_method != "greedy":
-        raise ValueError(
-            "Kimi synthetic verifier compaction requires greedy draft sampling"
         )
     if spec_config.enable_adaptive_verification:
         raise ValueError(
@@ -66,9 +62,15 @@ def compact_synthetic_verification_counts(
         raise ValueError(f"max_drafts must be non-negative, got {max_drafts}")
     physical_drafts = np.minimum(logical_num_draft_tokens, max_drafts)
     needs_compaction = logical_num_draft_tokens > max_drafts
-    remappable = num_scheduled_tokens >= logical_num_draft_tokens
+    # A real decode has one more scheduled row than logical drafts. Equality
+    # occurs for K=3 / AL=3 warmup because its three physical rows are already
+    # compact while the synthetic scheduler still carries three draft entries.
+    remappable = num_scheduled_tokens > logical_num_draft_tokens
     already_compacted = needs_compaction & (num_scheduled_tokens == physical_drafts + 1)
-    if np.any(~remappable & ~already_compacted):
+    invalid = (needs_compaction & ~remappable & ~already_compacted) | (
+        ~needs_compaction & (num_scheduled_tokens < logical_num_draft_tokens)
+    )
+    if np.any(invalid):
         raise ValueError(
             "Draft count cannot exceed scheduled-token count unless the "
             "synthetic verifier rows are already compacted"
