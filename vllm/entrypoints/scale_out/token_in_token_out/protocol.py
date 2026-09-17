@@ -218,6 +218,16 @@ class GenerateRequest(BaseModel):
 
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_token_logprobs: bool = False
+    """Return the sampled token's logprob per generated position as a flat
+    ``token_logprobs`` float list instead of the OpenAI-style per-token
+    ``logprobs`` objects. Intended for RL rollout collection, where the
+    trainer needs one float per token and the per-token objects dominate
+    API-server CPU time. Implies ``sampling_params.flat_logprobs``; sets
+    ``sampling_params.logprobs = 0`` when it is unset. Non-streaming only;
+    requires ``--logprobs-mode raw_logprobs`` or ``processed_logprobs``.
+    Values are clamped to ``>= -9999.0`` like the ``logprobs`` objects.
+    ``logprobs > 0`` still returns the ``logprobs`` objects alongside."""
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -319,6 +329,9 @@ class GenerateRequest(BaseModel):
 class GenerateResponseChoice(BaseModel):
     index: int
     logprobs: ChatCompletionLogProbs | None = None
+    # Sampled-token logprob per generated position; set when the request
+    # asked for ``return_token_logprobs``.
+    token_logprobs: list[float] | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None

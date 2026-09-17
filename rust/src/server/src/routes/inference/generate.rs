@@ -50,6 +50,15 @@ pub async fn generate(
     ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    if body.return_token_logprobs.unwrap_or(false) {
+        return ApiError::invalid_request(
+            "return_token_logprobs is not supported by the Rust frontend yet; \
+             use the Python frontend"
+                .to_string(),
+            Some("return_token_logprobs"),
+        )
+        .into_response();
+    }
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mm_features = if let Some(parts) = body.content_parts.take() {

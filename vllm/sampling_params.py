@@ -301,6 +301,14 @@ class SamplingParams(
     NOTE: GC costs of FlatLogprobs is significantly smaller than
     list[dict[int, Logprob]]. After enabled, PromptLogprobs and
     SampleLogprobs would populated as FlatLogprobs."""
+    sampled_logprobs_only: bool = False
+    """Transport only the sampled token's logprob per generated position.
+    Requires ``logprobs == 0``. The scheduler emits one float per token
+    instead of a per-request ``LogprobsLists`` (token ids, logprobs, ranks),
+    and the output processor keeps a plain float list instead of building
+    ``Logprob`` entries or detokenizing; ``CompletionOutput.logprobs`` is
+    ``None`` and ``CompletionOutput.sampled_logprobs`` carries the values.
+    Set by ``/inference/v1/generate`` for ``return_token_logprobs``."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -553,6 +561,11 @@ class SamplingParams(
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
+        if self.sampled_logprobs_only and self.logprobs != 0:
+            raise ValueError(
+                "sampled_logprobs_only requires logprobs == 0, "
+                f"got logprobs={self.logprobs}."
+            )
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()

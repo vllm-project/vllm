@@ -73,6 +73,11 @@ def server(request):
     ]
 
     extra_args = getattr(request, "param", None)
+    env_dict = None
+    if isinstance(extra_args, dict):
+        # {"args": [...], "env": {...}} lets a test pin server env vars.
+        env_dict = extra_args.get("env")
+        extra_args = extra_args.get("args")
     if extra_args is not None:
         args = args + (
             list(extra_args)
@@ -80,7 +85,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -309,6 +314,188 @@ async def test_generate_logprobs(client, logprobs_value):
         assert "logprob" in entry
         assert len(entry["top_logprobs"]) >= 1
         assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+
+
+@pytest.mark.asyncio
+async def test_generate_return_token_logprobs(client):
+    """Flat per-token sampled logprobs match the OpenAI-style objects."""
+    base = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 8, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=base)
+    resp.raise_for_status()
+    ref = resp.json()["choices"][0]
+
+    resp = await client.post(GEN_ENDPOINT, json={**base, "return_token_logprobs": True})
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+
+    assert choice["token_ids"] == ref["token_ids"]
+    assert choice["logprobs"] is None
+    assert len(choice["token_logprobs"]) == len(choice["token_ids"])
+    expected = [entry["logprob"] for entry in ref["logprobs"]["content"]]
+    assert choice["token_logprobs"] == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_generate_return_token_logprobs_defaults_logprobs(client):
+    """Omitting sampling_params.logprobs still returns the flat array."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert choice["logprobs"] is None
+    assert len(choice["token_logprobs"]) == len(choice["token_ids"])
+    assert all(v <= 0.0 for v in choice["token_logprobs"])
+
+
+@pytest.mark.asyncio
+async def test_generate_return_token_logprobs_keeps_top_logprobs(client):
+    """With logprobs > 0 both representations are returned."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0, "logprobs": 2},
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    content = choice["logprobs"]["content"]
+    assert len(content) == len(choice["token_ids"]) == len(choice["token_logprobs"])
+    assert choice["token_logprobs"] == pytest.approx(
+        [entry["logprob"] for entry in content], abs=1e-6
+    )
+    assert all(len(entry["top_logprobs"]) == 2 for entry in content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [2, 4])
+async def test_generate_return_token_logprobs_n_choices(client, n):
+    """Every choice carries its own aligned array; values match the objects."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 6,
+            "temperature": 1.0,
+            "seed": 7,
+            "n": n,
+            "logprobs": 1,
+        },
+        "stream": False,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choices = resp.json()["choices"]
+    assert len(choices) == n
+    assert sorted(c["index"] for c in choices) == list(range(n))
+    for choice in choices:
+        assert len(choice["token_logprobs"]) == len(choice["token_ids"])
+        assert choice["token_logprobs"] == pytest.approx(
+            [entry["logprob"] for entry in choice["logprobs"]["content"]], abs=1e-6
+        )
+
+
+def test_sampled_token_logprobs_clamps_like_object_path():
+    """-inf and extreme values follow the same clamp as the logprobs objects."""
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.logprobs import FlatLogprobs
+
+    flat = FlatLogprobs(
+        start_indices=[0, 2, 3],
+        end_indices=[2, 3, 5],
+        token_ids=[5, 9, 7, 1, 2],
+        logprobs=[-0.25, -1.5, float("-inf"), -123456.0, -0.1],
+        ranks=[1, 2, 1, 1, 2],
+        decoded_tokens=[None] * 5,
+    )
+    assert ServingTokens._sampled_token_logprobs(flat) == [-0.25, -9999.0, -9999.0]
+
+
+@pytest.mark.asyncio
+async def test_generate_omits_token_logprobs_unless_requested(client):
+    """Callers that did not ask for the field must not see it (schema stays)."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 3, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    assert "token_logprobs" not in resp.json()["choices"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [
+        {
+            "args": [
+                "--speculative-config",
+                (
+                    '{"method": "ngram", "num_speculative_tokens": 3, '
+                    '"prompt_lookup_max": 4, "prompt_lookup_min": 2}'
+                ),
+            ],
+            # Without batch-invariant execution the object path is not a
+            # stable numerical oracle in this configuration: repeated
+            # object-path requests returned identical tokens but sampled
+            # logprobs differing by up to ~2e-2. Under VLLM_BATCH_INVARIANT=1
+            # the object and sampled-only paths match exactly.
+            "env": {"VLLM_BATCH_INVARIANT": "1"},
+        }
+    ],
+    indirect=True,
+)
+async def test_generate_return_token_logprobs_with_speculative_decoding(client):
+    """Multi-token steps (ngram speculation) keep the flat array aligned with
+    the object path through the ragged cu_num_generated_tokens boundaries."""
+    # A repetitive prompt so the n-gram proposer gets accepted drafts.
+    token_ids = [1, 2, 3, 4, 5, 6] * 6
+    base = {
+        "model": MODEL_NAME,
+        "token_ids": token_ids,
+        "sampling_params": {"max_tokens": 24, "temperature": 0.0, "logprobs": 0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=base)
+    resp.raise_for_status()
+    ref = resp.json()["choices"][0]
+    resp = await client.post(GEN_ENDPOINT, json={**base, "return_token_logprobs": True})
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert choice["token_ids"] == ref["token_ids"]
+    assert len(choice["token_logprobs"]) == len(choice["token_ids"]) == 24
+    assert choice["token_logprobs"] == pytest.approx(
+        [entry["logprob"] for entry in ref["logprobs"]["content"]], abs=1e-6
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_return_token_logprobs_rejects_stream(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": True,
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "return_token_logprobs" in resp.text
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,9 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Flat per-token sampled logprobs (Python frontend feature); the Rust
+    /// frontend rejects it explicitly rather than ignoring it.
+    pub return_token_logprobs: Option<bool>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
