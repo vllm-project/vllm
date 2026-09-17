@@ -14,6 +14,7 @@ processes, so anything derived from iteration order must not leak into
 from types import SimpleNamespace
 
 import pytest
+import torch.nn as nn
 
 import vllm.v1.spec_decode.llm_base_proposer as llm_base_proposer
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -109,4 +110,36 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         )
         assert len(proposer.draft_attn_groups) == 1
         assert proposer.draft_attn_groups[0].layer_names == expected_order
+
         assert proposer.block_size == KERNEL_BLOCK_SIZE
+
+
+def test_v1_shares_vocab_modules_that_start_as_none(monkeypatch):
+    monkeypatch.setattr(
+        llm_base_proposer,
+        "get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
+    target_embed = nn.Embedding(8, 4)
+    target_lm_head = nn.Linear(4, 8, bias=False)
+    target = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=target_embed),
+        lm_head=target_lm_head,
+    )
+    draft = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=None),
+        lm_head=None,
+        has_own_embed_tokens=False,
+        has_own_lm_head=False,
+        config=SimpleNamespace(hidden_size=4, vocab_size=8, draft_vocab_size=8),
+    )
+    proposer = object.__new__(llm_base_proposer.SpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(speculative_config=None)
+    proposer.use_local_argmax_reduction = False
+    proposer.model = draft
+
+    proposer._maybe_share_embeddings(target)
+    proposer._maybe_share_lm_head(target)
+
+    assert draft.model.embed_tokens is target_embed
+    assert draft.lm_head is target_lm_head
