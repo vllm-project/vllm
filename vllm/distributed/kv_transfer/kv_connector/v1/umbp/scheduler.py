@@ -61,6 +61,7 @@ class UMBPStoreConnectorScheduler:
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
+        self.lazy_offload = bool(extra.get("lazy_offload", False))
         if extra.get("enable_partial_hash_hits", False):
             raise ValueError(
                 "UMBP partial hash hits require a runtime tail-key protocol"
@@ -269,11 +270,16 @@ class UMBPStoreConnectorScheduler:
                 meta.load_requests[request.req_id] = load_plans
             else:
                 tracker = self._tracker_for_request(request.req_id)
+                tracker.save_mode = "lazy" if self.lazy_offload else "eager"
                 total_tokens = (
                     request.num_computed_tokens
                     + scheduler_output.num_scheduled_tokens[request.req_id]
                 )
-                store_plans = self._store_plans(request, tracker, total_tokens)
+                store_plans = (
+                    []
+                    if self.lazy_offload
+                    else self._store_plans(request, tracker, total_tokens)
+                )
                 meta.store_plans.extend(store_plans)
                 if store_plans:
                     meta.store_requests[request.req_id] = store_plans
@@ -289,7 +295,7 @@ class UMBPStoreConnectorScheduler:
             if load_plans:
                 meta.load_plans.extend(load_plans)
                 meta.load_requests[request_id] = load_plans
-            elif self.save_decode_cache:
+            elif self.save_decode_cache and not self.lazy_offload:
                 request = self._requests.get(request_id)
                 tracker = self._request_trackers.get(request_id)
                 if request is not None and tracker is not None:
@@ -398,6 +404,7 @@ class UMBPStoreConnectorScheduler:
         block_ids_override: tuple[list[int], ...] | None = None,
     ) -> list[BlockTransferPlan]:
         """Describe full blocks produced by a scheduled prefill."""
+        request_id = getattr(request, "request_id", None) or request.req_id
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         previous_saved_tokens = (
             tracker.retry_from_tokens
@@ -428,7 +435,7 @@ class UMBPStoreConnectorScheduler:
                             group_id=group_id,
                         ),
                         block_id=block_id,
-                        request_id=request.req_id,
+                        request_id=request_id,
                         generation=tracker.generation,
                         group_id=group_id,
                         block_hash=self._object_hash(
@@ -459,6 +466,26 @@ class UMBPStoreConnectorScheduler:
         future = self._lookup_futures.pop(request.request_id, None)
         if future is not None:
             future.cancel()
+        if self.lazy_offload:
+            tracker = self._tracker_for_request(request.request_id)
+            tracker.save_mode = "lazy"
+            group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+            selected_block_ids = tuple(block_ids[group_id] for group_id in group_ids)
+            token_count = getattr(
+                request,
+                "num_computed_tokens",
+                getattr(request, "num_tokens", 0),
+            )
+            plans = self._store_plans(
+                request,
+                tracker,
+                token_count,
+                block_ids_override=selected_block_ids,
+            )
+            self._pending_stores.extend(plans)
+            if plans:
+                pending_meta = UMBPConnectorMetadata(store_plans=plans)
+                self._reference_store_blocks(pending_meta)
         return False, None
 
     def register_finished_partial_tail(

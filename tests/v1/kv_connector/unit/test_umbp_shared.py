@@ -429,6 +429,55 @@ def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
     assert [plan.block_id for plan in second.store_plans] == [3]
 
 
+def test_scheduler_lazy_offload_stores_only_when_request_finishes():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {
+                "mode": "embedded",
+                "load_async": False,
+                "lazy_offload": True,
+            }
+        ),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("lazy")),
+    )
+    request = SimpleNamespace(
+        request_id="lazy",
+        req_id="lazy",
+        num_tokens=32,
+        num_computed_tokens=32,
+        block_hashes=[b"a", b"b"],
+        block_ids=([4, 5],),
+        prompt_token_ids=list(range(32)),
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([4, 5],)),
+        0,
+    )
+    active_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={"lazy": 32},
+    )
+
+    assert scheduler.build_connector_meta(active_output).store_plans == []
+    assert scheduler.request_finished(request, ([4, 5],)) == (False, None)
+    finished_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+    plans = scheduler.build_connector_meta(finished_output).store_plans
+
+    assert [plan.block_id for plan in plans] == [4, 5]
+
+
 def test_scheduler_emits_partial_tail_plan_for_next_step():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded", "load_async": False}),
