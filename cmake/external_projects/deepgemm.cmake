@@ -42,16 +42,21 @@ else()
   set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
   set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
 
-  FetchContent_Populate(
-    deepgemm
-    SUBBUILD_DIR "${_deepgemm_sub}"
-    SOURCE_DIR "${_deepgemm_src}"
-    BINARY_DIR "${_deepgemm_bin}"
-    GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
-    GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
-    GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
-    GIT_PROGRESS TRUE
-  )
+  if(EXISTS "${_deepgemm_src}/csrc/python_api.cpp")
+    set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
+    set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
+  else()
+    FetchContent_Populate(
+      deepgemm
+      SUBBUILD_DIR "${_deepgemm_sub}"
+      SOURCE_DIR "${_deepgemm_src}"
+      BINARY_DIR "${_deepgemm_bin}"
+      GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
+      GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
+      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
+      GIT_PROGRESS TRUE
+    )
+  endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 

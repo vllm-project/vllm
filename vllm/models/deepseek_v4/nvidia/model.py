@@ -1050,11 +1050,6 @@ class DeepseekV4MoE(nn.Module):
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
-        if mega_gate_metadata is None:
-            raise RuntimeError(
-                "MegaMoE routing metadata must be prepared once by the model."
-            )
-
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
@@ -1079,6 +1074,11 @@ class DeepseekV4MoE(nn.Module):
         else:
             from vllm.utils.deep_gemm import bf16_mega_gate
 
+            if mega_gate_metadata is None:
+                raise RuntimeError(
+                    "MegaMoE routing metadata must be prepared once by the model."
+                )
+
             unmapped_topk_idx = None
             fix_routing_mask = None
             if self.gate.tid2eid is not None:
@@ -1086,7 +1086,6 @@ class DeepseekV4MoE(nn.Module):
                     raise RuntimeError("Hash routing requires prepared input IDs.")
                 if mega_gate_metadata.hash_token_mask is None:
                     raise RuntimeError("Hash routing requires a prepared routing mask.")
-                # PR 432 accepts fixed expert IDs, not the token-to-expert table.
                 unmapped_topk_idx = self.gate.tid2eid[
                     mega_gate_metadata.safe_hash_input_ids
                 ]

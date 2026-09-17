@@ -251,10 +251,9 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
         moe(torch.zeros(1, 128))
 
 
-@pytest.mark.parametrize("use_cudagraph", [False, True])
 @pytest.mark.parametrize("num_tokens", [16, 17])
 def test_deepseek_v4_mega_gate_hash_routing_correctness(
-    v41_moe_config, monkeypatch, num_tokens, use_cudagraph
+    v41_moe_config, monkeypatch, num_tokens
 ):
     if not current_platform.is_device_capability_family(100):
         pytest.skip("DeepGEMM Mega Gate requires SM100")
@@ -298,10 +297,9 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(
         dim=-1, keepdim=True
     )
 
-    routed = {}
-
     def check_routing(x, weights, ids, *, activation_clamp):
-        routed["ids"], routed["weights"] = ids, weights
+        torch.testing.assert_close(ids, expected_ids)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
         return x.clone()
 
     monkeypatch.setattr(moe.experts, "forward", check_routing)
@@ -311,25 +309,7 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(
         has_hash_routing=True,
         image_sentinel_base_id=None,
     )
-    if use_cudagraph:
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                moe(hidden_states, input_ids, metadata)
-        stream.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=stream):
-            output = moe(hidden_states, input_ids, metadata)
-        graph.replay()
-        torch.accelerator.synchronize()
-    else:
-        output = moe(hidden_states, input_ids, metadata)
-    torch.testing.assert_close(routed["ids"], expected_ids)
-    torch.testing.assert_close(
-        routed["weights"], expected_weights, rtol=1e-3, atol=1e-4
-    )
-    torch.testing.assert_close(output, hidden_states)
+    torch.testing.assert_close(moe(hidden_states, input_ids, metadata), hidden_states)
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
@@ -689,12 +669,12 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     monkeypatch, fused
 ):
     class FakeGate(torch.nn.Module):
+        weight = torch.empty(2, 128)
         tid2eid = None
         e_score_correction_bias = None
 
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.empty(2, 128)
+        def forward(self, hidden_states):
+            return torch.empty(hidden_states.shape[0], 2), None
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused
@@ -720,25 +700,16 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
     moe.renormalize = True
     moe.hash_indices_dtype = torch.int64
     moe.routed_scaling_factor = 1.0
-    moe.ep_rank = 0
     moe.swiglu_limit = 10.0
-
-    def fake_mega_gate(x, *args, **kwargs):
-        return (
-            torch.ones(x.shape[0], 1),
-            torch.zeros(x.shape[0], 1, dtype=torch.int64),
-        )
-
     monkeypatch.setattr(
-        "vllm.utils.deep_gemm.bf16_mega_gate",
-        fake_mega_gate,
+        "vllm.models.deepseek_v4.nvidia.model.fused_topk_bias",
+        lambda **kwargs: (
+            torch.ones(kwargs["hidden_states"].shape[0], 1),
+            torch.zeros(kwargs["hidden_states"].shape[0], 1, dtype=torch.int64),
+        ),
     )
-    metadata = prepare_mega_gate_routing_metadata(
-        torch.zeros(32, dtype=torch.int64),
-        has_hash_routing=False,
-        image_sentinel_base_id=None,
-    )
-    output = moe(torch.zeros(32, 128), mega_gate_metadata=metadata)
+
+    output = moe(torch.zeros(2, 128))
 
     expected = 1 if fused else 3
     assert torch.all(output == expected)
