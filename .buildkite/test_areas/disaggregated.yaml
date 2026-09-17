@@ -16,9 +16,9 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Distributed NixlConnector PD accuracy"
+      label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       depends_on:
         - image-build-amd
@@ -71,9 +71,9 @@ steps:
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy"
+      label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 40
       depends_on:
         - image-build-amd
@@ -221,9 +221,9 @@ steps:
     - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
   mirror:
     amd:
-      label: ":amd: (MI300) NixlConnector PD + Spec Decode acceptance"
+      label: ":amd: (MI355) NixlConnector PD + Spec Decode acceptance"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
         - image-build-amd

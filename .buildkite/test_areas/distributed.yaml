@@ -65,9 +65,9 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
   mirror:
     amd:
-      label: ":amd: (MI300) Distributed DP Basic"
+      label: ":amd: (MI355) Distributed DP Basic"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
