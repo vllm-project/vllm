@@ -2030,6 +2030,9 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
+            # A streaming continuation can replace request.sampling_params while
+            # handling a stop; keep the parameters for this output step.
+            sampling_params_before_stop = request.sampling_params
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -2146,8 +2149,8 @@ class Scheduler(SchedulerInterface):
 
             # Extract sample logprobs if needed.
             if (
-                request.sampling_params is not None
-                and request.sampling_params.num_logprobs is not None
+                sampling_params_before_stop is not None
+                and sampling_params_before_stop.num_logprobs is not None
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
