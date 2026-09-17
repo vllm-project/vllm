@@ -7,6 +7,7 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
@@ -47,6 +48,8 @@ from .utils import (
     validate_score_input,
 )
 
+logger = init_logger(__name__)
+
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
@@ -55,6 +58,27 @@ def _apply_post_tokenization_to_token_type_ids(
     tok_params: TokenizeParams,
     token_type_ids: list[int],
 ) -> list[int]:
+    # Must stay in the same order as `TokenizeParams._validate_tokens`, which
+    # truncates before padding. These ids are parallel to the prompt tokens
+    # and locate the query/document boundary for the cross-encoder; applying
+    # the two steps in a different order silently misplaces that boundary.
+    max_length = tok_params.truncate_prompt_tokens
+    if max_length is not None and max_length < 0:
+        max_length = tok_params.max_input_tokens
+
+    if max_length is not None and max_length < len(token_type_ids):
+        if max_length == 0:
+            token_type_ids = token_type_ids[:0]
+        else:
+            side = tok_params.truncation_side or (
+                tokenizer.truncation_side if tokenizer is not None else None
+            )
+            token_type_ids = (
+                token_type_ids[-max_length:]
+                if side == "left"
+                else token_type_ids[:max_length]
+            )
+
     pad_length = tok_params.pad_prompt_tokens
     if pad_length is not None and pad_length < 0:
         pad_length = tok_params.max_input_tokens
@@ -65,22 +89,7 @@ def _apply_post_tokenization_to_token_type_ids(
             pad_length - len(token_type_ids)
         )
 
-    max_length = tok_params.truncate_prompt_tokens
-    if max_length is not None and max_length < 0:
-        max_length = tok_params.max_input_tokens
-
-    if max_length is None or max_length >= len(token_type_ids):
-        return token_type_ids
-    if max_length == 0:
-        return token_type_ids[:0]
-
-    side = tok_params.truncation_side or (
-        tokenizer.truncation_side if tokenizer is not None else None
-    )
-    if side == "left":
-        return token_type_ids[-max_length:]
-
-    return token_type_ids[:max_length]
+    return token_type_ids
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
@@ -418,6 +427,24 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.supports_score_template = supports_score_template(model)
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
+
+        if (
+            getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
+            and self.chat_template is None
+        ):
+            suggested_template = (
+                "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+                if self.model_config.is_multimodal_model
+                else "examples/pooling/score/template/qwen3_reranker.jinja"
+            )
+            logger.warning(
+                "Serving an original Qwen3 reranker (%s) without a "
+                "--chat-template. The model was trained with a specific prompt "
+                "template; running without it may produce inaccurate relevance "
+                "scores. Consider specifying `--chat-template %s`.",
+                self.model_config.model,
+                suggested_template,
+            )
 
     #######################################
     # online APIs
@@ -839,7 +866,14 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            pooling_params=ctx.pooling_params
+        )
         scoring_data = ctx.scoring_data
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)

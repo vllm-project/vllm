@@ -19,5 +19,5 @@ torchaudio
 torchvision
 torchcodec >= 0.14 # Required for the torchcodec video decoding backend
 
-auto_round_lib==0.14.2
+auto_round_lib==0.15.0
 vllm_xpu_kernels==0.1.14.1

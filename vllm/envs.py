@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
+    FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
@@ -82,10 +83,10 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
-    VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
@@ -137,7 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -154,6 +155,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_PLE_CPU_OFFLOAD: bool = True
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -264,6 +266,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
+    VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -313,14 +316,13 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
-    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_ENABLE_HPC_OPS: bool = False
 
 
@@ -391,8 +393,7 @@ def env_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], str | None]:
-    """
-    Create a lambda that validates environment variable against allowed choices
+    """Create a lambda that validates environment variable against allowed choices.
 
     Args:
         env_name: Name of the environment variable
@@ -402,6 +403,7 @@ def env_with_choices(
 
     Returns:
         Lambda function for environment_variables dict
+
     """
 
     def _get_validated_env() -> str | None:
@@ -436,8 +438,7 @@ def env_list_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], list[str]]:
-    """
-    Create a lambda that validates environment variable
+    """Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
 
     Args:
@@ -449,6 +450,7 @@ def env_list_with_choices(
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
+
     """
 
     def _get_validated_env_list() -> list[str]:
@@ -491,8 +493,7 @@ def env_set_with_choices(
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], set[str]]:
-    """
-    Creates a lambda which that validates environment variable
+    """Creates a lambda which that validates environment variable
     containing comma-separated values against allowed choices which
     returns choices as a set.
     """
@@ -511,6 +512,7 @@ def get_vllm_port() -> int | None:
 
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
+
     """
     if "VLLM_PORT" not in os.environ:
         return None
@@ -536,8 +538,7 @@ def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
 ) -> Callable[[], str]:
-    """
-    Create a lambda that returns an environment variable value if set,
+    """Create a lambda that returns an environment variable value if set,
     or generates and sets a default value using the provided factory function.
     """
 
@@ -629,9 +630,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
-    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
-    # the worker's `execute_model` and `sample_tokens` calls. Valid values
-    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # If set, enable GPU<->CPU synchronization checking around the worker's
+    # `execute_model` and `sample_tokens` calls, via PyTorch's sync debug mode
+    # plus wrappers flagging `non_blocking` CPU<->CUDA copies that silently
+    # block the host (CPU tensors that are not pinned or not densely laid out).
+    # Valid values are "warn" (warn on each sync) or "error" (raise on sync).
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
@@ -838,6 +841,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
     # Standard unix flag for disabling ANSI color codes
     "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
+    # De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)
+    "FORCE_COLOR": lambda: os.getenv("FORCE_COLOR", "0") != "0",
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: (
@@ -1009,6 +1014,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_BYTES", "268435456")
     ),
+    # Maximum bytes a client-supplied embedding payload (`prompt_embeds`,
+    # `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once it is
+    # densified. A sparse tensor carries its own declared shape, so a payload
+    # of a few hundred bytes can expand into hundreds of GiB. The limit is
+    # checked before `to_dense()` so the memory is never allocated. Set to 0
+    # to disable. Default is 2 GiB, which covers a 128K-token float32
+    # embedding at hidden_size 4096.
+    "VLLM_MAX_EMBED_DECODE_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_EMBED_DECODE_BYTES", "2147483648")
+    ),
     # Maximum number of worker threads used for STT preprocessing. The default
     # intentionally caps at 2 because that performed best in profiling.
     # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
@@ -1044,17 +1059,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
-    # Hash algorithm for multimodal content hashing.
-    # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
-    # - "sha256": FIPS 140-3 compliant, widely supported
-    # - "sha512": FIPS 140-3 compliant, faster on 64-bit systems
-    # Use sha256 or sha512 for FIPS compliance in government/enterprise deployments
-    "VLLM_MM_HASHER_ALGORITHM": env_with_choices(
-        "VLLM_MM_HASHER_ALGORITHM",
-        "blake3",
-        ["blake3", "sha256", "sha512"],
-        case_sensitive=False,
-    ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
@@ -1146,11 +1150,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
     ),
-    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
-        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
-        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
-        else None
-    ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
@@ -1235,7 +1234,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
-    # CudaCommunicator on ROCm.
+    # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
@@ -1254,12 +1253,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
-    # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
-    # interleaved flydsl kernels instead of the default a16w4 separated path.
-    # This is the only flag users need: vLLM picks the kernels by passing
-    # gate_mode to AITER and sets the AITER-side workaround env at init.
-    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
+    # Route K3 SiTU MXFP4 MoE through the FlyDSL SiTUv2 path (a4w4 fp4
+    # activations, separated gate/up layout) instead of default a16w4. vLLM
+    # sets AITER_SITUV2_A4W4 at init when this flag is on and clears any
+    # legacy AITER_SITUV2_A8W4 override (AITER checks A8W4 first).
+    # VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 is a deprecated alias for existing
+    # recipes; it does not select a8w4 kernels.
+    # Needs AITER >= v0.1.20 (ROCm/aiter#4463) for the a4w4 dispatch flag
+    # and tuned kimik3_a4w4_*_fmoe.csv rows; otherwise FlyDSL uses heuristics.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0").lower() in ("true", "1")
+        or os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower()
+        in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
@@ -1863,6 +1868,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
+    # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
+    # This backend has a strict single-stream contract and is opt-in while its
+    # integration is being qualified.
+    "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
         int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
@@ -2040,6 +2051,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
+    # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
+    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2104,13 +2117,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
-    # NIXL EP environment variables
-    "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
-        os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
-    ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # Force N-contiguous weight layout for all XPU unquantized linears.
+    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
+        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
@@ -2165,6 +2178,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each op additionally checks its own shape / dtype constraints and falls
     # back to the eager path when they do not hold.
     "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
+    # Whether to skip version suffix when building package
+    "VLLM_SKIP_VERSION_SUFFIX": lambda: bool(
+        int(os.getenv("VLLM_SKIP_VERSION_SUFFIX", "0"))
+    ),
 }
 
 
@@ -2172,8 +2189,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 def __getattr__(name: str):
-    """
-    Gets environment variables lazily.
+    """Gets environment variables lazily.
 
     NOTE: After enable_envs_cache() invocation (which triggered after service
     initialization), all environment variables will be cached.
@@ -2184,14 +2200,13 @@ def __getattr__(name: str):
 
 
 def _is_envs_cache_enabled() -> bool:
-    """Checked if __getattr__ is wrapped with functools.cache"""
+    """Checked if __getattr__ is wrapped with functools.cache."""
     global __getattr__
     return hasattr(__getattr__, "cache_clear")
 
 
 def enable_envs_cache() -> None:
-    """
-    Enables caching of environment variables. This is useful for performance
+    """Enables caching of environment variables. This is useful for performance
     reasons, as it avoids the need to re-evaluate environment variables on
     every call.
 
@@ -2212,8 +2227,7 @@ def enable_envs_cache() -> None:
 
 
 def disable_envs_cache() -> None:
-    """
-    Resets the environment variables cache. It could be used to isolate environments
+    """Resets the environment variables cache. It could be used to isolate environments
     between unit tests.
     """
     global __getattr__
@@ -2234,21 +2248,11 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def validate_environ(hard_fail: bool) -> None:
-    for env in os.environ:
-        if env.startswith("VLLM_") and env not in environment_variables:
-            if hard_fail:
-                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
-            else:
-                logger.warning("Unknown vLLM environment variable detected: %s", env)
-
-
 def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
     Start with every known vLLM env var; drop entries in `ignored_factors`;
     hash everything else. This keeps the cache key aligned across workers."""
-
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
@@ -2313,6 +2317,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_DECODE_BYTES",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+        "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
@@ -2332,6 +2337,8 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        "VLLM_SKIP_VERSION_SUFFIX",
+        "FORCE_COLOR",
     }
 
     from vllm.config.utils import normalize_value
