@@ -1682,10 +1682,6 @@ def test_uno_tail_respects_explicit_context_limit(
     assert output.skip_speculator_proposal
     assert output.num_scheduled_tokens == {request.request_id: 1}
     assert not output.scheduled_spec_decode_tokens
-    # The trace's diagnostic lower bound uses the same effective context cap.
-    assert scheduler._will_finish_after_next_sample(request) == (
-        num_output_tokens == 95
-    )
     if num_output_tokens == 95:
         _model_output(scheduler, output, [[11]])
         assert request.num_output_tokens == 96
@@ -1705,9 +1701,6 @@ def test_uno_tail_overlapping_steps_before_output_delivery(
     first = scheduler.schedule()
     assert request.num_output_tokens == 0
     assert request.num_output_placeholders == 1
-    # The trace's lower bound is distinct from the upper-bound tail trigger.
-    # Check it before the previous sample has been observed by the scheduler.
-    assert scheduler._will_finish_after_next_sample(request)
     second = scheduler.schedule()
     assert second.skip_speculator_proposal
     assert second.num_scheduled_tokens == {request.request_id: 1}
@@ -1753,7 +1746,6 @@ def test_uno_tail_all_reject_pending_nine_is_not_terminal(
     scheduler._update_after_schedule(pending)
     assert request.num_output_tokens == 120
     assert request.num_output_placeholders == 9
-    assert not scheduler._will_finish_after_next_sample(request)
 
     current = scheduler.schedule()
     expected_queries = 1
@@ -1805,7 +1797,6 @@ def test_uno_tail_prevents_accepted_draft_leap(uno_scheduler_factory, async_sche
         DraftTokenIds([request.request_id], [[11, 12, 13, 14]])
     )
     # O=1 and four accepted drafts plus bonus would leap to six (> M=5).
-    assert not scheduler._will_finish_after_next_sample(request)
     tail = scheduler.schedule()
     assert tail.num_scheduled_tokens == {request.request_id: 1}
     assert not tail.scheduled_spec_decode_tokens

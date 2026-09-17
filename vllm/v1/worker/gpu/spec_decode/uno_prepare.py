@@ -15,31 +15,12 @@ the captured draft forward, so the live step must remain a launch argument.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable
 from typing import Any
 
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-
-
-def _launch_key_debug_enabled() -> bool:
-    """Read the diagnostic flag once and reject ambiguous boolean values."""
-    value = os.environ.get("VLLM_UNO_LAUNCH_KEY_DEBUG")
-    if value is None or value == "0":
-        return False
-    if value == "1":
-        return True
-    raise ValueError("VLLM_UNO_LAUNCH_KEY_DEBUG must be 0 or 1")
-
-
-_LAUNCH_KEY_DEBUG_ENABLED = _launch_key_debug_enabled()
-record_triton_launch: Callable[..., None] | None = None
-if _LAUNCH_KEY_DEBUG_ENABLED:
-    from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
-
 
 # Keep this contract shared with the CPU launch-key test.  These arguments
 # describe live target views rather than a Triton program shape, so changing
@@ -112,7 +93,6 @@ def _prepare_uno_inputs_kernel(
     capacities are independent constants because target input tensors may be
     slices while persistent output buffers are full graph-capacity tensors.
     """
-
     _NOISE_SEED_MULT: tl.constexpr = 0x1E3779B185EBCA8
     _NOISE_STEP_MULT: tl.constexpr = 0x11B54A32D192ED0
     _NOISE_MIX_1: tl.constexpr = 0x3F58476D1CE4E5B9
@@ -521,32 +501,6 @@ def prepare_uno_inputs_fused(
             block=block,
         )
     )
-    if record_triton_launch is not None:
-        record_triton_launch(
-            "_prepare_uno_inputs_kernel",
-            _prepare_uno_inputs_kernel,
-            launch_grid,
-            input_batch.idx_mapping,
-            num_sampled,
-            num_sampled if num_rejected is None else num_rejected,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            last_sampled,
-            next_prefill_tokens,
-            seeds,
-            block_table,
-            block_table.stride(0),
-            buffers.input_ids,
-            buffers.positions,
-            slot_mapping,
-            sample_idx_mapping,
-            buffers.seq_lens,
-            buffers.query_start_loc,
-            int(step),
-            target_query_len,
-            target_position_len,
-            **launch_kwargs,
-        )
     _prepare_uno_inputs_kernel[launch_grid](
         input_batch.idx_mapping,
         num_sampled,

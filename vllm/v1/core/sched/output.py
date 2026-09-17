@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -9,23 +8,6 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
-
-
-def parse_uno_step_timing_debug(value: str | None) -> bool:
-    """Parse the launch-only Uno step timing switch."""
-    if value is None:
-        return False
-    if value not in ("0", "1"):
-        raise ValueError("VLLM_UNO_STEP_TIMING_DEBUG must be 0 or 1")
-    return value == "1"
-
-
-# Both scheduler and worker import this immutable, process-local setting.  It
-# accepts launch configuration only; no request data participates in tracing.
-UNO_STEP_TIMING_DEBUG = parse_uno_step_timing_debug(
-    os.environ.get("VLLM_UNO_STEP_TIMING_DEBUG")
-)
-
 
 if TYPE_CHECKING:
     import numpy as np
@@ -330,11 +312,6 @@ class SchedulerOutput:
     # proposal can be skipped. Tail mode deliberately forgoes usable drafts;
     # this flag is not an exact prediction of request termination.
     skip_speculator_proposal: bool = False
-
-    # Launch-debug-only timing metadata.  These are ignored by scheduling and
-    # remain ``None`` unless VLLM_UNO_STEP_TIMING_DEBUG=1.
-    debug_uno_step_id: int | None = None
-    debug_schedule_wall_ms: float | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

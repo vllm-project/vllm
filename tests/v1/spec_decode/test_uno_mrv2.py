@@ -8,7 +8,7 @@ preparation and adapter scope; model/sampler/graph numerics require GPU tests.
 """
 
 import inspect
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +19,6 @@ import pytest
 import torch
 
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.launch_key_debug import _LaunchKeyReceipts, _object_fields
 from vllm.v1.worker.gpu.spec_decode.uno import (
     UNO_LORA_ID,
     UNO_SAMPLING_MODES,
@@ -1944,164 +1943,10 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
     )
 
 
-def _self_check_sampler(use_flashinfer=False):
-    """Return a sampler stub whose real backend decision can be observed."""
-    calls: list[bool] = []
-
-    def sample_random(*args, **kwargs):
-        use_flashinfer_call = (
-            kwargs["use_flashinfer"] if "use_flashinfer" in kwargs else args[6]
-        )
-        calls.append(bool(use_flashinfer_call))
-
-    return SimpleNamespace(
-        use_flashinfer=use_flashinfer,
-        logprobs_mode="raw_logprobs",
-        _sample_random=sample_random,
-        calls=calls,
-    )
-
-
-def _run_self_check_sampler_branch(runner, sampling_params):
-    """Send a mocked scheduler pass through the sampler branch observer."""
-    params = (
-        sampling_params if isinstance(sampling_params, tuple) else (sampling_params,)
-    )
-    use_flashinfer = (
-        runner.sampler.use_flashinfer
-        and any(p.top_k != -1 or p.top_p != 1.0 for p in params)
-        and all(p.temperature != 0.0 and p.seed is None for p in params)
-        and not (
-            any(p.logprobs is not None for p in params)
-            and runner.sampler.logprobs_mode
-            in ("processed_logprobs", "processed_logits")
-        )
-    )
-    runner.sampler._sample_random(None, None, None, None, None, None, use_flashinfer)
-    return "flashinfer" if use_flashinfer else "triton"
-
-
-def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
-    monkeypatch,
-):
-    """Warn mode records a real key without changing the monitor's contract."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(
-        speculator=object.__new__(UnoSpeculator),
-        adaptive_verification="saved-adaptive-state",
-        # This deliberately oversized fixture proves the full-chunk bound. It
-        # is not the production K=8 decode shape, which has query length 9.
-        max_num_tokens=2048,
-        decode_query_len=2047,
-        device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
-    )
-    runner.speculator._step = 0
-    worker_execute_model = Mock()
-    worker_sample_tokens = Mock()
-
-    @contextmanager
-    def launched_kernels():
-        yield {
-            "_topk_topp_kernel": 1,
-            "_topp_sb_stats_kernel": 1,
-            "_topp_sb_step_kernel": 5,
-            "_topp_sb_mask_kernel": 1,
-        }
-
-    def emit_compile(*_args, **_kwargs):
-        assert _args[:2] == (runner, worker_execute_model)
-        assert _args[3] == 2048
-        assert _kwargs["req_id_prefix"].startswith("_uno_jit_self_check_")
-        runner.speculator._step += 1
-        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
-        _args[2](None)
-        jit_monitor._handle_jit_event(
-            backend="Triton",
-            event="kernel JIT compilation",
-            fn_name="_prepare_uno_inputs_kernel",
-            detail="constexprs={K=8}; key=uno-served-key",
-        )
-        return True
-
-    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", emit_compile)
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", launched_kernels)
-    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-    monkeypatch.setattr(jit_monitor, "_active", True)
-    monkeypatch.setattr(jit_monitor, "_mode", "warn")
-    warning = Mock()
-    monkeypatch.setattr(warmup.logger, "warning", warning)
-    monkeypatch.setattr(jit_monitor.logger, "warning_once", Mock())
-
-    result = warmup.run_uno_served_jit_self_check(
-        runner, worker_execute_model, worker_sample_tokens
-    )
-
-    assert runner.adaptive_verification == "saved-adaptive-state"
-    assert runner.speculator._step == 0
-    assert not result.passed
-    assert result.monitor_armed
-    assert result.sampler_calls == {mode.name: 1 for mode in UNO_SAMPLING_MODES}
-    assert len(result.compilations) == len(UNO_SAMPLING_MODES)
-    assert any(
-        "kernel=%s" in call.args[0]
-        and call.args[3] == "_prepare_uno_inputs_kernel"
-        and call.args[4] == "constexprs={K=8}; key=uno-served-key"
-        for call in warning.call_args_list
-    )
-
-
-def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
-    monkeypatch,
-):
-    """K=8 serves ``decode_query_len=9``, so its mixed check uses 11 tokens."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(
-        speculator=object.__new__(UnoSpeculator),
-        adaptive_verification=None,
-        max_num_tokens=2048,
-        decode_query_len=9,
-        device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
-    )
-    observed_tokens: list[int] = []
-
-    @contextmanager
-    def launched_kernels():
-        yield {
-            "_topk_topp_kernel": 1,
-            "_topp_sb_stats_kernel": 1,
-            "_topp_sb_step_kernel": 1,
-            "_topp_sb_mask_kernel": 1,
-        }
-
-    def sampled(*args, **kwargs):
-        observed_tokens.append(args[3])
-        _run_self_check_sampler_branch(runner, kwargs["sampling_params"])
-        args[2](None)
-        return True
-
-    monkeypatch.setattr(jit_monitor, "_active", True)
-    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", launched_kernels)
-    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
-
-    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
-
-    assert result.passed
-    assert observed_tokens == [11] * len(UNO_SAMPLING_MODES)
-
-
-@pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
 def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
-    monkeypatch, entrypoint
+    monkeypatch,
 ):
     """Fixed warmup counts must not use the serving adaptive manager."""
-    from vllm.utils import jit_monitor
     from vllm.v1.worker.gpu import warmup
 
     adaptive = object()
@@ -2112,7 +1957,6 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
         model_config=SimpleNamespace(enforce_eager=False),
         cudagraph_manager=SimpleNamespace(needs_capture=lambda: True),
     )
@@ -2121,29 +1965,18 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
     def record_helper(*_args, **_kwargs):
         assert runner.adaptive_verification is None
         observed.append(True)
-        # A skipped self-check cycle still completes normally and must restore
-        # the serving collaborators. Its shape/coverage has separate tests.
         return False
 
-    if entrypoint == "kernels":
-        monkeypatch.setattr(warmup, "_warmup_kernels", record_helper)
-        invoke = warmup.warmup_kernels
-    else:
-        monkeypatch.setattr(jit_monitor, "_active", True)
-        monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-        monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", record_helper)
-        invoke = warmup.run_uno_served_jit_self_check
-    invoke(runner, Mock(), Mock())
-    assert len(observed) == (1 if entrypoint == "kernels" else len(UNO_SAMPLING_MODES))
+    monkeypatch.setattr(warmup, "_warmup_kernels", record_helper)
+    warmup.warmup_kernels(runner, Mock(), Mock())
+    assert len(observed) == 1
     assert runner.adaptive_verification is adaptive
 
 
-@pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
 def test_uno_startup_restores_adaptive_verification_after_callback_error(
-    monkeypatch, entrypoint
+    monkeypatch,
 ):
-    """Both startup callers restore the adaptive manager when a worker raises."""
-    from vllm.utils import jit_monitor
+    """Startup restores the adaptive manager when a worker raises."""
     from vllm.v1.worker.gpu import warmup
 
     adaptive = object()
@@ -2154,7 +1987,6 @@ def test_uno_startup_restores_adaptive_verification_after_callback_error(
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
     )
 
     class CallbackFailed(Exception):
@@ -2163,302 +1995,10 @@ def test_uno_startup_restores_adaptive_verification_after_callback_error(
     def fail(*_args, **_kwargs):
         raise CallbackFailed
 
-    if entrypoint == "kernels":
-        monkeypatch.setattr(warmup, "_warmup_kernels", fail)
-        invoke = warmup.warmup_kernels
-    else:
-        monkeypatch.setattr(jit_monitor, "_active", True)
-        monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", fail)
-        invoke = warmup.run_uno_served_jit_self_check
+    monkeypatch.setattr(warmup, "_warmup_kernels", fail)
     with pytest.raises(CallbackFailed):
-        invoke(runner, Mock(), Mock())
+        warmup.warmup_kernels(runner, Mock(), Mock())
     assert runner.adaptive_verification is adaptive
-
-
-def test_uno_self_check_token_count_keeps_fixture_and_production_bounds_distinct():
-    """K=8 production is 11 rows; the 2048-row fixture remains intentional."""
-    from vllm.v1.worker.gpu.warmup import uno_self_check_token_count
-
-    assert uno_self_check_token_count(2048, 9) == 11
-    assert uno_self_check_token_count(2048, 2047) == 2048
-
-
-@pytest.mark.parametrize("monitor_armed", [False, True])
-@pytest.mark.parametrize("has_other_speculator", [False, True])
-def test_uno_startup_self_check_returns_without_touching_non_uno_worker(
-    monkeypatch, monitor_armed, has_other_speculator
-):
-    """The unconditional worker startup caller must accept plain and other drafts."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(speculator=object() if has_other_speculator else None)
-    execute_model = Mock(side_effect=AssertionError("non-Uno warmup dispatch"))
-    sample_tokens = Mock(side_effect=AssertionError("non-Uno sampler dispatch"))
-    before = vars(runner).copy()
-    monkeypatch.setattr(jit_monitor, "_active", monitor_armed)
-
-    result = warmup.run_uno_served_jit_self_check(runner, execute_model, sample_tokens)
-
-    assert not result.ran
-    assert not result.passed
-    assert result.monitor_armed is monitor_armed
-    assert result.sampler_calls == {}
-    assert result.sampler_launches == {}
-    assert result.sampler_branches == {}
-    assert result.branch_mismatches == {}
-    assert result.missing_launches == {}
-    assert result.compilations == ()
-    assert vars(runner) == before
-    execute_model.assert_not_called()
-    sample_tokens.assert_not_called()
-
-
-def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch):
-    """A skipped cycle or missing kernel counter is not a successful check."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(
-        speculator=object.__new__(UnoSpeculator),
-        adaptive_verification=None,
-        max_num_tokens=32,
-        decode_query_len=8,
-        device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
-    )
-    monkeypatch.setattr(jit_monitor, "_active", False)
-    with pytest.raises(RuntimeError, match="requires an armed JIT monitor"):
-        warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
-
-    monkeypatch.setattr(jit_monitor, "_active", True)
-    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-
-    @contextmanager
-    def no_launches():
-        yield {}
-
-    def skipped(*_args, **_kwargs):
-        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
-        return False
-
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", no_launches)
-    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", skipped)
-    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
-    assert not result.passed
-    assert not result.ran
-    assert result.missing_launches["top_p_only"] == (
-        "_topp_sb_stats_kernel",
-        "_topp_sb_step_kernel",
-        "_topp_sb_mask_kernel",
-    )
-
-
-def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
-    """The seed-free post-warmup check cannot perturb later sampling RNG."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(
-        speculator=object.__new__(UnoSpeculator),
-        adaptive_verification="saved",
-        max_num_tokens=32,
-        decode_query_len=8,
-        device=torch.device("cpu"),
-        sampler=_self_check_sampler(),
-    )
-    monkeypatch.setattr(jit_monitor, "_active", True)
-    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-
-    @contextmanager
-    def launched_kernels():
-        yield {
-            "_topk_topp_kernel": 1,
-            "_topp_sb_stats_kernel": 1,
-            "_topp_sb_step_kernel": 5,
-            "_topp_sb_mask_kernel": 1,
-        }
-
-    def sampled(*args, **_kwargs):
-        torch.rand(4)
-        np.random.randint(0, 1000, size=4)
-        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
-        args[2](None)
-        return True
-
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", launched_kernels)
-    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
-    torch.manual_seed(1234)
-    before = torch.random.get_rng_state()
-    numpy_before = np.random.get_state()
-    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
-    assert result.passed
-    assert torch.equal(torch.random.get_rng_state(), before)
-    numpy_after = np.random.get_state()
-    assert numpy_after[0] == numpy_before[0]
-    np.testing.assert_array_equal(numpy_after[1], numpy_before[1])
-    assert numpy_after[2:] == numpy_before[2:]
-
-
-def test_uno_startup_jit_self_check_proves_flashinfer_branches(monkeypatch):
-    """FlashInfer modes need branch evidence, not nonexistent Triton kernels."""
-    from vllm.utils import jit_monitor
-    from vllm.v1.worker.gpu import warmup
-
-    runner = SimpleNamespace(
-        speculator=object.__new__(UnoSpeculator),
-        adaptive_verification=None,
-        max_num_tokens=32,
-        decode_query_len=8,
-        device=torch.device("cpu"),
-        sampler=_self_check_sampler(use_flashinfer=True),
-    )
-    monkeypatch.setattr(jit_monitor, "_active", True)
-    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-    observed_launches: dict[str, int] = {}
-
-    @contextmanager
-    def recorded_sampler_launches():
-        observed_launches.clear()
-        yield observed_launches
-
-    def sampled(*args, **kwargs):
-        params = kwargs["sampling_params"]
-        branch = _run_self_check_sampler_branch(runner, params)
-        params = params if isinstance(params, tuple) else (params,)
-        if branch == "triton" and any(p.top_k != -1 or p.top_p != 1.0 for p in params):
-            observed_launches.update(
-                _topk_topp_kernel=1,
-                _topp_sb_stats_kernel=1,
-                _topp_sb_step_kernel=1,
-                _topp_sb_mask_kernel=1,
-            )
-        args[2](None)
-        return True
-
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", recorded_sampler_launches)
-    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
-
-    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
-
-    assert result.passed
-    expected = {
-        "top_p_only": ("flashinfer",),
-        "top_k_top_p": ("flashinfer",),
-        "top_k_only": ("flashinfer",),
-        "neither": ("triton",),
-        "greedy": ("triton",),
-        "mixed_greedy": ("triton",),
-        "seeded_top_p_only": ("triton",),
-    }
-    assert {name: result.sampler_branches[name] for name in expected} == expected
-    assert all(
-        result.sampler_launches[name] == {}
-        for name, branches in result.sampler_branches.items()
-        if branches == ("flashinfer",)
-    )
-
-
-def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):
-    """The startup-only proxy counts real launch syntax, not a test signal."""
-    from vllm.v1.sample.ops import topk_topp_triton
-    from vllm.v1.worker.gpu.warmup import capture_topk_topp_launches
-
-    calls: list[tuple[str, object]] = []
-
-    class FakeTritonKernel:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def __getitem__(self, grid: object):
-            def launch(*_args, **_kwargs):
-                calls.append((self.name, grid))
-
-            return launch
-
-    monkeypatch.setattr(topk_topp_triton, "_topk_topp_kernel", FakeTritonKernel("topk"))
-    monkeypatch.setattr(
-        topk_topp_triton, "_topp_sb_step_kernel", FakeTritonKernel("step")
-    )
-    with capture_topk_topp_launches() as launches:
-        topk_topp_triton._topk_topp_kernel[(1,)]()
-        topk_topp_triton._topk_topp_kernel[(2,)]()
-        topk_topp_triton._topp_sb_step_kernel[(5,)]()
-    assert launches == {"_topk_topp_kernel": 2, "_topp_sb_step_kernel": 1}
-    assert calls == [("topk", (1,)), ("topk", (2,)), ("step", (5,))]
-
-
-def test_uno_launch_key_debug_is_gated_and_has_no_generic_serving_wrapper():
-    """Generic sampling stays untouched; only opt-in startup proxies record."""
-    from vllm.v1.sample.ops import topk_topp_triton
-    from vllm.v1.worker.gpu import launch_key_debug
-    from vllm.v1.worker.gpu.sample import gumbel
-    from vllm.v1.worker.gpu.spec_decode import uno_prepare
-
-    assert "launch_key_debug" not in inspect.getsource(topk_topp_triton)
-    assert "launch_key_debug" not in inspect.getsource(gumbel)
-    prepare_source = inspect.getsource(uno_prepare)
-    assert "_LAUNCH_KEY_DEBUG_ENABLED = _launch_key_debug_enabled()" in prepare_source
-    assert "if record_triton_launch is not None:" in prepare_source
-    assert "record_topk_topp_launches" in inspect.getsource(launch_key_debug)
-
-
-def test_uno_step_timing_debug_flag_is_launch_only_and_tracks_three_steps():
-    """The TTFT tracer never reads request data as configuration."""
-    from vllm.v1.core.sched.output import parse_uno_step_timing_debug
-    from vllm.v1.worker.gpu.uno_step_timing import UnoStepTimingTracer
-
-    assert not parse_uno_step_timing_debug(None)
-    assert not parse_uno_step_timing_debug("0")
-    assert parse_uno_step_timing_debug("1")
-    with pytest.raises(ValueError, match="VLLM_UNO_STEP_TIMING_DEBUG"):
-        parse_uno_step_timing_debug("enabled")
-
-    tracer = UnoStepTimingTracer(capture_cuda_events=False)
-    output = SimpleNamespace(
-        debug_uno_step_id=7,
-        debug_schedule_wall_ms=0.5,
-        num_scheduled_tokens={"internal-request": 1},
-        skip_speculator_proposal=False,
-        zero_next_draft_req_ids=set(),
-        scheduled_spec_decode_tokens={},
-    )
-    assert tracer.begin(output, running_count=1) is not None
-    assert tracer.begin(output, running_count=1) is not None
-    assert tracer.begin(output, running_count=1) is not None
-    assert tracer.begin(output, running_count=1) is None
-
-
-def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(
-    monkeypatch,
-):
-    """The opt-in warmup proxy emits a receipt from each real launch object."""
-    from vllm.v1.sample.ops import topk_topp_triton
-    from vllm.v1.worker.gpu import launch_key_debug
-
-    calls: list[tuple[str, tuple[int, ...]]] = []
-    records: list[tuple[str, object]] = []
-
-    class FakeTritonKernel:
-        def __getitem__(self, grid):
-            def launch(*_args, **_kwargs):
-                calls.append(("launch", grid))
-
-            return launch
-
-    monkeypatch.setattr(topk_topp_triton, "_topk_topp_kernel", FakeTritonKernel())
-    monkeypatch.setattr(launch_key_debug, "_ENABLED", True)
-    monkeypatch.setattr(
-        launch_key_debug,
-        "record_triton_launch",
-        lambda name, _kernel, grid, *_args, **_kwargs: records.append((name, grid)),
-    )
-
-    with launch_key_debug.record_topk_topp_launches():
-        topk_topp_triton._topk_topp_kernel[(3,)]()
-
-    assert records == [("_topk_topp_kernel", (3,))]
-    assert calls == [("launch", (3,))]
 
 
 def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
@@ -2504,7 +2044,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         cudagraph_stats=None,
         skip_speculator_proposal=False,
         zero_next_draft_req_ids=frozenset(),
-        uno_step_trace=None,
     )
     runner.is_last_pp_rank = True
     runner.pcp_manager = None
@@ -2602,78 +2141,6 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(
     assert not hasattr(runner, "_pending_uno_proposal")
     expected_drafts = [[0, 0]] if skip_proposal else [[8, 9]]
     assert runner.req_states.draft_tokens.tolist() == expected_drafts
-
-
-@pytest.mark.skip_global_cleanup
-def test_launch_key_receipt_compares_first_served_key_to_all_warmup_keys():
-    """The side-by-side record retains the actual warmup key set, not a sample."""
-    receipts = _LaunchKeyReceipts()
-    warmup_one = {
-        "kernel": "_prepare_uno_inputs_kernel",
-        "triton_key": "warmup-one",
-    }
-    warmup_two = {
-        "kernel": "_prepare_uno_inputs_kernel",
-        "triton_key": "warmup-two",
-    }
-
-    assert receipts.add("warmup", warmup_one) == {"record": warmup_one}
-    assert receipts.add("warmup", warmup_two) == {"record": warmup_two}
-    assert receipts.add("warmup", warmup_one) is None
-
-    served = {
-        "kernel": "_prepare_uno_inputs_kernel",
-        "triton_key": "warmup-two",
-    }
-    emitted = receipts.add("served", served)
-
-    assert emitted is not None
-    comparison = emitted["compare"]
-    assert comparison["served"] is served
-    assert comparison["served_key_was_warmed"]
-    assert [item["triton_key"] for item in comparison["warmup"]] == [
-        "warmup-one",
-        "warmup-two",
-    ]
-    # Only the first actual serving record is the diagnostic comparison.
-    assert (
-        receipts.add(
-            "served",
-            {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "another"},
-        )
-        is None
-    )
-
-
-@pytest.mark.skip_global_cleanup
-def test_launch_key_receipt_serializes_slots_backed_options():
-    """Triton 3.8 options use slots, not ``__dict__``."""
-
-    class Options:
-        __slots__ = ("num_stages", "num_warps")
-
-        def __init__(self) -> None:
-            self.num_stages = 3
-            self.num_warps = 4
-
-    assert _object_fields(Options()) == {"num_stages": 3, "num_warps": 4}
-
-
-@pytest.mark.skip_global_cleanup
-def test_launch_key_receipt_says_when_served_key_was_not_warmed():
-    receipts = _LaunchKeyReceipts()
-    receipts.add(
-        "warmup",
-        {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "warmup-only"},
-    )
-
-    emitted = receipts.add(
-        "served",
-        {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "served-only"},
-    )
-
-    assert emitted is not None
-    assert not emitted["compare"]["served_key_was_warmed"]
 
 
 def test_attention_config_leaves_the_version_to_the_platform():

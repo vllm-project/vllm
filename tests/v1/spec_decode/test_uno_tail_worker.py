@@ -17,7 +17,6 @@ import torch
 from tests.v1.spec_decode.test_uno_mrv2 import _uno_sample_tokens_runner
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.uno_step_timing import UnoStepTimingTracer
 
 
 def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
@@ -35,7 +34,6 @@ def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
     original.total_num_scheduled_tokens = 1
     original.zero_next_draft_req_ids = {"request-0"}
     original.skip_speculator_proposal = True
-    runner._uno_step_timing = None
     runner.update_pp_decode_requests = lambda: None
     for name in ("finish_requests", "free_states", "add_requests", "update_requests"):
         monkeypatch.setattr(runner, name, lambda _output: None)
@@ -207,63 +205,3 @@ def test_tail_draft_retrieval_masks_rows_without_changing_collective_shape(
     assert drafts.draft_token_ids == ([[], []] if all_tail else [[], [8, 9]])
     if all_tail:
         assert broadcasts[0].tolist() == [[88, 89], [98, 99]]
-
-
-def test_execute_model_timing_captures_late_tail_and_its_followup(monkeypatch):
-    """Late tail diagnostics do not require tracing every verification step."""
-    from vllm.v1.core.sched.output import SchedulerOutput
-
-    tracer = UnoStepTimingTracer(capture_cuda_events=False)
-    runner, _, _, _ = _uno_sample_tokens_runner(monkeypatch)
-    runner._uno_step_timing = tracer
-    runner.req_states.num_reqs = 1
-    runner.update_pp_decode_requests = lambda: None
-    for name in ("finish_requests", "free_states", "add_requests", "update_requests"):
-        monkeypatch.setattr(runner, name, lambda _output: None)
-    runner.block_tables = SimpleNamespace(apply_staged_writes=lambda: None)
-    traces = []
-    begin = tracer.begin
-
-    def record_begin(*args):
-        trace = begin(*args)
-        traces.append(trace)
-        return trace
-
-    monkeypatch.setattr(tracer, "begin", record_begin)
-
-    class BeforeDeviceDispatch(Exception):
-        pass
-
-    def stop_before_device_dispatch(*_args):
-        raise BeforeDeviceDispatch
-
-    runner.gather_batch_req_state = stop_before_device_dispatch
-    output = SchedulerOutput.make_empty()
-    output.debug_uno_step_id = 1
-    output.debug_schedule_wall_ms = 0.5
-    output.num_scheduled_tokens = {"request-0": 1}
-    output.total_num_scheduled_tokens = 1
-
-    def execute_until_dispatch():
-        with pytest.raises(BeforeDeviceDispatch):
-            runner.execute_model(output)
-        return traces[-1]
-
-    for _ in range(3):
-        assert execute_until_dispatch() is not None
-    late_trace = execute_until_dispatch()
-    assert late_trace is None, "ordinary late verification needs no timing trace"
-    output.zero_next_draft_req_ids = {"request-0"}
-    output.skip_speculator_proposal = True
-
-    for expected_step in (5, 6):
-        trace = execute_until_dispatch()
-        assert trace is not None, "late draft-free tail stage must be observable"
-        payload = trace.payload()
-        assert payload["tail_mode_rows"] == 1
-        assert payload["current_draft_counts"] == (0,)
-        assert payload["request_steps"] == (expected_step,)
-        assert payload["proposal_skipped_terminal"]
-
-    output.debug_uno_step_id = None
-    assert execute_until_dispatch() is None, "debug-off steps create no trace"
