@@ -93,7 +93,7 @@ def dump_engine_execution_timeout(
     timeout_s: float,
     stage: str,
 ):
-    with contextlib.suppress(Exception):
+    try:
         logger.error(
             "V1 LLM engine stage '%s' has not completed after %.2f seconds "
             "(pid=%d). Dumping sanitized scheduler state and Python stack "
@@ -106,6 +106,9 @@ def dump_engine_execution_timeout(
             ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S,
         )
         _dump_engine_timeout_context(config, snapshot)
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.exception("Failed to dump V1 engine timeout context")
 
     with contextlib.suppress(Exception):
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)

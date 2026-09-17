@@ -11,7 +11,13 @@ from typing import Any
 
 import vllm.v1.engine.core as engine_core_module
 from vllm.logging_utils import dump_input
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore
@@ -555,6 +561,36 @@ def test_engine_execution_timeout_real_timeout_emits_useful_summary(monkeypatch)
     assert "private/model/path" not in combined_logs
 
 
+def test_engine_execution_timeout_context_failure_is_reported(monkeypatch):
+    errors = []
+    traceback_dumped = threading.Event()
+
+    def fail_context(*args):
+        raise RuntimeError("context failure")
+
+    monkeypatch.setattr(dump_input, "_dump_engine_timeout_context", fail_context)
+    monkeypatch.setattr(
+        dump_input.logger,
+        "exception",
+        lambda message, *args: errors.append(message % args),
+    )
+    monkeypatch.setattr(
+        dump_input.faulthandler,
+        "dump_traceback",
+        lambda *args, **kwargs: traceback_dumped.set(),
+    )
+
+    dump_input.dump_engine_execution_timeout(
+        make_timeout_config(),
+        make_timeout_snapshot(),
+        timeout_s=1.0,
+        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+
+    assert errors == ["Failed to dump V1 engine timeout context"]
+    assert traceback_dumped.is_set()
+
+
 def test_engine_execution_timeout_watchdog_fires_twice_on_same_thread(monkeypatch):
     dumped_stages = []
     dump_completed = threading.Event()
@@ -640,6 +676,55 @@ def test_engine_execution_timeout_context_balances_detail_and_privacy(monkeypatc
     assert "[101, 102, 103]" not in combined_logs
     assert "num_scheduled_new_reqs" in combined_logs
     assert "num_running_reqs" in combined_logs
+
+
+def test_engine_execution_timeout_snapshot_uses_scheduler_dataclasses():
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[
+            NewRequestData(
+                req_id="new-request",
+                prompt_token_ids=[1, 2, 3],
+                mm_features=[],
+                sampling_params=SamplingParams(max_tokens=8, temperature=0.25),
+                pooling_params=None,
+                block_ids=([1, 2],),
+                num_computed_tokens=0,
+                lora_request=None,
+            )
+        ],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["cached-request"],
+            resumed_req_ids={"cached-request"},
+            new_token_ids=[[4]],
+            all_token_ids={"cached-request": [1, 2, 3, 4]},
+            new_block_ids=[([3],)],
+            num_computed_tokens=[3],
+            num_output_tokens=[1],
+        ),
+        num_scheduled_tokens={"new-request": 3, "cached-request": 1},
+        total_num_scheduled_tokens=4,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    snapshot = dump_input.make_engine_execution_timeout_snapshot(
+        scheduler_output,
+        {"cached_request_sampling_params": {"cached-request": {"temperature": 0.5}}},
+    )
+
+    samples = snapshot.scheduler_output_summary["request_samples"]
+    assert [sample["request_id"] for sample in samples] == [
+        "new-request",
+        "cached-request",
+    ]
+    assert samples[0]["num_prefill_tokens"] is None
+    assert samples[0]["sampling_params"]["temperature"] == 0.25
+    assert samples[1]["is_resumed"]
+    assert samples[1]["num_all_tokens"] == 4
+    assert samples[1]["sampling_params"] == {"temperature": 0.5}
 
 
 def test_engine_execution_timeout_samples_include_cached_requests_when_truncated():
