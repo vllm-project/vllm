@@ -212,6 +212,7 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
                 "vllm:simple_kv_offload_info."
             ),
             labelnames=self._labelnames,
+            multiprocess_mode="mostrecent",
         )
         self._gauge_pending_store_blocks = self._gauge_cls(
             name="vllm:simple_kv_offload_pending_store_blocks",
@@ -222,6 +223,7 @@ class SimpleCPUOffloadPromMetrics(KVConnectorPromMetrics):
                 "transfer."
             ),
             labelnames=self._labelnames,
+            multiprocess_mode="mostrecent",
         )
         self._gauge_info = self._gauge_cls(
             name="vllm:simple_kv_offload_info",
