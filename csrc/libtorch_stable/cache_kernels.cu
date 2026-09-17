@@ -84,7 +84,9 @@ void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
 namespace {
 // ROCm hipMemcpyBatchAsync faults for count > 8192 (MI350X/gfx950), so chunk
 // at that ceiling.
+#if defined(USE_ROCM)
 constexpr int64_t kRocmDefaultMaxBatchDescriptors = 8192;
+#endif
 
 constexpr const char* kMaxBatchDescriptorsEnv =
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS";
