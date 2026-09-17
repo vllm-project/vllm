@@ -55,7 +55,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
                 owned_by: "vllm".to_string(),
                 root: Some(state.model.clone()),
                 parent: None,
-                max_model_len: Some(state.text.max_model_len()),
+                max_model_len: state.max_model_len,
             })
             .collect(),
     })
@@ -66,6 +66,14 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
         model_names: state.served_model_names.clone(),
         lora_request: None,
     }
+}
+
+fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
+    requested_model
+        .filter(|model| !model.is_empty())
+        .or_else(|| state.served_model_names.first().map(String::as_str))
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn lower_render_request(
@@ -97,6 +105,7 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         content_parts: None,
+        return_token_ids: None,
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;
@@ -108,7 +117,7 @@ async fn render_chat(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
@@ -132,7 +141,7 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());

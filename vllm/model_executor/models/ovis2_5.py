@@ -49,12 +49,11 @@ IMAGE_PAD_TOKEN_ID = 151655
 
 
 class Ovis2_5ImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
@@ -66,12 +65,11 @@ class Ovis2_5ImagePatchInputs(TensorSchema):
 
 
 class Ovis2_5VideoPatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of videos * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
-        - patch_indicators: Batch size * (number of patches + 1)
-        - bn: Batch size * number of videos
+    """Dimensions:
+    - bnp: Batch size * number of videos * number of patches
+    - patch_size: patch_size_x * patch_size_y * num_channels
+    - patch_indicators: Batch size * (number of patches + 1)
+    - bn: Batch size * number of videos
     """
 
     type: Literal["video_patches"]
@@ -83,9 +81,7 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
 
 
 class VisualTokenizer(torch.nn.Module):
-    """
-    VIT
-    """
+    """VIT."""
 
     def __init__(
         self,
@@ -320,8 +316,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         self,
         visual_indicators: list[int],
     ) -> list[int]:
-        """
-        Filter image indicators placeholders and convert them to corresponding
+        """Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         """
         hf_config = self.info.get_hf_config()
@@ -332,53 +327,43 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             if x >= INDICATOR_IDS[0]
         ]
 
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
         if not mm_data:
-            # Avoid warning from HF logger for text-only input
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return processed_data
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
         hf_processor = self.info.get_hf_processor()
 
         if "videos" in mm_data:
             visual_indicators = [
                 hf_processor.construct_visual_indicators((1, 1, 1), True)
-                for grid in processed_outputs["video_grids"]
+                for grid in processed_data["video_grids"]
             ]
             indicator_tokens = [
                 self.visual_indicators_to_visual_tokens(indicator)
                 for indicator in visual_indicators
             ]
-            processed_outputs["video_indicator_tokens"] = torch.tensor(indicator_tokens)
+            processed_data["video_indicator_tokens"] = torch.tensor(indicator_tokens)
         if "images" in mm_data:
             visual_indicators = [
                 hf_processor.construct_visual_indicators((1, 1, 1), False)
-                for grid in processed_outputs["grids"]
+                for grid in processed_data["grids"]
             ]
             indicator_tokens = [
                 self.visual_indicators_to_visual_tokens(indicator)
                 for indicator in visual_indicators
             ]
 
-            processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
-        return processed_outputs
+            processed_data["indicator_tokens"] = torch.tensor(indicator_tokens)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        return prompt_tokens
+        return processed_data
 
     def _get_mm_fields_config(
         self,

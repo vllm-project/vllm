@@ -37,6 +37,7 @@ from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityData,
     ModalityDataItems,
+    MultiModalDataItems,
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
@@ -46,6 +47,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    HFMultiModalInputs,
     ProcessorInputs,
 )
 from vllm.sequence import IntermediateTensors
@@ -226,20 +228,17 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
 
-    def _call_hf_processor(
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Call the HuggingFace processor."""
-        # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         # Convert audio format: [(array, sr), ...] -> [array, ...]
         # KimiAudioProcessor expects raw numpy arrays
-        if audios:
+        mm_data = hf_inputs.hf_data
+        if audios := mm_data.pop("audio", []):
             audio_arrays = []
             for aud in audios:
                 if isinstance(aud, (tuple, list)) and len(aud) == 2:
@@ -251,12 +250,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
                     audio_arrays.append(aud)
             mm_data["audio"] = audio_arrays
 
-        # Use the context's call_hf_processor for proper handling
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            mm_kwargs,
-        )
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,

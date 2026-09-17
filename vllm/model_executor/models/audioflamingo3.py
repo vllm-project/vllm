@@ -71,11 +71,10 @@ from .utils import (
 
 
 class AudioFlamingo3FeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - num_chunks: Number of audio chunks (flattened)
-        - nmb: Number of mel bins
-        - num_audios: Number of original audio files
+    """Dimensions:
+    - num_chunks: Number of audio chunks (flattened)
+    - nmb: Number of mel bins
+    - num_audios: Number of original audio files
     """
 
     type: Literal["audio_features"]
@@ -96,12 +95,11 @@ class AudioFlamingo3FeatureInputs(TensorSchema):
 
 
 class AudioFlamingo3EmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size
-        - naf: Number of audio features
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - bn: Batch size
+    - naf: Number of audio features
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -154,8 +152,7 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         return hidden_states
 
     def _get_feat_extract_output_lengths(self, input_lengths: torch.Tensor):
-        """
-        Computes the output length of the convolutional layers and the output length
+        """Computes the output length of the convolutional layers and the output length
         of the audio encoder
         """
         input_lengths = (input_lengths - 1) // 2 + 1
@@ -377,35 +374,29 @@ class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, Any],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        processor_mm_data = dict(mm_data)
-        audios = processor_mm_data.pop("audios", None)
-        if audios is not None:
-            processor_mm_data["audio"] = audios
+        if "input_features_mask" in processed_data:
+            processed_data["feature_attention_mask"] = processed_data.pop(
+                "input_features_mask"
+            )
 
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=processor_mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        if "input_features_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
-
-        audio_data = processor_mm_data.get("audio")
+        audio_data = mm_data.get("audio")
         if audio_data is None:
-            return outputs
+            return processed_data
 
         audio_list = audio_data if isinstance(audio_data, list) else [audio_data]
         if len(audio_list) == 0:
-            return outputs
+            return processed_data
 
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         feature_extractor = processor.feature_extractor
         sampling_rate = feature_extractor.sampling_rate
         chunk_length = feature_extractor.chunk_length
@@ -423,8 +414,9 @@ class AudioFlamingo3MultiModalProcessor(
                 n_win = max_windows
             chunk_counts.append(n_win)
 
-        outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-        return outputs
+        processed_data["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -476,7 +468,7 @@ class AudioFlamingo3MultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_audioflamingo3,
             )
         ]
@@ -496,9 +488,7 @@ class AudioFlamingo3ForConditionalGeneration(
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.",
             connector="multi_modal_projector.",

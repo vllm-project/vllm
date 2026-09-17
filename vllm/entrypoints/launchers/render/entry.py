@@ -30,7 +30,6 @@ async def build_and_serve_renderer(
 
     Returns the shutdown task for the caller to await.
     """
-
     # Get uvicorn log config (from file or with endpoint filter)
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
@@ -101,12 +100,13 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     import uvloop
 
-    from vllm.entrypoints.openai.cli_args import (
+    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    from ..cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     cli_env_setup()
     parser = FlexibleArgumentParser(

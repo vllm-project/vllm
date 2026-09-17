@@ -8,16 +8,16 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -100,9 +100,7 @@ class HunyuanA13BToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract tool calls from a complete model output.
-        """
+        """Extract tool calls from a complete model output."""
         try:
             # Preprocess the model output
             content, potential_tool_calls = self.preprocess_model_output(model_output)
@@ -177,10 +175,7 @@ class HunyuanA13BToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        """
-        Extract tool calls for streaming mode.
-        """
-
+        """Extract tool calls for streaming mode."""
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_string):
             start_idx = consume_space(start_idx + len(self.bot_string), current_text)

@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .video import preprocess_dots3_note_video
@@ -630,32 +631,34 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
 
 
 class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingInfo]):
-    def _get_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
-        if "video" not in mm_items:
-            return processor_data, passthrough_data
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        videos = mm_items.get_items("video", VideoProcessorItems)
-        raw_videos: list[object] = []
-        for index, item in enumerate(videos.data):
-            if isinstance(item, MediaWithBytes):
-                raw_videos.append(item.original_bytes)
-            else:
-                raw_videos.append(videos.get(index))
-        processor_data = dict(processor_data)
-        processor_data["videos"] = raw_videos
-        return processor_data, passthrough_data
+        # The Dots3Note processor accepts "audios" instead of "audio"
+        hf_data = hf_inputs.hf_data
+        if "audio" in hf_data:
+            hf_data["audios"] = hf_data.pop("audio")
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        if "video" in mm_items:
+            videos = mm_items.get_items("video", VideoProcessorItems)
+
+            raw_videos: list[object] = []
+            for index, item in enumerate(videos.data):
+                if isinstance(item, MediaWithBytes):
+                    raw_videos.append(item.original_bytes)
+                else:
+                    raw_videos.append(videos.get(index))
+
+            hf_data["videos"] = raw_videos
+
+        return hf_inputs
+
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
         self,
@@ -727,7 +730,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             image_end_id = vocab[IMAGE_END]
             merge_size = self.info.image_processor.merge_size  # type: ignore[union-attr]
 
-            def image_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def image_replacement(item_idx: int) -> PromptUpdateDetails:
                 grid = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
                 assert isinstance(grid, torch.Tensor)
                 num_tokens = int(grid.prod()) // merge_size**2
@@ -755,7 +758,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
                 * int(config.get("merge_factor", 1))
             )
 
-            def audio_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def audio_replacement(item_idx: int) -> PromptUpdateDetails:
                 length = out_mm_kwargs["audio"][item_idx]["audio_lengths"].data
                 assert isinstance(length, torch.Tensor)
                 num_tokens = math.ceil(int(length.item()) / stride)
@@ -773,7 +776,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             )
         if "video" in out_mm_kwargs:
 
-            def video_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+            def video_replacement(item_idx: int) -> PromptUpdateDetails:
                 item = out_mm_kwargs["video"][item_idx]
                 input_ids_data = item["video_input_ids"].data
                 embed_mask_data = item["video_embed_mask"].data
@@ -782,8 +785,8 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
                 input_ids = input_ids_data.tolist()
                 embed_mask = embed_mask_data.bool()
 
-                def select_video_embeds(tokenizer, full) -> torch.Tensor:
-                    del tokenizer, full
+                def select_video_embeds(full) -> torch.Tensor:
+                    del full
                     return embed_mask
 
                 return PromptUpdateDetails(
@@ -794,7 +797,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             updates.append(
                 PromptReplacement(
                     modality="video",
-                    target=VIDEO_PLACEHOLDER,
+                    target=[vocab[VIDEO_PLACEHOLDER]],
                     replacement=video_replacement,
                 )
             )

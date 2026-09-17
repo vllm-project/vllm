@@ -419,7 +419,7 @@ vllm-bench \
 | --------- | ------------- | ------------- |
 | `openai-embeddings` | `/v1/embeddings` | Text embedding (accepts text or token IDs) |
 | `openai-embeddings-chat` | `/v1/embeddings` | Chat-format embedding (supports multimodal content) |
-| `vllm-pooling` | `/v1/pooling` | vLLM native pooling endpoint |
+| `vllm-pooling` | `/pooling` | vLLM native pooling endpoint |
 | `vllm-rerank` | `/v1/rerank` | vLLM reranking (query from prompt, documents via `--extra-body`) |
 
 Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Use `--dataset-name sharegpt`, `sonnet`, or `hf` for text-based embedding/rerank benchmarks, or `random` for token-ID-based embedding benchmarks.
@@ -667,6 +667,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
+- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`.
 
 **Prefix sharing** (random dataset): when `--multi-turn-prefix-global-ratio` or `--multi-turn-prefix-conversation-ratio` is > 0, each turn sends a fixed-length message (no history accumulation) composed of a global prefix + per-conversation prefix + unique suffix. The two ratios must sum to < 1.0.
 

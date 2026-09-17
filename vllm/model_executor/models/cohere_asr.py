@@ -45,8 +45,14 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
+)
+from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
 )
 from vllm.renderers import TokenizeParams
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -297,13 +303,13 @@ class CohereASRMLP(nn.Module):
 
 
 class FixedPositionalEncoding(nn.Module):
-    """
-    Fixed positional encoding (embedding layer) from sine and cosine functions
+    """Fixed positional encoding (embedding layer) from sine and cosine functions
     of different frequencies according to https://arxiv.org/abs/1706.03762
 
     Args:
         hidden_size: size of the embeddings in the model, also known as d_model
         max_sequence_length: maximum allowed length of the input sequence
+
     """
 
     def __init__(self, hidden_size: int, max_sequence_length: int = 512) -> None:
@@ -686,10 +692,12 @@ class ConvSubsampling(nn.Module):
 
 class PositionalEncoding(torch.nn.Module):
     """Fixed sinusoidal positional encoding.
+
     Args:
         d_model (int): embedding dim
         max_len (int): maximum input length
         xscale (bool): whether to scale the input by sqrt(d_model)
+
     """
 
     def __init__(
@@ -721,12 +729,14 @@ class PositionalEncoding(torch.nn.Module):
         self, x: torch.Tensor, cache_len: int = 0
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Adds positional encoding.
+
         Args:
             x (torch.Tensor): Input. Its shape is (batch, time, feature_size)
             cache_len (int): the size of the cache which is used to shift positions
         Returns:
             x+pos_emb (torch.Tensor): Its shape is (batch, time, feature_size)
             pos_emb (torch.Tensor): Its shape is (1, time, feature_size)
+
         """
         input_len = x.size(1) + cache_len
         if self.xscale:
@@ -759,14 +769,15 @@ class RelPositionalEncoding(PositionalEncoding):
         self, x: torch.Tensor, cache_len: int = 0
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute positional encoding.
+
         Args:
             x (torch.Tensor): Input. Its shape is (batch, time, feature_size)
             cache_len (int): the size of the cache which is used to shift positions
         Returns:
             x (torch.Tensor): Its shape is (batch, time, feature_size)
             pos_emb (torch.Tensor): Its shape is (1, time, feature_size)
-        """
 
+        """
         if self.xscale:
             x = x * self.xscale
 
@@ -780,15 +791,13 @@ class RelPositionalEncoding(PositionalEncoding):
 
 
 class Swish(nn.SiLU):
-    """
-    Swish activation function introduced in 'https://arxiv.org/abs/1710.05941'
+    """Swish activation function introduced in 'https://arxiv.org/abs/1710.05941'
     Mathematically identical to SiLU. See note in nn.SiLU for references.
     """
 
 
 class ConformerFeedForward(nn.Module):
-    """
-    feed-forward module of Conformer model.
+    """feed-forward module of Conformer model.
     use_bias (bool): Apply bias to all Linear and Conv1d
         layers to improve activation flow and stabilize
         training of huge models.
@@ -816,8 +825,7 @@ class ConformerFeedForward(nn.Module):
 
 
 class CausalConv1D(nn.Conv1d):
-    """
-    A causal version of nn.Conv1d where each step would
+    """A causal version of nn.Conv1d where each step would
     have limited access to locations on its right or left.
     All arguments are the same as nn.Conv1d except padding.
 
@@ -890,6 +898,7 @@ class CausalConv1D(nn.Conv1d):
 
 class ConformerConvolution(nn.Module):
     """The convolution module for the Conformer model.
+
     Args:
         d_model (int): hidden dimension
         kernel_size (int): kernel size for depthwise convolution
@@ -901,6 +910,7 @@ class ConformerConvolution(nn.Module):
         use_bias (bool): Use bias in all Linear and Conv1d
             layers to improve activation flow and stabilize
             training of huge models. Defaults to True
+
     """
 
     def __init__(
@@ -976,10 +986,12 @@ class ConformerConvolution(nn.Module):
 
 class CohereASRMultiHeadAttention(nn.Module):
     """Multi-Head Attention layer of Transformer.
+
     Args:
         n_head (int): number of heads
         n_feat (int): size of the features
         use_bias (bool): whether to remove bias in linear and conv layers
+
     """
 
     def __init__(
@@ -1007,6 +1019,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Transforms query, key and value.
+
         Args:
             query (torch.Tensor): (batch, time1, size)
             key (torch.Tensor): (batch, time2, size)
@@ -1015,6 +1028,7 @@ class CohereASRMultiHeadAttention(nn.Module):
             q (torch.Tensor): (batch, head, time1, size)
             k (torch.Tensor): (batch, head, time2, size)
             v (torch.Tensor): (batch, head, time2, size)
+
         """
         n_batch = query.size(0)
         q = self.linear_q(query).view(n_batch, -1, self.h, self.d_k)
@@ -1033,6 +1047,7 @@ class CohereASRMultiHeadAttention(nn.Module):
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute attention context vector.
+
         Args:
             value (torch.Tensor): (batch, time2, size)
             scores(torch.Tensor): (batch, time1, time2)
@@ -1041,6 +1056,7 @@ class CohereASRMultiHeadAttention(nn.Module):
             value (torch.Tensor): transformed `value`
                 (batch, time2, d_model) weighted by the
                 attention scores
+
         """
         n_batch = value.size(0)
         if mask is not None:
@@ -1068,16 +1084,19 @@ class CohereASRMultiHeadAttention(nn.Module):
         pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute 'Scaled Dot Product Attention'.
+
         Args:
             query (torch.Tensor): (batch, time1, size)
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
+            pos_emb (torch.Tensor): optional relative position embeddings
 
-        returns:
+        Returns:
             output (torch.Tensor): transformed `value`
                 (batch, time1, d_model) weighted by the
                 query dot key attention
+
         """
         q, k, v = self.forward_qkv(query, key, value)
 
@@ -1127,8 +1146,10 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
 
     def rel_shift(self, x: torch.Tensor) -> torch.Tensor:
         """Compute relative positional encoding.
+
         Args:
             x (torch.Tensor): (batch, nheads, time, 2*time-1)
+
         """
         b, h, qlen, pos_len = x.size()  # (b, h, t1, t2)
         # need to add a column of zeros on the left side of
@@ -1148,17 +1169,19 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
+
         Args:
             query (torch.Tensor): (batch, time1, size)
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
-            pos_emb (torch.Tensor) : (batch, time1, size)
+            pos_emb (torch.Tensor): (batch, time1, size)
 
         Returns:
             output (torch.Tensor): transformed `value`
                 (batch, time1, d_model) weighted by the
                 query dot key attention
+
         """
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
@@ -1209,6 +1232,7 @@ class ConformerLayer(torch.nn.Module):
             Conv1d layers from each ConformerLayer to
             improve activation flow and stabilize training
             of huge models. Defaults to True.
+
     """
 
     def __init__(
@@ -1276,14 +1300,14 @@ class ConformerLayer(torch.nn.Module):
         pos_emb: torch.Tensor | None = None,
         pad_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x (torch.Tensor): input signals (B, T, d_model)
             att_mask (torch.Tensor): attention masks(B, T, T)
             pos_emb (torch.Tensor): (L, 1, d_model)
             pad_mask (torch.tensor): padding mask
         Returns:
             x (torch.Tensor): (B, T, d_model)
+
         """
         residual = x
         x = self.norm_feed_forward1(x)
@@ -1328,8 +1352,7 @@ class ConformerLayer(torch.nn.Module):
 
 
 class ConformerEncoder(nn.Module):
-    """
-    The encoder for ASR model of Conformer.
+    """The encoder for ASR model of Conformer.
     Based on this paper:
     'Conformer: Convolution-augmented Transformer for
     Speech Recognition' by Anmol Gulati et al.
@@ -1470,12 +1493,12 @@ class ConformerEncoder(nn.Module):
         return num_encoder_cross_attn_tokens
 
     def set_max_audio_length(self, max_audio_length: int) -> None:
-        """
-        Sets maximum input length.
+        """Sets maximum input length.
         Pre-calculates internal seq_range mask.
 
         Args:
             max_audio_length (int): New maximum sequence length.
+
         """
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
@@ -1941,27 +1964,38 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     ) -> list[int]:
         return [0]
 
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ):
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=dict(mm_data).pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult:
+        # Dithering injects noise into the extracted features, so the
+        # feature extractor is not a pure function of its input. Since the
+        # processing cache assumes that processor outputs are invariant
+        # across calls, bypass the cache when dithering is active.
+        preproc = self.info.get_hf_config().preprocessor
+        if preproc.get("dither", 1e-05) > 0:
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _get_mm_fields_config(
         self,
@@ -2150,9 +2184,15 @@ class CohereAsrForConditionalGeneration(
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
     ) -> int | None:
-        hop_length = model_config.hf_config.preprocessor.get("window_stride")
-        assert hop_length is not None
-        return math.ceil(audio_duration_s * stt_config.sample_rate / hop_length)
+        hf_config = model_config.hf_config
+        preprocessor = hf_config.preprocessor
+        sample_rate = preprocessor["sample_rate"]
+        window_stride = preprocessor["window_stride"]
+        hop_length = int(window_stride * sample_rate)
+        # Floor-divide to match get_seq_len.
+        num_frames = int(audio_duration_s * sample_rate) // hop_length
+        subsampling_factor = hf_config.encoder["subsampling_factor"]
+        return math.ceil(num_frames / subsampling_factor)
 
     def get_num_encoder_cross_attn_tokens(self, num_encoder_input_tokens: int) -> int:
         return self.model.encoder.get_num_encoder_cross_attn_tokens(

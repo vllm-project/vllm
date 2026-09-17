@@ -18,6 +18,13 @@ class ECTransferConfig:
 
     ec_connector: str | None = None
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
+
+    Built-in options include ``ECExampleConnector`` (shared filesystem via
+    safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
+    requires ``mooncake-transfer-engine`` and matching producer/consumer
+    ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
+    Set ``cross_encoder_cache`` in Mooncake extra config to reuse shared
+    Encoder outputs from Store before encoding, retaining P2P delivery.
     """
 
     engine_id: str | None = None
@@ -58,8 +65,7 @@ class ECTransferConfig:
     Only supported in V1."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

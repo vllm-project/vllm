@@ -56,9 +56,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
     TimingContext,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -172,6 +174,11 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 image_token = processor.boi_token
             else:
                 image_token = getattr(processor, "image_token", "")
+                # Some processors (e.g. HunYuanVL) reject a bare image token and
+                # require each one to be wrapped in its start/end markers.
+                start_token = getattr(processor, "image_start_token", "")
+                end_token = getattr(processor, "image_end_token", "")
+                image_token = f"{start_token}{image_token}{end_token}"
             text += image_token * num_images
         return text
 
@@ -211,17 +218,6 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
     Subclasses add the strategy for locating placeholders in the prompt.
     """
-
-    def _get_hf_mm_data(
-        self,
-        mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """Rename the parser's `audios` key to the `audio` argument HF audio
-        processors take."""
-        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
-        if self.info._is_audio_model() and "audios" in processor_data:
-            processor_data["audio"] = processor_data.pop("audios")
-        return processor_data, passthrough_data
 
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Names of the fields the sub-processor for `modality` produces."""
@@ -345,27 +341,8 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
         return mm_fields
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> "BatchFeature":
-        """Run the HF processor and unpad inputs."""
-        try:
-            hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
-        except ValueError:
-            if any(mm_data.values()):
-                raise
-            # Some processors reject a prompt holding placeholders with
-            # no data to go with them, so tokenize it without them
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            hf_inputs = transformers.BatchFeature(
-                dict(input_ids=[prompt_ids]), tensor_type="pt"
-            )
-        self._unpad_images(hf_inputs)
-        self._unpad_audios(hf_inputs, mm_data, mm_kwargs)
-        return hf_inputs
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _unpad_audios(
         self,
@@ -449,19 +426,6 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         """Empty, because `apply` writes the placeholder ranges itself rather than
         deriving them from updates."""
         return []
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> "BatchFeature":
-        """Ask which modality owns each token of the expanded prompt, which is the
-        only marking of the tokens an expansion adds around an item."""
-        if any(mm_data.values()):
-            mm_data = {**mm_data, "return_mm_token_type_ids": True}
-
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
         """Token ids marking where `modality` sits in the prompt, which for some
@@ -612,24 +576,65 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
 
         with timing_ctx.record("apply_hf_processor"):
             hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-            prompt = hf_processor.decode(prompt)
+            prompt_text = hf_processor.decode(prompt)
 
             # Bypass cached processor and always apply to the full set of mm inputs
             # NOTE: we can't just set caching=False because base class method
             # transforms outputs to `MultiModalKwargs` which is not going to
             # work for Transformers. The vision path has logic tied to
             # `mm_tokens_per_modality` in _apply_vision()
-            prompt_ids, processed_data = self._apply_hf_processor_text_mm(
-                prompt_text=prompt,
-                mm_items=mm_items,
-                hf_processor_mm_kwargs={
-                    **hf_processor_mm_kwargs,
-                    # HF processors only accept text, and the decoded string already
-                    # contains any special tokens, so don't let them be added again
-                    # (`_call_hf_processor` disables `add_special_tokens`).
-                    "add_special_tokens": False,
-                },
+            hf_processor_mm_kwargs = {
+                # vLLM needs the untruncated sequence to keep placeholder
+                # tokens aligned. Note that the text inputs are just dummy
+                # text, not the original prompt. The original prompt is
+                # already tokenized by the renderer.
+                "truncation": False,
+                # HF processors only accept text, and the decoded string already
+                # contains any special tokens, so don't let them be added again
+                # (the HF processor call disables `add_special_tokens`).
+                "add_special_tokens": False,
+                **hf_processor_mm_kwargs,
+            }
+
+            processor_data, _, passthrough_data = self._get_hf_mm_inputs(
+                mm_items, hf_processor_mm_kwargs
             )
+
+            # The real prompt is fed to the processor below and the placeholder
+            # ranges are read back out of its output, so the dummy text meant for
+            # media-only callers is discarded here.
+            processor_data.pop("text", None)
+            has_mm_data = any(processor_data.values())
+
+            # Ask which modality owns each token of the expanded prompt, which
+            # is the only marking of the tokens an expansion adds around an item
+            if has_mm_data:
+                processor_data = {**processor_data, "return_mm_token_type_ids": True}
+
+            try:
+                processed_data = self.info.ctx.call_hf_processor(
+                    self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                    dict(text=prompt_text, **processor_data),
+                    hf_processor_mm_kwargs,
+                )
+            except ValueError:
+                if has_mm_data:
+                    raise
+                # Some processors reject a prompt holding placeholders with
+                # no data to go with them, so tokenize it without them
+                prompt_ids = self.info.get_tokenizer().encode(prompt_text)
+                processed_data = transformers.BatchFeature(
+                    dict(input_ids=[prompt_ids]), tensor_type="pt"
+                )
+            self._unpad_images(processed_data)
+            self._unpad_audios(processed_data, processor_data, hf_processor_mm_kwargs)
+            processed_data.update(passthrough_data)
+
+            input_ids = processed_data.pop("input_ids")
+            if not isinstance(input_ids, list):
+                input_ids = input_ids.tolist()
+
+            (prompt_ids,) = input_ids
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
@@ -704,6 +709,15 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         """Replace each modality's placeholder token with the token ids that item's
         replacement text encodes to, marking which of them hold embeddings."""
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+
+        def get_target_token_ids(token: str | int | Sequence[int]) -> list[int]:
+            if isinstance(token, str):
+                return cached_encode(tokenizer, token, add_special_tokens=False)
+            if isinstance(token, int):
+                return [token]
+            return list(token)
+
         updates = []
         for modality, items in out_mm_kwargs.items():
             # Popped so they are neither cached nor sent to the model; the updates
@@ -715,10 +729,11 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 )
                 for item in items
             ]
+            token = getattr(hf_processor, f"{modality}_token")
             updates.append(
                 PromptReplacement(
                     modality=modality,
-                    target=getattr(hf_processor, f"{modality}_token"),
+                    target=get_target_token_ids(token),
                     replacement=replacements.__getitem__,
                 )
             )
@@ -773,17 +788,47 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         except (AttributeError, KeyError, TypeError):
             return None
 
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
-        """Ask for the replacement each placeholder expands to, and record it as
-        per-item fields: its token ids, and the tokens or patches behind them."""
-        if has_mm_data := any(mm_data.values()):
-            mm_data = {**mm_data, "return_text_replacement_offsets": True}
-        hf_inputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
+
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
+
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
+
+        # Ask for the replacement each placeholder expands to, and record it as
+        # per-item fields: its token ids, and the tokens or patches behind them
+        if has_mm_data := any(hf_data.values()):
+            hf_data = {**hf_data, "return_text_replacement_offsets": True}
+
+        try:
+            hf_inputs = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_kwargs),
+                dict(text=prompt_text, **hf_data),
+                hf_kwargs,
+            )
+        except ValueError:
+            if any(hf_data.values()):
+                raise
+            # Some processors reject a prompt holding placeholders with
+            # no data to go with them, so tokenize it without them
+            tokenizer = self.info.get_tokenizer()
+            hf_inputs = transformers.BatchFeature(
+                dict(input_ids=[tokenizer.encode(prompt_text)]), tensor_type="pt"
+            )
+        self._unpad_images(hf_inputs)
+        self._unpad_audios(hf_inputs, hf_data, hf_kwargs)
+
         # Drop the inputs the model would reject
         hf_inputs.pop("mm_token_type_ids", None)
         hf_inputs.pop("token_type_ids", None)
@@ -802,13 +847,16 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     "so it can be fixed, and install `transformers<5.15.0` in the "
                     "meantime to locate placeholders in the expanded prompt instead."
                 )
-            return hf_inputs
+            hf_inputs.pop("input_ids", None)
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, hf_inputs
+            )
 
         tokenizer = self.info.get_tokenizer()
         replacements = defaultdict[str, list[list[int]]](list)
         for entry in offsets[0]:
             replacements[entry["type"]].append(
-                tokenizer.encode(entry["replacement"], add_special_tokens=False)
+                cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
         for modality, seqs in replacements.items():
@@ -820,7 +868,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, mm_data, len(seqs)
+                    hf_inputs, hf_data, len(seqs)
                 )
             elif modality == "audio":
                 counts = []
@@ -829,7 +877,11 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
                 hf_inputs["num_audio_tokens"] = torch.tensor(counts)
 
-        return hf_inputs
+        hf_inputs.pop("input_ids")
+
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, hf_inputs
+        )
 
 
 # From this version on, a processor reporting no offsets is an error rather than a
@@ -911,9 +963,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             yield
 
     def _decorate_for_torch_compile(self):
-        """
-        Decorate the model's decoder and encoder classes to indicate to vLLM that they
-        support torch compile if `can_enable_torch_compile` and
+        """Decorate the model's decoder and encoder classes to indicate to vLLM
+        that they support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
         """
         super()._decorate_for_torch_compile()
@@ -971,7 +1022,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         """Transformers modeling backend multimodal classes do not contain a separate
         vLLM language model class. Therefore, in order to return a language model vLLM
         class, we use a wrapper to give `self` the same interface as a text model."""
-
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
         # Keep only classes defined in `vllm.model_executor.models.transformers`
@@ -989,9 +1039,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return LanguageModel(self)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         for name in ("language_model", "text_model"):
             if getattr(self.model, name, None) is not None:
                 return MultiModelKeys.from_string_field(language_model=f"model.{name}")
@@ -1139,8 +1187,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # grid_thw fields are registered keep_on_cpu; restore the on-device
         # placement that HF get_image_features implementations expect.
         for key, value in kwargs.items():
-            if isinstance(value, torch.Tensor):
-                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
+            if isinstance(value, torch.Tensor) and value.is_cpu:
+                kwargs[key] = async_tensor_h2d(value, pixel_values.device)
 
         # The underlying HuggingFace `get_image_features` implementations
         # contain model-internal syncs (e.g. Idefics3 filters all-zero
@@ -1194,17 +1242,31 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
-        kwargs = {}
-        if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
+        if not hasattr(self, "_get_rope_index_kwarg_names"):
             import inspect
 
-            sig = inspect.signature(self.model.get_rope_index)
-            params = sig.parameters
-            self._get_rope_index_accepts_mm_token_type_ids = (
-                "mm_token_type_ids" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            params = inspect.signature(self.model.get_rope_index).parameters
+            self._get_rope_index_kwarg_names = (
+                None
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                else frozenset(params)
             )
-        if self._get_rope_index_accepts_mm_token_type_ids:
+
+        kwarg_names = self._get_rope_index_kwarg_names
+
+        def accepts_kwarg(name: str) -> bool:
+            return kwarg_names is None or name in kwarg_names
+
+        # Drop a grid the model can't accept only when there is nothing to pass.
+        kwargs = {
+            name: value
+            for name, value in (
+                ("image_grid_thw", image_grid_thw),
+                ("video_grid_thw", video_grid_thw),
+            )
+            if value is not None or accepts_kwarg(name)
+        }
+        if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
                 position = feature.mm_position
@@ -1215,8 +1277,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             **kwargs,
         )
 

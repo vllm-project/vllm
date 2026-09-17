@@ -10,16 +10,16 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -38,8 +38,7 @@ logger = init_logger(__name__)
 
 
 class Granite20bFCToolParser(ToolParser):
-    """
-    Tool call parser for the granite-20b-functioncalling model intended
+    """Tool call parser for the granite-20b-functioncalling model intended
     for use with the examples/tool_chat_template_granite20b_fc.jinja
     template.
 

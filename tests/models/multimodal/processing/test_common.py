@@ -33,9 +33,7 @@ from ...registry import (
 
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Add metadata to video mm_data
-    """
+    """Add metadata to video mm_data."""
 
     def create_metadata(frames: np.ndarray):
         num_frames = len(frames)
@@ -61,8 +59,7 @@ def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for GLM-ASR model.
+    """Patch the multimodal data for GLM-ASR model.
     GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
     """
     if "audio" in mm_data:
@@ -92,6 +89,11 @@ _XPU_EXCLUDED_MODEL_IDS = {
     "thinkingmachines/Inkling-NVFP4",
 }
 
+_CPU_EXCLUDED_MODEL_IDS = {
+    # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+}
+
 
 def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
     for model_arch in model_arch_list:
@@ -110,6 +112,11 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
     if current_platform.is_xpu():
         for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    if current_platform.is_cpu():
+        for excluded_model_id in _CPU_EXCLUDED_MODEL_IDS:
             while excluded_model_id in model_ids:
                 model_ids.remove(excluded_model_id)
 
@@ -385,17 +392,11 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "google/gemma-3n-E2B-it":
-        pytest.skip("Fix later")
-    if model_id == "OpenGVLab/InternVL2-2B":
-        pytest.skip("Fix later")
     if model_id == "openvla/openvla-7b":
         pytest.skip(
             "OpenVLA uses a custom vLLM processor because its HF remote "
             "processor is incompatible with current Transformers."
         )
-    if model_id == "jinaai/jina-reranker-m0":
-        pytest.skip("Fix later")
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "
@@ -403,21 +404,11 @@ def test_processing_correctness(
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
         )
-    if model_id == "CohereLabs/cohere-transcribe-03-2026":
-        pytest.skip("Fix later")
     if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
         pytest.skip(
             "MOSS-Audio uses a custom processor that dynamically expands "
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
-        )
-    # TODO: Remove when transformers 5.15.0 is released, which contains
-    # https://github.com/huggingface/transformers/pull/47483.
-    if model_id == "microsoft/VibeVoice-ASR-HF":
-        pytest.skip(
-            "VibeVoice ASR requires audio as a positional argument and hence "
-            "cannot pass the processing correctness test as is. Its generation "
-            "is covered by test_transformers_audio.py."
         )
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(
