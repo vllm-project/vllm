@@ -8,11 +8,188 @@ import math
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 
 from ..runtime import has_active_triton_cpu_backend
 
 _MAX_GRID_AXIS = 65_535
+_LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
+_QSA_SPLIT_OCCUPANCY_MULTIPLIER = 4
+# Four-way splitting preserves top-k tile locality after occupancy saturates.
+_QSA_MIN_SPLITS = 4
+_QSA_MAX_SPLITS = 16
+
+
+@triton.jit
+def _qsa_mqa_paged_kernel(
+    q_ptr,
+    k_cache_ptr,
+    page_table_ptr,
+    token_to_req_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    visible_blocks_ptr,
+    logits_ptr,
+    stride_q_row,
+    stride_q_head,
+    stride_q_dim,
+    stride_cache_block,
+    stride_cache_token,
+    stride_cache_dim,
+    stride_table_req,
+    stride_table_page,
+    stride_logits_row,
+    num_rows,
+    num_columns,
+    num_pages,
+    num_requests,
+    score_divisor,
+    PAGE_SIZE: tl.constexpr,
+    PAGE_TABLE_WIDTH: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    dims = tl.arange(0, BLOCK_D)
+    request = tl.load(token_to_req_ptr + row)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    query_position = tl.load(query_positions_ptr + row)
+    sequence_length = tl.load(
+        sequence_lengths_ptr + safe_request,
+        mask=(request >= 0) & (request < num_requests),
+        other=0,
+    )
+    visible = tl.minimum(
+        tl.minimum(
+            (query_position + 1) // COMPRESS_RATIO,
+            sequence_length // COMPRESS_RATIO,
+        ),
+        num_columns,
+    )
+    visible = tl.maximum(visible, 0)
+    if tl.program_id(1) == 0:
+        tl.store(visible_blocks_ptr + row, visible)
+    logical_page = columns // PAGE_SIZE
+    page_offset = columns % PAGE_SIZE
+    valid = (
+        (row < num_rows)
+        & (columns < visible)
+        & (request >= 0)
+        & (request < num_requests)
+        & (logical_page < PAGE_TABLE_WIDTH)
+    )
+    physical_page = tl.load(
+        page_table_ptr
+        + safe_request * stride_table_req
+        + tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1) * stride_table_page,
+        mask=valid,
+        other=-1,
+    )
+    valid &= (physical_page >= 0) & (physical_page < num_pages)
+    safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+    score = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    for head in tl.static_range(0, NUM_HEADS):
+        query = tl.load(
+            q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
+            mask=dims < HEAD_DIM,
+            other=0.0,
+        ).to(tl.float32)
+        keys = tl.load(
+            k_cache_ptr
+            + safe_physical_page[:, None] * stride_cache_block
+            + page_offset[:, None] * stride_cache_token
+            + dims[None, :] * stride_cache_dim,
+            mask=valid[:, None] & (dims[None, :] < HEAD_DIM),
+            other=0.0,
+        ).to(tl.float32)
+        score += tl.maximum(tl.sum(keys * query[None, :], axis=1), 0.0)
+
+    tl.store(
+        logits_ptr + row * stride_logits_row + columns,
+        tl.where(valid, score / score_divisor, -float("inf")),
+        mask=(row < num_rows) & (columns < num_columns),
+    )
+
+
+@triton.jit
+def _expand_qsa_indices_kernel(
+    block_indices_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    token_to_req_ptr,
+    output_ptr,
+    stride_blocks_row,
+    stride_blocks_column,
+    stride_output_row,
+    stride_output_column,
+    rows,
+    num_requests,
+    BLOCK_TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OUTPUT_WIDTH: tl.constexpr,
+    COLUMN_BLOCK: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * COLUMN_BLOCK + tl.arange(0, COLUMN_BLOCK)
+    query_position = tl.load(query_positions_ptr + row)
+    request = tl.load(token_to_req_ptr + row)
+    valid_request = (request >= 0) & (request < num_requests)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    sequence_length = tl.load(
+        sequence_lengths_ptr + safe_request,
+        mask=valid_request,
+        other=0,
+    )
+    complete_blocks = tl.minimum(
+        tl.minimum(
+            (query_position + 1) // COMPRESS_RATIO,
+            sequence_length // COMPRESS_RATIO,
+        ),
+        BLOCK_TOPK,
+    )
+    complete_blocks = tl.maximum(complete_blocks, 0)
+    expanded_count = complete_blocks * COMPRESS_RATIO
+    tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
+    tail_count = tl.maximum((query_position + 1) - tail_start, 0)
+
+    is_expanded = columns < expanded_count
+    block_rank = columns // COMPRESS_RATIO
+    offset = columns % COMPRESS_RATIO
+    block = tl.load(
+        block_indices_ptr
+        + row * stride_blocks_row
+        + tl.minimum(block_rank, BLOCK_TOPK - 1) * stride_blocks_column,
+        mask=(row < rows) & is_expanded,
+        other=-1,
+    )
+    expanded = block * COMPRESS_RATIO + offset
+    tail_offset = columns - expanded_count
+    is_tail = (
+        (columns >= expanded_count)
+        & (tail_offset < tail_count)
+        & (tail_offset < COMPRESS_RATIO - 1)
+    )
+    token = tl.where(is_expanded, expanded, tail_start + tail_offset)
+    valid = (
+        (row < rows)
+        & (columns < OUTPUT_WIDTH)
+        & valid_request
+        & (is_expanded | is_tail)
+        & (token >= 0)
+        & (token < sequence_length)
+    )
+    tl.store(
+        output_ptr + row * stride_output_row + columns * stride_output_column,
+        tl.where(valid, token, -1),
+        mask=(row < rows) & (columns < OUTPUT_WIDTH),
+    )
 
 
 @triton.jit
@@ -222,6 +399,166 @@ def _qsa_merge_splitk_kernel(
     )
 
 
+@triton.jit
+def _store_qsa_rows_kernel(
+    cache_ptr,
+    slots_ptr,
+    rows_ptr,
+    stride_cache_block,
+    stride_cache_token,
+    stride_cache_dim,
+    stride_rows_row,
+    stride_rows_dim,
+    num_rows,
+    num_blocks,
+    PAGE_SIZE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    dims = tl.arange(0, BLOCK_D)
+    slot = tl.load(slots_ptr + row)
+    valid = (row < num_rows) & (slot >= 0) & (slot < num_blocks * PAGE_SIZE)
+    safe_slot = tl.maximum(slot, 0)
+    values = tl.load(
+        rows_ptr + row * stride_rows_row + dims * stride_rows_dim,
+        mask=valid & (dims < WIDTH),
+        other=0,
+    )
+    tl.store(
+        cache_ptr
+        + (safe_slot // PAGE_SIZE).to(tl.int64) * stride_cache_block
+        + (safe_slot % PAGE_SIZE) * stride_cache_token
+        + dims * stride_cache_dim,
+        values,
+        mask=valid & (dims < WIDTH),
+    )
+
+
+@triton.jit
+def _compress_qsa_groups_kernel(
+    raw_keys_ptr,
+    raw_positions_ptr,
+    compressor_state_cache_ptr,
+    compressor_state_table_ptr,
+    token_to_req_ptr,
+    query_start_loc_ptr,
+    logical_positions_ptr,
+    compressed_slots_ptr,
+    pooled_ptr,
+    first_positions_ptr,
+    stride_raw_row,
+    stride_raw_dim,
+    stride_raw_positions_row,
+    stride_raw_positions_dim,
+    stride_compressor_state_block,
+    stride_compressor_state_token,
+    stride_compressor_state_dim,
+    stride_compressor_state_table_req,
+    stride_pooled_row,
+    stride_pooled_dim,
+    stride_positions_row,
+    stride_positions_dim,
+    num_rows,
+    num_compressor_state_blocks,
+    num_requests,
+    COMPRESSOR_STATE_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    dims = tl.arange(0, BLOCK_D)
+    request = tl.load(token_to_req_ptr + row)
+    end_position = tl.load(logical_positions_ptr + row)
+    compressed_slot = tl.load(compressed_slots_ptr + row)
+    valid_request = (request >= 0) & (request < num_requests)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    query_row_start = tl.load(
+        query_start_loc_ptr + safe_request, mask=valid_request, other=0
+    )
+    query_row_end = tl.load(
+        query_start_loc_ptr + safe_request + 1, mask=valid_request, other=0
+    )
+    chunk_start_position = end_position - (row - query_row_start)
+    compressor_state_block = tl.load(
+        compressor_state_table_ptr + safe_request * stride_compressor_state_table_req,
+        mask=valid_request,
+        other=-1,
+    )
+    valid_state_block = (compressor_state_block >= 0) & (
+        compressor_state_block < num_compressor_state_blocks
+    )
+    valid_row = (
+        (row < num_rows)
+        & valid_request
+        & (row >= query_row_start)
+        & (row < query_row_end)
+        & (end_position >= COMPRESS_RATIO - 1)
+        & (compressed_slot >= 0)
+    )
+    accumulator = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
+    for group_offset in tl.range(0, COMPRESS_RATIO):
+        position = end_position - (COMPRESS_RATIO - 1 - group_offset)
+        use_raw = position >= chunk_start_position
+        raw_row = query_row_start + position - chunk_start_position
+        raw_values = tl.load(
+            raw_keys_ptr + raw_row * stride_raw_row + dims * stride_raw_dim,
+            mask=valid_row
+            & use_raw
+            & (raw_row >= query_row_start)
+            & (raw_row < query_row_end)
+            & (raw_row < num_rows)
+            & (dims < HEAD_DIM),
+            other=0.0,
+        ).to(tl.float32)
+        state_values = tl.load(
+            compressor_state_cache_ptr
+            + tl.maximum(compressor_state_block, 0).to(tl.int64)
+            * stride_compressor_state_block
+            + (position % COMPRESSOR_STATE_SIZE) * stride_compressor_state_token
+            + dims * stride_compressor_state_dim,
+            mask=valid_row & ~use_raw & valid_state_block & (dims < HEAD_DIM),
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += tl.where(use_raw, raw_values, state_values)
+
+    tl.store(
+        pooled_ptr + row * stride_pooled_row + dims * stride_pooled_dim,
+        accumulator / COMPRESS_RATIO,
+        mask=(row < num_rows) & (dims < HEAD_DIM),
+    )
+
+    position_dims = tl.arange(0, 4)
+    first_position = end_position - COMPRESS_RATIO + 1
+    first_from_raw = first_position >= chunk_start_position
+    raw_first_row = query_row_start + first_position - chunk_start_position
+    raw_position_values = tl.load(
+        raw_positions_ptr
+        + raw_first_row * stride_raw_positions_row
+        + position_dims * stride_raw_positions_dim,
+        mask=valid_row
+        & first_from_raw
+        & (raw_first_row >= query_row_start)
+        & (raw_first_row < query_row_end)
+        & (raw_first_row < num_rows)
+        & (position_dims < 3),
+        other=0,
+    )
+    state_position_values = tl.where(valid_row, first_position, 0)
+    position_values = tl.where(
+        first_from_raw, raw_position_values, state_position_values
+    )
+    tl.store(
+        first_positions_ptr
+        + row * stride_positions_row
+        + position_dims * stride_positions_dim,
+        position_values,
+        mask=(row < num_rows) & (position_dims < 3),
+    )
+
+
 def _validate_scoring_inputs(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -262,8 +599,7 @@ def qsa_mqa_paged(
     num_columns: int | None = None,
     score_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute QSA scores from a paged compressed-key cache with Torch."""
-
+    """Compute QSA scores directly from a paged compressed-key cache."""
     _validate_scoring_inputs(
         q,
         k_cache,
@@ -273,8 +609,21 @@ def qsa_mqa_paged(
         sequence_lengths,
         compress_ratio,
     )
-    if q.device.type != "cpu":
-        raise RuntimeError("CPU QSA scoring requires CPU tensors")
+    if q.device.type != "cpu" or not has_active_triton_cpu_backend():
+        raise RuntimeError("CPU QSA scoring requires Triton and CPU tensors")
+    tensors = (
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+    )
+    if any(tensor.device != q.device for tensor in tensors):
+        raise ValueError("QSA scoring tensors must share one CPU device")
+    if q.stride(2) != 1 or k_cache.stride(3) != 1:
+        raise ValueError("QSA scoring head dimensions must be contiguous")
+    if page_table.stride(1) != 1:
+        raise ValueError("QSA page-table rows must be contiguous")
     capacity = page_table.shape[1] * k_cache.shape[1]
     columns = capacity if num_columns is None else num_columns
     if columns < 0 or columns > capacity:
@@ -283,34 +632,43 @@ def qsa_mqa_paged(
     if divisor <= 0:
         raise ValueError("QSA score scale must be positive")
 
-    logits = torch.full(
-        (q.shape[0], columns),
-        -float("inf"),
-        dtype=torch.float32,
-        device=q.device,
-    )
+    logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.zeros(q.shape[0], dtype=torch.int32, device=q.device)
-    for row in range(q.shape[0]):
-        request = int(token_to_req[row])
-        if request < 0 or request >= page_table.shape[0]:
-            continue
-        visible = min(
-            int((query_positions[row] + 1) // compress_ratio),
-            int(sequence_lengths[request] // compress_ratio),
-            columns,
-        )
-        visible = max(visible, 0)
-        visible_blocks[row] = visible
-        if visible == 0:
-            continue
-        logical = torch.arange(visible, device=q.device)
-        pages = page_table[request, logical // k_cache.shape[1]].long()
-        if torch.any((pages < 0) | (pages >= k_cache.shape[0])):
-            raise ValueError("QSA page table contains an invalid physical page")
-        offsets = logical % k_cache.shape[1]
-        keys = k_cache[pages, offsets, 0]
-        scores = torch.einsum("hd,kd->hk", q[row].float(), keys.float())
-        logits[row, :visible] = scores.clamp_min_(0).sum(dim=0) / divisor
+    if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    block_n = 32
+    _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        visible_blocks,
+        logits,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(3),
+        page_table.stride(0),
+        page_table.stride(1),
+        logits.stride(0),
+        q.shape[0],
+        columns,
+        k_cache.shape[0],
+        page_table.shape[0],
+        float(divisor),
+        PAGE_SIZE=k_cache.shape[1],
+        PAGE_TABLE_WIDTH=page_table.shape[1],
+        NUM_HEADS=q.shape[1],
+        HEAD_DIM=q.shape[2],
+        BLOCK_N=block_n,
+        BLOCK_D=triton.next_power_of_2(q.shape[2]),
+        COMPRESS_RATIO=compress_ratio,
+        num_cpu_threads=0,
+    )
     return logits, visible_blocks
 
 
@@ -324,9 +682,8 @@ def expand_qsa_block_indices(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Expand compressed blocks and append the causal open-group tail."""
-
-    if block_indices.device.type != "cpu":
-        raise RuntimeError("CPU QSA index expansion requires CPU tensors")
+    if block_indices.device.type != "cpu" or not has_active_triton_cpu_backend():
+        raise RuntimeError("CPU QSA index expansion requires Triton and CPU tensors")
     if compress_ratio <= 0 or token_topk % compress_ratio:
         raise ValueError(
             "QSA token top-k must be divisible by a positive compression ratio"
@@ -338,6 +695,11 @@ def expand_qsa_block_indices(
         raise ValueError("QSA request mapping must match query positions")
     if sequence_lengths.ndim != 1 or not sequence_lengths.shape[0]:
         raise ValueError("QSA request sequence lengths must be nonempty")
+    tensors = (query_positions, sequence_lengths, token_to_req)
+    if any(tensor.device != block_indices.device for tensor in tensors):
+        raise ValueError("QSA index-expansion tensors must share one CPU device")
+    if block_indices.stride(1) != 1:
+        raise ValueError("QSA compressed-index rows must be contiguous")
     output_width = token_topk + compress_ratio - 1
     if out is None:
         out = torch.empty(
@@ -345,29 +707,37 @@ def expand_qsa_block_indices(
             dtype=torch.int32,
             device=block_indices.device,
         )
-    elif out.shape != (block_indices.shape[0], output_width):
+    elif (
+        out.shape != (block_indices.shape[0], output_width)
+        or out.dtype != torch.int32
+        or out.device != block_indices.device
+    ):
         raise ValueError("QSA expansion output has an invalid shape")
-    out.fill_(-1)
-
-    offsets = torch.arange(compress_ratio, device=block_indices.device)
-    for row in range(block_indices.shape[0]):
-        request = int(token_to_req[row])
-        if request < 0 or request >= sequence_lengths.shape[0]:
-            continue
-        position = int(query_positions[row])
-        sequence_length = int(sequence_lengths[request])
-        selected = block_indices[row][block_indices[row] >= 0].long()
-        expanded = (selected[:, None] * compress_ratio + offsets).flatten()
-        tail_start = ((position + 1) // compress_ratio) * compress_ratio
-        tail = torch.arange(
-            tail_start,
-            min(position + 1, sequence_length),
-            device=block_indices.device,
-        )
-        tokens = torch.cat((expanded, tail))
-        tokens = tokens[(tokens >= 0) & (tokens < sequence_length)]
-        count = min(tokens.numel(), output_width)
-        out[row, :count] = tokens[:count].to(torch.int32)
+    if out.stride(1) != 1:
+        raise ValueError("QSA expansion output rows must be contiguous")
+    if not block_indices.shape[0]:
+        return out
+    column_block = 256
+    _expand_qsa_indices_kernel[
+        (block_indices.shape[0], triton.cdiv(output_width, column_block))
+    ](
+        block_indices,
+        query_positions,
+        sequence_lengths,
+        token_to_req,
+        out,
+        block_indices.stride(0),
+        block_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        block_indices.shape[0],
+        sequence_lengths.shape[0],
+        BLOCK_TOPK=block_topk,
+        COMPRESS_RATIO=compress_ratio,
+        OUTPUT_WIDTH=output_width,
+        COLUMN_BLOCK=column_block,
+        num_cpu_threads=0,
+    )
     return out
 
 
@@ -382,45 +752,91 @@ def qsa_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Score, top-k select, and expand QSA indices with Torch."""
-
+    """Score, batched top-k select, and expand QSA indices."""
     if token_topk <= 0 or token_topk % compress_ratio:
         raise ValueError("QSA token top-k must be positive and divisible by ratio")
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
-    if out.shape != (rows, output_width):
+    if (
+        out.shape != (rows, output_width)
+        or out.dtype != torch.int32
+        or out.device != q.device
+    ):
         raise ValueError("QSA selection output has an invalid shape")
     if not rows:
         return out
 
-    logits, visible_blocks = qsa_mqa_paged(
-        q,
-        k_cache,
-        page_table,
-        token_to_req,
-        query_positions,
-        sequence_lengths,
-        compress_ratio,
-    )
+    columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
-    selected = torch.full((rows, block_topk), -1, dtype=torch.int32, device=q.device)
-    for row in range(rows):
-        count = min(int(visible_blocks[row]), block_topk)
-        if count:
-            selected[row, :count] = torch.topk(
-                logits[row], count, sorted=False
-            ).indices.to(torch.int32)
-    return expand_qsa_block_indices(
-        selected,
-        query_positions,
-        sequence_lengths,
-        token_to_req,
-        compress_ratio,
-        token_topk,
-        out,
+    rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
+    selected = torch.empty(
+        (min(rows, rows_per_chunk), block_topk),
+        dtype=torch.int32,
+        device=q.device,
     )
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        row_slice = slice(row_start, row_end)
+        chunk_selected = selected[: row_end - row_start]
+        chunk_selected.fill_(-1)
+        logits, visible_blocks = qsa_mqa_paged(
+            q[row_slice],
+            k_cache,
+            page_table,
+            token_to_req[row_slice],
+            query_positions[row_slice],
+            sequence_lengths,
+            compress_ratio,
+        )
+        selected_count = min(columns, block_topk)
+        if selected_count:
+            indices = torch.topk(
+                logits,
+                selected_count,
+                dim=1,
+                sorted=True,
+            ).indices
+            ranks = torch.arange(selected_count, device=q.device)
+            valid = ranks[None, :] < visible_blocks[:, None]
+            chunk_selected[:, :selected_count].copy_(
+                torch.where(valid, indices, -1).to(torch.int32)
+            )
+        expand_qsa_block_indices(
+            chunk_selected,
+            query_positions[row_slice],
+            sequence_lengths,
+            token_to_req[row_slice],
+            compress_ratio,
+            token_topk,
+            out[row_slice],
+        )
+    return out
+
+
+def _qsa_sparse_num_splits(
+    num_rows: int,
+    num_kv_heads: int,
+    num_tiles: int,
+    num_compute_units: int | None = None,
+) -> int:
+    """Choose bounded split parallelism from the available compute units."""
+    base_programs = num_rows * num_kv_heads
+    if base_programs <= 0 or num_tiles <= 0:
+        return 1
+    compute_units = (
+        current_platform.num_compute_units()
+        if num_compute_units is None
+        else num_compute_units
+    )
+    if compute_units <= 1:
+        return 1
+    target_programs = _QSA_SPLIT_OCCUPANCY_MULTIPLIER * compute_units
+    occupancy_splits = triton.next_power_of_2(cdiv(target_programs, base_programs))
+    target_splits = max(_QSA_MIN_SPLITS, occupancy_splits)
+    max_useful = 1 << (num_tiles.bit_length() - 1)
+    return min(_QSA_MAX_SPLITS, max_useful, target_splits)
 
 
 def qsa_sparse_paged_attention(
@@ -433,7 +849,6 @@ def qsa_sparse_paged_attention(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA over paged BF16 CPU K/V caches with Triton."""
-
     if q.device.type != "cpu":
         raise RuntimeError("paged CPU QSA requires Triton and CPU tensors")
     if not has_active_triton_cpu_backend():
@@ -485,8 +900,11 @@ def qsa_sparse_paged_attention(
     block_m = triton.next_power_of_2(group_size)
     block_n = 16
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
-    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-    num_splits = min(max_useful_splits, 64)
+    num_splits = _qsa_sparse_num_splits(
+        q.shape[0],
+        k_cache.shape[2],
+        num_tiles,
+    )
     if k_cache.shape[2] > _MAX_GRID_AXIS or num_splits > _MAX_GRID_AXIS:
         raise ValueError("QSA sparse attention exceeds Triton grid bounds")
     if q.shape[1] > _MAX_GRID_AXIS:
@@ -566,23 +984,43 @@ def qsa_store_cache_rows(
     slot_mapping: torch.Tensor,
     rows: torch.Tensor,
 ) -> None:
-    """Store fixed-width rows in a CPU QSA cache with Torch."""
-
-    if cache.device.type != "cpu":
-        raise RuntimeError("CPU QSA cache stores require CPU tensors")
+    """Store fixed-width rows in a CPU QSA cache."""
+    if cache.device.type != "cpu" or not has_active_triton_cpu_backend():
+        raise RuntimeError("CPU QSA cache stores require Triton and CPU tensors")
     if cache.ndim != 4 or cache.shape[2] != 1:
         raise ValueError("QSA cache must be [pages, page_size, 1, width]")
+    if not all(cache.shape):
+        raise ValueError("QSA cache dimensions must be nonzero")
     if rows.ndim == 3:
         if rows.shape[1] != 1:
             raise ValueError("QSA cache rows must have one head")
         rows = rows[:, 0]
     if rows.shape != (slot_mapping.numel(), cache.shape[3]):
         raise ValueError("QSA cache rows and slots have incompatible shapes")
-    valid = (slot_mapping >= 0) & (slot_mapping < cache.shape[0] * cache.shape[1])
-    if not torch.any(valid):
+    if rows.device != cache.device or slot_mapping.device != cache.device:
+        raise ValueError("QSA cache-store tensors must share one CPU device")
+    if rows.dtype != cache.dtype:
+        raise ValueError("QSA cache rows must match the cache dtype")
+    if cache.stride(3) != 1 or rows.stride(1) != 1:
+        raise ValueError("QSA cache-store row dimensions must be contiguous")
+    if not rows.shape[0]:
         return
-    slots = slot_mapping[valid].long()
-    cache[slots // cache.shape[1], slots % cache.shape[1], 0] = rows[valid]
+    _store_qsa_rows_kernel[(rows.shape[0],)](
+        cache,
+        slot_mapping,
+        rows,
+        cache.stride(0),
+        cache.stride(1),
+        cache.stride(3),
+        rows.stride(0),
+        rows.stride(1),
+        rows.shape[0],
+        cache.shape[0],
+        PAGE_SIZE=cache.shape[1],
+        WIDTH=cache.shape[3],
+        BLOCK_D=triton.next_power_of_2(cache.shape[3]),
+        num_cpu_threads=0,
+    )
 
 
 def qsa_compress_groups_with_ratio(
@@ -598,9 +1036,8 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from CPU compressor state and current rows."""
-
-    if raw_keys.device.type != "cpu":
-        raise RuntimeError("CPU QSA compression requires CPU tensors")
+    if raw_keys.device.type != "cpu" or not has_active_triton_cpu_backend():
+        raise RuntimeError("CPU QSA compression requires Triton and CPU tensors")
     rows = token_to_req.numel()
     if compress_ratio <= 0:
         raise ValueError("QSA compression ratio must be positive")
@@ -634,39 +1071,59 @@ def qsa_compress_groups_with_ratio(
         raise ValueError("QSA compressor-state block table has too few request rows")
     if rope_cache is not None:
         raise NotImplementedError("CPU QSA compression does not support MRoPE")
-
-    pooled = torch.zeros_like(raw_keys)
-    first_positions = torch.zeros((rows, 3), dtype=torch.int64, device=raw_keys.device)
-    row_lookup = {
-        (int(token_to_req[row]), int(logical_positions[row])): row
-        for row in range(rows)
-    }
-    for row in range(rows):
-        if int(compressed_slots[row]) < 0:
-            continue
-        request = int(token_to_req[row])
-        if request < 0 or request >= num_requests:
-            continue
-        end = int(logical_positions[row])
-        start = end - compress_ratio + 1
-        keys: list[torch.Tensor] = []
-        positions: list[torch.Tensor] = []
-        for position in range(start, end + 1):
-            source_row = row_lookup.get((request, position))
-            if source_row is not None:
-                keys.append(raw_keys[source_row, 0])
-                positions.append(raw_positions[source_row, 0])
-                continue
-            block = int(compressor_state_block_table[request, 0])
-            if block < 0 or block >= compressor_state_cache.shape[0]:
-                raise ValueError("QSA compressor-state table contains an invalid block")
-            offset = position % compressor_state_cache.shape[1]
-            keys.append(compressor_state_cache[block, offset, 0])
-            positions.append(
-                torch.full((3,), position, dtype=torch.int64, device=raw_keys.device)
-            )
-        pooled[row, 0] = torch.stack(keys).float().mean(dim=0).to(raw_keys.dtype)
-        first_positions[row] = positions[0]
+    tensors = (
+        raw_positions,
+        compressor_state_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+    )
+    if any(tensor.device != raw_keys.device for tensor in tensors):
+        raise ValueError("QSA compression tensors must share one CPU device")
+    if (
+        raw_keys.stride(2) != 1
+        or compressor_state_cache.stride(3) != 1
+        or compressor_state_block_table.stride(1) != 1
+    ):
+        raise ValueError("QSA compression row dimensions must be contiguous")
+    pooled = torch.empty_like(raw_keys)
+    first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
+    if not rows:
+        return pooled, first_positions
+    _compress_qsa_groups_kernel[(rows,)](
+        raw_keys,
+        raw_positions,
+        compressor_state_cache,
+        compressor_state_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        pooled,
+        first_positions,
+        raw_keys.stride(0),
+        raw_keys.stride(2),
+        raw_positions.stride(0),
+        raw_positions.stride(2),
+        compressor_state_cache.stride(0),
+        compressor_state_cache.stride(1),
+        compressor_state_cache.stride(3),
+        compressor_state_block_table.stride(0),
+        pooled.stride(0),
+        pooled.stride(2),
+        first_positions.stride(0),
+        first_positions.stride(1),
+        rows,
+        compressor_state_cache.shape[0],
+        num_requests,
+        COMPRESSOR_STATE_SIZE=compressor_state_cache.shape[1],
+        COMPRESS_RATIO=compress_ratio,
+        HEAD_DIM=raw_keys.shape[2],
+        BLOCK_D=triton.next_power_of_2(raw_keys.shape[2]),
+        num_cpu_threads=0,
+    )
     return pooled, first_positions
 
 

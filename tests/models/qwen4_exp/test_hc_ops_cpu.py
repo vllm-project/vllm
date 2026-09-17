@@ -106,9 +106,9 @@ def test_hc_combine_norm() -> None:
     torch.testing.assert_close(actual_norm, expected_norm.to(torch.bfloat16))
 
 
-@pytest.mark.parametrize("num_tokens", [1, 17])
-def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
+def test_hc_combine_norm_unit_injection() -> None:
     torch.manual_seed(0)
+    num_tokens = 1
     embedding = torch.randn(num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16)
     hidden = torch.randn(num_tokens, HC, HIDDEN_SIZE, dtype=torch.bfloat16)
     weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)

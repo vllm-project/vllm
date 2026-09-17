@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from vllm.models.qwen4_exp.common import qsa_cache
+from vllm.models.qwen4_exp.cpu.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.cpu.ops.qsa import (
-    expand_qsa_block_indices,
     qsa_compress_groups_with_ratio,
-    qsa_mqa_paged,
     qsa_select_paged_tokens,
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
@@ -28,36 +25,13 @@ requires_triton_cpu = pytest.mark.skipif(
 )
 
 
-def test_qsa_metadata_uses_cpu_fallback_with_triton_installed(monkeypatch) -> None:
-    token_to_req = torch.tensor([0, 0, 1], dtype=torch.int32)
-    common = SimpleNamespace(
-        num_actual_tokens=3,
-        query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 2, 3], dtype=torch.int32),
-        seq_lens=torch.tensor([4, 3], dtype=torch.int32),
-        slot_mapping=torch.tensor([10, 11, 12], dtype=torch.int64),
-        block_table_tensor=torch.tensor([[0], [1]], dtype=torch.int32),
-        token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
-    )
-    buffers = (
-        torch.empty(3, dtype=torch.int32),
-        torch.empty(3, dtype=torch.int64),
-        torch.empty(3, dtype=torch.int32),
-        torch.empty(3, dtype=torch.int64),
-    )
+def test_qsa_metadata_selects_cpu_fallback_with_triton_installed(monkeypatch) -> None:
     monkeypatch.setattr(qsa_cache, "HAS_TRITON", True)
 
-    actual = qsa_cache.build_qsa_metadata(
-        common,
-        *buffers,
-        storage_block_size=4,
-        compress_ratio=1,
+    assert (
+        qsa_cache._select_qsa_metadata_fn(torch.device("cpu"))
+        is qsa_cache._build_qsa_metadata_torch
     )
-
-    assert actual[0].tolist() == [0, 0, 1]
-    assert actual[1].tolist() == [2, 3, 2]
-    assert actual[2].tolist() == [3, 4, 3]
-    assert actual[3].tolist() == [10, 11, 12]
 
 
 @requires_triton_cpu
@@ -105,32 +79,27 @@ def test_qsa_sparse_attention_matches_native_checkpoint_shape() -> None:
     torch.testing.assert_close(actual[0], expected, rtol=2e-2, atol=2e-2)
 
 
-def test_qsa_cpu_scoring_topk_and_expansion() -> None:
-    query = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=torch.bfloat16)
-    key_cache = torch.tensor(
-        [[[[1.0, 0.0]], [[0.0, 0.5]], [[2.0, 2.0]], [[-1.0, -1.0]]]],
-        dtype=torch.bfloat16,
+@requires_triton_cpu
+def test_qsa_cpu_selection_handles_short_contexts_and_reuses_output(
+    monkeypatch,
+) -> None:
+    num_heads = 2
+    head_dim = 16
+    query = torch.ones(3, num_heads, head_dim, dtype=torch.bfloat16)
+    key_cache = (
+        torch.tensor([1, 3, 2, 6, 4, 5], dtype=torch.bfloat16)
+        .view(3, 2, 1, 1)
+        .expand(-1, -1, 1, head_dim)
+        .contiguous()
     )
-    page_table = torch.tensor([[0]], dtype=torch.int32)
-    token_to_req = torch.tensor([0], dtype=torch.int32)
-    query_positions = torch.tensor([7], dtype=torch.int64)
-    sequence_lengths = torch.tensor([8], dtype=torch.int32)
+    page_table = torch.tensor([[0, -1, -1], [0, 1, 2]], dtype=torch.int32)
+    token_to_req = torch.tensor([0, 1, -1], dtype=torch.int32)
+    query_positions = torch.tensor([1, 11, 7], dtype=torch.int64)
+    sequence_lengths = torch.tensor([2, 12], dtype=torch.int32)
+    output = torch.full((3, 5), 99, dtype=torch.int32)
+    monkeypatch.setattr(qsa_ops, "_LOGITS_WORKSPACE_BYTES", 8)
 
-    logits, visible = qsa_mqa_paged(
-        query,
-        key_cache,
-        page_table,
-        token_to_req,
-        query_positions,
-        sequence_lengths,
-        compress_ratio=2,
-    )
-
-    assert visible.tolist() == [4]
-    expected = torch.tensor([[0.5, 0.25, 2.0, 0.0]]) * 2**0.5
-    torch.testing.assert_close(logits, expected)
-
-    selected = qsa_select_paged_tokens(
+    actual = qsa_select_paged_tokens(
         query,
         key_cache,
         page_table,
@@ -139,22 +108,18 @@ def test_qsa_cpu_scoring_topk_and_expansion() -> None:
         sequence_lengths,
         compress_ratio=2,
         token_topk=4,
+        out=output,
     )
-    assert selected.shape == (1, 5)
-    assert set(selected[0, :4].tolist()) == {0, 1, 4, 5}
-    assert selected[0, 4].item() == -1
 
-    expanded = expand_qsa_block_indices(
-        torch.tensor([[2, 0]], dtype=torch.int32),
-        query_positions,
-        sequence_lengths,
-        token_to_req,
-        compress_ratio=2,
-        token_topk=4,
-    )
-    assert expanded.tolist() == [[4, 5, 0, 1, -1]]
+    assert actual is output
+    assert actual.tolist() == [
+        [0, 1, -1, -1, -1],
+        [6, 7, 10, 11, -1],
+        [-1, -1, -1, -1, -1],
+    ]
 
 
+@requires_triton_cpu
 def test_qsa_cpu_streaming_compression_and_cache_store() -> None:
     raw_keys = torch.arange(6 * 4, dtype=torch.bfloat16).reshape(6, 1, 4)
     raw_positions = torch.arange(2, 8, dtype=torch.int64).view(6, 1, 1).expand(-1, 1, 3)
