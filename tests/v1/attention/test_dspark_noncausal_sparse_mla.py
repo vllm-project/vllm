@@ -610,13 +610,17 @@ def test_dspark_noncausal_differs_from_causal(
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("num_heads", [16, 64])
 def test_dsv41_flashinfer_dspark_window_matches_reference(
-    context_len, dtype, num_heads
+    context_len, dtype, num_heads, monkeypatch
 ):
     """Draft queries see the full block without treating padded slots as keys."""
     if not current_platform.is_device_capability_family(100):
         pytest.skip("DSV4 TRTLLM sparse attention requires SM100")
     from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+        DeepseekSparseSWAFlashInferMetadataBuilder,
         DeepseekV4FlashInferMLAAttention,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import (
+        DeepseekV41SparseSWAMetadataBuilder,
     )
 
     torch.manual_seed(123)
@@ -668,6 +672,26 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
         flashinfer_sparse_index_cache={},
         max_decode_query_len=5,
     )
+
+    # Exercise FlashInfer preparation without constructing a model/config.
+    def init_parent(builder):
+        builder._max_tokens = num_tokens
+        builder.device = device
+        builder.window_size = 128
+
+    monkeypatch.setattr(DeepseekV41SparseSWAMetadataBuilder, "__init__", init_parent)
+    monkeypatch.setattr(
+        DeepseekV41SparseSWAMetadataBuilder,
+        "build",
+        lambda *args: metadata,
+    )
+    builder = DeepseekSparseSWAFlashInferMetadataBuilder()
+    common_metadata = SimpleNamespace(causal=False)
+    builder.build(0, common_metadata)
+    prepared = (
+        metadata.flashinfer_decode_topk_lens,
+        metadata.flashinfer_decode_seq_lens,
+    )
     attention = SimpleNamespace(
         kv_cache_torch_dtype=dtype,
         window_size=128,
@@ -715,5 +739,18 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
     # Replay must consume the current inputs, including KV written since capture.
     query.copy_(torch.randn_like(query, dtype=torch.bfloat16).to(dtype))
     cache.copy_(torch.randn_like(cache, dtype=torch.bfloat16).to(dtype))
+    # A new step changes visibility as well as Q/KV, without recapturing.
+    metadata.seq_lens.sub_(1)
+    metadata.decode_swa_lens[:num_real_tokens].sub_(1)
+    for token, visible in enumerate(visible_indices):
+        indices[token, visible.numel() - 1] = -1
+        visible_indices[token] = visible[:-1]
+    builder.build(0, common_metadata)
+    assert metadata.flashinfer_decode_topk_lens.data_ptr() == prepared[0].data_ptr()
+    assert metadata.flashinfer_decode_seq_lens.data_ptr() == prepared[1].data_ptr()
+    torch.testing.assert_close(prepared[0], metadata.decode_swa_lens.clamp_min(128))
+    torch.testing.assert_close(
+        prepared[1], metadata.seq_lens[metadata.token_to_req_indices.long()]
+    )
     graph.replay()
     check_output()
