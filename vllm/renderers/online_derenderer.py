@@ -309,7 +309,7 @@ class OnlineDerenderer:
                 (validated by the caller — see `ServingDerender`) because
                 plain detokenization would leak raw parser markup into `content`.
             prompt_tokens: Prompt token count for the usage chunk.
-            prompt_token_ids: Prompt token IDs. Parser path onlyThe IDs lets
+            prompt_token_ids: Prompt token IDs. Parser path only. Lets
                 `parse_delta` settle its initial reasoning state. Required
                 when a reasoning or tool parser is configured (validated by
                 the caller — see ``ServingDerender``). Without it reasoning
@@ -419,20 +419,13 @@ class OnlineDerenderer:
         `parse_delta` (discarding the result) before processing this
         chunk's tokens for real.
 
-        Replay is fed one token at a time through a fresh incremental
-        detokenizer with special tokens preserved (``skip_special_tokens=
-        False``), since `DerenderStreamState` only carries a flat
-        `output_token_ids` list and not the original per chunk boundaries
-        those tokens arrived in. This makes replay's parser state
-        reconstruction independent of how the client chunked prior calls.
-
-        The current chunk's tokens by contrast are fed to `parse_delta`
-        in a single call using their own `token_ids`/text as given, i.e.
-        the same granularity `generate_chunk` arrived with. This matches
-        the standard (non derender) streaming path which calls
-        `parse_delta` once per engine step with that step's full
-        `delta_token_ids` (more than one token under e.g. speculative
-        decoding) rather than one call per token.
+        Every chunk, replayed or live, goes through one `parse_delta` call
+        with the tokens it arrived with (more than one under e.g.
+        speculative decoding). Replay recovers those boundaries from
+        `state.output_chunk_lens`, so the rebuilt parser state matches
+        standard serving, which calls `parse_delta` once per engine step.
+        Text comes from a fresh incremental detokenizer with special tokens
+        preserved (``skip_special_tokens=False``).
         """
         tokenizer = self.renderer.get_tokenizer()
 
@@ -460,19 +453,22 @@ class OnlineDerenderer:
         # correctly. Discarded once the call returns.
         detok_state = DerenderStreamState()
 
-        def _replay(token_ids: list[int]) -> None:
-            """Feed prior output tokens through `parse_delta` one at a
-            time discarding the result. Only reconstructs parser state and
-            never `finished` since that only applies to the current chunk.
+        def _replay(token_ids: list[int], chunk_lens: list[int]) -> None:
+            """Replay prior chunks through `parse_delta` to rebuild parser
+            state, discarding the result. Never `finished` since that only
+            applies to the current chunk.
             """
             nonlocal detok_state
-            for tok_id in token_ids:
+            start = 0
+            for chunk_len in chunk_lens:
+                chunk = token_ids[start : start + chunk_len]
+                start += chunk_len
                 text, detok_state = self._detokenize_delta(
-                    tokenizer, [tok_id], detok_state, skip_special_tokens=False
+                    tokenizer, chunk, detok_state, skip_special_tokens=False
                 )
                 parser.parse_delta(
                     text,
-                    [tok_id],
+                    chunk,
                     chat_request,
                     prompt_token_ids=prompt_token_ids,
                     finished=False,
@@ -480,10 +476,11 @@ class OnlineDerenderer:
 
         # Replay history to reconstruct parser state. The result is thrown
         # away and only the current chunk's emission goes to the client.
-        _replay(state.output_token_ids)
+        _replay(state.output_token_ids, state.output_chunk_lens)
 
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         output_token_ids = list(state.output_token_ids)
+        output_chunk_lens = list(state.output_chunk_lens)
         role_sent = state.role_sent
         tools_streamed = state.tools_streamed
         last_tool_call_ids = list(state.last_tool_call_ids)
@@ -526,7 +523,9 @@ class OnlineDerenderer:
             else:
                 delta_message = None
 
-            output_token_ids.extend(delta_tids)
+            if delta_tids:
+                output_token_ids.extend(delta_tids)
+                output_chunk_lens.append(len(delta_tids))
 
             if delta_message is None:
                 delta_message = DeltaMessage()
@@ -573,6 +572,7 @@ class OnlineDerenderer:
         updated_state = state.model_copy(
             update={
                 "output_token_ids": output_token_ids,
+                "output_chunk_lens": output_chunk_lens,
                 "role_sent": role_sent,
                 "tools_streamed": tools_streamed,
                 "last_tool_call_ids": last_tool_call_ids,

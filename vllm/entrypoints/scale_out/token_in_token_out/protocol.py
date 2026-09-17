@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -489,13 +489,14 @@ class DerenderStreamState(BaseModel):
       `prev_tokens`, `prefix_offset` and `read_offset` maintain a bounded incremental
       decoding window. This requires O(window) transport and O(delta) computation
       per chunk.
-    - For parser enabled chat streaming: `output_token_ids`, `tools_streamed` and
-      `last_tool_call_ids` are used to replay `parse_delta()` from scratch on every
-      chunk because parser state cannot be serialized. This incurs O(n) transport
-      per chunk (O(n²) per generation) and O(n²) `parse_delta()` calls per generation.
-      Since many parsers re-scan the entire accumulated text on each invocation,
-      `parse_delta()` itself is O(n) yielding a true worst case compute cost of O(n³)
-      per generation. No caching is performed. Work is bounded by `max_model_len`.
+    - For parser enabled chat streaming: `output_token_ids`, `output_chunk_lens`,
+      `tools_streamed` and `last_tool_call_ids` are used to replay `parse_delta()`
+      from scratch on every chunk because parser state cannot be serialized. This
+      incurs O(n) transport per chunk (O(n²) per generation) and O(n²)
+      `parse_delta()` calls per generation. Since many parsers re-scan the
+      entire accumulated text on each invocation, `parse_delta()` itself is
+      O(n) yielding a true worst case compute cost of O(n³) per generation.
+      No caching is performed. Work is bounded by `max_model_len`.
       See `OnlineDerenderer._derender_chat_stream_parsed`.
 
     The detokenization strategy carries the incremental decode offsets
@@ -556,6 +557,24 @@ class DerenderStreamState(BaseModel):
     bounded by ``max_model_len`` (enforced server side, not by a field
     validator here since the bound is model dependent).
     """
+
+    output_chunk_lens: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list)
+    """Token count of each chunk in `output_token_ids`. Parser path only.
+
+    Replay uses these to reproduce the original `parse_delta` call
+    boundaries. Must sum to `len(output_token_ids)`.
+    """
+
+    @model_validator(mode="after")
+    def _validate_output_chunk_lens(self) -> "DerenderStreamState":
+        total = sum(self.output_chunk_lens)
+        if total != len(self.output_token_ids):
+            raise ValueError(
+                f"output_chunk_lens must sum to len(output_token_ids) "
+                f"(got sum={total}, len(output_token_ids)="
+                f"{len(self.output_token_ids)})"
+            )
+        return self
 
     tools_streamed: bool = False
     """True once a tool call delta has been emitted. Parser path only.

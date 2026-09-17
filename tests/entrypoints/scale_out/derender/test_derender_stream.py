@@ -625,12 +625,12 @@ class TestDerenderChatStreamParsed:
     async def test_chunking_invariance(self, parsed_derenderer):
         """1 token per chunk vs a single whole chunk assemble identically.
 
-        The live chunk is fed to `parse_delta` at its own (producer)
-        granularity, while replayed history is always fed one token at a
-        time (see `_derender_chat_stream_parsed`'s docstring). This proves
-        that choice doesn't change the assembled output for a well behaved
-        incremental parser: each call's effects fold together the same way
-        regardless of how many tokens land in one call vs. many."""
+        Every chunk (live or replayed) is fed to `parse_delta` at its own
+        producer granularity (see `_derender_chat_stream_parsed`'s
+        docstring). This proves that choice doesn't change the assembled
+        output for a well behaved incremental parser. Each call's effects
+        fold together the same way regardless of how many tokens land in
+        one call vs. many."""
         token_ids = [
             _FakeParser.REASON,
             _FakeParser.REASON,
@@ -671,6 +671,54 @@ class TestDerenderChatStreamParsed:
 
         assert whole == one_at_a_time
         assert whole == {"content": "c", "reasoning": "rr", "tool_args": "aa"}
+
+    @pytest.mark.asyncio
+    async def test_replay_preserves_chunk_boundaries(
+        self, parsed_derenderer, monkeypatch
+    ):
+        """A multi-token chunk (e.g. a speculative decoding step) must be
+        replayed as one `parse_delta` call, not one per token. Parsers
+        with per-call state such as `history_tool_call_cnt` would
+        otherwise diverge from standard serving."""
+
+        class _CallCountingParser(_FakeParser):
+            """Emits how many `parse_delta` calls it has seen."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.num_calls = 0
+
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                self.num_calls += 1
+                return DeltaMessage(content=str(self.num_calls))
+
+        monkeypatch.setattr(parsed_derenderer, "parser", _CallCountingParser)
+        chat_request = _chat_request()
+
+        _, state = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([_FakeParser.CONTENT] * 3),
+            chat_request=chat_request,
+        )
+        assert state.output_chunk_lens == [3]
+
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                [_FakeParser.CONTENT], finish_reason="stop"
+            ),
+            state=state,
+            chat_request=chat_request,
+        )
+        assert chunk.choices[0].delta.content == "2"
 
     @pytest.mark.asyncio
     async def test_tool_call_id_pinned_across_chunks(self, parsed_derenderer):
@@ -964,6 +1012,24 @@ class TestDerenderStreamStateValidation:
         state = DerenderStreamState(prev_tokens=["a"] * 1024)
         assert len(state.prev_tokens) == 1024
 
+    def test_output_chunk_lens_mismatch_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DerenderStreamState(output_token_ids=[1, 2, 3], output_chunk_lens=[1, 1])
+
+    def test_output_chunk_lens_zero_entry_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DerenderStreamState(output_token_ids=[1, 2], output_chunk_lens=[0, 2])
+
+    def test_output_chunk_lens_matching_accepted(self):
+        state = DerenderStreamState(
+            output_token_ids=[1, 2, 3], output_chunk_lens=[1, 2]
+        )
+        assert state.output_chunk_lens == [1, 2]
+
 
 class TestServingDerenderStreamErrorHandling:
     """Malformed stream_state must surface as 400 and not an unhandled 500."""
@@ -1136,7 +1202,9 @@ class TestServingDerenderStreamValidation:
             stream=True,
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk([1, 2, 3]),
-            stream_state=DerenderStreamState(output_token_ids=[1, 2]),
+            stream_state=DerenderStreamState(
+                output_token_ids=[1, 2], output_chunk_lens=[2]
+            ),
         )
         result = await serving.derender_chat_stream_response(request)
         assert isinstance(result, ErrorResponse)
