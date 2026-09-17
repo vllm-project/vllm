@@ -30,6 +30,7 @@ from vllm.distributed import (
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import (
+    EngineExecutionTimeoutSnapshot,
     EngineExecutionTimeoutWatchdog,
     dump_engine_exception,
     get_engine_timeout_request_sample_indices,
@@ -107,17 +108,10 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
-EXECUTE_MODEL_STAGE = "execute_model"
 EXECUTE_MODEL_WAIT_STAGE = "execute_model_wait"
 SAMPLE_TOKENS_STAGE = "sample_tokens"
 SAMPLE_TOKENS_WAIT_STAGE = "sample_tokens_wait"
-_ENGINE_ITERATION_TIMEOUT_ENV = "VLLM_ENGINE_ITERATION_TIMEOUT_S"
-
-
-def _get_engine_execution_timeout_s() -> int:
-    if not envs.is_set(_ENGINE_ITERATION_TIMEOUT_ENV):
-        return 0
-    return envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+_EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT = EngineExecutionTimeoutSnapshot({}, {})
 
 
 BatchQueueEntry = tuple[
@@ -125,7 +119,7 @@ BatchQueueEntry = tuple[
     SchedulerOutput,
     Future[Any],
     str,
-    dict[str, Any],
+    EngineExecutionTimeoutSnapshot,
 ]
 
 
@@ -278,7 +272,7 @@ class EngineCore:
 
         self.execution_timeout_watchdog = EngineExecutionTimeoutWatchdog(
             config=self.vllm_config,
-            timeout_s=_get_engine_execution_timeout_s(),
+            timeout_s=envs.VLLM_ENGINE_SLOW_STAGE_DUMP_S,
         )
         self._timeout_sampling_params_by_request: dict[str, dict[str, Any] | None] = {}
         self.execution_timeout_watchdog.start()
@@ -561,12 +555,14 @@ class EngineCore:
     @contextmanager
     def dump_on_slow_execution(
         self,
-        scheduler_output: SchedulerOutput,
         stage: str,
-        scheduler_state: dict[str, Any],
+        snapshot: EngineExecutionTimeoutSnapshot,
     ) -> Generator[None, None, None]:
         watchdog = self.execution_timeout_watchdog
-        generation = watchdog.arm(scheduler_output, scheduler_state, stage)
+        if not watchdog.enabled:
+            yield
+            return
+        generation = watchdog.arm(snapshot, stage)
         try:
             yield
         finally:
@@ -574,9 +570,9 @@ class EngineCore:
 
     def _prepare_timeout_diagnostic_state(
         self, scheduler_output: SchedulerOutput
-    ) -> dict[str, Any]:
+    ) -> EngineExecutionTimeoutSnapshot:
         if not self.execution_timeout_watchdog.enabled:
-            return {}
+            return _EMPTY_ENGINE_EXECUTION_TIMEOUT_SNAPSHOT
         scheduler_state = self._make_scheduler_timeout_state(scheduler_output)
         try:
             return make_engine_execution_timeout_snapshot(
@@ -587,12 +583,10 @@ class EngineCore:
                 "Failed to snapshot scheduler output for timeout diagnostics; "
                 "continuing with a minimal diagnostic"
             )
-            return {
-                "scheduler_output_summary": {
-                    "scheduler_output_summary_unavailable": True
-                },
-                "scheduler_queue_summary": {},
-            }
+            return EngineExecutionTimeoutSnapshot(
+                scheduler_output_summary={"scheduler_output_summary_unavailable": True},
+                scheduler_queue_summary={},
+            )
 
     def _make_scheduler_timeout_state(
         self, scheduler_output: SchedulerOutput
@@ -727,23 +721,16 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         timeout_state = self._prepare_timeout_diagnostic_state(scheduler_output)
-        with self.dump_on_slow_execution(
-            scheduler_output, EXECUTE_MODEL_STAGE, timeout_state
-        ):
-            future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            with self.dump_on_slow_execution(
-                scheduler_output, EXECUTE_MODEL_WAIT_STAGE, timeout_state
-            ):
+            with self.dump_on_slow_execution(EXECUTE_MODEL_WAIT_STAGE, timeout_state):
                 model_output = future.result()
             if model_output is None:
-                with self.dump_on_slow_execution(
-                    scheduler_output, SAMPLE_TOKENS_STAGE, timeout_state
-                ):
+                with self.dump_on_slow_execution(SAMPLE_TOKENS_STAGE, timeout_state):
                     model_output = self.model_executor.sample_tokens(grammar_output)
 
         # Before processing the model output, process any aborts that happened
@@ -797,12 +784,7 @@ class EngineCore:
             scheduled_timeout_state = self._prepare_timeout_diagnostic_state(
                 scheduler_output
             )
-            with (
-                self.log_error_detail(scheduler_output),
-                self.dump_on_slow_execution(
-                    scheduler_output, EXECUTE_MODEL_STAGE, scheduled_timeout_state
-                ),
-            ):
+            with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
@@ -821,7 +803,6 @@ class EngineCore:
                         scheduler_output
                     )
                     with self.dump_on_slow_execution(
-                        scheduler_output,
                         SAMPLE_TOKENS_STAGE,
                         scheduled_timeout_state,
                     ):
@@ -870,7 +851,7 @@ class EngineCore:
         with (
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
-            self.dump_on_slow_execution(scheduler_output, future_stage, timeout_state),
+            self.dump_on_slow_execution(future_stage, timeout_state),
         ):
             model_output = future.result()
             if model_output is None:
@@ -909,7 +890,6 @@ class EngineCore:
                 deferred_scheduler_output
             )
             with self.dump_on_slow_execution(
-                deferred_scheduler_output,
                 SAMPLE_TOKENS_STAGE,
                 deferred_timeout_state,
             ):

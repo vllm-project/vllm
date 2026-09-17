@@ -124,9 +124,9 @@ class FakeStageEngine:
         yield
 
     @contextmanager
-    def dump_on_slow_execution(self, scheduler_output, stage, scheduler_state):
+    def dump_on_slow_execution(self, stage, snapshot):
         self.stages.append(stage)
-        self.stage_states.append(scheduler_state)
+        self.stage_states.append(snapshot)
         self.events.append(("enter", stage))
         try:
             yield
@@ -135,7 +135,9 @@ class FakeStageEngine:
 
     def _prepare_timeout_diagnostic_state(self, scheduler_output):
         self.prepared_timeout_outputs.append(scheduler_output)
-        return {"scheduler_output": scheduler_output}
+        return dump_input.EngineExecutionTimeoutSnapshot(
+            {"scheduler_output": scheduler_output}, {}
+        )
 
     def _should_throttle_prefills(self):
         return False
@@ -145,11 +147,6 @@ class FakeStageEngine:
 
     def _attach_iteration_details(self, outputs, iteration_details):
         return
-
-
-def clear_engine_execution_timeout_dump_throttle():
-    with dump_input._engine_execution_timeout_dump_lock:
-        dump_input._engine_execution_timeout_dump_last_s.clear()
 
 
 def make_timeout_scheduler_output() -> SimpleNamespace:
@@ -233,6 +230,16 @@ def make_timeout_config() -> SimpleNamespace:
     )
 
 
+def make_timeout_snapshot(
+    scheduler_output: SimpleNamespace | None = None,
+    scheduler_state: dict[str, Any] | None = None,
+) -> dump_input.EngineExecutionTimeoutSnapshot:
+    return dump_input.make_engine_execution_timeout_snapshot(
+        scheduler_output or make_timeout_scheduler_output(),
+        scheduler_state,
+    )
+
+
 def test_capture_iteration_details_disabled_without_log_stats():
     engine = make_fake_engine(log_stats=False)
 
@@ -283,38 +290,6 @@ def test_attach_iteration_details_falls_back_to_client_zero_without_outputs():
     assert outputs[0].scheduler_stats.iteration_details == iteration_details
 
 
-def test_engine_execution_timeout_watchdog_reuses_thread():
-    watchdog = dump_input.EngineExecutionTimeoutWatchdog(
-        config=make_timeout_config(),
-        timeout_s=10.0,
-    )
-    watchdog.start()
-    thread = watchdog._thread
-
-    try:
-        first_generation = watchdog.arm(
-            make_timeout_scheduler_output(),
-            {"snapshot": 1},
-            engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-        )
-        watchdog.disarm(first_generation)
-        second_generation = watchdog.arm(
-            make_timeout_scheduler_output(),
-            {"snapshot": 2},
-            engine_core_module.SAMPLE_TOKENS_STAGE,
-        )
-        watchdog.disarm(second_generation)
-
-        assert thread is not None
-        assert watchdog._state is None
-        assert watchdog._thread is thread
-        assert thread.is_alive()
-    finally:
-        watchdog.stop()
-
-    assert not thread.is_alive()
-
-
 def test_engine_execution_timeout_watchdog_disabled_is_lazy():
     watchdog = dump_input.EngineExecutionTimeoutWatchdog(
         config=make_timeout_config(),
@@ -323,8 +298,7 @@ def test_engine_execution_timeout_watchdog_disabled_is_lazy():
 
     watchdog.start()
     generation = watchdog.arm(
-        make_timeout_scheduler_output(),
-        {},
+        make_timeout_snapshot(),
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
     )
     watchdog.disarm(generation)
@@ -335,25 +309,6 @@ def test_engine_execution_timeout_watchdog_disabled_is_lazy():
     assert not watchdog.enabled
 
 
-def test_engine_execution_timeout_watchdog_is_opt_in(monkeypatch):
-    configured_timeout_s = engine_core_module.envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
-    env_name = engine_core_module._ENGINE_ITERATION_TIMEOUT_ENV
-
-    monkeypatch.setattr(
-        engine_core_module.envs,
-        "is_set",
-        lambda name: False,
-    )
-    assert engine_core_module._get_engine_execution_timeout_s() == 0
-
-    monkeypatch.setattr(
-        engine_core_module.envs,
-        "is_set",
-        lambda name: name == env_name,
-    )
-    assert engine_core_module._get_engine_execution_timeout_s() == configured_timeout_s
-
-
 def test_engine_execution_timeout_watchdog_fails_open_on_thread_start_error(
     monkeypatch,
 ):
@@ -362,33 +317,21 @@ def test_engine_execution_timeout_watchdog_fails_open_on_thread_start_error(
         timeout_s=10.0,
     )
 
-    def fail_start(_thread):
+    def fail_start():
         raise RuntimeError("thread limit reached")
 
-    snapshot_calls = []
-
-    def record_snapshot(*args):
-        snapshot_calls.append(args)
-        return {}
-
-    monkeypatch.setattr(threading.Thread, "start", fail_start)
-    monkeypatch.setattr(
-        dump_input,
-        "make_engine_execution_timeout_snapshot",
-        record_snapshot,
-    )
+    failing_thread = SimpleNamespace(start=fail_start)
+    monkeypatch.setattr(watchdog, "_create_thread", lambda: failing_thread)
 
     watchdog.start()
     generation = watchdog.arm(
-        make_timeout_scheduler_output(),
-        {},
+        make_timeout_snapshot(),
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
     )
 
     assert generation is None
     assert watchdog._thread is None
     assert not watchdog.enabled
-    assert snapshot_calls == []
 
 
 def test_engine_execution_timeout_watchdog_ignores_stale_disarm(monkeypatch):
@@ -396,8 +339,8 @@ def test_engine_execution_timeout_watchdog_ignores_stale_disarm(monkeypatch):
     dumps = []
     dump_completed = threading.Event()
 
-    def record_dump(config, scheduler_output, scheduler_state, timeout_s, stage):
-        dumps.append((scheduler_output, scheduler_state, stage))
+    def record_dump(config, snapshot, timeout_s, stage):
+        dumps.append((snapshot, stage))
         dump_completed.set()
 
     monkeypatch.setattr(dump_input, "dump_engine_execution_timeout", record_dump)
@@ -414,13 +357,11 @@ def test_engine_execution_timeout_watchdog_ignores_stale_disarm(monkeypatch):
         current_output = make_timeout_scheduler_output()
         current_output.scheduled_new_reqs[0].req_id = "current-generation-request"
         stale_generation = watchdog.arm(
-            stale_output,
-            {"snapshot": 1},
+            make_timeout_snapshot(stale_output, {"snapshot": 1}),
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         )
         watchdog.arm(
-            current_output,
-            {"snapshot": 2},
+            make_timeout_snapshot(current_output, {"snapshot": 2}),
             engine_core_module.SAMPLE_TOKENS_STAGE,
         )
         watchdog.disarm(stale_generation)
@@ -429,14 +370,58 @@ def test_engine_execution_timeout_watchdog_ignores_stale_disarm(monkeypatch):
 
         assert dump_completed.wait(timeout=1.0)
         assert len(dumps) == 1
-        output_summary, queue_summary, stage = dumps[0]
-        assert output_summary["request_samples"][0]["request_id"] == (
-            "current-generation-request"
-        )
-        assert queue_summary == {"snapshot": 2}
+        snapshot, stage = dumps[0]
+        assert snapshot.scheduler_output_summary["request_samples"][0][
+            "request_id"
+        ] == ("current-generation-request")
+        assert snapshot.scheduler_queue_summary == {"snapshot": 2}
         assert stage == engine_core_module.SAMPLE_TOKENS_STAGE
     finally:
         watchdog.stop()
+
+
+def test_engine_execution_timeout_watchdog_rearm_wakes_only_when_needed():
+    now_s = [0.0]
+    wake_count = 0
+
+    def record_wake():
+        nonlocal wake_count
+        wake_count += 1
+
+    watchdog = dump_input.EngineExecutionTimeoutWatchdog(
+        config=make_timeout_config(),
+        timeout_s=10.0,
+        time_fn=lambda: now_s[0],
+    )
+    watchdog._wake_event = SimpleNamespace(set=record_wake)
+
+    watchdog.arm(
+        make_timeout_snapshot(),
+        engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+    assert wake_count == 1
+
+    now_s[0] = 1.0
+    watchdog.arm(
+        make_timeout_snapshot(),
+        engine_core_module.SAMPLE_TOKENS_STAGE,
+    )
+    assert wake_count == 1
+
+    watchdog.timeout_s = 1.0
+    now_s[0] = 2.0
+    generation = watchdog.arm(
+        make_timeout_snapshot(),
+        engine_core_module.SAMPLE_TOKENS_WAIT_STAGE,
+    )
+    assert wake_count == 2
+
+    watchdog.disarm(generation)
+    watchdog.arm(
+        make_timeout_snapshot(),
+        engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    )
+    assert wake_count == 3
 
 
 def test_engine_execution_timeout_watchdog_keeps_arm_and_stop_nonblocking(
@@ -466,8 +451,7 @@ def test_engine_execution_timeout_watchdog_keeps_arm_and_stop_nonblocking(
 
     try:
         watchdog.arm(
-            make_timeout_scheduler_output(),
-            {"snapshot": 1},
+            make_timeout_snapshot(scheduler_state={"snapshot": 1}),
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         )
         assert dump_started.wait(timeout=1.0)
@@ -475,8 +459,7 @@ def test_engine_execution_timeout_watchdog_keeps_arm_and_stop_nonblocking(
         def arm_again():
             generations.append(
                 watchdog.arm(
-                    make_timeout_scheduler_output(),
-                    {"snapshot": 2},
+                    make_timeout_snapshot(scheduler_state={"snapshot": 2}),
                     engine_core_module.SAMPLE_TOKENS_STAGE,
                 )
             )
@@ -508,48 +491,6 @@ def test_engine_execution_timeout_watchdog_keeps_arm_and_stop_nonblocking(
     assert not watchdog._thread.is_alive()
 
 
-def test_engine_execution_timeout_watchdog_fires_real_timeout(monkeypatch):
-    contexts: list[tuple[Any, ...]] = []
-    traceback_dumped = threading.Event()
-
-    def record_context(*args: Any) -> None:
-        contexts.append(args)
-
-    def record_traceback(*args: Any, **kwargs: Any) -> None:
-        traceback_dumped.set()
-
-    clear_engine_execution_timeout_dump_throttle()
-    monkeypatch.setattr(dump_input, "_dump_engine_timeout_context", record_context)
-    monkeypatch.setattr(dump_input.faulthandler, "dump_traceback", record_traceback)
-    config = make_timeout_config()
-    watchdog = dump_input.EngineExecutionTimeoutWatchdog(
-        config=config,
-        timeout_s=0.01,
-    )
-    scheduler_output = make_timeout_scheduler_output()
-    scheduler_state = {"num_running_reqs": 1, "num_waiting_reqs": 0}
-    watchdog.start()
-
-    try:
-        generation = watchdog.arm(
-            scheduler_output,
-            scheduler_state,
-            engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-        )
-        assert traceback_dumped.wait(timeout=1.0)
-        watchdog.disarm(generation)
-    finally:
-        watchdog.stop()
-        clear_engine_execution_timeout_dump_throttle()
-
-    assert len(contexts) == 1
-    context_config, output_summary, queue_summary = contexts[0]
-    assert context_config is config
-    assert output_summary["request_samples"][0]["request_id"] == "request-123"
-    assert queue_summary == scheduler_state
-    assert output_summary is not scheduler_output
-
-
 def test_engine_execution_timeout_watchdog_disarm_suppresses_dump(monkeypatch):
     dumped = threading.Event()
     monkeypatch.setattr(
@@ -563,8 +504,7 @@ def test_engine_execution_timeout_watchdog_disarm_suppresses_dump(monkeypatch):
     )
 
     generation = watchdog.arm(
-        make_timeout_scheduler_output(),
-        {},
+        make_timeout_snapshot(),
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
     )
     watchdog.disarm(generation)
@@ -582,7 +522,6 @@ def test_engine_execution_timeout_real_timeout_emits_useful_summary(monkeypatch)
     def record_log(message, *args):
         logs.append(message % args)
 
-    clear_engine_execution_timeout_dump_throttle()
     monkeypatch.setattr(dump_input.logger, "error", record_log)
     monkeypatch.setattr(
         dump_input.faulthandler,
@@ -597,14 +536,14 @@ def test_engine_execution_timeout_real_timeout_emits_useful_summary(monkeypatch)
 
     try:
         watchdog.arm(
-            make_timeout_scheduler_output(),
-            {"num_running_reqs": 1, "num_waiting_reqs": 0},
+            make_timeout_snapshot(
+                scheduler_state={"num_running_reqs": 1, "num_waiting_reqs": 0}
+            ),
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         )
         assert traceback_dumped.wait(timeout=1.0)
     finally:
         watchdog.stop()
-        clear_engine_execution_timeout_dump_throttle()
 
     combined_logs = "\n".join(logs)
     assert engine_core_module.EXECUTE_MODEL_WAIT_STAGE in combined_logs
@@ -620,7 +559,7 @@ def test_engine_execution_timeout_watchdog_fires_twice_on_same_thread(monkeypatc
     dumped_stages = []
     dump_completed = threading.Event()
 
-    def record_dump(config, scheduler_output, scheduler_state, timeout_s, stage):
+    def record_dump(config, snapshot, timeout_s, stage):
         dumped_stages.append(stage)
         dump_completed.set()
 
@@ -638,7 +577,7 @@ def test_engine_execution_timeout_watchdog_fires_twice_on_same_thread(monkeypatc
             engine_core_module.SAMPLE_TOKENS_STAGE,
         ):
             dump_completed.clear()
-            watchdog.arm(make_timeout_scheduler_output(), {}, stage)
+            watchdog.arm(make_timeout_snapshot(), stage)
             assert dump_completed.wait(timeout=1.0)
         assert watchdog._thread is thread
         assert dumped_stages == [
@@ -649,61 +588,29 @@ def test_engine_execution_timeout_watchdog_fires_twice_on_same_thread(monkeypatc
         watchdog.stop()
 
 
-def test_engine_execution_timeout_dump_is_throttled_by_stage(monkeypatch):
-    contexts: list[tuple[Any, ...]] = []
-    tracebacks: list[dict[str, Any]] = []
-    times = iter([100.0, 101.0, 102.0, 401.0])
+def test_engine_execution_timeout_throttle_is_per_watchdog_and_stage():
+    now_s = [100.0]
 
-    def record_context(*args: Any) -> None:
-        contexts.append(args)
+    def make_watchdog():
+        return dump_input.EngineExecutionTimeoutWatchdog(
+            config=make_timeout_config(),
+            timeout_s=1.0,
+            time_fn=lambda: now_s[0],
+        )
 
-    def record_traceback(*args: Any, **kwargs: Any) -> None:
-        tracebacks.append(kwargs)
+    first_watchdog = make_watchdog()
+    second_watchdog = make_watchdog()
+    stage = engine_core_module.EXECUTE_MODEL_WAIT_STAGE
 
-    clear_engine_execution_timeout_dump_throttle()
-    monkeypatch.setattr(dump_input.time, "monotonic", lambda: next(times))
-    monkeypatch.setattr(dump_input, "_dump_engine_timeout_context", record_context)
-    monkeypatch.setattr(dump_input.faulthandler, "dump_traceback", record_traceback)
-    scheduler_output = make_timeout_scheduler_output()
-    config = make_timeout_config()
-
-    scheduler_state = {"num_running_reqs": 1, "num_waiting_reqs": 0}
-
-    dump_input.dump_engine_execution_timeout(
-        config=config,
-        scheduler_output=scheduler_output,
-        scheduler_state=scheduler_state,
-        timeout_s=1.0,
-        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
+    assert first_watchdog._mark_dump_if_allowed(stage)
+    assert not first_watchdog._mark_dump_if_allowed(stage)
+    assert first_watchdog._mark_dump_if_allowed(
+        engine_core_module.SAMPLE_TOKENS_WAIT_STAGE
     )
-    dump_input.dump_engine_execution_timeout(
-        config=config,
-        scheduler_output=scheduler_output,
-        scheduler_state=scheduler_state,
-        timeout_s=1.0,
-        stage=engine_core_module.SAMPLE_TOKENS_WAIT_STAGE,
-    )
-    dump_input.dump_engine_execution_timeout(
-        config=config,
-        scheduler_output=scheduler_output,
-        scheduler_state=scheduler_state,
-        timeout_s=1.0,
-        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-    )
-    dump_input.dump_engine_execution_timeout(
-        config=config,
-        scheduler_output=scheduler_output,
-        scheduler_state=scheduler_state,
-        timeout_s=1.0,
-        stage=engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-    )
+    assert second_watchdog._mark_dump_if_allowed(stage)
 
-    assert len(contexts) == 3
-    assert len(tracebacks) == 3
-    assert all(context[0] is config for context in contexts)
-    assert all(context[1] is scheduler_output for context in contexts)
-
-    clear_engine_execution_timeout_dump_throttle()
+    now_s[0] += dump_input.ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S
+    assert first_watchdog._mark_dump_if_allowed(stage)
 
 
 def test_engine_execution_timeout_context_balances_detail_and_privacy(monkeypatch):
@@ -715,8 +622,9 @@ def test_engine_execution_timeout_context_balances_detail_and_privacy(monkeypatc
     monkeypatch.setattr(dump_input.logger, "error", record_log)
     dump_input._dump_engine_timeout_context(
         make_timeout_config(),
-        make_timeout_scheduler_output(),
-        {"num_running_reqs": 1, "num_waiting_reqs": 0},
+        make_timeout_snapshot(
+            scheduler_state={"num_running_reqs": 1, "num_waiting_reqs": 0}
+        ),
     )
 
     combined_logs = "\n".join(logs)
@@ -761,7 +669,9 @@ def test_engine_execution_timeout_bounds_oversized_request_ids(monkeypatch):
         "error",
         lambda message, *args: logs.append(message % args),
     )
-    dump_input._dump_engine_timeout_context(make_timeout_config(), scheduler_output, {})
+    dump_input._dump_engine_timeout_context(
+        make_timeout_config(), make_timeout_snapshot(scheduler_output)
+    )
 
     combined_logs = "\n".join(logs)
     assert oversized_request_id not in combined_logs
@@ -797,7 +707,9 @@ def test_engine_execution_timeout_logs_request_sample_truncation(monkeypatch):
         "error",
         lambda message, *args: logs.append(message % args),
     )
-    dump_input._dump_engine_timeout_context(make_timeout_config(), scheduler_output, {})
+    dump_input._dump_engine_timeout_context(
+        make_timeout_config(), make_timeout_snapshot(scheduler_output)
+    )
 
     output_summary = logs[0]
     assert '"request_samples_truncated": true' in output_summary
@@ -874,13 +786,13 @@ def test_engine_execution_timeout_cached_sample_marks_unreported_tokens_unknown(
 
 def test_dump_on_slow_execution_arms_and_disarms_watchdog():
     calls: list[Any] = []
-    scheduler_state = {"num_running_reqs": 2}
+    snapshot = make_timeout_snapshot(scheduler_state={"num_running_reqs": 2})
 
     class FakeWatchdog:
         enabled = True
 
-        def arm(self, scheduler_output, state, stage):
-            calls.append(("arm", scheduler_output, state, stage))
+        def arm(self, armed_snapshot, stage):
+            calls.append(("arm", armed_snapshot, stage))
             return 123
 
         def disarm(self, generation):
@@ -889,21 +801,17 @@ def test_dump_on_slow_execution_arms_and_disarms_watchdog():
     engine = SimpleNamespace(
         execution_timeout_watchdog=FakeWatchdog(),
     )
-    scheduler_output = SimpleNamespace()
-
     with EngineCore.dump_on_slow_execution(
         engine,
-        scheduler_output,
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-        scheduler_state,
+        snapshot,
     ):
         calls.append("body")
 
     assert calls == [
         (
             "arm",
-            scheduler_output,
-            scheduler_state,
+            snapshot,
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         ),
         "body",
@@ -913,13 +821,13 @@ def test_dump_on_slow_execution_arms_and_disarms_watchdog():
 
 def test_dump_on_slow_execution_disarms_watchdog_after_exception():
     calls: list[Any] = []
-    scheduler_state = {"num_running_reqs": 2}
+    snapshot = make_timeout_snapshot(scheduler_state={"num_running_reqs": 2})
 
     class FakeWatchdog:
         enabled = True
 
-        def arm(self, scheduler_output, state, stage):
-            calls.append(("arm", scheduler_output, state, stage))
+        def arm(self, armed_snapshot, stage):
+            calls.append(("arm", armed_snapshot, stage))
             return 123
 
         def disarm(self, generation):
@@ -928,14 +836,11 @@ def test_dump_on_slow_execution_disarms_watchdog_after_exception():
     engine = SimpleNamespace(
         execution_timeout_watchdog=FakeWatchdog(),
     )
-    scheduler_output = SimpleNamespace()
-
     try:
         with EngineCore.dump_on_slow_execution(
             engine,
-            scheduler_output,
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
-            scheduler_state,
+            snapshot,
         ):
             raise RuntimeError("stage failed")
     except RuntimeError as err:
@@ -946,8 +851,7 @@ def test_dump_on_slow_execution_disarms_watchdog_after_exception():
     assert calls == [
         (
             "arm",
-            scheduler_output,
-            scheduler_state,
+            snapshot,
             engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         ),
         ("disarm", 123),
@@ -960,8 +864,8 @@ def test_dump_on_slow_execution_disabled_skips_snapshot():
     class FakeWatchdog:
         enabled = False
 
-        def arm(self, scheduler_output, state, stage):
-            calls.append(("arm", state))
+        def arm(self, snapshot, stage):
+            calls.append(("arm", snapshot, stage))
             return None
 
         def disarm(self, generation):
@@ -980,13 +884,37 @@ def test_dump_on_slow_execution_disabled_skips_snapshot():
     )
     with EngineCore.dump_on_slow_execution(
         engine,
-        SimpleNamespace(),
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         scheduler_state,
     ):
         pass
 
-    assert calls == [("arm", {}), ("disarm", None)]
+    assert scheduler_state.scheduler_output_summary == {}
+    assert calls == []
+
+
+def test_prepare_timeout_diagnostic_state_fails_open(monkeypatch):
+    def fail_snapshot(*args):
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(
+        engine_core_module,
+        "make_engine_execution_timeout_snapshot",
+        fail_snapshot,
+    )
+    engine = SimpleNamespace(
+        execution_timeout_watchdog=SimpleNamespace(enabled=True),
+        _make_scheduler_timeout_state=lambda scheduler_output: {},
+    )
+
+    snapshot = EngineCore._prepare_timeout_diagnostic_state(
+        engine, make_timeout_scheduler_output()
+    )
+
+    assert snapshot.scheduler_output_summary == {
+        "scheduler_output_summary_unavailable": True
+    }
+    assert snapshot.scheduler_queue_summary == {}
 
 
 def test_engine_shutdown_stops_watchdog_before_teardown(monkeypatch):
@@ -1089,19 +1017,6 @@ def test_make_scheduler_timeout_state_refreshes_rescheduled_request(monkeypatch)
     )
 
 
-def test_make_scheduler_timeout_state_failure_is_nonfatal():
-    def fail_snapshot():
-        raise RuntimeError("snapshot failed")
-
-    engine = SimpleNamespace(
-        scheduler=SimpleNamespace(make_timeout_diagnostic_state=fail_snapshot)
-    )
-
-    assert EngineCore._make_scheduler_timeout_state(
-        engine, make_timeout_scheduler_output()
-    ) == {"cached_request_sampling_params": {}}
-
-
 def test_make_scheduler_timeout_state_failure_still_refreshes_sampling_cache():
     def fail_snapshot():
         raise RuntimeError("snapshot failed")
@@ -1174,14 +1089,11 @@ def test_step_records_execute_and_sync_sample_timeout_stages():
     assert scheduler.updated_with == (scheduler_output, model_output)
     assert model_executor.sample_calls == [("grammar", False)]
     assert engine.stages == [
-        engine_core_module.EXECUTE_MODEL_STAGE,
         engine_core_module.EXECUTE_MODEL_WAIT_STAGE,
         engine_core_module.SAMPLE_TOKENS_STAGE,
     ]
     assert engine.events == [
-        ("enter", engine_core_module.EXECUTE_MODEL_STAGE),
         ("call", "execute_model"),
-        ("exit", engine_core_module.EXECUTE_MODEL_STAGE),
         ("enter", engine_core_module.EXECUTE_MODEL_WAIT_STAGE),
         ("call", "execute_model.result"),
         ("exit", engine_core_module.EXECUTE_MODEL_WAIT_STAGE),
@@ -1223,14 +1135,9 @@ def test_step_with_batch_queue_enqueues_sample_tokens_wait_stage():
     assert future_stage == engine_core_module.SAMPLE_TOKENS_WAIT_STAGE
     assert timeout_state is engine.stage_states[0]
     assert model_executor.sample_calls == [("grammar", True)]
-    assert engine.stages == [
-        engine_core_module.EXECUTE_MODEL_STAGE,
-        engine_core_module.SAMPLE_TOKENS_STAGE,
-    ]
+    assert engine.stages == [engine_core_module.SAMPLE_TOKENS_STAGE]
     assert engine.events == [
-        ("enter", engine_core_module.EXECUTE_MODEL_STAGE),
         ("call", "execute_model"),
-        ("exit", engine_core_module.EXECUTE_MODEL_STAGE),
         ("enter", engine_core_module.SAMPLE_TOKENS_STAGE),
         ("call", "sample_tokens"),
         ("exit", engine_core_module.SAMPLE_TOKENS_STAGE),
@@ -1250,7 +1157,9 @@ def test_step_with_batch_queue_reuses_snapshot_for_deferred_sampling():
         execute_result=SimpleNamespace(), sample_result=SimpleNamespace()
     )
     engine = FakeStageEngine(scheduler, model_executor)
-    old_timeout_state = {"snapshot": "old"}
+    old_timeout_state = dump_input.EngineExecutionTimeoutSnapshot(
+        {"snapshot": "old"}, {}
+    )
     old_model_output = SimpleNamespace()
     engine.batch_queue = deque(
         [
@@ -1280,20 +1189,16 @@ def test_step_with_batch_queue_reuses_snapshot_for_deferred_sampling():
     assert scheduler.updated_with == (old_scheduler_output, old_model_output)
     assert engine.prepared_timeout_outputs == [scheduler_output]
     assert engine.stages == [
-        engine_core_module.EXECUTE_MODEL_STAGE,
         engine_core_module.SAMPLE_TOKENS_WAIT_STAGE,
         engine_core_module.SAMPLE_TOKENS_STAGE,
     ]
-    scheduled_timeout_state = engine.stage_states[0]
+    scheduled_timeout_state = engine.stage_states[1]
     assert engine.stage_states == [
-        scheduled_timeout_state,
         old_timeout_state,
         scheduled_timeout_state,
     ]
     assert engine.events == [
-        ("enter", engine_core_module.EXECUTE_MODEL_STAGE),
         ("call", "execute_model"),
-        ("exit", engine_core_module.EXECUTE_MODEL_STAGE),
         ("enter", engine_core_module.SAMPLE_TOKENS_WAIT_STAGE),
         ("call", "old_sample_tokens.result"),
         ("exit", engine_core_module.SAMPLE_TOKENS_WAIT_STAGE),
@@ -1322,7 +1227,7 @@ def test_step_with_batch_queue_uses_queued_future_stage():
     model_output = SimpleNamespace()
     engine = FakeStageEngine(scheduler)
     exec_future = FakeFuture(SimpleNamespace(), engine.events, "execute_model.result")
-    timeout_state = {"snapshot": 1}
+    timeout_state = dump_input.EngineExecutionTimeoutSnapshot({"snapshot": 1}, {})
     engine.batch_queue = deque(
         [
             (

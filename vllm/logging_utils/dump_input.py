@@ -29,10 +29,12 @@ ENGINE_EXECUTION_TIMEOUT_REQUEST_SAMPLE_LIMIT = 20
 ENGINE_EXECUTION_TIMEOUT_REQUEST_ID_MAX_CHARS = 256
 ENGINE_EXECUTION_TIMEOUT_SUMMARY_MAX_CHARS = 32_768
 ENGINE_EXECUTION_TIMEOUT_WATCHDOG_STOP_TIMEOUT_S = 1.0
-_ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY = "scheduler_output_summary"
-_ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY = "scheduler_queue_summary"
-_engine_execution_timeout_dump_lock = threading.Lock()
-_engine_execution_timeout_dump_last_s: dict[str, float] = {}
+
+
+@dataclass(frozen=True)
+class EngineExecutionTimeoutSnapshot:
+    scheduler_output_summary: dict[str, Any]
+    scheduler_queue_summary: dict[str, Any]
 
 
 def prepare_object_to_dump(obj) -> str:
@@ -87,78 +89,48 @@ def dump_engine_exception(
 
 def dump_engine_execution_timeout(
     config: VllmConfig,
-    scheduler_output: SchedulerOutput | dict[str, Any],
-    scheduler_state: dict[str, Any] | None,
+    snapshot: EngineExecutionTimeoutSnapshot,
     timeout_s: float,
     stage: str,
 ):
-    if not _mark_engine_execution_timeout_dump(stage):
-        return
-
     with contextlib.suppress(Exception):
         logger.error(
             "V1 LLM engine stage '%s' has not completed after %.2f seconds "
             "(pid=%d). Dumping sanitized scheduler state and Python stack "
             "traces. "
             "Further dumps for this stage are throttled for %.0f seconds. "
-            "Set VLLM_ENGINE_ITERATION_TIMEOUT_S=0 to disable this diagnostic.",
+            "Set VLLM_ENGINE_SLOW_STAGE_DUMP_S=0 to disable this diagnostic.",
             stage,
             timeout_s,
             os.getpid(),
             ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S,
         )
-        _dump_engine_timeout_context(config, scheduler_output, scheduler_state)
+        _dump_engine_timeout_context(config, snapshot)
 
     with contextlib.suppress(Exception):
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
 
 
-def _mark_engine_execution_timeout_dump(stage: str) -> bool:
-    now_s = time.monotonic()
-    with _engine_execution_timeout_dump_lock:
-        last_dump_s = _engine_execution_timeout_dump_last_s.get(stage)
-        if (
-            last_dump_s is not None
-            and now_s - last_dump_s < ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S
-        ):
-            return False
-        _engine_execution_timeout_dump_last_s[stage] = now_s
-        return True
-
-
 def _dump_engine_timeout_context(
     config: VllmConfig,
-    scheduler_output: SchedulerOutput | dict[str, Any],
-    scheduler_state: dict[str, Any] | None,
+    snapshot: EngineExecutionTimeoutSnapshot,
 ) -> None:
-    scheduler_state = scheduler_state or {}
-    if isinstance(scheduler_output, dict):
-        scheduler_output_summary = scheduler_output
-        queue_summary = scheduler_state
-    else:
-        snapshot = make_engine_execution_timeout_snapshot(
-            scheduler_output, scheduler_state
-        )
-        scheduler_output_summary = snapshot[
-            _ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY
-        ]
-        queue_summary = snapshot[_ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY]
-
     summary = {
         "config": _make_engine_config_summary(config),
-        **scheduler_output_summary,
+        **snapshot.scheduler_output_summary,
     }
     logger.error("Scheduler output summary: %s", _serialize_diagnostic(summary))
-    if queue_summary:
+    if snapshot.scheduler_queue_summary:
         logger.error(
-            "Scheduler queue summary: %s", _serialize_diagnostic(queue_summary)
+            "Scheduler queue summary: %s",
+            _serialize_diagnostic(snapshot.scheduler_queue_summary),
         )
 
 
 def make_engine_execution_timeout_snapshot(
     scheduler_output: SchedulerOutput,
     scheduler_state: dict[str, Any] | None,
-) -> dict[str, dict[str, Any]]:
+) -> EngineExecutionTimeoutSnapshot:
     """Copy bounded timeout diagnostics off scheduler-owned objects."""
     scheduler_state = scheduler_state or {}
     cached_sampling_params = scheduler_state.get("cached_request_sampling_params", {})
@@ -194,17 +166,9 @@ def make_engine_execution_timeout_snapshot(
     queue_summary = {
         _bounded_diagnostic_string(str(key)): _diagnostic_scalar(value)
         for key, value in scheduler_state.items()
-        if key
-        not in (
-            "cached_request_sampling_params",
-            _ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY,
-            _ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY,
-        )
+        if key != "cached_request_sampling_params"
     }
-    return {
-        _ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY: scheduler_output_summary,
-        _ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY: queue_summary,
-    }
+    return EngineExecutionTimeoutSnapshot(scheduler_output_summary, queue_summary)
 
 
 def _make_engine_config_summary(config: VllmConfig) -> dict[str, Any]:
@@ -575,8 +539,7 @@ def _dump_engine_execution_context(
 class _EngineExecutionTimeoutState:
     deadline_s: float
     generation: int
-    scheduler_output_summary: dict[str, Any]
-    scheduler_queue_summary: dict[str, Any]
+    snapshot: EngineExecutionTimeoutSnapshot
     stage: str
 
 
@@ -595,6 +558,7 @@ class EngineExecutionTimeoutWatchdog:
         self.time_fn = time_fn
 
         self._generation = 0
+        self._last_dump_s_by_stage: dict[str, float] = {}
         self._lock = threading.Lock()
         self._state: _EngineExecutionTimeoutState | None = None
         self._stopped = False
@@ -613,11 +577,7 @@ class EngineExecutionTimeoutWatchdog:
         with self._lock:
             if self._stopped or self._thread is not None:
                 return
-            self._thread = threading.Thread(
-                target=self._run,
-                name="EngineExecutionTimeoutWatchdog",
-                daemon=True,
-            )
+            self._thread = self._create_thread()
             try:
                 self._thread.start()
             except RuntimeError as err:
@@ -631,6 +591,13 @@ class EngineExecutionTimeoutWatchdog:
                 "continuing with this diagnostic disabled: %s",
                 start_error,
             )
+
+    def _create_thread(self) -> threading.Thread:
+        return threading.Thread(
+            target=self._run,
+            name="EngineExecutionTimeoutWatchdog",
+            daemon=True,
+        )
 
     def stop(self) -> None:
         with self._lock:
@@ -650,54 +617,31 @@ class EngineExecutionTimeoutWatchdog:
 
     def arm(
         self,
-        scheduler_output: SchedulerOutput,
-        scheduler_state: dict[str, Any],
+        snapshot: EngineExecutionTimeoutSnapshot,
         stage: str,
     ) -> int | None:
         timeout_s = self.timeout_s
         if timeout_s is None or timeout_s <= 0 or self._stopped:
             return None
 
-        try:
-            scheduler_output_summary = scheduler_state.get(
-                _ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY
-            )
-            scheduler_queue_summary = scheduler_state.get(
-                _ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY
-            )
-            if not isinstance(scheduler_output_summary, dict) or not isinstance(
-                scheduler_queue_summary, dict
-            ):
-                snapshot = make_engine_execution_timeout_snapshot(
-                    scheduler_output, scheduler_state
-                )
-                scheduler_output_summary = snapshot[
-                    _ENGINE_EXECUTION_TIMEOUT_OUTPUT_SUMMARY_KEY
-                ]
-                scheduler_queue_summary = snapshot[
-                    _ENGINE_EXECUTION_TIMEOUT_QUEUE_SUMMARY_KEY
-                ]
-        except Exception:
-            logger.warning_once(
-                "Failed to prepare engine execution timeout context; continuing "
-                "with a minimal diagnostic"
-            )
-            scheduler_output_summary = {"scheduler_output_summary_unavailable": True}
-            scheduler_queue_summary = {}
-
         with self._lock:
             if self._stopped:
                 return None
             self._generation += 1
             generation = self._generation
+            previous_state = self._state
+            deadline_s = self.time_fn() + timeout_s
             self._state = _EngineExecutionTimeoutState(
-                deadline_s=self.time_fn() + timeout_s,
+                deadline_s=deadline_s,
                 generation=generation,
-                scheduler_output_summary=scheduler_output_summary,
-                scheduler_queue_summary=scheduler_queue_summary,
+                snapshot=snapshot,
                 stage=stage,
             )
-        self._wake_event.set()
+            should_wake = (
+                previous_state is None or deadline_s < previous_state.deadline_s
+            )
+        if should_wake:
+            self._wake_event.set()
         return generation
 
     def disarm(self, generation: int | None) -> None:
@@ -737,10 +681,23 @@ class EngineExecutionTimeoutWatchdog:
                     continue
                 self._state = None
 
+            if not self._mark_dump_if_allowed(state.stage):
+                continue
             dump_engine_execution_timeout(
                 self.config,
-                state.scheduler_output_summary,
-                state.scheduler_queue_summary,
+                state.snapshot,
                 self.timeout_s or 0,
                 state.stage,
             )
+
+    def _mark_dump_if_allowed(self, stage: str) -> bool:
+        now_s = self.time_fn()
+        with self._lock:
+            last_dump_s = self._last_dump_s_by_stage.get(stage)
+            if (
+                last_dump_s is not None
+                and now_s - last_dump_s < ENGINE_EXECUTION_TIMEOUT_DUMP_THROTTLE_S
+            ):
+                return False
+            self._last_dump_s_by_stage[stage] = now_s
+            return True
