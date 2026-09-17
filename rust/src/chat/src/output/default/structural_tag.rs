@@ -173,7 +173,11 @@ fn apply_scoped_structural_tag_constraint(
             },
         })?;
 
-    // Overwrite any existing structured output settings with the structural tag constraint.
+    // Overwrite any existing structured output settings with the structural tag
+    // constraint. The caller's `StructuredOutputOptions` are not carried over:
+    // the v1 engine reads those knobs only from the server-level
+    // structured_outputs_config, and a structural tag has no whitespace or
+    // additionalProperties switch to map them onto anyway.
     request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
         backend: StructuredOutputBackend::Xgrammar,
         ..StructuredOutputsParams::structural_tag(structural_tag)
