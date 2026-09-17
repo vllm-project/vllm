@@ -1534,8 +1534,10 @@ if __name__ == "__main__":
 def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     """The info metric holds one series for each tier, and the tier label tells
     the series apart. A tier cannot know its own index, so the manager adds the
-    label. A tier fills the names it owns only, so the CPU primary tier fills
-    its cpu_ labels on its own series alone."""
+    label. A tier fills the names it owns only. The primary tier here gets no
+    configuration, so it adds no label of its own. See
+    test_tiering_primary_tier_publishes_the_cpu_labels in test_factory.py for
+    the labels it adds with one."""
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
