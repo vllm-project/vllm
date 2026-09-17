@@ -4,15 +4,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import torch
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from .data import (
     BlockTransferPlan,
@@ -36,14 +37,19 @@ class UMBPStoreConnectorWorker:
         layout: KVLayoutPlanner | None = None,
         *,
         layerwise_load: bool = True,
+        layerwise_store: bool = False,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
         self.layerwise_load = layerwise_load
+        self.layerwise_store = layerwise_store
         self._load_jobs: dict[str, TransferJobState] = {}
         self._layer_load_jobs: dict[str, dict[str, TransferJobState]] = {}
         self._pending_load_layers: dict[str, set[str]] = {}
         self._store_jobs: dict[str, TransferJobState] = {}
+        self._layer_store_jobs: dict[str, TransferJobState] = {}
+        self._layer_store_plans: dict[str, BlockTransferPlan] = {}
+        self._submitted_store_layers: set[str] = set()
         self._worker_meta = UMBPConnectorWorkerMetadata()
         self._finished_sending: set[str] = set()
         self._finished_recving: set[str] = set()
@@ -114,9 +120,7 @@ class UMBPStoreConnectorWorker:
                 "load",
                 submitted=len(layer_plans),
                 num_bytes=sum(
-                    item.length
-                    for plan in layer_plans
-                    for item in plan.ranges
+                    item.length for plan in layer_plans for item in plan.ranges
                 ),
             )
             self._layer_load_jobs.setdefault(layer_name, {})[request_id] = (
@@ -130,8 +134,10 @@ class UMBPStoreConnectorWorker:
         *,
         is_load: bool,
         mark_finished: bool = True,
+        wait: bool = True,
+        publish: bool = True,
     ) -> None:
-        result = self.runtime.wait(job)
+        result = self.runtime.wait(job) if wait else job
         if is_load:
             self._stats.record(
                 "load",
@@ -150,9 +156,7 @@ class UMBPStoreConnectorWorker:
             if result.status != TransferJobStatus.COMPLETED:
                 self._failed_recving.add(request_id)
                 for key in result.failed_keys:
-                    self._worker_meta.failed_loads[key] = (
-                        result.error or "load failed"
-                    )
+                    self._worker_meta.failed_loads[key] = result.error or "load failed"
         else:
             self._stats.record(
                 "store",
@@ -165,7 +169,7 @@ class UMBPStoreConnectorWorker:
                     if plan.key in result.completed_keys
                 ),
             )
-            if result.status == TransferJobStatus.COMPLETED:
+            if publish and result.status == TransferJobStatus.COMPLETED:
                 self.runtime.publish(result)
             self._worker_meta.completed_stores.update(result.completed_keys)
             for plan in result.plans:
@@ -173,9 +177,13 @@ class UMBPStoreConnectorWorker:
                     continue
                 self._worker_meta.kv_events.append(
                     BlockStored(
-                        block_hashes=[maybe_convert_block_hash(plan.block_hash)],
+                        block_hashes=[
+                            maybe_convert_block_hash(cast(BlockHash, plan.block_hash))
+                        ],
                         parent_block_hash=(
-                            maybe_convert_block_hash(plan.parent_block_hash)
+                            maybe_convert_block_hash(
+                                cast(BlockHash, plan.parent_block_hash)
+                            )
                             if plan.parent_block_hash is not None
                             else None
                         ),
@@ -213,14 +221,14 @@ class UMBPStoreConnectorWorker:
                     if plan.key in failed_keys:
                         token = (plan.key, plan.generation)
                         self._worker_meta.failed_store_tokens[token] = (
-                            self._worker_meta.failed_store_tokens.get(token, 0)
-                            + 1
+                            self._worker_meta.failed_store_tokens.get(token, 0) + 1
                         )
                 for key in failed_keys:
                     self._worker_meta.failed_store_errors[key] = (
                         result.error or "store failed"
                     )
-            self._finished_sending.add(request_id)
+            if mark_finished:
+                self._finished_sending.add(request_id)
         self._worker_meta.failed_block_ids.update(result.failed_block_ids)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -264,17 +272,110 @@ class UMBPStoreConnectorWorker:
 
     def save_kv_layer(
         self,
+        metadata: UMBPConnectorMetadata,
         layer_name: str,
         kv_layer: torch.Tensor,
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        del layer_name, kv_layer, attn_metadata, kwargs
+        del kv_layer, attn_metadata, kwargs
+        if not self.layerwise_store:
+            return
+        layer_plans = metadata.store_plans_by_layer.get(layer_name, ())
+        if not layer_plans:
+            return
+        materialized = self._materialize_layer_plans(layer_plans, layer_name)
+        if not materialized:
+            return
+        for plan in layer_plans:
+            self._layer_store_plans.setdefault(plan.key, plan)
+        self._stats.record(
+            "store",
+            submitted=len(materialized),
+            num_bytes=sum(item.length for plan in materialized for item in plan.ranges),
+        )
+        self._layer_store_jobs[layer_name] = self.runtime.store(materialized)
+        self._submitted_store_layers.add(layer_name)
 
     def wait_for_save(self) -> None:
+        finished_requests: set[str] = set()
+        layer_results = [
+            self.runtime.wait(job) for job in self._layer_store_jobs.values()
+        ]
+        all_keys = set(self._layer_store_plans)
+        failed_keys = {key for result in layer_results for key in result.failed_keys}
+        completed_keys = all_keys - failed_keys
+        if layer_results and not failed_keys:
+            for result in layer_results:
+                self.runtime.publish(result)
+        if self._layer_store_plans:
+            aggregate = TransferJobState(tuple(self._layer_store_plans.values()))
+            aggregate.start()
+            if completed_keys:
+                aggregate.complete(list(completed_keys))
+            if failed_keys:
+                aggregate.fail(list(failed_keys), "layer-wise store failed")
+            self._finish_job(
+                "__layerwise_store__",
+                aggregate,
+                is_load=False,
+                mark_finished=False,
+                wait=False,
+                publish=False,
+            )
+            finished_requests.update(
+                plan.request_id
+                for plan in aggregate.plans
+                if plan.request_id is not None
+            )
+        self._layer_store_jobs.clear()
+        self._layer_store_plans.clear()
+        self._submitted_store_layers.clear()
         for request_id, job in self._store_jobs.items():
             self._finish_job(request_id, job, is_load=False)
+            if request_id != "__umbp_batch__":
+                finished_requests.add(request_id)
+            else:
+                finished_requests.update(
+                    plan.request_id for plan in job.plans if plan.request_id is not None
+                )
         self._store_jobs.clear()
+        self._finished_sending.update(finished_requests)
+
+    def _materialize_layer_plans(
+        self, plans: Sequence[BlockTransferPlan], layer_name: str
+    ) -> list[BlockTransferPlan]:
+        materialized: list[BlockTransferPlan] = []
+        for plan in plans:
+            for full_plan in self._materialize_plans([plan]):
+                layer_ranges = tuple(
+                    item for item in full_plan.ranges if item.layer_name == layer_name
+                )
+                if layer_ranges:
+                    materialized.append(replace(full_plan, ranges=layer_ranges))
+        return materialized
+
+    def _store_was_submitted_layerwise(self, plan: BlockTransferPlan) -> bool:
+        materialized = self._materialize_plans([plan])
+        required_layers = {
+            item.layer_name for full_plan in materialized for item in full_plan.ranges
+        }
+        return bool(required_layers) and required_layers.issubset(
+            self._submitted_store_layers
+        )
+
+    def _submit_store_plans(
+        self, plans: list[BlockTransferPlan], request_id: str
+    ) -> None:
+        if not plans:
+            return
+        materialized = self._materialize_plans(plans)
+        self._stats.record(
+            "store",
+            submitted=len(materialized),
+            num_bytes=sum(item.length for plan in materialized for item in plan.ranges),
+        )
+        self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
         store_requests = {
@@ -285,34 +386,27 @@ class UMBPStoreConnectorWorker:
             store_requests.setdefault(partial_plan.request_id, []).append(
                 self._partial_tail_to_plan(partial_plan)
             )
+        if self.layerwise_store:
+            for request_id, plans in store_requests.items():
+                remaining = [
+                    plan
+                    for plan in plans
+                    if not self._store_was_submitted_layerwise(plan)
+                ]
+                self._submit_store_plans(remaining, request_id)
+            if metadata.store_plans and not store_requests:
+                remaining = [
+                    plan
+                    for plan in metadata.store_plans
+                    if not self._store_was_submitted_layerwise(plan)
+                ]
+                self._submit_store_plans(remaining, "__umbp_batch__")
+            return
+
         for request_id, plans in store_requests.items():
-            if plans:
-                self._stats.record(
-                    "store",
-                    submitted=len(plans),
-                    num_bytes=sum(
-                        item.length
-                        for plan in self._materialize_plans(plans)
-                        for item in plan.ranges
-                    ),
-                )
-                self._store_jobs[request_id] = self.runtime.store(
-                    self._materialize_plans(plans)
-                )
+            self._submit_store_plans(plans, request_id)
         if metadata.store_plans and not store_requests:
-            materialized = self._materialize_plans(metadata.store_plans)
-            self._stats.record(
-                "store",
-                submitted=len(materialized),
-                num_bytes=sum(
-                    item.length
-                    for plan in materialized
-                    for item in plan.ranges
-                ),
-            )
-            self._store_jobs["__umbp_batch__"] = self.runtime.store(
-                materialized
-            )
+            self._submit_store_plans(metadata.store_plans, "__umbp_batch__")
 
     @staticmethod
     def _partial_tail_to_plan(
@@ -331,9 +425,7 @@ class UMBPStoreConnectorWorker:
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
         """Cancel request-local jobs before vLLM reuses their GPU blocks."""
-        if not (
-            metadata.preempted_block_ids or metadata.preempted_request_ids
-        ):
+        if not (metadata.preempted_block_ids or metadata.preempted_request_ids):
             return
         if not metadata.preempted_request_ids:
             self.wait_for_layer_load("")
@@ -357,6 +449,20 @@ class UMBPStoreConnectorWorker:
             if store_job is not None:
                 result = self._cancel_job(store_job)
                 self._finish_job(request_id, result, is_load=False)
+        for layer_name, job in list(self._layer_store_jobs.items()):
+            if any(
+                plan.request_id in preempted
+                for plan in job.plans
+                if plan.request_id is not None
+            ):
+                result = self._cancel_job(self._layer_store_jobs.pop(layer_name))
+                self._finish_job(
+                    "__layerwise_store__",
+                    result,
+                    is_load=False,
+                    mark_finished=False,
+                )
+        self._submitted_store_layers.clear()
 
     def _cancel_job(self, job: TransferJobState) -> TransferJobState:
         cancel = getattr(self.runtime, "cancel", None)
@@ -395,7 +501,9 @@ class UMBPStoreConnectorWorker:
                 group_id, block_hash = parsed
                 self._worker_meta.kv_events.append(
                     BlockRemoved(
-                        block_hashes=[maybe_convert_block_hash(block_hash)],
+                        block_hashes=[
+                            maybe_convert_block_hash(cast(BlockHash, block_hash))
+                        ],
                         medium="CPU",
                         group_idx=group_id,
                         locality="LOCAL",

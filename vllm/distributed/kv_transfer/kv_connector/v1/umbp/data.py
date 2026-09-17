@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from math import gcd
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 import torch
 
@@ -52,15 +53,13 @@ class RankTopology:
                 raise ValueError(f"{name}={rank} is outside [0, {size})")
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: Any) -> "RankTopology":
+    def from_vllm_config(cls, vllm_config: Any) -> RankTopology:
         parallel = vllm_config.parallel_config
         tp_size = getattr(parallel, "tensor_parallel_size", 1)
         pp_size = getattr(parallel, "pipeline_parallel_size", 1)
         rank = getattr(parallel, "rank", 0)
         return cls(
-            tp_rank=getattr(
-                parallel, "tensor_parallel_rank", rank % tp_size
-            ),
+            tp_rank=getattr(parallel, "tensor_parallel_rank", rank % tp_size),
             tp_size=tp_size,
             pp_rank=getattr(
                 parallel,
@@ -118,7 +117,7 @@ class UMBPNamespace:
         cls,
         vllm_config: Any,
         kv_cache_config: KVCacheConfig,
-    ) -> "UMBPNamespace":
+    ) -> UMBPNamespace:
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured != "auto":
@@ -256,7 +255,7 @@ class TPShardMapping:
         consumer_tp_size: int,
         consumer_rank: int,
         num_kv_heads: int,
-    ) -> "TPShardMapping":
+    ) -> TPShardMapping:
         if producer_tp_size <= 0 or consumer_tp_size <= 0:
             raise ValueError("TP sizes must be positive")
         if consumer_rank < 0 or consumer_rank >= consumer_tp_size:
@@ -264,8 +263,10 @@ class TPShardMapping:
         if num_kv_heads <= 0:
             raise ValueError("num_kv_heads must be positive")
 
-        common = producer_tp_size * consumer_tp_size // gcd(
-            producer_tp_size, consumer_tp_size
+        common = (
+            producer_tp_size
+            * consumer_tp_size
+            // gcd(producer_tp_size, consumer_tp_size)
         )
         if num_kv_heads < common:
             # MQA/GQA ranks can replicate a smaller KV-head set.
@@ -324,9 +325,7 @@ class TPShardMapping:
         expected = self.num_kv_heads // self.consumer_tp_size
         covered = sum(item.num_heads for item in self.slices)
         if covered != expected:
-            raise ValueError(
-                f"TP mapping covers {covered} heads, expected {expected}"
-            )
+            raise ValueError(f"TP mapping covers {covered} heads, expected {expected}")
 
 
 @dataclass(frozen=True)
@@ -359,7 +358,7 @@ class KVLayoutPlanner:
         self._physical_strides: dict[str, int] = {}
 
     @classmethod
-    def from_kv_cache_config(cls, config: KVCacheConfig) -> "KVLayoutPlanner":
+    def from_kv_cache_config(cls, config: KVCacheConfig) -> KVLayoutPlanner:
         group_by_layer = {
             layer: group_id
             for group_id, group in enumerate(config.kv_cache_groups)
@@ -445,7 +444,7 @@ class KVLayoutPlanner:
         generation: int = 0,
         token_start: int | None = None,
         token_end: int | None = None,
-    ) -> "BlockTransferPlan":
+    ) -> BlockTransferPlan:
         if not self._base_addresses:
             raise RuntimeError("KV caches must be registered before planning")
         return self.plan_for_block(
@@ -468,7 +467,7 @@ class KVLayoutPlanner:
         generation: int = 0,
         token_start: int | None = None,
         token_end: int | None = None,
-    ) -> "BlockTransferPlan":
+    ) -> BlockTransferPlan:
         """Lower one GPU block into a deterministic scatter/gather plan."""
         if block_id < 0:
             raise ValueError("block_id must be non-negative")
@@ -522,9 +521,7 @@ class KVLayoutPlanner:
                         stride=physical_stride,
                         length=overlap_end - overlap_start,
                         object_offset=(
-                            partial_object_offset
-                            + overlap_start
-                            - byte_start
+                            partial_object_offset + overlap_start - byte_start
                             if token_start is not None
                             else region.object_offset + part * physical_stride
                         ),
@@ -666,12 +663,19 @@ class RequestTracker:
         for current, new in zip(self.block_ids, block_ids, strict=True):
             if new[: len(current)] == current:
                 current.extend(new[len(current) :])
-            elif not new:
-                continue
-            elif current[-len(new) :] == new:
+            elif not new or current[-len(new) :] == new:
                 continue
             else:
                 current.extend(new)
+
+    def replace_blocks(self, block_ids: tuple[list[int], ...]) -> None:
+        """Replace stale pre-preemption tables with resumed full tables."""
+        self.block_ids = tuple(list(group) for group in block_ids)
+        self.token_len = 0
+        self.saved_tokens = 0
+        self.retry_from_tokens = None
+        self.pending_tail = None
+        self.generation += 1
 
     def mark_saved(self, token_count: int, block_size: int) -> int:
         """Advance the save watermark only to a complete block boundary."""
@@ -730,9 +734,7 @@ class TransferJobState:
 
     @property
     def failed_block_ids(self) -> set[int]:
-        return {
-            plan.block_id for plan in self.plans if plan.key in self.failed_keys
-        }
+        return {plan.block_id for plan in self.plans if plan.key in self.failed_keys}
 
     def _finish_if_done(self) -> None:
         keys = {plan.key for plan in self.plans}
@@ -782,7 +784,7 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
     def aggregate(
         self, other: KVConnectorWorkerMetadata
-    ) -> "UMBPConnectorWorkerMetadata":
+    ) -> UMBPConnectorWorkerMetadata:
         if not isinstance(other, UMBPConnectorWorkerMetadata):
             raise TypeError("cannot aggregate incompatible UMBP worker metadata")
         self.completed_loads.update(other.completed_loads)
@@ -796,9 +798,7 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 self.completed_store_counts.get(key, 0) + count
             )
         for key, count in other.failed_store_counts.items():
-            self.failed_store_counts[key] = (
-                self.failed_store_counts.get(key, 0) + count
-            )
+            self.failed_store_counts[key] = self.failed_store_counts.get(key, 0) + count
         for token, count in other.completed_store_tokens.items():
             self.completed_store_tokens[token] = (
                 self.completed_store_tokens.get(token, 0) + count
