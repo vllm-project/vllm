@@ -498,7 +498,7 @@ def test_gather_sampler_output_logprobs_and_nans():
     expected_logprobs = torch.full(
         (num_logits, num_cols), float("-inf"), dtype=torch.float32
     )
-    expected_ranks = torch.zeros(num_logits, dtype=torch.int64)
+    expected_ranks = torch.zeros(num_logits, num_cols, dtype=torch.int64)
     expected_nans = torch.zeros(num_reqs, dtype=torch.int32)
     for rank, (local, _, metadata) in enumerate(results):
         local_batches.append(cuda_fields(local))
@@ -511,7 +511,7 @@ def test_gather_sampler_output_logprobs_and_nans():
         local_cols = num_cols - 1 if rank == 0 else num_cols + 2
         ids = rows[:, None] * 10 + torch.arange(local_cols)[None, :]
         logprobs = ids.float() * 0.5
-        ranks_t = rows + 7
+        ranks_t = rows[:, None] + torch.arange(local_cols)[None, :] + 7
         nans = (rows % 4).to(torch.int32)
         local_outputs.append(
             SamplerOutput(
@@ -536,7 +536,7 @@ def test_gather_sampler_output_logprobs_and_nans():
         copy_cols = min(local_cols, num_cols)
         expected_ids[rows, :copy_cols] = ids[:, :copy_cols]
         expected_logprobs[rows, :copy_cols] = logprobs[:, :copy_cols]
-        expected_ranks[rows] = ranks_t
+        expected_ranks[rows, :copy_cols] = ranks_t[:, :copy_cols]
         for j in owned:
             in_req = (rows >= int(cu[j])) & (rows < int(cu[j + 1]))
             expected_nans[j] = int(nans[in_req].sum())

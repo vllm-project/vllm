@@ -198,6 +198,60 @@ fn decodes_inline_new_logprobs() {
 }
 
 #[test]
+fn decodes_2d_token_ranks() {
+    // Per-token ranks after sampled-token dedup: remaining top-k entries keep
+    // their original 1-based positions (1, 2, 3) rather than sequential 1, 2.
+    let ids = Value::Ext(
+        3,
+        vec![
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    );
+    let probs = Value::Ext(3, vec![0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64]);
+    let ranks = Value::Ext(
+        3,
+        vec![
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    );
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value("<i8", &[1, 3], ids),
+            ndarray_value("<f4", &[1, 3], probs),
+            ndarray_value("<i8", &[1, 3], ranks),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
+    assert_eq!(
+        logprobs,
+        Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: 1,
+                        logprob: 1.0,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: 2,
+                        logprob: 2.0,
+                        rank: 2,
+                    },
+                    TokenLogprob {
+                        token_id: 3,
+                        logprob: 3.0,
+                        rank: 3,
+                    },
+                ],
+            }],
+        }
+    );
+}
+
+#[test]
 fn decodes_multipart_new_logprobs() {
     let frames = vec![
         Bytes::from(encode_value(&output_wire_with_custom_fields(

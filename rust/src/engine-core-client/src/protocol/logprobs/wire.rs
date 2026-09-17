@@ -29,7 +29,8 @@ pub struct WireLogprobs {
     pub logprob_token_ids: WireNdArray,
     /// Wire array with shape `[num_positions, max_num_logprobs + 1]`.
     pub logprobs: WireNdArray,
-    /// Wire array with shape `[num_positions]`.
+    /// Wire array with shape `[num_positions]` (legacy sampled/selected rank)
+    /// or `[num_positions, max_num_logprobs + 1]` (per-token ranks).
     ///
     /// Python uses the field name `sampled_token_ranks` for sample logprobs and
     /// `selected_token_ranks` for prompt logprobs. Rust keeps one neutral field

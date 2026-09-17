@@ -421,10 +421,12 @@ def _unpack_gathered_output_kernel(
         "max_num_logits_per_req",
         "num_logprob_cols",
         "num_src_cols",
+        "num_src_rank_cols",
         "send_ids_stride",
         "send_logprobs_stride",
         "src_ids_stride",
         "src_logprobs_stride",
+        "src_ranks_stride",
     ]
 )
 def _pack_logprobs_kernel(
@@ -437,10 +439,12 @@ def _pack_logprobs_kernel(
     src_logprobs_ptr,
     src_logprobs_stride,
     selected_token_ranks_ptr,
+    src_ranks_stride,
     local_cu_num_logits_ptr,
     max_num_logits_per_req,
     num_logprob_cols,
     num_src_cols,
+    num_src_rank_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -464,8 +468,13 @@ def _pack_logprobs_kernel(
         )
         ids_row = send_ids_ptr + dst * send_ids_stride
         tl.store(ids_row + cols, ids.to(tl.int64), mask=dst_mask)
-        rank = tl.load(selected_token_ranks_ptr + src)
-        tl.store(ids_row + num_logprob_cols, rank.to(tl.int64))
+        src_rank_mask = cols < num_src_rank_cols
+        ranks = tl.load(
+            selected_token_ranks_ptr + src * src_ranks_stride + cols,
+            mask=src_rank_mask,
+            other=0,
+        )
+        tl.store(ids_row + num_logprob_cols + cols, ranks.to(tl.int64), mask=dst_mask)
         tl.store(
             send_logprobs_ptr + dst * send_logprobs_stride + cols,
             logprobs.to(tl.float32),
@@ -479,6 +488,7 @@ def _pack_logprobs_kernel(
         "num_logprob_cols",
         "gathered_ids_stride",
         "gathered_logprobs_stride",
+        "dst_ranks_stride",
     ]
 )
 def _unpack_logprobs_kernel(
@@ -491,6 +501,7 @@ def _unpack_logprobs_kernel(
     logprob_token_ids_ptr,
     logprobs_ptr,
     selected_token_ranks_ptr,
+    dst_ranks_stride,
     max_num_logits_per_req,
     num_logprob_cols,
     BLOCK_SIZE: tl.constexpr,
@@ -506,8 +517,10 @@ def _unpack_logprobs_kernel(
         src_ids_row = gathered_ids_ptr + src * gathered_ids_stride
         ids = tl.load(src_ids_row + cols, mask=mask)
         tl.store(logprob_token_ids_ptr + dst * num_logprob_cols + cols, ids, mask=mask)
-        rank = tl.load(src_ids_row + num_logprob_cols)
-        tl.store(selected_token_ranks_ptr + dst, rank)
+        ranks = tl.load(src_ids_row + num_logprob_cols + cols, mask=mask)
+        tl.store(
+            selected_token_ranks_ptr + dst * dst_ranks_stride + cols, ranks, mask=mask
+        )
         logprobs = tl.load(
             gathered_logprobs_ptr + src * gathered_logprobs_stride + cols, mask=mask
         )
@@ -529,15 +542,20 @@ def _gather_logprobs_tensors(
     block_size = triton.next_power_of_2(num_logprob_cols)
 
     # Padded slots are never read back: gathered_src_indices only addresses
-    # rows that an owner rank wrote.
+    # rows that an owner rank wrote. Token ids occupy the first
+    # num_logprob_cols columns; per-token ranks occupy the next
+    # num_logprob_cols columns.
     send_ids_ranks = torch.empty(
-        num_send_rows, num_logprob_cols + 1, dtype=torch.int64, device=device
+        num_send_rows, 2 * num_logprob_cols, dtype=torch.int64, device=device
     )
     send_logprobs = torch.empty(
         num_send_rows, num_logprob_cols, dtype=torch.float32, device=device
     )
     if local_output is not None and local_output.logprobs_tensors is not None:
         lp = local_output.logprobs_tensors
+        src_ranks = lp.selected_token_ranks
+        if src_ranks.ndim == 1:
+            src_ranks = src_ranks.unsqueeze(-1)
         _pack_logprobs_kernel[(metadata.num_local_reqs, max_num_logits_per_req)](
             send_ids_ranks,
             send_ids_ranks.stride(0),
@@ -547,11 +565,13 @@ def _gather_logprobs_tensors(
             lp.logprob_token_ids.stride(0),
             lp.logprobs,
             lp.logprobs.stride(0),
-            lp.selected_token_ranks,
+            src_ranks,
+            src_ranks.stride(0),
             local_batch.cu_num_logits,
             max_num_logits_per_req,
             num_logprob_cols,
             lp.logprob_token_ids.shape[1],
+            src_ranks.shape[1],
             BLOCK_SIZE=block_size,
         )
 
@@ -566,7 +586,9 @@ def _gather_logprobs_tensors(
     logprobs = torch.empty(
         num_logits, num_logprob_cols, dtype=torch.float32, device=device
     )
-    selected_token_ranks = torch.empty(num_logits, dtype=torch.int64, device=device)
+    selected_token_ranks = torch.empty(
+        num_logits, num_logprob_cols, dtype=torch.int64, device=device
+    )
     _unpack_logprobs_kernel[(num_reqs, max_num_logits_per_req)](
         gathered_ids_ranks,
         gathered_ids_ranks.stride(0),
@@ -577,6 +599,7 @@ def _gather_logprobs_tensors(
         logprob_token_ids,
         logprobs,
         selected_token_ranks,
+        selected_token_ranks.stride(0),
         max_num_logits_per_req,
         num_logprob_cols,
         BLOCK_SIZE=block_size,

@@ -27,9 +27,9 @@ pub struct TokenLogprob {
     pub token_id: u32,
     /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
-    /// The sampled/selected token uses its actual vocab rank. Remaining entries
-    /// use 1-based top-k ranks matching the engine's returned candidate
-    /// order.
+    /// Vocab rank for this token. 2D wire payloads supply a rank per entry;
+    /// 1D payloads use the sampled/selected rank for the first entry and
+    /// 1-based top-k ranks for the rest.
     /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
     /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
@@ -47,22 +47,29 @@ pub struct PositionLogprobs {
 impl PositionLogprobs {
     /// Convert one decoded logprobs row into this per-position form by grouping
     /// each token/logprob pair together with the sampled/selected token's
-    /// actual vocab rank.
+    /// actual vocab rank. Remaining entries use 1-based sequential top-k ranks.
     fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
-        if token_ids.len() != logprobs.len() {
+        let ranks: Vec<u32> =
+            std::iter::once(sampled_rank).chain(1..).take(token_ids.len()).collect();
+        Self::from_decoded_row_with_ranks(token_ids, logprobs, &ranks)
+    }
+
+    /// Convert one decoded logprobs row using exact per-token ranks.
+    fn from_decoded_row_with_ranks(
+        token_ids: &[u32],
+        logprobs: &[f32],
+        ranks: &[u32],
+    ) -> Result<Self> {
+        if token_ids.len() != logprobs.len() || token_ids.len() != ranks.len() {
             bail_ext_value_decode!(
-                "logprobs row length mismatch: token_ids={}, logprobs={}",
+                "logprobs row length mismatch: token_ids={}, logprobs={}, ranks={}",
                 token_ids.len(),
-                logprobs.len()
+                logprobs.len(),
+                ranks.len()
             );
         }
         let mut entries = Vec::with_capacity(token_ids.len());
-        for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
-            let rank = if index == 0 {
-                sampled_rank
-            } else {
-                index as u32
-            };
+        for ((&token_id, &logprob), &rank) in token_ids.iter().zip(logprobs.iter()).zip(ranks) {
             entries.push(TokenLogprob {
                 token_id,
                 logprob,
@@ -183,7 +190,7 @@ impl WireLogprobs {
 
         let mut token_ids = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(8));
         let mut logprobs = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(4));
-        let mut token_ranks = Vec::with_capacity(rows.saturating_mul(8));
+        let mut token_ranks = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(8));
 
         for (row_index, position) in value.positions.iter().enumerate() {
             if position.entries.len() != cols {
@@ -192,14 +199,14 @@ impl WireLogprobs {
                     position.entries.len()
                 ));
             }
-            let Some((sampled, _)) = position.entries.split_first() else {
+            if position.entries.is_empty() {
                 return Err(format!("logprobs row {row_index} is empty"));
-            };
+            }
 
-            token_ranks.extend_from_slice(&(sampled.rank as i64).to_le_bytes());
             for entry in &position.entries {
                 token_ids.extend_from_slice(&(entry.token_id as i64).to_le_bytes());
                 logprobs.extend_from_slice(&entry.logprob.to_le_bytes());
+                token_ranks.extend_from_slice(&(entry.rank as i64).to_le_bytes());
             }
         }
 
@@ -216,7 +223,7 @@ impl WireLogprobs {
             },
             token_ranks: WireNdArray {
                 dtype: NumpyDtype::little(TensorDtype::I64),
-                shape: vec![rows],
+                shape: vec![rows, cols],
                 data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
@@ -251,7 +258,7 @@ impl WireLogprobs {
         )?;
         let logprobs =
             array::decode_array2_f32(self.logprobs, &format!("{field_prefix}.logprobs"), frames)?;
-        let token_ranks = array::decode_array1_u32(
+        let token_ranks = array::decode_ranks_u32(
             self.token_ranks,
             &format!("{field_prefix}.token_ranks"),
             frames,
@@ -264,13 +271,6 @@ impl WireLogprobs {
                 token_ids.cols,
                 logprobs.rows,
                 logprobs.cols
-            );
-        }
-        if token_ids.rows != token_ranks.len() {
-            bail_ext_value_decode!(
-                "{field_prefix}: token_ranks length {} does not match row count {}",
-                token_ranks.len(),
-                token_ids.rows
             );
         }
 
@@ -288,17 +288,51 @@ impl WireLogprobs {
         }
 
         let mut positions = Vec::with_capacity(token_ids.rows);
-        for ((token_ids_row, logprobs_row), sampled_rank) in token_ids
-            .data
-            .chunks(token_ids.cols)
-            .zip(logprobs.data.chunks(logprobs.cols))
-            .zip(token_ranks)
-        {
-            positions.push(PositionLogprobs::from_decoded_row(
-                token_ids_row,
-                logprobs_row,
-                sampled_rank,
-            )?);
+        match token_ranks {
+            array::DecodedRanks::Sampled(token_ranks) => {
+                if token_ids.rows != token_ranks.len() {
+                    bail_ext_value_decode!(
+                        "{field_prefix}: token_ranks length {} does not match row count {}",
+                        token_ranks.len(),
+                        token_ids.rows
+                    );
+                }
+                for ((token_ids_row, logprobs_row), sampled_rank) in token_ids
+                    .data
+                    .chunks(token_ids.cols)
+                    .zip(logprobs.data.chunks(logprobs.cols))
+                    .zip(token_ranks)
+                {
+                    positions.push(PositionLogprobs::from_decoded_row(
+                        token_ids_row,
+                        logprobs_row,
+                        sampled_rank,
+                    )?);
+                }
+            }
+            array::DecodedRanks::PerToken(token_ranks) => {
+                if token_ids.rows != token_ranks.rows || token_ids.cols != token_ranks.cols {
+                    bail_ext_value_decode!(
+                        "{field_prefix}: token_ranks shape ({}, {}) does not match token ids ({}, {})",
+                        token_ranks.rows,
+                        token_ranks.cols,
+                        token_ids.rows,
+                        token_ids.cols
+                    );
+                }
+                for ((token_ids_row, logprobs_row), ranks_row) in token_ids
+                    .data
+                    .chunks(token_ids.cols)
+                    .zip(logprobs.data.chunks(logprobs.cols))
+                    .zip(token_ranks.data.chunks(token_ranks.cols))
+                {
+                    positions.push(PositionLogprobs::from_decoded_row_with_ranks(
+                        token_ids_row,
+                        logprobs_row,
+                        ranks_row,
+                    )?);
+                }
+            }
         }
 
         Ok(Logprobs { positions })
