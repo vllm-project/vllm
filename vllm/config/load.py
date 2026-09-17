@@ -97,6 +97,11 @@ class LoadConfig:
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    weight_cache_is_draft_model: bool = False
+    """Whether an ``ipc_cache`` load targets the weight cache daemon group that
+    serves the speculative draft model instead of the target model."""
+    weight_cache_draft_model_idx: int | None = None
+    """Index of the speculative draft model within the draft cache role."""
     device: str | None = None
     """Device to which model weights will be loaded, default to
     device_config.device"""

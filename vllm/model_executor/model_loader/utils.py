@@ -12,7 +12,13 @@ from torch import nn
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    LoadConfig,
+    ModelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import (
@@ -32,6 +38,35 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Load config for the speculative draft model.
+
+    An explicit ``draft_load_config`` always wins. Otherwise the draft inherits
+    the target's load config, except under ``ipc_cache``: an MTP draft is
+    routed to the daemon's draft group, and any other draft (which the daemon
+    does not cache) falls back to disk loading instead of being sent to the
+    target daemon with a mismatching fingerprint.
+    """
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        caches_draft_model,
+    )
+
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    load_config = vllm_config.load_config
+    if speculative_config.draft_load_config is not None:
+        return speculative_config.draft_load_config
+    if load_config.load_format != "ipc_cache":
+        return load_config
+    if caches_draft_model(speculative_config):
+        return replace(
+            load_config,
+            weight_cache_is_draft_model=True,
+            weight_cache_draft_model_idx=0,
+        )
+    return replace(load_config, load_format="auto", model_loader_extra_config={})
 
 
 @instrument(span_name="Initialize model")

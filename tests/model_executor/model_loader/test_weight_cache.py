@@ -207,3 +207,71 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
     assert restart_outputs == baseline_outputs
+
+
+def test_weight_cache_caches_only_mtp_drafts():
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        caches_draft_model,
+    )
+
+    draft = object()
+    assert caches_draft_model(SimpleNamespace(method="mtp", draft_model_config=draft))
+    assert not caches_draft_model(
+        SimpleNamespace(method="eagle3", draft_model_config=draft)
+    )
+    assert not caches_draft_model(
+        SimpleNamespace(method="mtp", draft_model_config=None)
+    )
+    assert not caches_draft_model(None)
+
+
+def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
+
+    target_path = get_socket_path("GPU-abc", str(tmp_path))
+    draft_path = get_socket_path("GPU-abc", str(tmp_path), is_draft_model=True)
+
+    assert target_path != draft_path
+    assert draft_path.endswith("GPU-abc_draft0.sock")
+
+
+def test_draft_load_config_under_ipc_cache():
+    """An MTP draft is routed to the daemon's draft group; any other draft
+    falls back to disk instead of hitting the target daemon; an explicit
+    draft_load_config always wins."""
+    from types import SimpleNamespace
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.utils import get_draft_load_config
+
+    ipc = LoadConfig(
+        load_format="ipc_cache", model_loader_extra_config={"fallback": False}
+    )
+    explicit = LoadConfig(load_format="fastsafetensors")
+
+    def cfg(method, draft_load_config=None, load_config=ipc):
+        return SimpleNamespace(
+            load_config=load_config,
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=object(),
+                draft_load_config=draft_load_config,
+            ),
+        )
+
+    mtp = get_draft_load_config(cfg("mtp"))
+    assert mtp.load_format == "ipc_cache"
+    assert mtp.weight_cache_is_draft_model
+    assert mtp.weight_cache_draft_model_idx == 0
+    assert mtp.model_loader_extra_config == {"fallback": False}
+
+    eagle = get_draft_load_config(cfg("eagle3"))
+    assert eagle.load_format == "auto"
+    assert not eagle.weight_cache_is_draft_model
+    assert eagle.model_loader_extra_config == {}
+
+    assert get_draft_load_config(cfg("mtp", explicit)) is explicit
+    disk = LoadConfig(load_format="fastsafetensors")
+    assert get_draft_load_config(cfg("mtp", load_config=disk)) is disk

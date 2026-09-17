@@ -60,7 +60,8 @@ class IpcModelLoader(BaseModelLoader):
     Extra config keys (via --model-loader-extra-config):
 
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
-      derived from the physical GPU uuid.
+      derived from the physical GPU uuid and the cache role
+      (``load_config.weight_cache_is_draft_model``).
     - socket_dir: directory containing the daemon sockets.
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
@@ -78,6 +79,14 @@ class IpcModelLoader(BaseModelLoader):
         extra_config = copy(load_config.model_loader_extra_config or {})
         self.socket_path: str | None = extra_config.pop("socket_path", None)
         self.socket_dir: str | None = extra_config.pop("socket_dir", None)
+        self.is_draft_model = load_config.weight_cache_is_draft_model
+        self.draft_model_idx = load_config.weight_cache_draft_model_idx
+        if self.is_draft_model and self.socket_path is not None:
+            raise ValueError(
+                "socket_path cannot be combined with the draft weight cache role; "
+                "use socket_dir so the target and draft sockets are derived "
+                "independently"
+            )
         self.mode: str = extra_config.pop("mode", "zero_copy")
         self.fallback: bool = extra_config.pop("fallback", True)
         self.connect_timeout_s: float = float(
@@ -269,6 +278,8 @@ class IpcModelLoader(BaseModelLoader):
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
+            is_draft_model=self.is_draft_model,
+            draft_model_idx=self.draft_model_idx,
         )
         return self._request_state(cache_config)
 
@@ -316,7 +327,12 @@ class IpcModelLoader(BaseModelLoader):
     def _resolve_socket_path(self) -> str:
         if self.socket_path is not None:
             return self.socket_path
-        return get_socket_path(get_current_device_uuid(), self.socket_dir)
+        return get_socket_path(
+            get_current_device_uuid(),
+            self.socket_dir,
+            is_draft_model=self.is_draft_model,
+            draft_model_idx=self.draft_model_idx,
+        )
 
     def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
         if daemon_uuid is None:
@@ -340,7 +356,11 @@ class IpcModelLoader(BaseModelLoader):
         # DefaultModelLoader must not see load_format="ipc_cache" or the ipc
         # extra config keys.
         return dataclasses.replace(
-            self.load_config, load_format="auto", model_loader_extra_config={}
+            self.load_config,
+            load_format="auto",
+            model_loader_extra_config={},
+            weight_cache_is_draft_model=False,
+            weight_cache_draft_model_idx=None,
         )
 
     def _fallback_load(

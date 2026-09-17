@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
@@ -128,9 +128,48 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_uuid: str, socket_dir: str | None = None) -> str:
+# Speculative methods whose draft model the daemon caches in its own group.
+# Other drafts (e.g. EAGLE3 heads) keep loading from disk in the engine.
+WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp"})
+
+
+def caches_draft_model(speculative_config: Any) -> bool:
+    """Whether the daemon serves the speculative draft as a separate role."""
+    return (
+        speculative_config is not None
+        and speculative_config.method in WEIGHT_CACHE_DRAFT_METHODS
+        and speculative_config.draft_model_config is not None
+    )
+
+
+def normalize_draft_model_idx(draft_model_idx: int | None) -> int:
+    return -1 if draft_model_idx is None else draft_model_idx
+
+
+def format_daemon_role(
+    is_draft_model: bool = False, draft_model_idx: int | None = None
+) -> str:
+    """Socket-name suffix distinguishing the draft daemon group from the target."""
+    if not is_draft_model:
+        return ""
+    return f"_draft{draft_model_idx if draft_model_idx is not None else 0}"
+
+
+def get_socket_path(
+    gpu_uuid: str,
+    socket_dir: str | None = None,
+    *,
+    is_draft_model: bool = False,
+    draft_model_idx: int | None = None,
+) -> str:
     directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_uuid=gpu_uuid))
+    return os.path.join(
+        directory,
+        SOCKET_NAME_TEMPLATE.format(
+            gpu_uuid=gpu_uuid,
+            role=format_daemon_role(is_draft_model, draft_model_idx),
+        ),
+    )
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -272,10 +311,18 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    is_draft_model: bool = False
+    draft_model_idx: int = -1
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        is_draft_model: bool = False,
+        draft_model_idx: int | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -302,6 +349,8 @@ class WeightCacheKey:
             quant_config_hash=_hash_quant_config(quant_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft_model=is_draft_model,
+            draft_model_idx=normalize_draft_model_idx(draft_model_idx),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
