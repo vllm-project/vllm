@@ -342,6 +342,35 @@ def test_routed_experts_attention_group_is_shared_and_fail_closed():
     with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
         get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
 
+    wrapped = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    {"layer.0": FullAttentionSpec(), "layer.1": FullAttentionSpec()}
+                )
+            )
+        ]
+    )
+    assert get_routed_experts_attn_gid(wrapped) == 0
+
+    mixed = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    {"layer.0": FullAttentionSpec(), "layer.1": object()}
+                )
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(mixed)
+
+    empty = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=UniformTypeKVCacheSpecs({}))]
+    )
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(empty)
+
 
 def test_routed_experts_attention_group_unwraps_uniform_type_specs():
     """DeepSeek-V4-shaped groups wrap their specs in ``UniformTypeKVCacheSpecs``.

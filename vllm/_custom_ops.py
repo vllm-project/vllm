@@ -3111,16 +3111,35 @@ def top_k_per_row_prefill(
     stride1: int,
     topk_tokens: int,
 ) -> None:
-    torch.ops._C.top_k_per_row_prefill(
-        logits,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        raw_topk_indices,
-        num_rows,
-        stride0,
-        stride1,
-        topk_tokens,
-    )
+    if envs.VLLM_BATCH_INVARIANT:
+        # The deterministic sparse Top-K and FP8 activation quantization
+        # kernels are packaged in one batch-invariant extension.
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            require_batch_invariant_kernel,
+        )
+
+        require_batch_invariant_kernel()
+        torch.ops.vllm_batch_invariant.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            stride1,
+            topk_tokens,
+        )
+    else:
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            stride1,
+            topk_tokens,
+        )
 
 
 def top_k_per_row_decode(

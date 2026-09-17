@@ -91,6 +91,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BATCH_INVARIANT_KERNEL_LIB: str | None = None
+    VLLM_DS4_DECODE_KERNEL: Literal["paged", "sparse"] = "paged"
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -279,6 +281,7 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK: int = 128
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
@@ -619,6 +622,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
+    ),
+    # Standalone fused SiLU+A2-quant kernel required by batch-invariant
+    # DeepGEMM experts. Expert initialization fails closed when BI is enabled
+    # and this path is absent or ABI-incompatible.
+    "VLLM_BATCH_INVARIANT_KERNEL_LIB": lambda: os.getenv(
+        "VLLM_BATCH_INVARIANT_KERNEL_LIB"
+    ),
+    # DeepSeek-V4 decode attention kernel. ``paged`` is the production default;
+    # ``sparse`` keeps decode request semantics but reuses the prefill FlashMLA
+    # kernel for train/rollout alignment.
+    "VLLM_DS4_DECODE_KERNEL": env_with_choices(
+        "VLLM_DS4_DECODE_KERNEL",
+        "paged",
+        ["paged", "sparse"],
+        case_sensitive=False,
     ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
@@ -1942,6 +1960,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
+    ),
+    # Fixed DeepEP low-latency buffer capacity. Prefill batches larger than
+    # this value are staged; this is deliberately independent from the
+    # scheduler's max_num_batched_tokens.
+    "VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": lambda: int(
+        os.getenv("VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "128")
     ),
     # Force DeepEP to use intranode kernel for inter-node communication in
     # high throughput mode. This is useful archive higher prefill throughput

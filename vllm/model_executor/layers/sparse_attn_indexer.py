@@ -54,6 +54,28 @@ logger = init_logger(__name__)
 MXFP4_BLOCK_SIZE = 32
 
 
+def _top_k_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    top_k: int,
+) -> None:
+    ops.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        stride0,
+        stride1,
+        top_k,
+    )
+
+
 def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -613,7 +635,7 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
+                _top_k_per_row_prefill(
                     logits,
                     cu_seqlen_ks,
                     cu_seqlen_ke,
@@ -752,16 +774,73 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
+        use_cooperative_topk = (
+            current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and num_rows <= 64
+            and logits.stride(0) % 4 == 0
+            and current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(120)
         )
+        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+            512,
+            1024,
+            2048,
+        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # Match prefill's selector as well as its DeepGEMM score kernel.
+            # At C128 position 2051 there are 513 candidates for top-512, so
+            # score/selection differences that were hidden on shorter rows
+            # become observable in the chosen KV set.
+            row_starts = decode_metadata.row_starts[:num_rows]
+            row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
+            _top_k_per_row_prefill(
+                logits,
+                row_starts,
+                row_ends,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        elif use_cooperative_topk:
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.cooperative_topk(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
+        elif use_persistent_topk:
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.persistent_topk(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                logits.shape[1],
+            )
+        else:
+            # The backend comes from the layer (config is only readable at
+            # model construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
