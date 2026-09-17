@@ -293,26 +293,26 @@ def precision_environment(
       precision's own checkpoint (see ``base_model_for_precision``), so every row is
       symmetric and no dual-precision runtime takes part.
 
-    NVFP4 is always standalone: the dual-precision loader carries no FP4 shadow format,
-    so that row is vanilla vLLM on the NVFP4 checkpoint whatever ``standalone`` says.
+    Both quantized rows honour ``standalone`` identically. NVFP4 used to be pinned to
+    the standalone form because the dual-precision loader carried no FP4 shadow format;
+    it does now, and leaving the pin in place made a dual-precision run measure INT4
+    inside the runtime against NVFP4 outside it, which is not a format comparison.
 
     ``None`` means "remove from the environment".
     """
     if precision == PRECISION_BF16:
         return {POLICY_ENV: None}
-    if precision == PRECISION_NVFP4:
-        if not nvfp4_model:
-            raise ValueError("--nvfp4-model is required for the nvfp4 precision row")
-        return {POLICY_ENV: None}
-    if precision == PRECISION_INT4:
-        if not int4_model:
-            raise ValueError("--int4-model is required for the int4 precision row")
+    if precision in (PRECISION_INT4, PRECISION_NVFP4):
+        shadow = int4_model if precision == PRECISION_INT4 else nvfp4_model
+        if not shadow:
+            flag = "--int4-model" if precision == PRECISION_INT4 else "--nvfp4-model"
+            raise ValueError(f"{flag} is required for the {precision} precision row")
         if standalone:
             return {POLICY_ENV: None}
         return {
             POLICY_ENV: UNIFORM_W4_SPEC,
             "VLLM_DUAL_PRECISION_ROLLOUT": "1",
-            "VLLM_DUAL_PRECISION_INT4_MODEL": str(int4_model),
+            "VLLM_DUAL_PRECISION_INT4_MODEL": str(shadow),
         }
     raise ValueError(f"Unsupported precision: {precision}")
 
@@ -321,11 +321,13 @@ def base_model_for_precision(precision: str, args: argparse.Namespace) -> str:
     """Checkpoint this row's engine loads as its base model.
 
     Only the standalone rows swap the base checkpoint.  Under the dual-precision
-    protocol every row loads ``--model`` and the INT4 weights arrive as a shadow.
+    protocol every row loads ``--model`` and the quantized weights arrive as a shadow.
     """
+    if not args.standalone_base_precision:
+        return str(args.model)
     if precision == PRECISION_NVFP4:
         return str(args.nvfp4_model)
-    if precision == PRECISION_INT4 and args.standalone_base_precision:
+    if precision == PRECISION_INT4:
         return str(args.int4_model)
     return str(args.model)
 
