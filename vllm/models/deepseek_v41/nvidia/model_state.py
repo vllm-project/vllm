@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.triton_utils import tl, triton
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -59,6 +60,15 @@ class DeepseekV41ModelState(DefaultModelState):
         device: torch.device,
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
+        self._decoder_tail = next(
+            (
+                m.decoder_tail
+                for m in model.modules()
+                if getattr(m, "decoder_tail", None) is not None
+            ),
+            None,
+        )
+        self._tail_logprobs: set[str] = set()
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
@@ -67,10 +77,24 @@ class DeepseekV41ModelState(DefaultModelState):
                 (self.max_num_reqs, depth), -1, dtype=torch.int32, device=device
             )
 
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        super().add_request(req_index, new_req_data)
+        params = new_req_data.sampling_params
+        if params is not None and params.prompt_logprobs is not None:
+            self._tail_logprobs.add(new_req_data.req_id)
+
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        self._tail_logprobs.discard(req_id)
+
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
+        if self._decoder_tail is not None:
+            self._decoder_tail.allowed = not any(
+                req in self._tail_logprobs for req in input_batch.req_ids
+            )
         window = self.lookback_token_ids
         if window is None:
             return model_inputs
@@ -91,6 +115,8 @@ class DeepseekV41ModelState(DefaultModelState):
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        if self._decoder_tail is not None:
+            self._decoder_tail.allowed = False
         if self.lookback_token_ids is not None:
             # The captured graph reads this buffer; replays refill it in place.
             self.lookback_token_ids.fill_(-1)
