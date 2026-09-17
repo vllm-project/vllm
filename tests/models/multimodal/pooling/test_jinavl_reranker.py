@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
-from transformers import AutoModel
+import torch
+from transformers import AutoModel, Qwen2VLConfig
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.entrypoints.chat_utils import (
@@ -11,13 +14,9 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.model_executor.models.jina_vl import JinaVLScorer
 
 from ....conftest import HfRunner, VllmRunner
-
-pytestmark = pytest.mark.skip(
-    reason="jinaai/jina-reranker-m0 custom code is incompatible with "
-    "transformers v5 (missing all_tied_weights_keys)"
-)
 
 MODELS = ["jinaai/jina-reranker-m0"]
 
@@ -29,8 +28,8 @@ MM_PROCESSOR_KWARGS = {
 LIMIT_MM_PER_PROMPT = {"image": 2}
 
 CHECKPOINT_TO_HF_MAPPER = {
-    "visual.": "model.visual.",
-    "model.": "model.language_model.",
+    r"^visual\.": "model.visual.",
+    r"^model\.(?!language_model\.|visual\.)": "model.language_model.",
 }
 
 HANDELSBLATT_IMAGE_URL = (
@@ -92,6 +91,22 @@ TEXT_MIXED_DOCS_TEST_DATA = {
         {"image": HANDELSBLATT_IMAGE_URL},
     ],
 }
+
+
+@pytest.mark.usefixtures("dist_init")
+def test_scorer_loads_single_label_weights():
+    """The ranking head uses model labels, not the text backbone's default."""
+    config = Qwen2VLConfig(text_config={"hidden_size": 16}, num_labels=1)
+    model_config = SimpleNamespace(hf_config=config, head_dtype=torch.float32)
+    scorer = JinaVLScorer(model_config)
+    weight = torch.ones(1, 16)
+    bias = torch.zeros(1)
+
+    scorer.out_proj.weight_loader(scorer.out_proj.weight, weight)
+    scorer.out_proj.weight_loader(scorer.out_proj.bias, bias)
+
+    torch.testing.assert_close(scorer.out_proj.weight, weight)
+    torch.testing.assert_close(scorer.out_proj.bias, bias)
 
 
 def _normalize_image(image_val: str) -> str:

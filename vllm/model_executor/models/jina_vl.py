@@ -45,7 +45,7 @@ class JinaVLScorer(nn.Module):
         )
         self.out_proj = RowParallelLinear(
             config.hidden_size,
-            config.num_labels,
+            model_config.hf_config.num_labels,
             params_dtype=head_dtype,
             bias=True,
             prefix=f"{prefix}.out_proj",
