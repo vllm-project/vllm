@@ -143,7 +143,7 @@ class WeightCacheDaemon:
         from vllm.model_executor.model_loader import get_model
 
         tp_size = self.cache_config.tp_size
-        torch.cuda.set_device(self.tp_rank)
+        torch.accelerator.set_device_index(self.tp_rank)
         init_distributed_environment(
             world_size=tp_size,
             rank=self.tp_rank,
@@ -159,7 +159,9 @@ class WeightCacheDaemon:
             # collective and must run on every rank first, and vLLM's per-rank
             # weight loading does no cross-rank collectives, so bounding the
             # number of concurrent loaders here cannot deadlock.
-            with load_gate or contextlib.nullcontext():
+            if load_gate is None:
+                load_gate = contextlib.nullcontext()
+            with load_gate:
                 self.model = get_model(vllm_config=self.vllm_config)
         self._export_entries()
         logger.info(
@@ -222,7 +224,7 @@ class WeightCacheDaemon:
                 os.unlink(socket_path)
 
     def _socket_path(self) -> str:
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         gpu_id = get_physical_device_id(device_index)
         if gpu_id is None:
             gpu_id = device_index
@@ -274,12 +276,14 @@ class WeightCacheDaemon:
         self.entries.clear()
         self.aliases.clear()
         self.model = None
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
         send_msg(conn, {"status": "ok"})
 
     def _gpu_uuid(self) -> str:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(
+            torch.accelerator.current_device_index()
+        )
         return str(props.uuid)
 
 
