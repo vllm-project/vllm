@@ -1648,9 +1648,8 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# 384 is not a power of two, so it counts via the tiled atomic accumulation
-# rather than the single-tile path 128 takes.
-@pytest.mark.parametrize("num_topk_tokens", [128, 384])
+# Cover power-of-two, padded single-tile, GLM's capacity, and atomic fallback.
+@pytest.mark.parametrize("num_topk_tokens", [128, 384, 2176, 4224])
 def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
@@ -1673,7 +1672,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_topk_tokens // 2,
         num_topk_tokens // 4,
         num_topk_tokens,
-        1,
+        0,
     ] * 2
     expected_valid = []
     for i in range(num_tokens):
