@@ -14,8 +14,7 @@ from vllm.platforms import current_platform
     not current_platform.is_rocm() or not rocm_aiter_ops.is_enabled(),
     reason="ROCm AITER only",
 )
-@pytest.mark.parametrize("transpose_scale", [False, True])
-def test_fused_mla_dual_rms_norm_group_quant_matches_unfused(transpose_scale):
+def test_fused_mla_dual_rms_norm_group_quant_matches_unfused():
     with set_current_vllm_config(VllmConfig()):
         torch.manual_seed(0)
         dev = "cuda"
@@ -28,24 +27,14 @@ def test_fused_mla_dual_rms_norm_group_quant_matches_unfused(transpose_scale):
         eps = 1e-6
 
         quant_op = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant
-        op_has_transpose = any(
-            a.name == "transpose_scale" for a in quant_op.default._schema.arguments
-        )
-        if transpose_scale and not op_has_transpose:
-            pytest.skip(
-                "rocm_aiter_rmsnorm_fp8_group_quant has no transpose_scale"
-            )
-        if op_has_transpose:
-            q_ref, s_ref = quant_op(q_c, qw, eps, G, transpose_scale)
-        else:
-            q_ref, s_ref = quant_op(q_c, qw, eps, G)
+        q_ref, s_ref = quant_op(q_c, qw, eps, G)
         xf = kv_c.float()
         kv_ref = (
             xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
         ).to(torch.bfloat16) * kw
 
         q_f, s_f, kv_f = torch.ops.vllm.fused_mla_dual_rms_norm_group_quant(
-            q_c, qw, kv_c, kw, eps, eps, G, transpose_scale
+            q_c, qw, kv_c, kw, eps, eps, G
         )
         torch.cuda.synchronize()
 
