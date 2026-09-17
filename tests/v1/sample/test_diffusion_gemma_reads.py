@@ -111,32 +111,37 @@ def test_remove_request_forgets_the_slot():
 
 
 def _denoise_once(
-    states: DiffusionGemmaRequestStates, slots: list[int], compute_sc: bool = True
+    states: DiffusionGemmaRequestStates,
+    slots: list[int],
+    compute_sc: bool = True,
+    width: int = CL,
 ) -> None:
     """One compiled denoise step over ``slots`` with flat logits, so nothing
-    converges by stability or confidence and only the step cap can end it."""
+    converges by stability or confidence and only the step cap can end it.
+    ``width`` below CL runs the step on [:, :width] views, as the sampler
+    does for a narrow tile."""
     n = len(slots)
     device = states.device
     decode_slots = torch.tensor(slots, dtype=torch.int64, device=device)
     decode_idx = torch.arange(n, dtype=torch.int64, device=device)
     _compiled_sample_step(
-        torch.zeros(n * CL, VOCAB, device=device),
+        torch.zeros(n * width, VOCAB, device=device),
         decode_slots,
         decode_idx,
         decode_slots,
-        torch.full((n,), CL, dtype=torch.int64, device=device),
-        states.canvas,
-        states.argmax_canvas,
+        torch.full((n,), width, dtype=torch.int64, device=device),
+        states.canvas[:, :width],
+        states.argmax_canvas[:, :width],
         states.step,
         states.is_encoder_phase,
         states.confident,
-        states.self_conditioning_embeds,
+        states.self_conditioning_embeds[:, :width],
         torch.zeros(VOCAB, 4, device=device),
         torch.tensor(1.0, device=device),
-        states.accepted_canvas_history,
+        states.accepted_canvas_history[:, :, :width],
         states.accepted_canvas_history_len,
         states.max_steps,
-        torch.zeros(n, CL, dtype=torch.int32, device=device),
+        torch.zeros(n, CL, dtype=torch.int32, device=device)[:, :width],
         torch.zeros(n, dtype=torch.int32, device=device),
         torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
         max_denoising_steps=float(MAX_STEPS),
@@ -144,7 +149,7 @@ def _denoise_once(
         t_max=1.0,
         confidence_threshold=0.1,
         vocab_size=VOCAB,
-        CL=CL,
+        CL=width,
         ST=states.stability_threshold,
         entropy_bound=0.1,
         sc_vocab_start=0,
@@ -164,6 +169,21 @@ def test_single_step_tile_skips_self_conditioning():
     _denoise_once(states, [0], compute_sc=False)
 
     assert not states.self_conditioning_embeds[0].any()
+
+
+def test_narrow_tile_leaves_the_rest_of_the_canvas_alone():
+    states = _states()
+    states.add_request(0)
+    states.is_encoder_phase[0] = False
+    states.canvas[0] = 5
+    states.argmax_canvas[0] = 5
+
+    _denoise_once(states, [0], width=4)
+
+    # Columns past the width are untouched; the step counted.
+    assert states.canvas[0, 4:].tolist() == [5] * (CL - 4)
+    assert states.argmax_canvas[0, 4:].tolist() == [5] * (CL - 4)
+    assert states.step[0] == 1
 
 
 def test_step_cap_is_per_slot():
