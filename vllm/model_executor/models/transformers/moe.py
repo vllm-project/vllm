@@ -166,7 +166,7 @@ class MoEMixin(MixtureOfExperts):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
+        top_k = self.model_config.get_num_experts_per_token()
         assert top_k is not None
         hidden_size = text_config.hidden_size
         intermediate_size = getattr_iter(
@@ -259,6 +259,9 @@ class MoEMixin(MixtureOfExperts):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
+                    # Whether the expert weights are stored in transposed format.
+                    # Comes from Transformers `use_experts_implementation` decorator.
+                    is_transposed = getattr(experts, "is_transposed", False)
                     # If the config does not specify num_shared_experts, but
                     # the model has shared experts, we assume there is one.
                     if self.num_shared_experts == 0:
@@ -292,6 +295,7 @@ class MoEMixin(MixtureOfExperts):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
+                        is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
                     fuser = MoEBlockFuser.match(moe_block, experts_name)
