@@ -86,6 +86,12 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     fault_tolerant_wrapper,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
+from vllm.v1.metrics.forward_pass_metrics import (
+    FPM_HEARTBEAT_INTERVAL_SECONDS,
+    FPM_IDLE_POLL_INTERVAL_SECONDS,
+    FPM_SHUTDOWN_TIMEOUT_SECONDS,
+    ForwardPassMetricsEmitter,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -169,6 +175,9 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self._initialize_effective_attention_block_size()
+        self.forward_pass_metrics_emitter = ForwardPassMetricsEmitter.from_vllm_config(
+            vllm_config, self.scheduler
+        )
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
@@ -610,8 +619,13 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            self._poll_forward_pass_metrics()
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.begin_iteration(
+                self.scheduler, scheduler_output
+            )
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -625,9 +639,17 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.before_update(
+                scheduler_output, model_output
+            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.complete_iteration(
+                self.scheduler, scheduler_output, model_output
+            )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
@@ -669,6 +691,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if self.forward_pass_metrics_emitter is not None:
+                self.forward_pass_metrics_emitter.begin_iteration(
+                    self.scheduler, scheduler_output
+                )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -708,6 +734,7 @@ class EngineCore:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
+            self._poll_forward_pass_metrics()
             return None, False
 
         # Block until the next result is available.
@@ -726,9 +753,17 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.before_update(
+                scheduler_output, model_output
+            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.complete_iteration(
+                self.scheduler, scheduler_output, model_output
+            )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
@@ -756,6 +791,31 @@ class EngineCore:
 
         return engine_core_outputs, model_executed
 
+    def _poll_forward_pass_metrics(self) -> None:
+        """Collect ready tail timings without delaying a new request."""
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is not None:
+            emitter.poll_timing(self.model_executor)
+
+    def _flush_forward_pass_metrics(self) -> None:
+        """Allow a bounded shutdown grace for timing responses."""
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is None or not emitter.has_pending_timing():
+            return
+        deadline = time.monotonic() + FPM_SHUTDOWN_TIMEOUT_SECONDS
+        while emitter.has_pending_timing():
+            try:
+                emitter.poll_timing(self.model_executor)
+            except Exception:
+                logger.warning("Failed to collect final FPM timings", exc_info=True)
+                break
+            if not emitter.has_pending_timing():
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("Dropping unfinished FPM samples during shutdown")
+                break
+            time.sleep(FPM_IDLE_POLL_INTERVAL_SECONDS)
+
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
             request_ids = []
@@ -769,6 +829,9 @@ class EngineCore:
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
+        if self.forward_pass_metrics_emitter is not None:
+            self._flush_forward_pass_metrics()
+            self.forward_pass_metrics_emitter.shutdown()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -951,7 +1014,14 @@ class EngineCore:
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.execute_dummy_batch()
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is None:
+            self.model_executor.execute_dummy_batch()
+            return
+        iteration_id = emitter.begin_dummy_iteration(self.scheduler)
+        samples = self.model_executor.execute_dummy_batch(iteration_id)
+        assert samples is not None
+        emitter.complete_timing_samples(samples)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1442,6 +1512,11 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
         waited = False
         while not self.has_work() and self.is_running():
+            emitter = self.forward_pass_metrics_emitter
+            if emitter is not None and self.input_queue.empty():
+                emitter.poll_timing(self.model_executor)
+                if self.input_queue.empty():
+                    emitter.publish_idle(self.scheduler)
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1452,10 +1527,21 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            poll_metrics = block and emitter is not None
             try:
-                req = self.input_queue.get(block=block)
+                if block and emitter is not None:
+                    timeout = (
+                        FPM_IDLE_POLL_INTERVAL_SECONDS
+                        if emitter.has_pending_timing()
+                        else FPM_HEARTBEAT_INTERVAL_SECONDS
+                    )
+                    req = self.input_queue.get(timeout=timeout)
+                else:
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if poll_metrics:
+                    continue
                 break
             if not block:
                 break

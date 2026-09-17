@@ -209,7 +209,9 @@ def test_execute_model_waits_previous_pp_send_before_forward(
             ),
         ),
         use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
+        model_runner=SimpleNamespace(
+            execute_model=run_model, forward_pass_metrics_timer=None
+        ),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )
