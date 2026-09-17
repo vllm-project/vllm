@@ -77,7 +77,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
+from .engram import Engram, ParallelEngramEmbedding, gather_engram_hashes
 from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
@@ -1200,6 +1200,9 @@ class DeepseekV41LLMForCausalLM(
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
+        for module in self.model.modules():
+            if isinstance(module, ParallelEngramEmbedding):
+                module.finish_weight_loading()
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
 
