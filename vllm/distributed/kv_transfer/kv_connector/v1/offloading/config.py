@@ -59,13 +59,27 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
 _MLA_LAYER_TYPES = (MLAAttentionSpec, SlidingWindowMLASpec)
 
 
+def _is_replicated_mla_spec(spec: KVCacheSpec) -> bool:
+    """True when ``spec`` is an MLA layer whose KV is replicated across TP.
+
+    Replication requires both:
+    - the spec type stores a latent vector (MLAAttentionSpec/SlidingWindowMLASpec), and
+    - num_kv_heads == 1, which means TP has no head dimension to shard.
+    """
+    return (
+        type(spec) in _MLA_LAYER_TYPES
+        and isinstance(spec, AttentionSpec)
+        and spec.num_kv_heads == 1
+    )
+
+
 def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
     """Per-layer specs of an all-MLA group, or ``None`` if it is not all-MLA.
 
     ``UniformTypeKVCacheSpecs`` groups several layers of one attention type,
     so unwrap it and check each layer. Both ``MLAAttentionSpec`` and
-    ``SlidingWindowMLASpec`` qualify — both store a replicated latent vector
-    with no head dimension to shard. Exact type checks keep other wrappers out.
+    ``SlidingWindowMLASpec`` qualify when they have ``num_kv_heads == 1`` —
+    a single latent vector with no head dimension to shard across TP ranks.
     """
     if isinstance(spec, UniformTypeKVCacheSpecs):
         layer_specs = list(spec.kv_cache_specs.values())
@@ -73,10 +87,10 @@ def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
             return None
         return (
             layer_specs
-            if all(type(s) in _MLA_LAYER_TYPES for s in layer_specs)
+            if all(_is_replicated_mla_spec(s) for s in layer_specs)
             else None
         )
-    return [spec] if type(spec) in _MLA_LAYER_TYPES else None
+    return [spec] if _is_replicated_mla_spec(spec) else None
 
 
 def _all_groups_are_mla(groups) -> bool:
@@ -87,16 +101,20 @@ def _all_groups_are_mla(groups) -> bool:
 
 
 def _expected_mla_bytes_per_block(groups) -> int:
-    """Bytes one block occupies across all groups, one MLA page per layer."""
-    total = 0
-    for group in groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            # Already the sum over the layers it wraps.
-            total += spec.page_size_bytes
-        else:
-            total += spec.page_size_bytes * len(group.layer_names)
-    return total
+    """Bytes one physical block must accommodate across all aliased groups.
+
+    KV cache groups alias the same backing allocation from byte 0; a block is
+    owned by exactly one group at a time.  The physical block must therefore be
+    large enough for the *largest* group, not the sum of all groups.  This
+    mirrors the allocator's ``_get_kv_cache_bytes_per_block`` which also uses
+    ``max``.
+    """
+    return max(
+        spec.page_size_bytes
+        if isinstance(spec := group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else spec.page_size_bytes * len(group.layer_names)
+        for group in groups
+    )
 
 
 def build_offloading_config(

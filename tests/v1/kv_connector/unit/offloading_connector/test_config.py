@@ -624,7 +624,12 @@ def _make_swa_mla_kv_cache_config(
 
 def _make_dsv4_style_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
     """Multi-group config with both MLAAttentionSpec and SlidingWindowMLASpec
-    groups, mirroring the DSV4 layout (regular MLA + sliding-window MLA)."""
+    groups, mirroring the DSV4 layout (regular MLA + sliding-window MLA).
+
+    KV cache groups alias the same backing allocation from byte 0 — a block is
+    owned by exactly one group at a time — so the physical block is sized to
+    the *largest* group (max), not the sum of all groups.
+    """
     mla_spec = _mla_spec()
     swa_spec = SlidingWindowMLASpec(
         block_size=16,
@@ -637,22 +642,22 @@ def _make_dsv4_style_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
     swa_layers = ["swa_0", "swa_1"]
     mla_bytes = mla_spec.page_size_bytes * len(mla_layers)
     swa_bytes = swa_spec.page_size_bytes * len(swa_layers)
-    total_bytes = mla_bytes + swa_bytes
+    # Groups alias: physical block sized to the largest group.
+    max_bytes = max(mla_bytes, swa_bytes)
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=total_bytes * num_blocks,
+                size=max_bytes * num_blocks,
                 layers=mla_layers,
                 layer_stride=mla_spec.page_size_bytes * num_blocks,
-                block_stride=total_bytes,
+                block_stride=mla_spec.page_size_bytes,
             ),
             KVCacheTensor(
-                size=total_bytes * num_blocks,
+                size=max_bytes * num_blocks,
                 layers=swa_layers,
                 layer_stride=swa_spec.page_size_bytes * num_blocks,
-                block_stride=total_bytes,
-                offset=mla_bytes * num_blocks,
+                block_stride=swa_spec.page_size_bytes,
             ),
         ],
         kv_cache_groups=[
@@ -783,31 +788,11 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
             ),
             "mla-mamba-hybrid",
         ),
-        (
-            KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=_MLA_PAGE * 4,
-                        layers=[layer],
-                        layer_stride=_MLA_PAGE * 4,
-                        block_stride=_MLA_PAGE,
-                    )
-                    for layer in ("layer0", "layer1")
-                ],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(["layer0"], _mla_spec()),
-                    KVCacheGroupSpec(["layer1"], _mla_spec()),
-                ],
-            ),
-            "multi-group-mla",
-        ),
     ],
     ids=[
         "hidden-state",
         "mla-full-hybrid",
         "mla-mamba-hybrid",
-        "multi-group-mla",
     ],
 )
 def test_replicated_layout_excludes_unproven_cache_shapes(
