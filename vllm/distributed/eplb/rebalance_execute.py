@@ -183,12 +183,12 @@ def move_to_buffer(
     Args:
         num_local_experts: Number of local experts.
         old_indices: (num_experts_total,) ndarray of current (old)
-            global-to-local expert assignments.
+            global-to-locals expert assignments.
         new_indices: (num_experts_total,) ndarray of desired (new)
             global-to-local assignments after rebalance.
         expert_weights: Original expert weights for the layer.
         expert_weights_buffers: Intermediate buffers (one per tensor).
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        stream: CUDA/XPU stream for async copies (can be None for sync mode).
         ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
@@ -450,7 +450,7 @@ def transfer_layer(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        stream: CUDA stream for async copies (can be None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
 

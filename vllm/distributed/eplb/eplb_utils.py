@@ -51,8 +51,7 @@ class CpuGpuEvent:
         self._recorded = threading.Event()
 
     def wait(self, stream: torch.Stream | None = None):
-        """
-        Blocks the calling thread until record finishes. Used to guarantee that the
+        """Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
 
         Should only be called by the Async Eplb thread.
@@ -62,8 +61,7 @@ class CpuGpuEvent:
         self._recorded.clear()
 
     def record(self, stream: torch.Stream | None = None):
-        """
-        Unblocks the waiting thread after calling event.record().
+        """Unblocks the waiting thread after calling event.record().
 
         Should only be called by the main thread.
         """

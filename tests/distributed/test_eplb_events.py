@@ -60,9 +60,8 @@ def test_reuse_across_multiple_cycles():
 
 @pytest.mark.parametrize("device", ["cuda", "xpu"])
 def test_producer_consumer(device):
-    """
-    This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared GPU
-    tensor on multiple CPU threads.
+    """This test uses the CpuGpuEvent to synchronize reads and writes to/from
+    a shared GPU tensor on multiple CPU threads.
     """
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
