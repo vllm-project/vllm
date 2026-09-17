@@ -11,7 +11,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
-    dcp_world_size_for_kv_cache_spec,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -20,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -140,9 +140,7 @@ class KVCacheCoordinator(ABC):
                 role=kv_cache_group.role,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size_for_kv_cache_spec(
-                    kv_cache_group.kv_cache_spec, dcp_world_size
-                ),
+                dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
@@ -664,16 +662,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             f"hash_block_size. block_sizes={cacheable_block_sizes}, "
             f"hash_block_size={hash_block_size}"
         )
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
-        if dcp_world_size > 1:
-            # DCP shards full-attention KV across ranks and replicates Mamba
-            # state; other spec types (e.g. sliding window) have no DCP-aware
-            # handling yet, so reject them explicitly.
-            for g in kv_cache_config.kv_cache_groups:
-                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+        for g in kv_cache_config.kv_cache_groups:
+            spec = g.kv_cache_spec
+            replicated = not spec.dcp_sharded
+            if pcp_world_size > 1:
+                assert isinstance(spec, FullAttentionSpec) or (
+                    isinstance(spec, AttentionSpec) and replicated
+                ), "PCP only supports full attention and replicated draft groups."
+            if dcp_world_size > 1:
+                assert isinstance(spec, FullAttentionSpec) or replicated, (
                     "DCP with hybrid KV cache layouts only supports "
-                    "full-attention and Mamba groups, got: "
-                    f"{type(g.kv_cache_spec).__name__}."
+                    "full-attention, Mamba, and replicated draft groups, got: "
+                    f"{type(spec).__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache
         # managers in every group. TP needs hashing finer than the Mamba block;
