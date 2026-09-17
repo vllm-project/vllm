@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColBERT late interaction model for retrieval and reranking.
+"""ColBERT late interaction model for retrieval and reranking.
 
 ColBERT uses per-token embeddings and late interaction (MaxSim) scoring
 instead of single-vector representations or cross-encoder concatenation.
@@ -75,6 +74,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
                 ``None``, will be inferred from weights during loading (or
                 auto-loaded from sentence-transformers Dense layers).
             head_dtype: Data type for the projection layer.
+
         """
         self.hidden_size = hidden_size
         self.colbert_dim = colbert_dim
@@ -149,6 +149,7 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         Returns:
             ``(remaining_weights, loaded_names)`` — the weights that were
             **not** consumed and the set of names that were loaded.
+
         """
         weights_list = list(weights)
         other_weights: list[tuple[str, torch.Tensor]] = []
@@ -358,11 +359,12 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
+        # HF pooler weights are not used in ColBERT
+        mapper = WeightsMapper(
+            orig_to_new_prefix={"roberta.": "model.", "model.pooler.": None}
+        )
 
-        # Skip HF pooler weights (model.pooler.*) as they not used in ColBERT
-        loader = AutoWeightsLoader(self, skip_prefixes=["model.pooler."])
-
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(other_weights, mapper=mapper)
         return loaded | colbert_loaded
 

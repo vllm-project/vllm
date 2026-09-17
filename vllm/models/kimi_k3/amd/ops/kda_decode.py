@@ -35,7 +35,7 @@ def is_fused_kda_decode_supported(
     conv_state_dtype: torch.dtype,
 ) -> bool:
     """Whether the fused decode kernel can serve this layer on this device."""
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
     if (
         num_heads not in SUPPORTED_NUM_HEADS
@@ -48,8 +48,9 @@ def is_fused_kda_decode_supported(
         or not hasattr(torch.ops._C, "fused_kda_decode")
     ):
         return False
-    # TODO: Verify on other archs; only measured on gfx950 for now
-    return on_gfx950()
+    # gfx950 (MI355X) and gfx942 (MI325X): both CDNA, sharing the wave64 / DPP /
+    # bf16 primitives the kernel relies on.
+    return on_gfx950() or on_gfx942()
 
 
 def make_decode_conv1d_weight_loader(

@@ -6,14 +6,14 @@ from fastapi import Request
 
 from vllm import PromptType, SamplingParams, envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.typing import AnyRequest
-from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
@@ -117,7 +117,7 @@ class BaseServing:
     def _base_request_id(
         raw_request: Request | None, default: str | None = None
     ) -> str | None:
-        """Pulls the request id to use from a header, if provided"""
+        """Pulls the request id to use from a header, if provided."""
         if raw_request is not None and (
             (req_id := raw_request.headers.get("X-Request-Id")) is not None
         ):

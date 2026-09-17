@@ -8,7 +8,7 @@ import pytest
 from transformers import MistralCommonBackend, PreTrainedTokenizerFast
 
 from vllm.config import StructuredOutputsConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import mistral as mistral_tokenizers
 from vllm.v1.structured_output import (
@@ -44,6 +44,7 @@ class _StubVllmMistralTokenizer:
 
     def __init__(self, is_tekken: bool):
         self.is_tekken = is_tekken
+        self.llg_tokenizer = None
 
 
 def _validate(tokenizer, backend):
@@ -63,7 +64,7 @@ def _guidance_must_not_run(*_args, **_kwargs):
 
 
 def _reject_xgrammar(*_args, **_kwargs):
-    raise ValueError("unsupported schema")
+    raise VLLMValidationError("unsupported schema")
 
 
 def test_structured_outputs_rejected_for_diffusion_models():
@@ -113,6 +114,114 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
 
 
 @pytest.mark.parametrize(
+    "regex",
+    [
+        "\x00",  # a lone leading NUL
+        "\x00\x01\x02\x1f",  # a NUL followed by other control chars
+        "[0-9]\x00",  # an embedded NUL
+    ],
+)
+def test_regex_with_nul_byte_rejected(regex):
+    """A NUL byte is never meaningful in a structured-outputs regex and is not
+    handled by xgrammar's native regex converter. It must be rejected at request
+    validation in every backend mode (a clean 400), instead of reaching that
+    native code or silently falling back to another backend in the default
+    'auto' mode."""
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(regex=regex))
+
+    # Rejected before backend selection, so it is a 400 even in 'auto' mode
+    # (which would otherwise catch the error and fall back to another backend).
+    with pytest.raises(VLLMValidationError, match="NUL"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(),
+            tokenizer=object(),
+        )
+
+    # The xgrammar backend also rejects it directly (defense in depth), before
+    # the pattern reaches the native from_regex call.
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    with pytest.raises(ValueError, match="NUL"):
+        validate_xgrammar_grammar(params)
+
+
+INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
+
+
+@pytest.mark.parametrize(
+    "backend, structured_outputs",
+    [
+        ("xgrammar", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("outlines", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("auto", StructuredOutputsParams(json=INVALID_JSON_SCHEMA)),
+        ("auto", StructuredOutputsParams(json='{"type": ')),
+        ("xgrammar", StructuredOutputsParams(grammar="not a grammar")),
+        ("guidance", StructuredOutputsParams(grammar="not a grammar")),
+        ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
+        ("outlines", StructuredOutputsParams(regex="(")),
+        ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
+    ],
+)
+def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
+    """Only `VLLMClientError` survives `AsyncLLM.generate` untouched; anything else
+    is wrapped in `EngineGenerateError` and served as a 500 instead of a 400."""
+    params = SamplingParams(structured_outputs=structured_outputs)
+    with pytest.raises(VLLMClientError):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    "schema, expected_backend",
+    [
+        # multipleOf is unsupported by xgrammar.
+        (
+            {
+                "type": "object",
+                "properties": {"n": {"type": "integer", "multipleOf": 2}},
+            },
+            "guidance",
+        ),
+        # patternProperties + properties is also unsupported by guidance.
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "patternProperties": {"^a$": {"type": "string"}},
+            },
+            "outlines",
+        ),
+    ],
+)
+@pytest.mark.parametrize("slow_tokenizer", [False, True])
+def test_auto_backend_falls_back_on_unsupported_schema(
+    schema, expected_backend, slow_tokenizer
+):
+    """`auto` falls back on rejection, so it must catch what the validators raise."""
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    if slow_tokenizer and expected_backend == "guidance":
+        with pytest.raises(VLLMValidationError, match="No compatible"):
+            params._validate_structured_outputs(
+                _StubModelConfig(is_diffusion=False),
+                StructuredOutputsConfig(backend="auto"),
+                tokenizer=_StubSlowTokenizer(),
+            )
+        return
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=_StubSlowTokenizer()
+        if slow_tokenizer
+        else object.__new__(PreTrainedTokenizerFast),
+    )
+    assert params.structured_outputs._backend == expected_backend
+
+
+@pytest.mark.parametrize(
     "tokenizer_factory, raw_mistral",
     [
         pytest.param(_StubSlowTokenizer, False, id="slow-hf"),
@@ -120,6 +229,11 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
             lambda: object.__new__(MistralCommonBackend),
             True,
             id="raw-mistral-spm",
+        ),
+        pytest.param(
+            lambda: object.__new__(MistralCommonBackend),
+            "tekken",
+            id="raw-mistral-tekken",
         ),
     ],
 )
@@ -131,7 +245,7 @@ def test_guidance_rejects_unsupported_tokenizers(
         monkeypatch.setattr(
             mistral_tokenizers,
             "mistral_common_tekkenizer",
-            lambda tokenizer: None,
+            lambda tokenizer: object() if raw_mistral == "tekken" else None,
         )
     monkeypatch.setattr(
         backend_guidance,
@@ -152,9 +266,9 @@ def test_guidance_rejects_unsupported_tokenizers(
             id="fast-hf",
         ),
         pytest.param(
-            lambda: object.__new__(MistralCommonBackend),
+            lambda: _StubVllmMistralTokenizer(is_tekken=True),
             True,
-            id="raw-mistral-tekken",
+            id="vllm-mistral-tekken",
         ),
     ],
 )
@@ -165,8 +279,8 @@ def test_guidance_allows_supported_tokenizers(
     if raw_mistral:
         monkeypatch.setattr(
             mistral_tokenizers,
-            "mistral_common_tekkenizer",
-            lambda tokenizer: object(),
+            "MistralTokenizer",
+            _StubVllmMistralTokenizer,
         )
     validate_guidance = Mock()
     monkeypatch.setattr(

@@ -31,10 +31,16 @@ from vllm.model_executor.models.bailing_moe_v3 import (
     BailingMoeV3MoE,
     _configure_ling_fp8_quant_config,
     _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
+    _maybe_remap_ling_mxfp4_weight_names,
 )
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    _merge_multimodal_embeddings,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -213,8 +219,16 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
         return self.logits_processor(head, mtp_layer.shared_head(hidden_states))
 
 
-@support_torch_compile
-class BailingMoeV3MTPModel(nn.Module, SupportsPP):
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "hidden_states": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
+class BailingMoeV3MTPModel(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
     hf_to_vllm_mapper = BailingMoeV3ForCausalLM.hf_to_vllm_mapper
 
     packed_modules_mapping = {
@@ -231,7 +245,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
         self.quant_config = vllm_config.quant_config
-        _configure_ling_fp8_quant_config(self.quant_config)
+        _configure_ling_fp8_quant_config(self.quant_config, self.config)
         self.model = BailingMoeV3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -241,8 +255,22 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
     def share_lm_head(self, lm_head: nn.Module) -> None:
         self.lm_head = lm_head
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.embed_input_ids(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        assert is_multimodal is not None
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def forward(
         self,
@@ -281,6 +309,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = _maybe_remap_ling_mxfp4_weight_names(weights, self.quant_config)
         stacked_params_mapping = [
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),

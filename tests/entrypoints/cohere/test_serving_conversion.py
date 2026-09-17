@@ -11,6 +11,7 @@ a real engine client, model registry, etc.) — the same pattern used in
 ``test_serving_streaming.py``.
 """
 
+import json
 from typing import Any
 
 import pytest
@@ -34,10 +35,60 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.renderers.cohere import (
+    MESSAGES_CITATIONS_KEY,
+    POSITION_TO_SOURCE_KEY,
+    TOOL_MESSAGE_V2_CONTENT_KEY,
+)
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+# A full grounded tool round-trip: a tool call, a tool result carrying both
+# a document and a bare text block, and an assistant turn citing it. Between
+# them these populate every reserved ``_``-prefixed chat_template_kwargs key.
+_TOOL_ROUND_TRIP_MESSAGES: list[dict[str, Any]] = [
+    {"role": "user", "content": "What is the capital?"},
+    {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"q": "capital"}'},
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": [
+            {
+                "type": "document",
+                "document": {"id": "doc-9", "data": {"text": "Paris"}},
+            },
+            {"type": "text", "text": "Paris is the capital."},
+        ],
+    },
+    {
+        "role": "assistant",
+        "content": "Paris.",
+        "citations": [
+            {
+                "start": 0,
+                "end": 5,
+                "text": "Paris",
+                "sources": [
+                    {"type": "tool", "id": "doc-9", "tool_output": {"text": "Paris"}}
+                ],
+            }
+        ],
+    },
+    {"role": "user", "content": "Are you sure?"},
+]
 
 
 def _make_request(**kwargs) -> CohereChatV2Request:
@@ -447,9 +498,15 @@ class TestConvertToolMessage:
             "content": "result text",
         }
 
-    def test_text_only_list_flattened_to_newline_string(self):
-        # Text-only tool results are flattened to a single newline-joined
-        # string for compatibility with standard chat templates.
+    def test_text_only_list_preserves_per_block_text_parts(self):
+        # A list of text blocks maps 1-to-1 onto ``text`` content
+        # parts, mirroring the shape ``_convert_user_message`` emits
+        # for multi-part user content. vLLM's
+        # ``_parse_chat_message_content`` will collapse this back to
+        # ``"\n".join(...)`` for the ``ConversationMessage`` handed to
+        # renderers (see the tool-role branch in
+        # ``vllm/entrypoints/chat_utils.py``), so downstream chat
+        # templates that expect string tool content still work.
         req = self._request_with_tool_message(
             [
                 {"type": "text", "text": "line 1"},
@@ -458,11 +515,27 @@ class TestConvertToolMessage:
         )
         result = _convert(req)
         tool_msg = result.messages[-1]
-        assert tool_msg["content"] == "line 1\nline 2"
+        assert tool_msg["content"] == [
+            {"type": "text", "text": "line 1"},
+            {"type": "text", "text": "line 2"},
+        ]
 
-    def test_with_document_preserves_structured_content(self):
-        # When documents appear in the tool result, we keep the list shape
-        # so the Cohere renderer can lift them into grounding sources.
+    def test_document_blocks_serialized_as_text_parts(self):
+        """Document blocks must not survive on the OpenAI-shaped tool
+        message.
+
+        vLLM's shared ``_parse_chat_message_content_parts`` runs a
+        Pydantic ``ValidatorIterator`` over the OpenAI content-part
+        union, which only knows ``text`` / ``image_url`` / etc. and
+        rejects ``{"type": "document", ...}`` blocks outright. We
+        therefore JSON-serialize each document into its own ``text``
+        content part so the request survives OpenAI validation; the
+        cohere renderer still resolves outbound citations against
+        the original cohere v2 messages via ``POSITION_TO_SOURCE_KEY``
+        and reconstructs structured melody ``document`` blocks from the
+        original v2 content forwarded via
+        ``TOOL_MESSAGE_V2_CONTENT_KEY``.
+        """
         req = self._request_with_tool_message(
             [
                 {"type": "text", "text": "see attachment"},
@@ -475,11 +548,75 @@ class TestConvertToolMessage:
         result = _convert(req)
         tool_msg = result.messages[-1]
         assert isinstance(tool_msg["content"], list)
+        assert len(tool_msg["content"]) == 2
+        # First block passes through unchanged.
         assert tool_msg["content"][0] == {"type": "text", "text": "see attachment"}
-        assert tool_msg["content"][1] == {
-            "type": "document",
-            "document": {"data": {"text": "doc text"}, "id": "d1"},
-        }
+        # Second block: document JSON-serialized into a ``text`` part.
+        second = tool_msg["content"][1]
+        assert second["type"] == "text"
+        assert json.loads(second["text"]) == {"data": {"text": "doc text"}, "id": "d1"}
+
+    def test_document_only_content_serialized_as_text_part(self):
+        """Document-only tool results must also produce a text-typed
+        content part (no ``text`` block above them), so a single-doc
+        result still passes the OpenAI content-parts validator.
+        """
+        req = self._request_with_tool_message(
+            [
+                {
+                    "type": "document",
+                    "document": {"data": {"result": "K2 is 8611m."}},
+                }
+            ]
+        )
+        result = _convert(req)
+        tool_msg = result.messages[-1]
+        assert isinstance(tool_msg["content"], list)
+        (part,) = tool_msg["content"]
+        assert part["type"] == "text"
+        assert json.loads(part["text"]) == {"data": {"result": "K2 is 8611m."}}
+
+    def test_converted_tool_message_content_survives_openai_validation(self):
+        """Regression for the reported crash.
+
+        ``vllm/entrypoints/chat_utils.py:_parse_chat_message_content_parts``
+        runs a Pydantic ``ValidatorIterator`` over
+        ``list[ChatCompletionContentPartParam]``, which is a
+        discriminated union that only accepts ``text`` / ``image_url``
+        / ``input_audio`` / ``refusal`` / ``file`` types. Previously
+        the converted tool message carried ``{"type": "document",
+        "document": {...}}`` blocks, which the validator rejected with:
+
+            2 validation errors for ValidatorIterator
+            0.text  Field required
+            0.type  Input should be 'text', got 'document'
+
+        The fix rewrites every ``DocumentToolContent`` into a
+        JSON-serialized ``text`` part. This test asserts the invariant
+        that keeps the validator happy: on the OpenAI-shaped request,
+        every content entry a tool message carries must be a ``text``
+        part (or a bare string) -- so no future refactor accidentally
+        re-introduces a ``document``-typed content part.
+        """
+        req = self._request_with_tool_message(
+            [
+                {
+                    "type": "document",
+                    "document": {
+                        "data": {"result": "The second tallest mountain is K2."}
+                    },
+                }
+            ]
+        )
+        result = _convert(req)
+        tool_msg = result.messages[-1]
+
+        content = tool_msg["content"]
+        assert isinstance(content, (str, list))
+        if isinstance(content, list):
+            for part in content:
+                assert isinstance(part, dict)
+                assert part.get("type") == "text"
 
 
 # ======================================================================
@@ -806,6 +943,276 @@ class TestApplyCohereTemplateKwargs:
         # renderers see a clean request.
         result = _convert(_make_request())
         assert result.chat_template_kwargs is None
+
+
+# ======================================================================
+# Engine-core hop (_engine_chat_template_kwargs)
+# ======================================================================
+
+
+class TestEngineChatTemplateKwargs:
+    """The internal ``_``-prefixed entries must not reach the engine core.
+
+    ``OpenAIServingChat`` uses one ``chat_template_kwargs`` dict twice:
+    to build the API-server-side parser, and to populate
+    ``EngineCoreRequest.reasoning_parser_kwargs``, which crosses ZMQ as
+    msgpack. This handler's reserved keys are only meaningful to the
+    former, and ``_position_to_source`` holds ``CitationSource`` models
+    that msgpack cannot encode at all -- forwarding them fails the
+    request with a ``TypeError``. The
+    ``_engine_chat_template_kwargs`` override drops them.
+    """
+
+    @staticmethod
+    def _engine_kwargs(request: CohereChatV2Request) -> dict[str, Any]:
+        full = _convert(request).chat_template_kwargs
+        assert full, "expected the request to populate chat_template_kwargs"
+        return _FakeServing()._engine_chat_template_kwargs(full)
+
+    def test_grounded_request_drops_internal_keys_keeps_public_ones(self):
+        request = _make_request(
+            documents=[{"id": "d1", "data": {"text": "hi"}}],
+            citation_options={"mode": "accurate"},
+        )
+        full = _convert(request).chat_template_kwargs
+        # Sanity: the key we expect to be dropped is actually present.
+        assert POSITION_TO_SOURCE_KEY in full
+
+        engine_kwargs = self._engine_kwargs(request)
+        assert POSITION_TO_SOURCE_KEY not in engine_kwargs
+        # Public template inputs the engine-side parser may legitimately
+        # read must survive.
+        assert engine_kwargs["citation_options"] == {"mode": "accurate"}
+        assert engine_kwargs["documents"] == [{"id": "d1", "data": {"text": "hi"}}]
+
+    def test_all_internal_keys_dropped(self):
+        """Exercises all three reserved keys at once: the tool-result
+        position map, the inbound assistant citations, and the raw v2 tool
+        content blocks.
+        """
+        request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
+        full = _convert(request).chat_template_kwargs
+        internal = {k for k in full if k.startswith("_")}
+        # Sanity: this request really does populate all three.
+        assert internal == {
+            MESSAGES_CITATIONS_KEY,
+            POSITION_TO_SOURCE_KEY,
+            TOOL_MESSAGE_V2_CONTENT_KEY,
+        }
+
+        engine_kwargs = self._engine_kwargs(request)
+        assert not [k for k in engine_kwargs if k.startswith("_")]
+
+    def test_engine_kwargs_are_msgpack_encodable(self):
+        """The real failure mode: the full dict raises, the filtered one
+        doesn't. Pins that the filter is what makes the engine hop work.
+        """
+        request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
+        full = _convert(request).chat_template_kwargs
+
+        with pytest.raises(TypeError, match="is not serializable"):
+            MsgpackEncoder().encode({"chat_template_kwargs": full})
+
+        engine_kwargs = self._engine_kwargs(request)
+        encoder = MsgpackEncoder()
+        decoder = MsgpackDecoder(dict[str, Any])
+        round_tripped = decoder.decode(
+            encoder.encode({"chat_template_kwargs": engine_kwargs})[0]
+        )
+        assert round_tripped["chat_template_kwargs"] == engine_kwargs
+
+    def test_original_dict_not_mutated(self):
+        """The caller still passes the full dict to the in-process parser,
+        so the filter must return a copy.
+        """
+        request = _make_request(documents=[{"id": "d1", "data": {"text": "hi"}}])
+        full = _convert(request).chat_template_kwargs
+        before = set(full)
+
+        self._engine_kwargs(request)
+        assert set(full) == before
+
+    def test_base_implementation_is_a_passthrough(self):
+        """Only the Cohere subclass filters; plain chat completions must
+        keep forwarding whatever the request asked for.
+        """
+        kwargs = {
+            "documents": [{"id": "d1"}],
+            POSITION_TO_SOURCE_KEY: {(0, 0): object()},
+        }
+        passed_through = OpenAIServingChat._engine_chat_template_kwargs(
+            _FakeServing(), kwargs
+        )
+        assert passed_through == kwargs
+
+
+# ======================================================================
+# Tool-message content forwarding
+# (chat_template_kwargs["_tool_message_v2_content"])
+# ======================================================================
+
+
+class TestToolMessageV2ContentForwarding:
+    """The cohere renderer needs the original v2 tool-message content
+    (text / document blocks) to reconstruct melody's ``document``-block
+    shape, but the OpenAI content-parts validator on the way in only
+    accepts text / image / audio / etc. blocks. So
+    :meth:`CohereServingChatV2._convert_tool_message` rewrites each
+    content block into a plain ``text`` part on the request that
+    survives validation, and
+    :meth:`CohereServingChatV2._collect_v2_tool_message_content`
+    forwards the *original* v2 content blocks -- as ``model_dump``'d
+    dicts -- to the renderer under
+    :data:`TOOL_MESSAGE_V2_CONTENT_KEY`. These tests pin the
+    forwarding contract (presence, dict-shape, index-alignment); the
+    v2 → melody mapping the renderer applies to these blocks lives in
+    ``tests/renderers/test_cohere.py``.
+    """
+
+    def _request_with_tool_message(self, content: Any) -> CohereChatV2Request:
+        return _make_request(
+            messages=[
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": content},
+            ]
+        )
+
+    def test_absent_when_no_tool_messages(self):
+        result = _convert(_make_request())
+        # ``chat_template_kwargs`` may be ``None`` here (no cohere-side
+        # forwarding happened at all) or a dict without the key; both
+        # mean the same thing to the renderer.
+        assert not (result.chat_template_kwargs or {}).get(TOOL_MESSAGE_V2_CONTENT_KEY)
+
+    def test_absent_for_string_tool_content(self):
+        # Bare-string tool content works through the renderer's default
+        # ``_content_blocks`` path, so no forwarded blocks are needed.
+        req = self._request_with_tool_message("plain text")
+        result = _convert(req)
+        assert not (result.chat_template_kwargs or {}).get(TOOL_MESSAGE_V2_CONTENT_KEY)
+
+    def test_forwarded_blocks_are_plain_v2_shape_dicts(self):
+        # The forwarded map must contain the original v2 content
+        # blocks verbatim (as plain dicts, not Pydantic instances) so
+        # the renderer can drive the v2 → melody mapping and the map
+        # stays trivially serializable.
+        req = self._request_with_tool_message(
+            [
+                {"type": "text", "text": "K2 is 8611m."},
+                {
+                    "type": "document",
+                    "document": {
+                        "id": "d1",
+                        "data": {"result": "The second tallest mountain is K2."},
+                    },
+                },
+            ]
+        )
+        blocks_by_index = _forwarded_v2_content(req)
+        # Index 2 = the tool message (user=0, assistant=1, tool=2).
+        assert list(blocks_by_index.keys()) == [2]
+        assert blocks_by_index[2] == [
+            {"type": "text", "text": "K2 is 8611m."},
+            {
+                "type": "document",
+                "document": {
+                    "id": "d1",
+                    "data": {"result": "The second tallest mountain is K2."},
+                },
+            },
+        ]
+        # Guard against a regression where Pydantic instances leak into
+        # the forwarded map -- msgpack can't serialize them, and even
+        # for keys filtered out of the engine-core payload we want the
+        # renderer to see plain data.
+        for block in blocks_by_index[2]:
+            assert isinstance(block, dict)
+
+    def test_forwarded_blocks_preserve_input_order(self):
+        # Melody's tool-result rendering keys result slots by their
+        # position within a tool message's content list, and the
+        # outbound citation source map (built by
+        # ``_walk_citable_positions``) uses that same positional index.
+        # Reordering would drop citations pointing at slot ``1`` onto
+        # the wrong payload.
+        req = self._request_with_tool_message(
+            [
+                {"type": "text", "text": "leading note"},
+                {
+                    "type": "document",
+                    "document": {"data": {"body": "doc body"}, "id": "d0"},
+                },
+                {"type": "text", "text": '{"parsed": "yes"}'},
+            ]
+        )
+        blocks = _forwarded_v2_content(req)[2]
+        assert [b["type"] for b in blocks] == ["text", "document", "text"]
+
+    def test_index_matches_original_request_position(self):
+        # Entries are keyed by *request-message* index so the renderer,
+        # walking the OpenAI-shaped conversation with the same
+        # enumeration, resolves the right slot. If ``_convert_messages``
+        # ever splits or merges messages this invariant breaks, so pin
+        # the current 1-to-1 behavior with a two-tool-message request.
+        req = _make_request(
+            messages=[
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        },
+                        {
+                            "id": "c2",
+                            "type": "function",
+                            "function": {"name": "g", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": [{"type": "text", "text": "first result"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "c2",
+                    "content": [{"type": "text", "text": "second result"}],
+                },
+            ]
+        )
+        blocks_by_index = _forwarded_v2_content(req)
+        assert sorted(blocks_by_index.keys()) == [2, 3]
+        assert blocks_by_index[2] == [{"type": "text", "text": "first result"}]
+        assert blocks_by_index[3] == [{"type": "text", "text": "second result"}]
+
+
+def _forwarded_v2_content(
+    request: CohereChatV2Request,
+) -> dict[int, list[dict[str, Any]]]:
+    """Extract the forwarded v2 tool-message content from a converted
+    request, or fail the test if the key isn't present.
+    """
+    result = _convert(request)
+    kwargs = result.chat_template_kwargs or {}
+    assert TOOL_MESSAGE_V2_CONTENT_KEY in kwargs, (
+        f"expected {TOOL_MESSAGE_V2_CONTENT_KEY} in chat_template_kwargs, "
+        f"got keys {list(kwargs)}"
+    )
+    return kwargs[TOOL_MESSAGE_V2_CONTENT_KEY]
 
 
 # ======================================================================

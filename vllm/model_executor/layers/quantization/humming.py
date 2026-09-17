@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -59,11 +58,6 @@ if TYPE_CHECKING:
         HummingInputSchema,
         HummingWeightSchema,
     )
-
-
-def prepare_padded_shape(shape, x):
-    padded_shape = math.ceil(shape / x) * x
-    return padded_shape, padded_shape - shape
 
 
 def prepare_param(tensor, name, extra_attrs):
@@ -127,22 +121,6 @@ def prepare_moe_param(tensor: torch.Tensor, name: str, extra_attrs: dict[str, An
     set_weight_attrs(param, extra_attrs)
     param.param_name = name
     return param
-
-
-def may_pad_loaded_weight(param, loaded_weight):
-    pad_shape = getattr(param, "pad_shape", None)
-    if pad_shape is None:
-        return loaded_weight
-    value = 1 if loaded_weight.dtype == torch.float8_e8m0fnu else 0
-    padding = []
-    for x in pad_shape[::-1][: loaded_weight.ndim]:
-        padding += [0, x]
-    loaded_weight = torch.nn.functional.pad(
-        input=loaded_weight,
-        pad=padding,
-        value=value,
-    )
-    return loaded_weight
 
 
 def compressed_tensors_get_config(config: dict[str, Any], key: str):
@@ -805,8 +783,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Apply Humming-quantized MoE computation using the standard kernel flow.
+        """Apply Humming-quantized MoE computation using the standard kernel flow.
 
         This method uses FusedMoEKernel.apply() which orchestrates:
         1. Preparation (quantization if needed - skipped for Humming via

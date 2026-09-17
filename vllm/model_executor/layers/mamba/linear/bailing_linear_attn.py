@@ -523,7 +523,7 @@ class BailingMoELinearAttention(LinearAttention):
         output: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        """Forward method called by torch.ops.vllm.linear_attention"""
+        """Forward method called by torch.ops.vllm.linear_attention."""
         torch.ops.vllm.linear_attention(
             hidden_states,
             output,
@@ -542,7 +542,8 @@ class BailingMoELinearAttention(LinearAttention):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]  # type: ignore
+            attn_metadata = attn_metadata.get(self.prefix)  # type: ignore
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens

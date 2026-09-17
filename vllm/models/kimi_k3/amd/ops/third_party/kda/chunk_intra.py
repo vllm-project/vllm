@@ -59,8 +59,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     USE_SAFE_GATE: tl.constexpr,
     SOLVE_TRIL_DOT_PRECISION: tl.constexpr,
 ):
-    """
-    Fused kernel: compute inter-subchunk Akk + solve_tril in one pass.
+    """Fused kernel: compute inter-subchunk Akk + solve_tril in one pass.
     Prerequisite: token_parallel has already computed diagonal Akk blocks in Akkd.
 
     This kernel:
