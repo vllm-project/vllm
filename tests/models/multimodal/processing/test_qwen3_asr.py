@@ -75,6 +75,36 @@ def test_audio_processing_matches_hf(asr_processor, samples, num_audios):
     )
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_nested_audio_kwargs(asr_processor, configured):
+    """Dummy-text defaults must not conflict with explicit audio truncation."""
+    processor, native = asr_processor
+    audio = np.random.RandomState(42).randn(32001).astype(np.float32)
+    kwargs = {"audio_kwargs": {"truncation": True, "max_length": 16000}}
+    expected = native(text=_AUDIO_PROMPT, audio=audio, return_tensors="pt", **kwargs)
+    if configured:
+        processor.info.ctx.get_mm_config().mm_processor_kwargs = kwargs
+    actual = processor(
+        _AUDIO_PROMPT,
+        mm_items=processor.info.parse_mm_data({"audio": audio}),
+        hf_processor_mm_kwargs={} if configured else kwargs,
+    )
+
+    assert kwargs == {"audio_kwargs": {"truncation": True, "max_length": 16000}}
+    assert actual["prompt_token_ids"] == expected["input_ids"][0].tolist()
+    mask = expected["input_features_mask"][0]
+    actual_features = actual["mm_kwargs"].get_data()
+    torch.testing.assert_close(
+        actual_features["input_audio_features"],
+        expected["input_features"][0, :, mask.bool()],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        actual_features["audio_feature_lengths"], mask.sum().reshape(1)
+    )
+
+
 @pytest.mark.parametrize("cached_indices", [[], [0], [1], [0, 1]])
 def test_audio_processing_cache_is_batch_independent(asr_processor, cached_indices):
     """Partial cache hits must not change features, masks, or prompt expansion."""

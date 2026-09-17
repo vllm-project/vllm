@@ -85,6 +85,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.qwen3_asr import (
@@ -280,33 +281,66 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     BaseMultiModalProcessor[Qwen3ASRProcessingInfo],
 ):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        kwargs = dict(hf_inputs.hf_kwargs)
+        if "truncation" not in hf_kwargs:
+            # HF already defaults to no truncation. The base's flat default
+            # would override config kwargs or conflict with nested audio kwargs.
+            kwargs.pop("truncation", None)
+        return hf_inputs._replace(hf_kwargs=kwargs)
+
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processor = self.info.get_hf_processor(**hf_kwargs)
-        features = []
-        masks = []
-        # Extract each clip independently so padding cannot change its features
-        # or make them depend on which other clips hit the processor cache.
-        for audio in cast(list[AudioItem], hf_data["audio"]):
-            hf_inputs = self.info.ctx.call_hf_processor(
-                processor,
-                dict(text=processor.audio_token, audio=audio),
-                hf_kwargs,
-            )
-            mask = hf_inputs["input_features_mask"][0]
-            features.append(hf_inputs["input_features"][0, :, mask.bool()])
-            masks.append(mask)
+        audios = cast(list[AudioItem], hf_data["audio"])
+        if len(audios) == 1:
+            return super()._call_hf_processor(hf_data, hf_kwargs)
 
-        return BatchFeature(
-            dict(
-                input_audio_features=torch.cat(features, dim=1),
-                feature_attention_mask=masks,
-                audio_feature_lengths=torch.stack([mask.sum() for mask in masks]),
+        # HF requires one text per audio, and batch padding changes clip features.
+        # Keep clips independent so partial cache hits cannot change their inputs.
+        text = self._get_hf_mm_text({"audio": 1})
+        outputs: dict[str, list[torch.Tensor]] = {
+            "input_features": [],
+            "input_features_mask": [],
+        }
+        for audio in audios:
+            processed = super()._call_hf_processor(
+                dict(hf_data, text=text, audio=audio), hf_kwargs
             )
+            for key, values in outputs.items():
+                values.append(processed[key][0])
+
+        return BatchFeature(outputs)
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
+        features = processed_data.pop("input_features")
+        masks = processed_data.pop("input_features_mask")
+        processed_data["input_audio_features"] = torch.cat(
+            [feature[:, mask.bool()] for feature, mask in zip(features, masks)], dim=1
         )
+        processed_data["feature_attention_mask"] = masks
+        processed_data["audio_feature_lengths"] = torch.stack(
+            [mask.sum() for mask in masks]
+        )
+        return processed_data
 
     def _get_mm_fields_config(
         self,
