@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -330,6 +331,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         namespace: str,
         topology: RankTopology,
         lookup_dir: str,
+        max_workers: int,
+        timeout_s: float,
     ) -> None:
         self.client = client
         self._namespace = namespace
@@ -337,6 +340,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._lookup_dir = lookup_dir
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="umbp-embedded-transfer",
+        )
+        self._futures: dict[int, Future[TransferJobState]] = {}
+        self._timeout_s = timeout_s
 
     def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -397,6 +406,14 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         plans = tuple(plans)
         job = TransferJobState(plans)
         job.start()
+        self._futures[id(job)] = self._executor.submit(
+            self._load_sync, job, plans
+        )
+        return job
+
+    def _load_sync(
+        self, job: TransferJobState, plans: tuple[BlockTransferPlan, ...]
+    ) -> TransferJobState:
         if not plans:
             job.complete()
             return job
@@ -416,6 +433,14 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         plans = tuple(plans)
         job = TransferJobState(plans)
         job.start()
+        self._futures[id(job)] = self._executor.submit(
+            self._store_sync, job, plans
+        )
+        return job
+
+    def _store_sync(
+        self, job: TransferJobState, plans: tuple[BlockTransferPlan, ...]
+    ) -> TransferJobState:
         if not plans:
             job.complete()
             return job
@@ -432,7 +457,20 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         return job
 
     def wait(self, job: TransferJobState) -> TransferJobState:
-        return job
+        future = self._futures.pop(id(job), None)
+        if future is None:
+            return job
+        try:
+            return future.result(timeout=self._timeout_s)
+        except TimeoutError:
+            job.fail(
+                [plan.key for plan in job.plans],
+                "MORI UMBP transfer timed out",
+            )
+            return job
+        except Exception as exc:
+            job.fail([plan.key for plan in job.plans], str(exc))
+            return job
 
     def publish(self, job: TransferJobState) -> None:
         if job.status.value != "completed":
@@ -441,6 +479,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             raise RuntimeError("MORI UMBP flush failed")
 
     def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=True)
         if self._lookup_server is not None:
             self._lookup_server.close()
         for storage_ptr in self._registered_storages:
@@ -476,15 +515,25 @@ class EmbeddedRuntime(IUMBPRuntime):
         return _MoriEmbeddedRuntime(
             UMBPClient(client_config),
             config.options.get("lookup_dir", "/tmp"),
+            int(config.options.get("num_workers", 4)),
+            float(config.options.get("timeout_ms", 30000)) / 1000,
         )
 
 
 class _MoriEmbeddedRuntime(IUMBPRuntime):
     capabilities = UMBPRuntimeCapabilities()
 
-    def __init__(self, client: object, lookup_dir: str) -> None:
+    def __init__(
+        self,
+        client: object,
+        lookup_dir: str,
+        max_workers: int,
+        timeout_s: float,
+    ) -> None:
         self.client = client
         self.lookup_dir = lookup_dir
+        self.max_workers = max_workers
+        self.timeout_s = timeout_s
 
     def create_scheduler_handle(
         self,
@@ -507,4 +556,6 @@ class _MoriEmbeddedRuntime(IUMBPRuntime):
             namespace,
             topology,
             self.lookup_dir,
+            self.max_workers,
+            self.timeout_s,
         )
