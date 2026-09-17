@@ -58,6 +58,7 @@ def region_pull_worker():
     worker._recving_transfers = {}
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
+    worker.dcp_rank = 0
     spec = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
     )
@@ -235,9 +236,7 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         else:
             assert rank not in reads and f"P-rank{rank}" in notified
     assert meta.region_blocks_to_zero == (
-        [[30 + group * 10 + num_pages] for group in region_groups]
-        if num_pages
-        else None
+        [[30 + group * 10 + num_pages] for group in region_groups] if num_pages else []
     )
 
 

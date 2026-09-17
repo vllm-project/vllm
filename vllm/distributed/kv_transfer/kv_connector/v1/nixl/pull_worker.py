@@ -175,12 +175,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
+            if dcp_active and (
+                self._physical_blocks_per_logical_kv_block != 1
+                or remote_info.remote_physical_blocks_per_logical != 1
+            ):
+                raise NotImplementedError(
+                    "DCP region pulls require matching logical and physical block sizes"
+                )
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
                 )
-        if groups_differ and not dcp_active:
-            assert len(plan.all_source_ranks) == 1
             remote_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
@@ -188,8 +193,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_by_region = self._block_ids_by_region(
                 remote_physical_block_ids, remote_region_groups
             )
-            local_by_region = self._block_ids_by_region(
-                local_block_ids, local_region_groups
+            local_by_region = (
+                self._block_ids_by_region(local_block_ids, local_region_groups)
+                if local_block_ids
+                else []
             )
             num_computed_blocks = None
             num_remote_blocks = None
@@ -198,7 +205,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 and meta.local_num_computed_blocks
                 and all(group >= 0 for group in local_region_groups)
                 and all(group >= 0 for group in remote_region_groups)
-                and not dcp_active
             ):
                 transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
@@ -209,32 +215,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 num_remote_blocks = cdiv(
                     meta.remote.num_tokens, remote_info.remote_block_size
                 )
-            elif (
-                remote_info.remote_physical_blocks_per_logical
+            elif any(local_by_region) and (
+                dcp_active
+                or remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             ):
                 raise NotImplementedError(
-                    "Region-mapped pulls with different logical block sizes require "
-                    "remote_num_tokens, per-group prefix counts, unshared regions "
-                    "and DCP=1"
+                    "Region-mapped pulls with DCP or different logical block sizes "
+                    "require remote_num_tokens, per-group prefix counts "
+                    "and unshared regions"
                 )
-            matched_local, matched_remote = self._apply_prefix_caching_by_region(
-                local_by_region,
-                remote_by_region,
-                num_computed_blocks=num_computed_blocks,
-                num_remote_blocks=num_remote_blocks,
-            )
+            read_specs = []
+            for rank in plan.all_source_ranks:
+                matched_local, matched_remote = self._apply_prefix_caching_by_region(
+                    local_by_region,
+                    remote_by_region,
+                    num_computed_blocks=num_computed_blocks,
+                    num_remote_blocks=num_remote_blocks,
+                    remote_rank=rank,
+                    remote_dcp_size=remote_info.remote_dcp_size,
+                )
+                read_specs.append(
+                    ReadSpec(
+                        rank, matched_local, matched_remote, block_ids_by_region=True
+                    )
+                )
             meta.region_blocks_to_zero = [
-                list(blocks[len(matched) :])
-                for blocks, matched in zip(local_by_region, matched_local, strict=True)
-            ]
-            read_specs = [
-                ReadSpec(
-                    remote_rank=plan.all_source_ranks[0],
-                    local_block_ids=matched_local,
-                    remote_block_ids=matched_remote,
-                    block_ids_by_region=True,
-                )
+                list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
+                for r, blocks in enumerate(local_by_region)
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
@@ -242,57 +250,23 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_logical_block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
-            local_logical_block_ids = meta.local_block_ids
-            computed = meta.local_num_computed_blocks
-            source_ranks = plan.source_ranks_per_group
-            spec_types = self._group_spec_types
-            if groups_differ and local_logical_block_ids:
-                if (
-                    min(*local_region_groups, *remote_region_groups) < 0
-                    or self._physical_blocks_per_logical_kv_block != 1
-                    or remote_info.remote_physical_blocks_per_logical != 1
-                ):
-                    raise NotImplementedError(
-                        "DCP region pulls require unshared MLA regions with "
-                        "matching logical and physical block sizes"
-                    )
-                assert meta.remote.num_tokens is not None and computed
-                local_logical_block_ids = self._block_ids_by_region(
-                    local_logical_block_ids, local_region_groups
-                )
-                remote_logical_block_ids = self._block_ids_by_region(
-                    remote_logical_block_ids, remote_region_groups
-                )
-                computed = tuple(
-                    computed[self.kv_cache_config.transfer_group_ids[g]]
-                    for g in local_region_groups
-                )
-                source_ranks = tuple(source_ranks[g] for g in local_region_groups)
-                spec_types = tuple(spec_types[g] for g in local_region_groups)
-                num_local = cdiv(
-                    cdiv(meta.remote.num_tokens, self.block_size) - self.dcp_rank,
-                    self.dcp_size,
-                )
-                meta.region_blocks_to_zero = []
-                for ids, prefix in zip(local_logical_block_ids, computed, strict=True):
-                    count = max(0, num_local - prefix)
-                    meta.region_blocks_to_zero.append(ids[count:])
-                    del ids[count:]
-            num_groups = len(local_logical_block_ids)
+            num_groups = len(meta.local_block_ids)
 
             def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
                 return [
-                    list(block_ids[g]) if rank in source_ranks[g] else []
+                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
                     for g in range(num_groups)
                 ]
 
             read_specs = []
             for rank in plan.all_source_ranks:
                 if dcp_active:
-                    local_ids = group_ids(local_logical_block_ids, rank)
+                    local_ids = group_ids(meta.local_block_ids, rank)
                     remote_ids = group_ids(remote_logical_block_ids, rank)
                     for g in range(num_groups):
-                        if not local_ids[g] or not _is_attention_spec(spec_types[g]):
+                        if not local_ids[g] or not _is_attention_spec(
+                            self._group_spec_types[g]
+                        ):
                             continue
                         local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
                             local_ids[g],
@@ -301,7 +275,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             local_dcp_size=self.dcp_size,
                             local_dcp_rank=self.dcp_rank,
                             remote_dcp_size=remote_info.remote_dcp_size,
-                            local_num_computed_blocks=computed[g],
+                            local_num_computed_blocks=(
+                                meta.local_num_computed_blocks[g]
+                            ),
                         )
                     local_physical_ids = self._logical_to_kernel_block_ids(
                         local_ids, self._physical_blocks_per_logical_kv_block
@@ -318,7 +294,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_rank=rank,
                         local_block_ids=local_physical_ids,
                         remote_block_ids=remote_physical_ids,
-                        block_ids_by_region=groups_differ,
                     )
                 )
 
