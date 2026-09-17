@@ -36,6 +36,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -1052,37 +1055,58 @@ class DeepseekV4MoE(nn.Module):
                 "MegaMoE routing metadata must be prepared once by the model."
             )
 
-        from vllm.utils.deep_gemm import bf16_mega_gate
-
-        unmapped_topk_idx = None
-        fix_routing_mask = None
-        if self.gate.tid2eid is not None:
-            if mega_gate_metadata.safe_hash_input_ids is None:
-                raise RuntimeError("Hash routing requires prepared input IDs.")
-            if mega_gate_metadata.hash_token_mask is None:
-                raise RuntimeError("Hash routing requires a prepared routing mask.")
-            # PR 432 accepts fixed expert IDs, not the token-to-expert table.
-            unmapped_topk_idx = self.gate.tid2eid[
-                mega_gate_metadata.safe_hash_input_ids
-            ]
-            fix_routing_mask = mega_gate_metadata.hash_token_mask
-
         org_shape = hidden_states.shape
-        topk_weights, topk_ids = bf16_mega_gate(
-            hidden_states,
-            self.gate.weight,
-            self.n_activated_experts,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            ep_rank=self.ep_rank,
-            bias=self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
-            else None,
-            image_bias=bias_vl.data if bias_vl is not None else None,
-            image_token_mask=mega_gate_metadata.image_token_mask,
-            fix_routing_mask=fix_routing_mask,
-            unmapped_topk_idx=unmapped_topk_idx,
-        )
+        # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
+        gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
+        if hidden_states.shape[0] <= gate_threshold:
+            router_logits, _ = self.gate(hidden_states)
+            topk_weights, topk_ids = fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.gate.e_score_correction_bias.data
+                if self.gate.e_score_correction_bias is not None
+                else None,
+                topk=self.n_activated_experts,
+                renormalize=self.renormalize,
+                indices_type=self.hash_indices_dtype,
+                input_tokens=input_ids,
+                hash_indices_table=self.gate.tid2eid,
+                routed_scaling_factor=self.routed_scaling_factor,
+                bias_vl=bias_vl.data if bias_vl is not None else None,
+                image_sentinel_lo=self.image_sentinel_lo if bias_vl is not None else 0,
+            )
+        else:
+            from vllm.utils.deep_gemm import bf16_mega_gate
+
+            unmapped_topk_idx = None
+            fix_routing_mask = None
+            if self.gate.tid2eid is not None:
+                if mega_gate_metadata.safe_hash_input_ids is None:
+                    raise RuntimeError("Hash routing requires prepared input IDs.")
+                if mega_gate_metadata.hash_token_mask is None:
+                    raise RuntimeError("Hash routing requires a prepared routing mask.")
+                # PR 432 accepts fixed expert IDs, not the token-to-expert table.
+                unmapped_topk_idx = self.gate.tid2eid[
+                    mega_gate_metadata.safe_hash_input_ids
+                ]
+                fix_routing_mask = mega_gate_metadata.hash_token_mask
+
+            topk_weights, topk_ids = bf16_mega_gate(
+                hidden_states,
+                self.gate.weight,
+                self.n_activated_experts,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                ep_rank=self.ep_rank,
+                bias=self.gate.e_score_correction_bias.data
+                if self.gate.e_score_correction_bias is not None
+                else None,
+                image_bias=bias_vl.data if bias_vl is not None else None,
+                image_token_mask=mega_gate_metadata.image_token_mask,
+                fix_routing_mask=fix_routing_mask,
+                unmapped_topk_idx=unmapped_topk_idx,
+            )
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )

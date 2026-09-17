@@ -66,11 +66,21 @@ def v41_moe_config(dist_init):
     )
 
 
+@pytest.mark.parametrize("use_cudagraph", [False, True])
+@pytest.mark.parametrize("above_threshold", [False, True])
 @pytest.mark.parametrize("padding", [False, True], ids=["unpadded", "nan_padding"])
 @pytest.mark.parametrize("vision", [False, True])
-@pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 8, 2), (2, 4, 3)])
+@pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 384, 6), (2, 128, 3)])
 def test_deepseek_v41_moe_routes_without_hash_table(
-    v41_moe_config, monkeypatch, vision, layer_id, num_experts, top_k, padding
+    v41_moe_config,
+    monkeypatch,
+    vision,
+    layer_id,
+    num_experts,
+    top_k,
+    padding,
+    above_threshold,
+    use_cudagraph,
 ):
     """Main and draft layers select experts by score and preserve image routing."""
     if not current_platform.is_device_capability_family(100):
@@ -78,15 +88,23 @@ def test_deepseek_v41_moe_routes_without_hash_table(
 
     config = v41_moe_config.model_config.hf_config
     config.hidden_size = 256
+    config.n_routed_experts = 384
+    config.num_experts_per_tok = 6
+    config.dspark_n_routed_experts = 128
+    num_tokens = (1 if num_experts == 128 else 16) + int(above_threshold)
     config.vision_n_layers = int(vision)
     with (
         set_default_torch_dtype(v41_moe_config.model_config.dtype),
         torch.device("cuda"),
     ):
         moe = DeepseekV41MoE(v41_moe_config, prefix=f"model.layers.{layer_id}.ffn")
-        hidden_states = torch.randn(4, config.hidden_size, dtype=torch.bfloat16)
+        hidden_states = torch.randn(
+            num_tokens, config.hidden_size, dtype=torch.bfloat16
+        )
         input_ids = (
-            torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID, 129257])
+            torch.tensor(
+                [42, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID, 129257]
+            ).repeat((num_tokens + 3) // 4)[:num_tokens]
             if vision
             else None
         )
@@ -95,7 +113,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     assert isinstance(moe.experts, DeepseekV4MegaMoEExperts)
     assert moe.experts.w13_weight.shape == (num_experts, 256, 128)
     assert moe.experts.top_k == top_k
-    assert (config.n_routed_experts, config.num_experts_per_tok) == (8, 2)
+    assert (config.n_routed_experts, config.num_experts_per_tok) == (384, 6)
 
     with torch.no_grad():
         moe.gate.weight.normal_(std=0.01)
@@ -116,16 +134,16 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         dim=-1, keepdim=True
     )
 
-    num_valid_tokens = 3 if padding else 4
+    num_valid_tokens = num_tokens - int(padding)
     expected_output = 3 * hidden_states[:num_valid_tokens]
     if padding:
         hidden_states[-1] = float("nan")
-        padding_mask = torch.tensor([False, False, False, True], device="cuda")
+        padding_mask = torch.arange(num_tokens, device="cuda") >= num_valid_tokens
+
+    routed = {}
 
     def check_routing(x, weights, ids, *, activation_clamp):
-        assert torch.isfinite(weights[:num_valid_tokens]).all()
         if padding:
-            assert torch.isnan(x[num_valid_tokens:]).all()
             staged_ids = torch.empty_like(ids)
             staged_weights = torch.empty_like(weights)
             prepare_megamoe_inputs(
@@ -142,18 +160,8 @@ def test_deepseek_v41_moe_routes_without_hash_table(
                 staged_weights,
                 is_padding=padding_mask,
             )
-            assert (staged_ids[num_valid_tokens:] == -1).all()
-            assert (staged_weights[num_valid_tokens:] == 0).all()
             ids, weights = staged_ids, staged_weights
-        torch.testing.assert_close(
-            ids[:num_valid_tokens], expected_ids[:num_valid_tokens]
-        )
-        torch.testing.assert_close(
-            weights[:num_valid_tokens],
-            expected_weights[:num_valid_tokens],
-            rtol=1e-3,
-            atol=1e-4,
-        )
+        routed["ids"], routed["weights"] = ids, weights
         assert activation_clamp == config.swiglu_limit
         return x.clone()
 
@@ -162,17 +170,45 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     routing_input_ids = (
         input_ids
         if input_ids is not None
-        else torch.zeros(4, dtype=torch.int64, device="cuda")
+        else torch.zeros(num_tokens, dtype=torch.int64, device="cuda")
     )
     metadata = prepare_mega_gate_routing_metadata(
         routing_input_ids,
         has_hash_routing=False,
         image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID if vision else None,
     )
+    if use_cudagraph:
+        stream = torch.cuda.Stream()
+        if padding:
+            hidden_states[-1].zero_()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                moe(hidden_states, input_ids, metadata)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = moe(hidden_states, input_ids, metadata)
+        if padding:
+            hidden_states[-1] = float("nan")
+        graph.replay()
+        torch.accelerator.synchronize()
+    else:
+        output = moe(hidden_states, input_ids, metadata)
+
+    ids, weights = routed["ids"], routed["weights"]
+    if padding:
+        assert torch.isnan(hidden_states[num_valid_tokens:]).all()
+        assert (ids[num_valid_tokens:] == -1).all()
+        assert (weights[num_valid_tokens:] == 0).all()
+    torch.testing.assert_close(ids[:num_valid_tokens], expected_ids[:num_valid_tokens])
     torch.testing.assert_close(
-        moe(hidden_states, input_ids, metadata)[:num_valid_tokens],
-        expected_output,
+        weights[:num_valid_tokens],
+        expected_weights[:num_valid_tokens],
+        rtol=1e-3,
+        atol=1e-4,
     )
+    torch.testing.assert_close(output[:num_valid_tokens], expected_output)
 
 
 @pytest.mark.parametrize(
@@ -215,7 +251,11 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
         moe(torch.zeros(1, 128))
 
 
-def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypatch):
+@pytest.mark.parametrize("use_cudagraph", [False, True])
+@pytest.mark.parametrize("num_tokens", [16, 17])
+def test_deepseek_v4_mega_gate_hash_routing_correctness(
+    v41_moe_config, monkeypatch, num_tokens, use_cudagraph
+):
     if not current_platform.is_device_capability_family(100):
         pytest.skip("DeepGEMM Mega Gate requires SM100")
 
@@ -232,8 +272,10 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypa
             prefix="model.layers.0.ffn",
             num_hash_layers=config.num_hash_layers,
         )
-        hidden_states = torch.randn(4, config.hidden_size, dtype=torch.bfloat16)
-        input_ids = torch.tensor([0, 1, 2, 3])
+        hidden_states = torch.randn(
+            num_tokens, config.hidden_size, dtype=torch.bfloat16
+        )
+        input_ids = torch.arange(num_tokens)
 
     token_ids = torch.arange(config.vocab_size, device="cuda")
     fixed_ids = torch.stack(
@@ -256,9 +298,10 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypa
         dim=-1, keepdim=True
     )
 
+    routed = {}
+
     def check_routing(x, weights, ids, *, activation_clamp):
-        torch.testing.assert_close(ids, expected_ids)
-        torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
+        routed["ids"], routed["weights"] = ids, weights
         return x.clone()
 
     monkeypatch.setattr(moe.experts, "forward", check_routing)
@@ -268,7 +311,25 @@ def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypa
         has_hash_routing=True,
         image_sentinel_base_id=None,
     )
-    torch.testing.assert_close(moe(hidden_states, input_ids, metadata), hidden_states)
+    if use_cudagraph:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                moe(hidden_states, input_ids, metadata)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = moe(hidden_states, input_ids, metadata)
+        graph.replay()
+        torch.accelerator.synchronize()
+    else:
+        output = moe(hidden_states, input_ids, metadata)
+    torch.testing.assert_close(routed["ids"], expected_ids)
+    torch.testing.assert_close(
+        routed["weights"], expected_weights, rtol=1e-3, atol=1e-4
+    )
+    torch.testing.assert_close(output, hidden_states)
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
@@ -673,11 +734,11 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
         fake_mega_gate,
     )
     metadata = prepare_mega_gate_routing_metadata(
-        torch.zeros(2, dtype=torch.int64),
+        torch.zeros(32, dtype=torch.int64),
         has_hash_routing=False,
         image_sentinel_base_id=None,
     )
-    output = moe(torch.zeros(2, 128), mega_gate_metadata=metadata)
+    output = moe(torch.zeros(32, 128), mega_gate_metadata=metadata)
 
     expected = 1 if fused else 3
     assert torch.all(output == expected)
