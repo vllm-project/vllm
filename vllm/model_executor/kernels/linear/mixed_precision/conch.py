@@ -124,7 +124,7 @@ class ConchLinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         from conch.ops.quantization.gemm import mixed_precision_gemm
 
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         # Map channelwise group_size=-1 to the actual input dimension K.
         # The conch kernel computes stride_mul = block_k / group_size;

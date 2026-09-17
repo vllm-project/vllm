@@ -9,6 +9,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
     is_v1_kv_transfer_group,
 )
+from vllm.utils.torch_utils import _resolve_layer_name
 
 
 def maybe_transfer_kv_layer(func: Callable) -> Callable:
@@ -38,7 +39,7 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
         if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
             return func(*args, **kwargs)
 
-        layer_name: str = args[layer_name_index]
+        layer_name = _resolve_layer_name(args[layer_name_index])
 
         # Extract attention context (metadata, layer, kv_cache, layer_slot_mapping)
         attn_metadata, _, kv_cache, _ = get_attention_context(layer_name)

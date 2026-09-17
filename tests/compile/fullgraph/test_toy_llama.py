@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test the piecewise compilation with a simple model, comparing the output
+"""Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
 
 This is a tractable model, the weights and computation are specially designed
@@ -17,7 +16,6 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
@@ -340,6 +338,8 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
 def test_toy_llama(
     backend: str, use_inductor_graph_partition: bool, monkeypatch, tmp_path
 ):
+    from vllm.compilation.counter import compilation_counter
+
     # We disable the vLLM compile cache into a new tmp dir for 1 reason:
     # 1. To make sure we can properly track the number of Inductor compilations.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")

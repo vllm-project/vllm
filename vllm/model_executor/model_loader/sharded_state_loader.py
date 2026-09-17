@@ -27,12 +27,11 @@ logger = init_logger(__name__)
 
 
 class ShardedStateLoader(BaseModelLoader):
-    """
-    Model loader that directly loads each worker's model state dict, which
+    """Model loader that directly loads each worker's model state dict, which
     enables a fast load path for large tensor-parallel models where each worker
     only needs to read its own shard rather than the entire checkpoint. See
-    `examples/offline_inference/save_sharded_state.py` for creating a sharded
-    checkpoint.
+    `examples/features/sharded_state/save_sharded_state_offline.py` for creating
+    a sharded checkpoint.
     """
 
     DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
@@ -57,8 +56,7 @@ class ShardedStateLoader(BaseModelLoader):
     def _filter_subtensors(
         tensors: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        """
-        Filter out all tensors that share the same memory or a subset of the
+        """Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
         same_storage_groups: dict[Any, list[tuple[str, torch.Tensor]]] = (
@@ -157,7 +155,6 @@ class ShardedStateLoader(BaseModelLoader):
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,
-            scope="local",
         )
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")

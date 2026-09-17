@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Benchmark for FlashInfer fused collective operations vs standard operations.
+"""Benchmark for FlashInfer fused collective operations vs standard operations.
 
 This benchmark compares:
 1. FlashInfer's allreduce_fusion with trtllm backend
@@ -80,13 +79,17 @@ _FI_MAX_SIZES = {
     2: 64 * MiB,  # 64MB
     4: 64 * MiB,  # 64MB
     8: 64 * MiB,  # 64MB
+    16: 64 * MiB,  # 64MB (multi-node)
 }
 
 # Global workspace tensors for FlashInfer (keyed by backend name)
 _FI_WORKSPACES: dict = {}
 
-# Backends to benchmark
-FLASHINFER_BACKENDS = ["trtllm", "mnnvl"]
+# Backends to benchmark. trtllm is single-node only and can hang cross-node, so
+# multi-node sweeps can restrict to mnnvl via FI_BACKENDS=mnnvl.
+FLASHINFER_BACKENDS = [
+    b for b in os.environ.get("FI_BACKENDS", "trtllm,mnnvl").split(",") if b
+]
 
 
 def setup_flashinfer_workspace(
@@ -442,9 +445,15 @@ def run_benchmarks(
     """Run all benchmarks for given configuration.
 
     Args:
+        num_tokens: Number of tokens in the benchmark input.
+        hidden_dim: Hidden dimension of the benchmark input.
+        dtype: dtype of the benchmark input.
+        use_residual: Whether to include a residual add in the fused op.
+        no_oneshot: Skip the one-shot allreduce variants.
         allreduce_params: Shared parameters for FlashInfer fused allreduce.
         workspaces: Dict mapping backend name ("trtllm", "mnnvl") to workspace.
         quant_modes: Set of quantization modes: "none", "fp8", "fp4".
+
     """
     (
         input_tensor,
@@ -995,7 +1004,10 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    device = torch.device(f"cuda:{rank}")
+    # Use LOCAL_RANK for the device so multi-node runs (global rank >= GPUs per
+    # node) map to a valid local GPU; falls back to global rank single-node.
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 

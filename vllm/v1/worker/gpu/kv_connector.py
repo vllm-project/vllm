@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -30,11 +29,14 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
+        pass
+
+    def finish_forward(self) -> None:
         pass
 
     def post_forward(
-        self, scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         return None
 
@@ -42,6 +44,9 @@ class KVConnector:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
     def set_disabled(self, disabled: bool) -> None:
+        pass
+
+    def reset_capture_state(self) -> None:
         pass
 
 
@@ -52,53 +57,69 @@ class ActiveKVConnector(KVConnector):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
         # Register kv caches with KV Connector if applicable.
-        # TODO: support cross_layers_kv_cache
-        # (see https://github.com/vllm-project/vllm/pull/27743)
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
+        self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         if self._disabled:
             return
 
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
-        self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         self.kv_connector.handle_preemptions(kv_connector_metadata)
+        self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self._pending_load_kwargs = kwargs
 
+        if scheduler_output.has_sync_kv_loads:
+            # Sync loads need to run before this step's forward.
+            self._start_load_kv()
+        # Otherwise start the async load after forward to keep submission
+        # off the critical path.
+
+    def _start_load_kv(self) -> None:
+        load_kwargs = self._pending_load_kwargs
+        assert load_kwargs is not None
+        self._pending_load_kwargs = None
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
-            self.kv_connector.start_load_kv(get_forward_context())
+            self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
         else:
             with set_forward_context(None, self.vllm_config):
-                self.kv_connector.start_load_kv(get_forward_context())
+                self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
+
+    def finish_forward(self) -> None:
+        if not self._disabled:
+            self.kv_connector.finish_forward()
+
+    def reset_capture_state(self) -> None:
+        self.kv_connector.reset_capture_state()
 
     def post_forward(
-        self,
-        scheduler_output: "SchedulerOutput",
-        wait_for_save: bool = True,
-        clear_metadata: bool = True,
+        self, finished_req_ids: set[str], wait_for_save: bool = True
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
+        if self._pending_load_kwargs is not None:
+            self._start_load_kv()
+
         output = KVConnectorOutput()
         if wait_for_save:
             self.kv_connector.wait_for_save()
-        output.finished_sending, output.finished_recving = (
-            self.kv_connector.get_finished(scheduler_output.finished_req_ids)
-        )
+        transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
+        output.finished_sending = transfer_results.finished_sending or None
+        output.finished_recving = transfer_results.finished_recving or None
+        output.failed_recving = transfer_results.failed_recving
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
         output.kv_connector_worker_meta = (
             self.kv_connector.build_connector_worker_meta()
         )
-
-        if clear_metadata:
-            self.kv_connector.clear_connector_metadata()
+        self.kv_connector.clear_connector_metadata()
         return output
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
@@ -106,12 +127,10 @@ class ActiveKVConnector(KVConnector):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         self.pre_forward(scheduler_output)
-        kv_connector_output = self.post_forward(scheduler_output, wait_for_save=False)
-        if kv_connector_output is None or kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        self.finish_forward()
+        finished_req_ids = scheduler_output.finished_req_ids
+        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.

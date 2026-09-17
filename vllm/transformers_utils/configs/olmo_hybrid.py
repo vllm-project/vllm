@@ -6,8 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class OlmoHybridConfig(PretrainedConfig):
-    r"""
-        Configuration class for [`OlmoHybridModel`]. It is used to
+    r"""Configuration class for [`OlmoHybridModel`]. It is used to
         instantiate an OLMo Hybrid model according to the specified
         arguments, defining the model architecture. Instantiating a
         configuration with the defaults will yield a similar
@@ -19,7 +18,7 @@ class OlmoHybridConfig(PretrainedConfig):
         can be used to control the model outputs. Read the
         documentation from [`PreTrainedConfig`] for more information.
 
-        Args:
+    Args:
             vocab_size (`int`, *optional*, defaults to 100352):
                 Vocabulary size of the OlmoHybrid model. Defines
                 the number of different tokens that can be
@@ -159,6 +158,7 @@ class OlmoHybridConfig(PretrainedConfig):
         >>> model = OlmoHybridModel(configuration)
         >>> configuration = model.config
     ```
+
     """
 
     model_type = "olmo_hybrid"
@@ -228,15 +228,8 @@ class OlmoHybridConfig(PretrainedConfig):
             if "full_attention" not in layer_types:
                 layer_types[-1] = "full_attention"
 
-        if hasattr(self, "validate_layer_type"):
-            # Transformers v5
-            self.layer_types = layer_types
-            self.validate_layer_type()
-        else:
-            # Transformers v4
-            from transformers.configuration_utils import layer_type_validation
-
-            layer_type_validation(layer_types, num_hidden_layers)
+        self.layer_types = layer_types
+        self.validate_layer_type()
         if "linear_attention" not in layer_types:
             raise ValueError(
                 "OLMoHybrid expects at least one 'linear_attention' layer."

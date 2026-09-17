@@ -1,26 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The CLI entrypoints of vLLM
+"""The CLI entrypoints of vLLM.
 
 Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
 import sys
+from importlib.util import find_spec
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
+def maybe_run_omni() -> bool:
+    # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
+    if "--omni" not in sys.argv:
+        return False
+
+    # NOTE: Check the spec instead of importing directly here, since things could
+    # fail with ImportError due to mismatched versions if things are moved around.
+    spec = find_spec("vllm_omni")
+    if spec is None:
+        logger.error(
+            "--omni flag requires a valid instance of vllm-omni to be installed."
+        )
+        sys.exit(1)
+
+    from vllm_omni.entrypoints.cli.main import main as omni_main
+
+    logger.info("Delegating entrypoint handling to vllm-omni")
+    omni_main()
+
+    return True
+
+
 def main():
+    if maybe_run_omni():
+        return
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
-    from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
+    from vllm.entrypoints.serve.utils.api_utils import (
+        VLLM_SUBCMD_PARSER_EPILOG,
+        cli_env_setup,
+    )
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
@@ -33,6 +62,8 @@ def main():
     ]
 
     cli_env_setup()
+
+    vllm.entrypoints.cli.benchmark.main.maybe_exec_rust_bench()
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
     if len(sys.argv) > 1 and sys.argv[1] == "bench":

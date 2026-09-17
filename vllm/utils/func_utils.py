@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers that are applied to functions.
+"""Contains helpers that are applied to functions.
 
 This is similar in concept to the `functools` module.
 """
@@ -45,16 +44,14 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
 
 @lru_cache
-def supports_kw(
+def _supports_kw(
     callable: Callable[..., object],
     kw_name: str,
     *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
-    """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
-    disallows kwargs names that can also be positional arguments.
-    """
+    """Internal cached implementation of supports_kw."""
     params = inspect.signature(callable).parameters
     if not params:
         return False
@@ -99,6 +96,29 @@ def supports_kw(
     return False
 
 
+def supports_kw(
+    callable: Callable[..., object],
+    kw_name: str,
+    *,
+    requires_kw_only: bool = False,
+    allow_var_kwargs: bool = True,
+) -> bool:
+    """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
+    disallows kwargs names that can also be positional arguments.
+    """
+    # Unwrap bound methods so that the lru_cache key is the underlying
+    # function, not the instance. Caching bound methods pins the object
+    # (and all its GPU tensors) for the lifetime of the cache.
+    if hasattr(callable, "__func__"):
+        callable = callable.__func__
+    return _supports_kw(
+        callable,
+        kw_name,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
+
+
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
     overrides: Mapping[str, object] | None,
@@ -106,8 +126,7 @@ def get_allowed_kwarg_only_overrides(
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
 ) -> dict[str, Any]:
-    """
-    Given a callable which has one or more keyword only params and a dict
+    """Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
     expanded to overwrite one or more keyword-only args. This is used in a
     few places to handle custom processor overrides for multimodal models,
@@ -118,12 +137,14 @@ def get_allowed_kwarg_only_overrides(
         callable: Callable which takes 0 or more keyword only arguments.
                   If None is provided, all overrides names are allowed.
         overrides: Potential overrides to be used when invoking the callable.
+        requires_kw_only: If True, only keyword-only params may be overridden.
         allow_var_kwargs: Allows overrides that are expandable for var kwargs.
 
     Returns:
         Dictionary containing the kwargs to be leveraged which may be used
         to overwrite one or more keyword only arguments when invoking the
         callable.
+
     """
     if not overrides:
         return {}

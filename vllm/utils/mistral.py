@@ -26,3 +26,13 @@ def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralToken
         getattr(cls, "IS_MISTRAL_TOKENIZER", False)
         and isinstance(obj, mt.MistralTokenizer)
     )
+
+
+def is_mistral_tool_parser(cls: type | None) -> bool:
+    """Return true if *cls* carries the ``IS_MISTRAL_TOOL_PARSER`` marker.
+
+    The marker is set on the engine-adapter subclass registered under the
+    ``"mistral"`` tool-parser key.  No import of the parser module is
+    required.
+    """
+    return bool(getattr(cls, "IS_MISTRAL_TOOL_PARSER", False))

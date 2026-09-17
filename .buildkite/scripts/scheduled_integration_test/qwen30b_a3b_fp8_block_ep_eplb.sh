@@ -48,7 +48,7 @@ for BACK in "${BACKENDS[@]}"; do
     --enforce-eager \
     --enable-eplb \
     --all2all-backend "$BACK" \
-    --eplb-config '{"window_size":10, "step_interval":100, "num_redundant_experts":0, "log_balancedness":true}' \
+    --eplb-config '{"window_size":10, "step_interval":100, "num_redundant_experts":0, "log_balancedness":true, "use_async":false}' \
     --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
     --data-parallel-size "${DATA_PARALLEL_SIZE}" \
     --enable-expert-parallel \

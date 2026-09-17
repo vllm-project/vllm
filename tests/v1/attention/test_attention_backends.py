@@ -3,6 +3,7 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -16,31 +17,50 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
+    is_quantized_kv_cache,
     is_torch_equal_or_newer,
     set_random_seed,
 )
-from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import (
-    set_kv_cache_layout,
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionType,
+    CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
     AttentionBackendEnum.FLASHINFER,
     AttentionBackendEnum.FLEX_ATTENTION,
     AttentionBackendEnum.TRITON_ATTN,
-    AttentionBackendEnum.TREE_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
+
+def _actual_backend(backend: AttentionBackendEnum | str) -> AttentionBackendEnum:
+    """Resolve pseudo-backends (FLEX_ATTENTION_SLOW) to their real enum."""
+    if isinstance(backend, str):
+        if backend != "FLEX_ATTENTION_SLOW":
+            raise ValueError(f"Unknown pseudo-backend: {backend}")
+        return AttentionBackendEnum.FLEX_ATTENTION
+    return backend
+
+
 DEVICE_TYPE = current_platform.device_type
+
+# Use the platform's preferred FP8 type so the stored cache matches what the
+# backends reinterpret at runtime. On ROCm gfx94x this is e4m3fnuz, not e4m3fn;
+# storing e4m3fn bytes there would be re-read as fnuz and produce NaNs.
+FP8_KV_CACHE_DTYPES = {
+    "fp8": current_platform.fp8_dtype(),
+    "fp8_e4m3": current_platform.fp8_dtype(),
+}
 
 # Remove flashinfer from the list if it's not available
 try:
@@ -106,26 +126,32 @@ def create_and_prepopulate_kv_cache(
     device: torch.device,
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
+    layout: KVCacheLayout,
     randomize_blocks: bool = True,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
     Args:
         k_contexts: List of key context tensors for each sequence
         v_contexts: List of value context tensors for each sequence
-        seq_lens: List of sequence lengths
         block_size: Size of each block
         num_kv_heads: Number of KV heads
         head_size: Size of each head
         dtype: Data type for the cache
         device: Device to create the cache on
         num_blocks: Total number of blocks in the cache
-        block_table: Block table tensor to populate
+        common_attn_metadata: Provides seq lens, block table and slot mapping
+        layout: Physical layout to allocate in; the cache is returned as the
+                logical ``[B, H, N, C]`` view (as ``create_kv_cache_views`` does)
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
+        kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
 
     Returns:
-        Tuple of (kv_cache, updated_block_table)
+        A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
+        2 * head_size)`` order with strides determined by ``layout``.
+
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -137,22 +163,38 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Create KV cache
-    kv_cache = torch.zeros(
-        2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
-    )
-    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
+    # For an fp8 kv cache, store the cache in the fp8 dtype so that assigning
+    # the higher-precision context tensors quantizes them, mirroring runtime.
+    fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
+    storage_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype] if fp8_kv_cache else dtype
 
-    # Populate the cache with the context tokens
+    # Logical 5D shape is always [L, B, H, N, C]. Cross-layer layouts need
+    # at least two layers to reproduce the inter-layer gaps in a layer view.
+    logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
+    num_layers = 1 if layout.is_layer_compact else 2
+    logical_5d = (num_layers, *logical_4d)
+    physical_5d = tuple(logical_5d[i] for i in layout.stride_order)
+    inv_order = [layout.stride_order.index(i) for i in range(5)]
+
+    kv_cache_physical = torch.zeros(physical_5d, dtype=storage_dtype, device=device)
+    # Permute to logical [L, B, H, N, C], then select a layer. This mirrors
+    # create_kv_cache_views and retains cross-layer strides in the 4D view.
+    kv_cache = kv_cache_physical.permute(*inv_order)[0]
+
+    # Write context tokens into the cache via the logical view:
+    # kv_cache[block, :, token_in_block, :] routes correctly regardless
+    # of physical layout.
     # Start from block_id=1 since block_id=0 is considered the null block
     start_block_idx = 1
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_context.shape[0]
-        kv_cache_flat[0, start:end, ...] = k_context
-        kv_cache_flat[1, start:end, ...] = v_context
-
+        t = torch.arange(k_context.shape[0], device=device)
+        blk = start_block_idx + t // block_size
+        off = t % block_size
+        # Advanced indexing on (blk, off) yields [T, H, hs] destinations.
+        # index_put is dtype-strict; cast like the scalar path would.
+        kv_cache[blk, :, off, :head_size] = k_context.to(kv_cache.dtype)
+        kv_cache[blk, :, off, head_size:] = v_context.to(kv_cache.dtype)
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
@@ -169,7 +211,7 @@ def create_and_prepopulate_kv_cache(
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
     # Add 1 to account for starting from block 1
     inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
+    kv_cache[1:blocks_end, ...] = kv_cache[perm, ...]
 
     # Construct the right block table
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -192,24 +234,48 @@ def create_and_prepopulate_kv_cache(
             i, block_indices
         ] * block_size + token_inter_block_offsets.to(device)
 
+    if fp8_kv_cache:
+        kv_cache = kv_cache.view(torch.uint8)
+
     return kv_cache
 
 
 class MockAttentionLayer:
     """A mock attention layer for testing."""
 
-    def __init__(self, device: torch.device):
+    def __init__(
+        self,
+        device: torch.device,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+    ):
         self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(v_scale, device=device)
         # Add float versions for flashinfer
         self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._k_scale_float = k_scale
+        self._v_scale_float = v_scale
+
+
+def _clone_kv_cache_in_layout(
+    kv_cache: torch.Tensor, layout: KVCacheLayout
+) -> torch.Tensor:
+    """Copy a logical [B, H, N, C] cache into a fresh allocation in `layout`."""
+    logical_5d = (1, *kv_cache.shape)
+    physical = torch.zeros(
+        tuple(logical_5d[i] for i in layout.stride_order),
+        dtype=kv_cache.dtype,
+        device=kv_cache.device,
+    )
+    inv_order = [layout.stride_order.index(i) for i in range(5)]
+    view = physical.permute(*inv_order)[0]
+    view.copy_(kv_cache)
+    return view
 
 
 def run_attention_backend(
-    backend: AttentionBackendEnum,
+    backend: AttentionBackendEnum | str,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -221,21 +287,22 @@ def run_attention_backend(
     kv_cache: torch.Tensor,
     attn_type: AttentionType = AttentionType.DECODER,
     sliding_window: int | None = None,
+    kv_cache_dtype: str = "auto",
+    sinks: torch.Tensor | None = None,
+    use_cuda_graph: bool = False,
+    layer_k_scale: float = 1.0,
+    layer_v_scale: float = 1.0,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
-    # Handle special case for FLEX_ATTENTION_SLOW
-    actual_backend = backend
-
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
-        actual_backend = AttentionBackendEnum.FLEX_ATTENTION
         use_direct_block_mask = False
+    backend = _actual_backend(backend)
 
-    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == AttentionBackendEnum.FLASHINFER:
+    if backend == AttentionBackendEnum.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -248,6 +315,7 @@ def run_attention_backend(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_size**0.5),  # Standard scale
+                    has_sinks=sinks is not None,
                 )
                 for layer_name in layer_names
             }
@@ -264,7 +332,7 @@ def run_attention_backend(
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
+        if backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -280,31 +348,56 @@ def run_attention_backend(
     )
     head_size = vllm_config.model_config.get_head_size()
     scale = 1.0 / (head_size**0.5)
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=sliding_window,
-        attn_type=attn_type,
-        kv_cache_dtype="auto",
-    )
+    # Impls capture the current vllm config at construction, as in model loading.
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype=kv_cache_dtype,
+            **({"sinks": sinks} if sinks is not None else {}),
+        )
 
     # Create mock layer and output buffer
-    mock_layer = MockAttentionLayer(device)
+    mock_layer = MockAttentionLayer(device, layer_k_scale, layer_v_scale)
     output = torch.empty_like(query)
+
+    if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
+        query = query.to(current_platform.fp8_dtype())
 
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
-    if not try_backend_includes_kv_cache_update(actual_backend):
+    if not try_backend_includes_kv_cache_update(backend):
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
-    output = impl.forward(
-        mock_layer, query, key, value, kv_cache, attn_metadata, output=output
-    )
+    if use_cuda_graph:
+        impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            impl.forward(
+                mock_layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+        graph.replay()
+    else:
+        backend_output = impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
+        if backend_output is not None:
+            output = backend_output
 
     return output
 
@@ -315,15 +408,25 @@ def _test_backend_correctness(
     backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
+    causal: bool = True,
     attn_type: AttentionType = AttentionType.DECODER,
     block_size: int = 16,
     atol: float = 1e-2,
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
+    kv_cache_dtype: str = "auto",
+    use_sinks: bool = False,
+    layout: KVCacheLayout | None = None,
+    use_cuda_graph: bool = False,
+    num_speculative_tokens: int = 0,
+    model_dtype: torch.dtype | None = None,
+    max_num_seqs: int | None = None,
+    max_num_batched_tokens: int | None = None,
+    layer_k_scale: float = 1.0,
+    layer_v_scale: float = 1.0,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
-    using torch.nn.functional.scaled_dot_product_attention.
+    """Test that all backends produce similar outputs to a reference implementation
+    using FlexAttention or an explicit attention-sink reference.
 
     This test works by:
     1. Generating a batch of sequences with specified context and query lengths.
@@ -364,13 +467,23 @@ def _test_backend_correctness(
         model_name=model,
         tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
         max_model_len=max(batch_spec.seq_lens),
+        dtype=model_dtype or "auto",
         block_size=block_size,
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
+    if max_num_seqs is not None:
+        vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+    if max_num_batched_tokens is not None:
+        vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    if num_speculative_tokens > 0:
+        vllm_config.speculative_config = SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
     device = torch.device(f"{DEVICE_TYPE}:0")
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -382,11 +495,23 @@ def _test_backend_correctness(
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
         vllm_config.parallel_config
     )
+    sinks = (
+        torch.linspace(-1.0, 1.0, num_q_heads, dtype=torch.float32, device=device)
+        if use_sinks
+        else None
+    )
     head_size = vllm_config.model_config.get_head_size()
     sliding_window = vllm_config.model_config.get_sliding_window()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     block_size = vllm_config.cache_config.block_size
     scale = 1.0 / (head_size**0.5)
+
+    fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
+    if fp8_kv_cache:
+        query_fp8_dtype = current_platform.fp8_dtype()
+        kv_fp8_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+        atol = max(atol, 6e-2)
+        rtol = max(rtol, 1e-1)
 
     # 2. Generate data and compute SDPA reference output
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
@@ -403,10 +528,17 @@ def _test_backend_correctness(
         k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
+        if fp8_kv_cache:
+            q_ref = q.to(query_fp8_dtype).to(dtype)
+            k_ref = k_full.to(kv_fp8_dtype).to(dtype)
+            v_ref = v_full.to(kv_fp8_dtype).to(dtype)
+        else:
+            q_ref, k_ref, v_ref = q, k_full, v_full
+
         # SDPA expects (N, H, L, D), so unsqueeze batch and permute
-        q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
-        k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
-        v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
+        q_sdpa_in = q_ref.unsqueeze(0).transpose(1, 2)
+        k_sdpa_in = k_ref.unsqueeze(0).transpose(1, 2)
+        v_sdpa_in = v_ref.unsqueeze(0).transpose(1, 2)
 
         if num_q_heads != num_kv_heads:
             assert num_q_heads % num_kv_heads == 0, (
@@ -422,17 +554,38 @@ def _test_backend_correctness(
         kv_len = s_len
 
         final_mask_mod = partial(mask_mod, context_len=context_len)
-        block_mask = create_block_mask(
-            final_mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device
-        )
-        sdpa_out_i = flex_attention(
-            q_sdpa_in,
-            k_sdpa_in,
-            v_sdpa_in,
-            block_mask=block_mask,
-            scale=scale,
-            enable_gqa=True,
-        )
+        if sinks is None:
+            block_mask = create_block_mask(
+                final_mask_mod,
+                B=None,
+                H=None,
+                Q_LEN=q_len,
+                KV_LEN=kv_len,
+                device=device,
+            )
+            sdpa_out_i = flex_attention(
+                q_sdpa_in,
+                k_sdpa_in,
+                v_sdpa_in,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=True,
+            )
+        else:
+            scores = (
+                torch.matmul(q_sdpa_in.float(), k_sdpa_in.float().transpose(-2, -1))
+                * scale
+            )
+            q_idx = torch.arange(q_len, device=device).unsqueeze(1)
+            kv_idx = torch.arange(kv_len, device=device).unsqueeze(0)
+            zero = torch.zeros((), dtype=torch.int32, device=device)
+            valid = final_mask_mod(zero, zero, q_idx, kv_idx)
+            scores.masked_fill_(~valid.unsqueeze(0).unsqueeze(0), -torch.inf)
+            sink_logits = sinks.view(1, num_q_heads, 1, 1).expand(1, -1, q_len, -1)
+            weights = torch.softmax(torch.cat((scores, sink_logits), dim=-1), dim=-1)[
+                ..., :kv_len
+            ]
+            sdpa_out_i = torch.matmul(weights, v_sdpa_in.float()).to(dtype)
 
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
@@ -453,11 +606,25 @@ def _test_backend_correctness(
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, vllm_config.cache_config.block_size, device
     )
-    if attn_type == AttentionType.ENCODER_ONLY:
-        # For encoder-only, all tokens are prefill tokens
-        common_attn_metadata.causal = False
+    common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
+    # Mirror selector-time resolution locally (caller-requested layout, then
+    # any backend-required layout, then the default chain).
+    declared = [
+        supported
+        for backend in backend_to_test
+        if (
+            supported := _actual_backend(backend)
+            .get_class()
+            .supported_kv_cache_layouts()
+        )
+        is not None
+    ]
+    if layout is None:
+        # Mirror the resolver: the shared cache uses the declared sets' preferred
+        # layout; backends that don't support it get a per-backend copy below.
+        layout = min(declared, key=len)[0] if declared else KVCacheLayout.LBNHC
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -468,54 +635,72 @@ def _test_backend_correctness(
         device=device,
         num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
         common_attn_metadata=common_attn_metadata,
+        layout=layout,
         randomize_blocks=True,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # 4. Run vLLM backends and compare
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        # FlashAttentionm + FlexAttention:
-        #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer + Triton:
-        #   [num_blocks, 2, block_size, num_kv_heads, head_size]
-        # Select the appropriate KV cache format for each backend
-        kv_cache_for_backend = kv_cache
-        reset_kv_cache_layout = False
-        if backend_name in (
-            AttentionBackendEnum.FLASHINFER,
-            AttentionBackendEnum.TRITON_ATTN,
+        backend_cls = _actual_backend(backend_name).get_class()
+
+        if is_quantized_kv_cache(kv_cache_dtype) and (
+            not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)
         ):
-            kv_cache_for_backend = kv_cache.transpose(0, 1)
+            continue
 
-        if backend_name == AttentionBackendEnum.FLASHINFER:
-            # For FlashInfer default to HND layout and
-            kv_cache_for_backend = (
-                kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
-            )
-            set_kv_cache_layout("HND")
-            reset_kv_cache_layout = True
-        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
-            kv_cache_for_backend = kv_cache_for_backend.contiguous()
+        kv_cache_for_backend = kv_cache
+        backend_layout = layout
 
-        try:
-            backend_output = run_attention_backend(
-                backend_name,
-                kv_cache_spec,
-                ["placeholder"],
-                vllm_config,
-                device,
-                common_attn_metadata,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache_for_backend,
-                sliding_window=sliding_window,
-                attn_type=attn_type,
+        backend_supported = backend_cls.supported_kv_cache_layouts()
+        if backend_supported is not None and backend_layout not in backend_supported:
+            # Production resolution never pairs this backend with the shared layout
+            # (e.g. flex is LBNHC-only next to FlashInfer's LBHNC); give it a copy
+            # of the cache in a layout it supports.
+            backend_layout = backend_supported[0]
+            kv_cache_for_backend = _clone_kv_cache_in_layout(kv_cache, backend_layout)
+
+        if backend_name == AttentionBackendEnum.B12X:
+            cache_dtype = (
+                FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+                if is_quantized_kv_cache(kv_cache_dtype)
+                else kv_cache.dtype
             )
-        finally:
-            if reset_kv_cache_layout:
-                set_kv_cache_layout(None)
+            typed_cache = kv_cache.view(cache_dtype)
+            key_cache = typed_cache[..., :head_size].permute(0, 2, 1, 3)
+            value_cache = typed_cache[..., head_size:].permute(0, 2, 1, 3)
+            packed_cache = torch.stack((key_cache, value_cache), dim=1).flatten(-2)
+            if is_quantized_kv_cache(kv_cache_dtype):
+                packed_cache = packed_cache.view(torch.uint8)
+            kv_cache_for_backend = _clone_kv_cache_in_layout(
+                packed_cache, backend_layout
+            )
+
+        # FlashInfer reads the layout at plan time; set it to match
+        # the physical order of the test cache.
+        vllm_config.cache_config.kv_cache_layout = backend_layout.name
+
+        backend_output = run_attention_backend(
+            backend_name,
+            kv_cache_spec,
+            ["placeholder"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache_for_backend,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype=kv_cache_dtype,
+            sinks=sinks,
+            use_cuda_graph=use_cuda_graph,
+            layer_k_scale=layer_k_scale,
+            layer_v_scale=layer_v_scale,
+        )
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (
@@ -532,7 +717,7 @@ def _test_backend_correctness(
         )
 
         # Check numerical similarity
-        def error_msg(msg: str, backend_name: str):
+        def error_msg(msg: str, backend_name: AttentionBackendEnum | str):
             return f"[{backend_name}] output differs from SDPA baseline. {msg}"
 
         torch.testing.assert_close(
@@ -542,6 +727,38 @@ def _test_backend_correctness(
             atol=atol,
             msg=partial(error_msg, backend_name=backend_name),
         )
+
+
+@pytest.mark.parametrize("layout", ["BLHNC", "BHLNC"])
+@pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_flashinfer_cross_layer_layout(
+    default_vllm_config,
+    layout: str,
+    batch_spec_name: str,
+    kv_cache_dtype: str,
+):
+    if AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST:
+        pytest.skip("FlashInfer is not installed")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        batch_spec=BATCH_SPECS[batch_spec_name],
+        model="meta-llama/Meta-Llama-3-8B",
+        backend_to_test=[AttentionBackendEnum.FLASHINFER],
+        mask_mod=causal_mask_mod,
+        kv_cache_dtype=kv_cache_dtype,
+        layout=KVCacheLayout[layout],
+    )
 
 
 @pytest.mark.parametrize(
@@ -561,8 +778,13 @@ def _test_backend_correctness(
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_causal_backend_correctness(
-    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    kv_cache_dtype: str,
 ):
     """Test backend's correctness with causal attention."""
 
@@ -603,6 +825,7 @@ def test_causal_backend_correctness(
         SMALL_BLOCK_BACKENDS,
         causal_mask_mod,
         tensor_parallel_size=tensor_parallel_size,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     # Fast FlexAttention needs to run with block_size=128
@@ -614,7 +837,404 @@ def test_causal_backend_correctness(
             causal_mask_mod,
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
+            kv_cache_dtype=kv_cache_dtype,
         )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
+    """XQA decode should only apply q_scale when decode Q is FP8."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class MockLayer:
+        _q_scale_float = 2.0
+        _k_scale_float = 3.0
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 0.5
+    impl.kv_cache_dtype = "fp8"
+
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.bfloat16) == 1.5
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_draft_masks():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device("cpu")
+    causal = flashinfer_backend._make_xqa_draft_block_mask(3, True, device)
+    full = flashinfer_backend._make_xqa_draft_block_mask(3, False, device)
+    ragged = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+        [2, 3], 3, True, device
+    )
+
+    assert torch.equal(
+        causal.view(torch.int16),
+        torch.tensor([[1, 0], [3, 0], [7, 0]], dtype=torch.int16),
+    )
+    assert torch.equal(
+        full.view(torch.int16), torch.tensor([[7, 0]] * 3, dtype=torch.int16)
+    )
+    assert torch.equal(
+        ragged.view(torch.int16),
+        torch.tensor(
+            [[1, 0], [3, 0], [1, 0], [3, 0], [7, 0]],
+            dtype=torch.int16,
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
+    """CUDA-graph padding stays as zero-length requests in ragged offsets."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device("cpu")
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = True
+    qo_indptr = torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32, device=device)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=4,
+        num_decode_tokens=21,
+    )
+
+    assert q_len == 6
+    assert q_lens == [3, 6, 6, 0]
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 9, 15, 15]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypatch):
+    """Non-ragged XQA keeps one query/output row per padded request."""
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 1.0
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.kv_cache_dtype = "auto"
+    impl.is_kvcache_nvfp4 = False
+    impl.head_size = 16
+    impl.dcp_world_size = 1
+    impl.o_sf_scale = None
+    impl.window_left = -1
+    impl.sinks = None
+    impl.cache_config = unittest.mock.Mock()
+    impl.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
+
+    layer = unittest.mock.Mock(
+        _q_scale=torch.tensor(1.0),
+        _q_scale_float=1.0,
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+    decode = flashinfer_backend.FlashInferTrtllmAPIDecode(
+        kernel=flashinfer_backend.FlashInferDecodeKernel.XQA,
+        block_tables=torch.zeros((4, 1), dtype=torch.int32),
+        seq_lens=torch.tensor([8, 8, 0, 0], dtype=torch.int32),
+        max_seq_len=8,
+        q_len_per_req=1,
+    )
+    attn_metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=2,
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+        q_data_type_prefill=torch.bfloat16,
+        q_data_type_decode=torch.bfloat16,
+        num_decodes=4,
+        num_decode_tokens=2,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        causal=True,
+        prefill=None,
+        decode=decode,
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+
+    seen_shapes = {}
+
+    def mock_xqa(**kwargs):
+        seen_shapes["query"] = kwargs["query"].shape
+        seen_shapes["out"] = kwargs["out"].shape
+        seen_shapes["block_tables"] = kwargs["block_tables"].shape
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "_get_trtllm_workspace_buffer",
+        lambda: torch.empty(1, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "flashinfer_xqa_batch_decode_with_kv_cache", mock_xqa
+    )
+
+    query = torch.zeros((4, 1, 16), dtype=torch.bfloat16)
+    output = torch.empty_like(query)
+    result = impl.forward(
+        layer,
+        query,
+        torch.empty_like(query),
+        torch.empty_like(query),
+        torch.zeros((1, 1, 1, 32), dtype=torch.bfloat16),
+        attn_metadata,
+        output,
+    )
+
+    assert result is output
+    assert seen_shapes == {
+        "query": torch.Size([4, 1, 16]),
+        "out": torch.Size([4, 1, 16]),
+        "block_tables": torch.Size([4, 1]),
+    }
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = True
+    qo_indptr = torch.tensor([0, 3, 3, 3], dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=3,
+        num_decode_tokens=6,
+    )
+
+    assert q_len == 3
+    assert q_lens == [3, 0, 0]
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("qo_indptr_values", "num_decode_tokens", "expected_q_len"),
+    [
+        ([0, 3, 3], 3, 3),
+        ([0, 2, 4, 4, 4], 4, 2),
+    ],
+)
+def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets(
+    qo_indptr_values: list[int],
+    num_decode_tokens: int,
+    expected_q_len: int,
+):
+    """Padded speculative decode keeps its actual packed query width."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = False
+    qo_indptr = torch.tensor(qo_indptr_values, dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=len(qo_indptr_values) - 1,
+        num_decode_tokens=num_decode_tokens,
+    )
+
+    assert q_len == expected_q_len
+    assert q_lens is None
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == qo_indptr_values
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    source_sinks = torch.tensor([1.0, 2.0], dtype=dtype)
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl._sinks_source = source_sinks
+    impl.sinks = source_sinks
+
+    impl.process_weights_after_loading(dtype)
+
+    assert impl.sinks is not None
+    sinks_ptr = impl.sinks.data_ptr()
+    assert impl.sinks.dtype == torch.float32
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
+
+    source_sinks.copy_(torch.tensor([3.0, 4.0], dtype=dtype))
+    impl.process_weights_after_loading(dtype)
+
+    assert impl.sinks.data_ptr() == sinks_ptr
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("Native FlashInfer prefill with sinks requires SM90 or SM12x.")
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    if not FlashInferBackend.supports_sink():
+        pytest.skip("FlashInfer attention sinks are not available in this setup.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BATCH_SPECS["small_prefill"],
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+        use_sinks=True,
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_decode_correctness(default_vllm_config):
+    """FlashInfer should route SM90/SM12x decode through XQA and match SDPA."""
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("FlashInfer XQA decode requires SM90 or SM12x.")
+
+    import unittest.mock
+
+    from vllm.utils.flashinfer import can_use_trtllm_attention
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
+        return {
+            "placeholder": PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=0.0,
+                sm_scale=1.0,
+            )
+        }
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    batch_spec = BATCH_SPECS["small_decode"]
+    vllm_config = create_vllm_config(
+        model_name="meta-llama/Meta-Llama-3-8B",
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=16,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        if not can_use_trtllm_attention(
+            vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            ),
+            kv_cache_spec.num_kv_heads,
+            is_prefill=False,
+        ):
+            pytest.skip("FlashInfer XQA decode is not available in this setup.")
+
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            mock_get_per_layer_parameters,
+        ):
+            builder = flashinfer_backend.FlashInferMetadataBuilder(
+                kv_cache_spec, ["placeholder"], vllm_config, device
+            )
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, vllm_config.cache_config.block_size, device
+            )
+            attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_BATCH
+    )
+    wide_head_kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=kv_cache_spec.num_kv_heads,
+        head_size=512,
+        dtype=vllm_config.model_config.dtype,
+    )
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, wide_head_kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+    assert isinstance(
+        attn_metadata.decode,
+        flashinfer_backend.FlashInferTrtllmAPIDecode,
+    )
+    assert attn_metadata.decode.kernel == flashinfer_backend.FlashInferDecodeKernel.XQA
+
+    _test_backend_correctness(
+        batch_spec,
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+    )
 
 
 if current_platform.is_rocm():
@@ -632,6 +1252,14 @@ else:
         "FLEX_ATTENTION_SLOW",
     ]
 
+# Encoder-only FlexAttention always uses the slow builder, so the pseudo-backend
+# would run an identical implementation twice.
+SLIDING_WINDOW_ENCODER_BACKENDS_TO_TEST = [
+    backend
+    for backend in SLIDING_WINDOW_BACKENDS_TO_TEST
+    if backend != "FLEX_ATTENTION_SLOW"
+]
+
 
 @pytest.mark.parametrize(
     "batch_spec_name",
@@ -647,7 +1275,10 @@ else:
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_sliding_window_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -699,6 +1330,45 @@ def test_sliding_window_backend_correctness(
         )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
+    default_vllm_config,
+):
+    """Stale scale tensors must not affect an unquantized KV cache."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+
+    def sliding_window_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+        sliding_window: int,
+    ):
+        causal_mask = q_idx + context_len >= kv_idx
+        window_mask = q_idx + context_len - kv_idx < sliding_window
+        return causal_mask & window_mask
+
+    model = "microsoft/Phi-tiny-MoE-instruct"
+    batch_spec = BATCH_SPECS["small_decode"]
+    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
+    sliding_window = model_config.get_sliding_window()
+    assert sliding_window is not None
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        [AttentionBackendEnum.ROCM_AITER_FA],
+        partial(sliding_window_mask_mod, sliding_window=sliding_window),
+        layer_k_scale=0.25,
+        layer_v_scale=0.5,
+    )
+
+
 @pytest.mark.parametrize(
     "batch_spec_name",
     [
@@ -709,7 +1379,10 @@ def test_sliding_window_backend_correctness(
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_sliding_window_encoder_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -734,8 +1407,80 @@ def test_sliding_window_encoder_backend_correctness(
     _test_backend_correctness(
         batch_spec,
         model,
-        SLIDING_WINDOW_BACKENDS_TO_TEST,
+        SLIDING_WINDOW_ENCODER_BACKENDS_TO_TEST,
         sliding_window_mask_mod_fn,
+        causal=False,
         attn_type=AttentionType.ENCODER_ONLY,
         tensor_parallel_size=tensor_parallel_size,
     )
+
+
+NON_CAUSAL_BACKENDS_TO_TEST = [
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    "FLEX_ATTENTION_SLOW",
+]
+
+if current_platform.is_rocm():
+    NON_CAUSAL_BACKENDS_TO_TEST = [
+        x
+        for x in NON_CAUSAL_BACKENDS_TO_TEST
+        if x is not AttentionBackendEnum.FLASH_ATTN
+    ]
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+    ],
+)
+@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+def test_non_causal_backend_correctness(
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+):
+    """Test backend's correctness with non-causal (bidirectional) decoder
+    attention, as used by DFlash speculative decoding."""
+
+    def bidirectional_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return q_idx >= 0  # Always True
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    LARGE_BLOCK_BACKENDS = (
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
+    )
+
+    SMALL_BLOCK_BACKENDS = [
+        x for x in NON_CAUSAL_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        bidirectional_mask_mod,
+        causal=False,
+    )
+
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            bidirectional_mask_mod,
+            causal=False,
+            block_size=128,
+        )

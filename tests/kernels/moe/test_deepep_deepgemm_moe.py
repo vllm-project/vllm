@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test DeepEP + DeepGEMM integration
+"""Test DeepEP + DeepGEMM integration
 DeepGEMM are gemm kernels specialized for the
 fp8 block-quantized case.
 """
@@ -14,6 +13,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 from typing_extensions import ParamSpec
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -29,6 +29,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -47,10 +48,12 @@ if has_deep_ep():
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),
@@ -82,23 +85,13 @@ def with_dp_metadata(M: int, world_size: int):
         yield
 
 
-def next_power_of_2(x):
-    import math
-
-    if x == 0:
-        return 1
-    return 2 ** math.ceil(math.log2(x))
-
-
 def make_block_quant_fp8_weights(
     e: int,
     n: int,
     k: int,
     block_size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Return weights w1q, w2q, w1_scale, w2_scale
-    """
+    """Return weights w1q, w2q, w1_scale, w2_scale."""
     (_, w1q, w1_scale, _), (_, w2q, w2_scale, _) = make_test_weights(
         e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
     )
@@ -198,7 +191,6 @@ def make_ll_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -231,7 +223,6 @@ def make_ht_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -358,7 +349,6 @@ def triton_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         quant_config=quant_config,
     )
 
@@ -383,7 +373,13 @@ def _test_deepep_deepgemm_moe(
     w1_scale = w1_scale.to(device=device)
     w2_scale = w2_scale.to(device=device)
 
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        pg = torch.distributed.split_group(
+            split_ranks=[list(range(pgi.world_size))],
+            group_desc="deepep_deepgemm_test",
+        )
+    else:
+        pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, pgi.rank)
     block_shape = [w1.size(1) // w1_scale.size(1), w1.size(2) // w1_scale.size(2)]
 
@@ -460,10 +456,7 @@ def test_ht_deepep_deepgemm_moe(
     disable_deepgemm_ue8m0,
     workspace_init,
 ):
-    """
-    Tests for High-Throughput DeepEP + DeepGemm integration.
-    """
-
+    """Tests for High-Throughput DeepEP + DeepGemm integration."""
     m, n, k = mnk
     set_random_seed(7)
 
@@ -534,9 +527,7 @@ def test_ll_deepep_deepgemm_moe(
     disable_deepgemm_ue8m0,
     workspace_init,
 ):
-    """
-    Tests for Low-Latency DeepEP + DeepGemm integration.
-    """
+    """Tests for Low-Latency DeepEP + DeepGemm integration."""
     assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk

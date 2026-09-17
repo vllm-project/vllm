@@ -9,7 +9,9 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.tokenizers.registry import get_tokenizer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 logger = init_logger(__name__)
 
@@ -27,8 +29,33 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=False,
             runner=runner,
         )
-        self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
+
+        self.use_heterogeneous_vocab = self.speculative_config.use_heterogeneous_vocab
+
+        spec = self.speculative_config
+        if self.use_heterogeneous_vocab:
+            # Heterogeneous vocabularies: build a VocabMapping to translate
+            # token IDs between the two tokenizers and constrain draft logits
+            # to the intersection so rejection sampling stays lossless.
+            target_tokenizer = get_tokenizer(
+                spec.target_model_config.tokenizer,
+                trust_remote_code=spec.target_model_config.trust_remote_code,
+            )
+            draft_tokenizer = get_tokenizer(
+                spec.draft_model_config.model,
+                trust_remote_code=spec.draft_model_config.trust_remote_code,
+            )
+            self.vocab_mapping: VocabMapping | None = VocabMapping(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                target_vocab_size=spec.target_model_config.get_vocab_size(),
+                draft_vocab_size=spec.draft_model_config.get_vocab_size(),
+                device=device,
+            )
+        else:
+            self._raise_if_vocab_size_mismatch()
+            self.vocab_mapping = None
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()

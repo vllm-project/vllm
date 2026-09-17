@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
+
 import pytest
 import torch
 
 from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("terratorch") is None,
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
 
 
 @create_new_process_for_each_test()  # Hangs otherwise

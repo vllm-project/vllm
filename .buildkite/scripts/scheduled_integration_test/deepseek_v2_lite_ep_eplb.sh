@@ -10,7 +10,7 @@ mkdir -p "${OUT_DIR}"
 
 wait_for_server() {
   local port=$1
-  timeout 600 bash -c '
+  timeout "${VLLM_ENGINE_READY_TIMEOUT_S:-600}" bash -c '
     until curl -sf "http://127.0.0.1:'"$port"'/health" > /dev/null; do
       sleep 1
     done'
@@ -49,6 +49,7 @@ for BACK in "${BACKENDS[@]}"; do
     --data-parallel-size 2 \
     --enable-expert-parallel \
     --enable-eplb \
+    --eplb-config '{"use_async": false}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --all2all-backend "$BACK" \

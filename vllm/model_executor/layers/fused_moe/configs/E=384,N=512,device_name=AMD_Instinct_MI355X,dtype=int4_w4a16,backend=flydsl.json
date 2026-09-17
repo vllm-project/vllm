@@ -1,0 +1,114 @@
+{
+    "1": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 512,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "2": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 512,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "4": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 512,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "8": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "16": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "24": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "32": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "48": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "64": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "128": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "256": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 256,
+        "tile_k2": 128
+    },
+    "512": {
+        "tile_m": 16,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 128,
+        "tile_k2": 128
+    },
+    "1024": {
+        "tile_m": 32,
+        "tile_n": 64,
+        "tile_k": 128,
+        "tile_n2": 128,
+        "tile_k2": 64
+    },
+    "2048": {
+        "tile_m": 64,
+        "tile_n": 64,
+        "tile_k": 64,
+        "tile_n2": 128,
+        "tile_k2": 64
+    },
+    "4096": {
+        "tile_m": 32,
+        "tile_n": 64,
+        "tile_k": 64,
+        "tile_n2": 128,
+        "tile_k2": 64
+    },
+    "8192": {
+        "tile_m": 64,
+        "tile_n": 64,
+        "tile_k": 64,
+        "tile_n2": 128,
+        "tile_k2": 128
+    }
+}

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 import weakref
 
 import pytest
@@ -8,8 +7,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -20,30 +17,21 @@ embedding_size = 384
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        assert embedding_size == runner.llm.model_config.embedding_size
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup
@@ -75,16 +63,6 @@ def test_list_prompts(llm: LLM):
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_embed(llm: LLM, caplog_vllm):
-    with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
-        outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
-        assert "deprecated" in caplog_vllm.text
-
-    multi_vector = outputs[0].outputs.data
-    assert multi_vector.shape == (11, 384)
-
-
-@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
@@ -107,8 +85,15 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize("task", ["token_classify", "classify"])
+@pytest.mark.parametrize(
+    "task", ["token_classify", "classify", "token_embed", "plugin"]
+)
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = "Classification API is not supported by this model.+"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via.+"
+    else:
+        err_msg = "Classification API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

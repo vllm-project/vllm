@@ -15,7 +15,7 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
-    use_async: bool = False,
+    use_async: bool = True,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
@@ -28,9 +28,8 @@ def get_model_args(
         "window_size": 128,
         "step_interval": 1024,
         "log_balancedness": False,
+        "use_async": use_async,
     }
-    if use_async:
-        eplb_config["use_async"] = True
     model_args = {
         "pretrained": model_name,
         "dtype": "auto",
@@ -76,8 +75,7 @@ def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
     model_setup: tuple[str, str, str, int, float],
 ):
-    """
-    Test the correctness of EPLB speculative decoding with GSM8K dataset.
+    """Test the correctness of EPLB speculative decoding with GSM8K dataset.
     Applicable to MoE models with mtp or eagle spec decode.
     """
     method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
@@ -110,10 +108,7 @@ def test_eplb_spec_decode(
 
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
-    """
-    Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
-    """
-
+    """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next."""
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03

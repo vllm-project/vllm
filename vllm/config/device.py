@@ -28,8 +28,7 @@ class DeviceConfig:
     `__post_init__`."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -65,8 +64,13 @@ class DeviceConfig:
             elif isinstance(self.device, torch.device):
                 self.device_type = self.device.type
 
-        # Some device types require processing inputs on CPU
-        if self.device_type in ["tpu"]:
+        # Some platforms require processing inputs on CPU.
+        from vllm.platforms import current_platform
+
+        if (
+            current_platform.uses_host_device_handling()
+            and self.device_type == current_platform.device_type
+        ):
             self.device = None
         else:
             # Set device with device type

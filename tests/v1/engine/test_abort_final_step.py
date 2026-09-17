@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Test for the fix in PR #29987: Eagerly abort cancelled final-step requests.
+"""Test for the fix in PR #29987: Eagerly abort cancelled final-step requests.
 
 This test verifies that when a request is aborted during its final execution
 step (when it would naturally complete), it is properly marked as aborted
@@ -52,8 +51,7 @@ class DummyKVConnectorMetadata(KVConnectorMetadata):
 
 
 class DummyKVConnector(KVConnectorBase_V1):
-    """
-    Dummy KV connector that captures request finish statuses to a file.
+    """Dummy KV connector that captures request finish statuses to a file.
     This is used to verify the fix - without the fix, a request aborted
     during its final step would be captured as FINISHED_LENGTH_CAPPED
     instead of FINISHED_ABORTED.
@@ -66,7 +64,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         # Get the status file path from extra config
@@ -144,8 +142,7 @@ KVConnectorFactory.register_connector(
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.asyncio
 async def test_abort_during_final_step(async_scheduling: bool):
-    """
-    Test that a request aborted during its final execution step is treated as
+    """Test that a request aborted during its final execution step is treated as
     aborted rather than completed.
 
     This test:
@@ -165,7 +162,6 @@ async def test_abort_during_final_step(async_scheduling: bool):
     With the fix, _process_aborts_queue() runs before update_from_output(), so the
     abort takes precedence and the KV connector sees FINISHED_ABORTED.
     """
-
     # Create three temporary files:
     # 1. ready_file: deleted by execute_model to signal it has started
     # 2. block_file: execute_model waits for this to be deleted
@@ -184,14 +180,31 @@ async def test_abort_during_final_step(async_scheduling: bool):
         original_execute_model = Worker.execute_model
 
         def execute_model_with_wait(self, scheduler_output):
-            # Signal that execute_model has been called by deleting ready_file
-            if ready_file.exists():
-                ready_file.unlink()
+            # V2's `gpu_worker.compile_or_warm_up_model` calls
+            # `warmup_kernels(...)` during engine init, which itself calls
+            # `Worker.execute_model` three times (prefill / decode / cleanup)
+            # to JIT compile triton kernels. None of those carry the test's
+            # request id, so we only stall when our actual request is being
+            # processed.
+            scheduled = scheduler_output.num_scheduled_tokens or {}
+            finished = scheduler_output.finished_req_ids or set()
 
-            # Wait for the block file to be deleted (triggered from test after abort)
-            # This runs in the worker process (after fork), so we poll the filesystem
-            while block_file.exists():
-                time.sleep(0.01)
+            def is_target_request(req_ids):
+                return any(
+                    rid == request_id or rid.startswith(f"{request_id}-")
+                    for rid in req_ids
+                )
+
+            if is_target_request(scheduled) or is_target_request(finished):
+                # Signal that execute_model has been called by deleting ready_file
+                if ready_file.exists():
+                    ready_file.unlink()
+
+                # Wait for the block file to be deleted (triggered from test after
+                # abort). This runs in the worker process (after fork), so we poll
+                # the filesystem.
+                while block_file.exists():
+                    time.sleep(0.01)
             return original_execute_model(self, scheduler_output)
 
         # Patch execute_model to inject the wait

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import hashlib
-import multiprocessing
 import os
 import pickle
 import tempfile
@@ -15,7 +13,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
-import vllm.model_executor.layers.activation
+import vllm.kernels  # noqa: F401 to register kernels
+from vllm import ir
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
@@ -31,6 +30,9 @@ from vllm.config import (
 )
 from vllm.envs import disable_envs_cache
 from vllm.forward_context import set_forward_context
+from vllm.ir import ops
+from vllm.model_executor.layers.activation import GeluAndMulSparse
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
@@ -46,7 +48,7 @@ def vllm_tmp_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def reference_fn(x: torch.Tensor):
     assert x.shape[0] <= 42
     assert x.shape[0] % 2 == 0
-    for _ in range(3000):
+    for _ in range(30):
         x = x + x.shape[0]
     return x
 
@@ -55,7 +57,7 @@ def reference_fn_tuple(x: torch.Tensor):
     """Reference function that returns a tuple of tensors."""
     assert x.shape[0] <= 42
     assert x.shape[0] % 2 == 0
-    for _ in range(3000):
+    for _ in range(30):
         x = x + x.shape[0]
     return x, x * 2
 
@@ -78,6 +80,18 @@ class CompiledModTuple(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return reference_fn_tuple(x)
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0})
+class SparseActivationAotModel(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.up_proj = torch.nn.Linear(32, 256, bias=False)
+        self.activation = GeluAndMulSparse(0.95, "tanh")
+        self.down_proj = torch.nn.Linear(128, 16, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        return self.down_proj(self.activation(self.up_proj(x)))
 
 
 def make_vllm_config() -> VllmConfig:
@@ -143,22 +157,87 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             m.setenv("VLLM_USE_AOT_COMPILE", "1")
             m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
             m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+            disable_envs_cache()
             vllm_config = make_vllm_config()
-            with use_vllm_config(vllm_config):
+            with (
+                use_vllm_config(vllm_config),
+                compilation_counter.expect(
+                    num_aot_compiles=1,
+                    num_aot_artifacts_saved=1,
+                    num_aot_artifacts_loaded=0,
+                ),
+            ):
                 compiled_mod = CompiledMod(vllm_config=vllm_config)
                 expected = compiled_mod(*args)
+            assert isinstance(expected, torch.Tensor)
 
             disable_envs_cache()
 
             m.setenv("VLLM_FORCE_AOT_LOAD", "1")
             vllm_config = make_vllm_config()
-            with use_vllm_config(vllm_config):
+            with (
+                use_vllm_config(vllm_config),
+                compilation_counter.expect(
+                    num_aot_compiles=0,
+                    num_aot_artifacts_saved=0,
+                    num_aot_artifacts_loaded=1,
+                ),
+            ):
                 cached_mod = CompiledMod(vllm_config=vllm_config)
                 ret = cached_mod(*args)
+            assert isinstance(ret, torch.Tensor)
             assert cached_mod.was_aot_compile_fn_loaded_from_disk, (
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not is_torch_equal_or_newer("2.10.0"),
+    reason="requires CUDA and torch 2.10",
+)
+def test_sparse_activation_standalone_aot_preserves_dependencies(
+    monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
+):
+    def native_reference(model: SparseActivationAotModel, x: torch.Tensor):
+        projected = torch.nn.functional.linear(x, model.up_proj.weight)
+        activated = ops.gelu_and_mul_sparse.impls["native"].impl_fn(
+            projected, model.activation.std_multiplier, "tanh"
+        )
+        return torch.nn.functional.linear(activated, model.down_proj.weight)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+        m.setenv("VLLM_CACHE_ROOT", str(vllm_tmp_cache / "vllm_cache"))
+
+        vllm_config = make_vllm_config()
+        torch.manual_seed(0)
+        inputs = [
+            torch.randn(4, 32, device="cuda", dtype=torch.bfloat16),
+            torch.randn(7, 32, device="cuda", dtype=torch.bfloat16),
+        ]
+
+        with (
+            use_vllm_config(vllm_config),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            ir.enable_torch_wrap(True),
+        ):
+            compiled = SparseActivationAotModel(vllm_config=vllm_config).to(
+                device="cuda", dtype=torch.bfloat16
+            )
+            compiled.requires_grad_(False)
+            expected = [native_reference(compiled, x) for x in inputs]
+            actual = [compiled(x) for x in inputs]
+
+        for result, reference in zip(actual, expected):
+            assert torch.isfinite(result).all()
+            torch.testing.assert_close(
+                result,
+                reference,
+                **ops.gelu_and_mul_sparse.get_tolerance(result.dtype),
+            )
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -186,70 +265,10 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
-def test_cache_load_returns_tuple_consistency(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that cache loading correctly handles the returns_tuple logic.
-
-    This verifies that when a model returns a single tensor (not a tuple),
-    the output type is consistent between fresh compilation and cache load.
-    Without the fix, cached artifacts would return [tensor] instead of tensor.
-    """
-    with monkeypatch.context() as m:
-        args = (torch.randn(10, 10),)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            m.setenv("VLLM_CACHE_ROOT", tmpdirname)
-            m.setenv("VLLM_USE_AOT_COMPILE", "1")
-            m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
-            m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
-            vllm_config = make_vllm_config()
-
-            # Fresh compilation
-            with use_vllm_config(vllm_config):
-                compiled_mod = CompiledMod(vllm_config=vllm_config)
-                fresh_result = compiled_mod(*args)
-                fresh_result_type = type(fresh_result)
-
-            # Verify fresh result is a tensor, not a tuple/list
-            assert isinstance(fresh_result, torch.Tensor), (
-                f"Fresh compile should return tensor, got {fresh_result_type}"
-            )
-
-            disable_envs_cache()
-
-            # Load from cache
-            m.setenv("VLLM_FORCE_AOT_LOAD", "1")
-            vllm_config = make_vllm_config()
-            with use_vllm_config(vllm_config):
-                cached_mod = CompiledMod(vllm_config=vllm_config)
-                cached_result = cached_mod(*args)
-                cached_result_type = type(cached_result)
-
-            # Verify cache was actually loaded
-            assert cached_mod.was_aot_compile_fn_loaded_from_disk, (
-                "Expected was_aot_compile_fn_loaded_from_disk to be True after "
-                "loading from cache"
-            )
-
-            # Verify cached result has same type as fresh result
-            assert isinstance(cached_result, torch.Tensor), (
-                f"Cache load should return tensor, got {cached_result_type}. "
-                "This indicates the returns_tuple logic is not being applied "
-                "correctly when loading from cache."
-            )
-
-            # Verify values match
-            assert torch.allclose(cached_result, fresh_result), (
-                "Cached result values should match fresh compilation"
-            )
-
-
-@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_cache_load_returns_tuple_consistency_tuple_output(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that cache loading correctly handles models that return tuples.
+    """Test that cache loading correctly handles models that return tuples.
 
     This verifies that when a model returns a tuple of tensors, the output
     type is preserved as a tuple between fresh compilation and cache load.
@@ -315,8 +334,7 @@ def test_cache_load_returns_tuple_consistency_tuple_output(
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_shape_env(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that the shape environment is correctly serialized and preserved
+    """Test that the shape environment is correctly serialized and preserved
     when loading from cache.
     """
     with monkeypatch.context() as m:
@@ -354,8 +372,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
 ):
-    """
-    Test that partition wrappers are applied when loading AOT cached functions.
+    """Test that partition wrappers are applied when loading AOT cached functions.
 
     This test verifies the fix for GitHub issue #31439 where AOT compile
     caused 2x latency regression when use_inductor_graph_partition=True.
@@ -468,72 +485,66 @@ def test_standalone_compile_correctness():
         common_args,
         common_args,
         env1={"VLLM_USE_STANDALONE_COMPILE": "1"},
-        env2={"VLLM_USE_STANDALONE_COMPILE": "0"},
+        env2={
+            "VLLM_USE_STANDALONE_COMPILE": "0",
+            "VLLM_USE_MEGA_AOT_ARTIFACT": "0",
+        },
     )
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that compiling gpt2 twice results in a cache hit and
-    capture torch dynamic symbol creations to ensure make_symbol
-    not called on cache hit.
-    """
+    """Test that compiling gpt2 twice results in a cache hit.
 
-    import torch.fx.experimental.symbolic_shapes as symbolic_shapes_module
-    from torch.utils._sympy.symbol import make_symbol
-
+    Counter values are read from the EngineCore subprocess via
+    ``LLM.collective_rpc`` so the test works under default V1
+    multiprocessing (no shared memory between test and engine).
+    """
     from vllm import LLM
 
-    create_symbol_counter = multiprocessing.Value("i", 0)
-    original_make_symbol = make_symbol
+    def _snap(self):
+        from vllm.compilation.counter import compilation_counter
 
-    @functools.wraps(original_make_symbol)
-    def counting_make_symbol(prefix, idx, **kwargs):
-        with create_symbol_counter.get_lock():
-            create_symbol_counter.value += 1
-        return original_make_symbol(prefix, idx, **kwargs)
+        return (
+            compilation_counter.num_aot_compiles,
+            compilation_counter.num_aot_artifacts_saved,
+            compilation_counter.num_aot_artifacts_loaded,
+        )
 
-    symbolic_shapes_module.make_symbol = counting_make_symbol
-    try:
-        with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
-            m.setenv("VLLM_CACHE_ROOT", tmpdirname)
-            m.setenv("VLLM_USE_AOT_COMPILE", "1")
-            # First compilation - initialize model and generate
-            llm_model = LLM(
-                model="gpt2",
-                compilation_config=CompilationConfig(
-                    mode=CompilationMode.VLLM_COMPILE,
-                ),
-                max_model_len=256,
-            )
+    # collective_rpc(callable) requires pickle-based serialization.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-            llm_model.generate("Hello, my name is")
-            assert create_symbol_counter.value == 2
-            create_symbol_counter.value = 0
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
+        m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        # First compilation - initialize model and generate
+        llm_model = LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+            ),
+            max_model_len=256,
+        )
 
-            # Clean up first model
-            del llm_model
-            disable_envs_cache()
-            vllm.model_executor.layers.activation._ACTIVATION_REGISTRY._dict.clear()
+        llm_model.generate("Hello, my name is")
+        assert llm_model.collective_rpc(_snap)[0] == (1, 1, 0)
 
-            # Second compilation - should hit cache
-            m.setenv("VLLM_FORCE_AOT_LOAD", "1")
-            llm_model = LLM(
-                model="gpt2",
-                compilation_config=CompilationConfig(
-                    mode=CompilationMode.VLLM_COMPILE,
-                ),
-                max_model_len=256,
-            )
-            llm_model.generate("Hello, my name is")
+        # Clean up first model
+        del llm_model
+        disable_envs_cache()
 
-            assert create_symbol_counter.value == 0
-
-    finally:
-        # Restore original method
-        symbolic_shapes_module.make_symbol = original_make_symbol
+        # Second compilation - should hit cache
+        m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+        llm_model = LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+            ),
+            max_model_len=256,
+        )
+        llm_model.generate("Hello, my name is")
+        assert llm_model.collective_rpc(_snap)[0] == (0, 0, 1)
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -625,7 +636,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_success(self, mock_deserialize):
-        """Test successful loading of all artifacts"""
+        """Test successful loading of all artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact1 = Mock()
@@ -642,7 +653,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_already_loaded(self, mock_deserialize):
-        """Test that load_all skips if already loaded"""
+        """Test that load_all skips if already loaded."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -655,7 +666,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_get_loaded_artifact(self, mock_deserialize):
-        """Test retrieving loaded artifacts"""
+        """Test retrieving loaded artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -879,41 +890,3 @@ def test_disable_compile_cache_skips_aot_load(
         mod(*args)
 
     assert not mod.was_aot_compile_fn_loaded_from_disk
-
-
-@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
-def test_aot_counters_on_save_and_load(
-    monkeypatch: pytest.MonkeyPatch, fresh_vllm_cache: str
-):
-    """Verify AOT counters are incremented correctly on save and load."""
-    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
-    disable_envs_cache()
-
-    args = (torch.randn(10, 10),)
-
-    # Phase 1: fresh compile + save
-    vllm_config = make_vllm_config()
-    with (
-        use_vllm_config(vllm_config),
-        compilation_counter.expect(
-            num_aot_compiles=1,
-            num_aot_artifacts_saved=1,
-            num_aot_artifacts_loaded=0,
-        ),
-    ):
-        CompiledMod(vllm_config=vllm_config)(*args)
-
-    # Phase 2: load from cache
-    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "1")
-    disable_envs_cache()
-
-    vllm_config = make_vllm_config()
-    with (
-        use_vllm_config(vllm_config),
-        compilation_counter.expect(
-            num_aot_compiles=0,
-            num_aot_artifacts_saved=0,
-            num_aot_artifacts_loaded=1,
-        ),
-    ):
-        CompiledMod(vllm_config=vllm_config)(*args)

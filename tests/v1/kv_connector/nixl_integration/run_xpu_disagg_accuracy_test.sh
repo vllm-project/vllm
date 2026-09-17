@@ -21,30 +21,32 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-"xpu"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 
-generate_affinity_mask() {
-  local count=$1
-  local start=${2:-0}
-  local mask=""
-  local i
-
-  for ((i=0; i<count; i++)); do
-    local device=$((start + i))
-    if [[ -z "${mask}" ]]; then
-      mask="${device}"
-    else
-      mask="${mask},${device}"
-    fi
+# Parse available devices from ZE_AFFINITY_MASK (e.g. "2,3") or default to "0,1,...".
+# compute_gpu_id indexes into this list to assign devices per-instance.
+if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
+  IFS=',' read -r -a AVAILABLE_DEVICES <<< "${ZE_AFFINITY_MASK}"
+else
+  # Default: devices 0 .. (PREFILLER_TP_SIZE + DECODER_TP_SIZE - 1)
+  AVAILABLE_DEVICES=()
+  for ((i=0; i<PREFILLER_TP_SIZE + DECODER_TP_SIZE; i++)); do
+    AVAILABLE_DEVICES+=("$i")
   done
+fi
 
-  echo "${mask}"
+compute_gpu_id() {
+  local start=$1
+  local tp_size=$2
+  local gpu_id="${AVAILABLE_DEVICES[$start]}"
+  for (( j=1; j<tp_size; j++ )); do
+    gpu_id="${gpu_id},${AVAILABLE_DEVICES[$((start + j))]}"
+  done
+  echo "${gpu_id}"
 }
-
-PREFILLER_ZE_AFFINITY_MASK=${PREFILLER_ZE_AFFINITY_MASK:-$(generate_affinity_mask "${PREFILLER_TP_SIZE}" 0)}
-DECODER_ZE_AFFINITY_MASK=${DECODER_ZE_AFFINITY_MASK:-$(generate_affinity_mask "${DECODER_TP_SIZE}" "${PREFILLER_TP_SIZE}")}
 
 
 # execution env
-GIT_ROOT=$(git rev-parse --show-toplevel)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 EXP_ROOT="${GIT_ROOT}/tests/v1/kv_connector/nixl_integration"
 
 OUTPUT_FILE=${OUTPUT_FILE:-"${EXP_ROOT}/.xpu_accuracy_test_outputs.txt"}
@@ -68,8 +70,11 @@ wait_for_server() {
 }
 
 launch_baseline() {
+  local BASELINE_GPU_ID
+  BASELINE_GPU_ID=$(compute_gpu_id 0 1)
+
   BASELINE_BASE_CMD="
-  ZE_AFFINITY_MASK=0 \
+  ZE_AFFINITY_MASK=$BASELINE_GPU_ID \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
       --host ${BASELINE_HOST} \
@@ -81,59 +86,61 @@ launch_baseline() {
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --dtype float16 \
       --enforce-eager"
-  echo ${BASELINE_BASE_CMD}      
+  echo "${BASELINE_BASE_CMD}"
   bash -c "${BASELINE_BASE_CMD}" &
   sleep 10
-  wait_for_server ${BASELINE_HOST} ${BASELINE_PORT}
+  wait_for_server "${BASELINE_HOST}" "${BASELINE_PORT}"
 }
 
 launch_pd() {
-  PREFILL_BASE_CMD="
-  ZE_AFFINITY_MASK=${PREFILLER_ZE_AFFINITY_MASK} \
-  VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
-  VLLM_NIXL_SIDE_CHANNEL_HOST=${PREFILL_HOST} \
-  VLLM_NIXL_SIDE_CHANNEL_PORT=${PREFILL_NIXL_SIDE_PORT} \
-  VLLM_WORKER_MULTIPROC_METHOD=spawn \
-  VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
-      --host ${PREFILL_HOST} \
-      --port ${PREFILL_PORT} \
-      --max-model-len ${MAX_MODEL_LEN}\
-      --seed 42 \
-      --block-size ${BLOCK_SIZE} \
-      --enforce-eager \
-      --dtype float16 \
-      -tp ${PREFILLER_TP_SIZE} \
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}'"
+  local PREFILL_GPU_ID
+  PREFILL_GPU_ID=$(compute_gpu_id 0 "${PREFILLER_TP_SIZE}")
+  local DECODE_GPU_ID
+  DECODE_GPU_ID=$(compute_gpu_id "${PREFILLER_TP_SIZE}" "${DECODER_TP_SIZE}")
+  local kv_config="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"}"
 
-
-  DECODE_BASE_CMD="
-  ZE_AFFINITY_MASK=${DECODER_ZE_AFFINITY_MASK} \
-  VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
-  VLLM_WORKER_MULTIPROC_METHOD=spawn \
-  VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
-      --host ${DECODE_HOST} \
-      --port ${DECODE_PORT} \
-      --max-model-len ${MAX_MODEL_LEN}\
-      --seed 42 \
-      --block-size ${BLOCK_SIZE} \
-      --enforce-eager \
-      -tp ${DECODER_TP_SIZE} \
-      --dtype float16 \
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}'"
-
-  echo ${PREFILL_BASE_CMD}
-  echo ${DECODE_BASE_CMD}
   sleep 2
 
-  # execute on hosts
-  bash -c "${PREFILL_BASE_CMD}" &
-  bash -c "${DECODE_BASE_CMD}" &
+  echo "Starting prefill on GPU ${PREFILL_GPU_ID}, port ${PREFILL_PORT}"
+  ZE_AFFINITY_MASK="${PREFILL_GPU_ID}" \
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=200 \
+  VLLM_NIXL_SIDE_CHANNEL_HOST="${PREFILL_HOST}" \
+  VLLM_NIXL_SIDE_CHANNEL_PORT="${PREFILL_NIXL_SIDE_PORT}" \
+  VLLM_WORKER_MULTIPROC_METHOD=spawn \
+  VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+  vllm serve "$MODEL_NAME" \
+    --host "${PREFILL_HOST}" \
+    --port "${PREFILL_PORT}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --seed 42 \
+    --block-size "${BLOCK_SIZE}" \
+    --enforce-eager \
+    --dtype float16 \
+    -tp "${PREFILLER_TP_SIZE}" \
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+    --kv-transfer-config "${kv_config}" &
+
+  echo "Starting decode on GPU ${DECODE_GPU_ID}, port ${DECODE_PORT}"
+  ZE_AFFINITY_MASK="${DECODE_GPU_ID}" \
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=200 \
+  VLLM_WORKER_MULTIPROC_METHOD=spawn \
+  VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+  vllm serve "$MODEL_NAME" \
+    --host "${DECODE_HOST}" \
+    --port "${DECODE_PORT}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --seed 42 \
+    --block-size "${BLOCK_SIZE}" \
+    --enforce-eager \
+    -tp "${DECODER_TP_SIZE}" \
+    --dtype float16 \
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+    --kv-transfer-config "${kv_config}" &
+
   sleep 1
-  wait_for_server ${PREFILL_HOST} ${PREFILL_PORT}
+  wait_for_server "${PREFILL_HOST}" "${PREFILL_PORT}"
   sleep 1
-  wait_for_server ${DECODE_HOST} ${DECODE_PORT}
+  wait_for_server "${DECODE_HOST}" "${DECODE_PORT}"
   sleep 1
 }
 
@@ -143,7 +150,7 @@ launch_pd_proxy(){
   --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
   --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
   --host=${PROXY_HOST} --port ${PROXY_PORT}"
-  echo ${PROXY_BASE_CMD} 
+  echo "${PROXY_BASE_CMD}"
   bash -c "${PROXY_BASE_CMD}" &
   sleep 2
 }
@@ -151,7 +158,7 @@ launch_pd_proxy(){
 run_tests(){
   local service_url=$1
   local mode=$2
-  python3 ${EXP_ROOT}/test_disagg_accuracy.py --service_url=${service_url} --model_name=${MODEL_NAME} --mode=${mode} --file_name=${OUTPUT_FILE}
+  python3 "${EXP_ROOT}/test_disagg_accuracy.py" --service_url="${service_url}" --model_name="${MODEL_NAME}" --mode="${mode}" --file_name="${OUTPUT_FILE}"
 }
 
 
@@ -168,7 +175,7 @@ launch_pd_proxy
 run_tests "http://${PROXY_HOST}:${PROXY_PORT}" "disagg"
 echo "-----P/D success----"
 
-rm ${OUTPUT_FILE}
+rm "${OUTPUT_FILE}"
 cleanup
 
 exit 0

@@ -5,11 +5,20 @@
 Run `pytest tests/samplers/test_beam_search.py`.
 """
 
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import jsonschema
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
+from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.llm import LLM
+from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 
 # Extra engine kwargs needed for numerically deterministic beam search.
 # On ROCm, floating-point reductions in attention and GEMM kernels are
@@ -40,12 +49,92 @@ MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
+@pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
+@pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
+def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
+    monkeypatch,
+    abort_after: int,
+    prompt_token: int,
+    terminal_logprobs: SampleLogprobs | None,
+) -> None:
+    """Return tokens and scores from the last completed step for aborted prompts.
+
+    Other prompts in the batch continue generating.
+    """
+
+    def run_requests(prompts, **kwargs):
+        results = []
+        for prompt in prompts:
+            tokens = prompt["prompt_token_ids"]
+            if tokens[0] == prompt_token:
+                assert len(tokens) <= abort_after + 1, "Continued after abort"
+            aborted = (
+                tokens[0] == prompt_token
+                and len(tokens) == abort_after + 1
+                and tokens[-1] != 12
+            )
+            results.append(
+                RequestOutput(
+                    request_id="inner",
+                    prompt=None,
+                    prompt_token_ids=tokens,
+                    prompt_logprobs=None,
+                    finished=True,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[] if aborted else [11],
+                            cumulative_logprob=None,
+                            logprobs=terminal_logprobs
+                            if aborted
+                            else [{11: Logprob(-0.1), 12: Logprob(-0.2)}],
+                            finish_reason="abort" if aborted else "length",
+                        )
+                    ],
+                )
+            )
+        return results
+
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    tokenizer = SimpleNamespace(
+        eos_token_id=0,
+        decode=lambda tokens, skip_special_tokens=False: " ".join(
+            str(token) for token in tokens if not skip_special_tokens or token != 0
+        ),
+    )
+    llm.renderer = Mock(get_tokenizer=Mock(return_value=tokenizer))
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    prompts = [
+        {"type": "token", "prompt_token_ids": [token]} for token in [prompt_token, 2]
+    ]
+    params = BeamSearchParams(beam_width=2, max_tokens=3)
+    outputs = llm.beam_search(prompts, params)
+
+    aborted, normal = outputs
+    expected_tokens = (
+        [[prompt_token, 11], [prompt_token, 12]] if abort_after else [[prompt_token]]
+    )
+    assert [beam.tokens for beam in aborted.sequences] == expected_tokens
+    for beam in aborted.sequences:
+        assert beam.finish_reason == "abort"
+        assert beam.text == tokenizer.decode(
+            beam.tokens, skip_special_tokens=params.skip_special_tokens
+        )
+        assert len(beam.logprobs) == abort_after
+    assert aborted.sequences[0].cum_logprob == pytest.approx(-0.1 * abort_after)
+    assert len(normal.sequences) == 2
+    assert all(len(beam.tokens) == 4 for beam in normal.sequences)
+    assert all(beam.finish_reason != "abort" for beam in normal.sequences)
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
 @pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
 def test_beam_search_single_input(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -54,9 +143,6 @@ def test_beam_search_single_input(
     max_tokens: int,
     beam_width: int,
 ) -> None:
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
-
     example_prompts = example_prompts[:1]
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_beam_search(
@@ -90,7 +176,6 @@ def test_beam_search_single_input(
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
 @pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
 def test_beam_search_with_concurrency_limit(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -99,9 +184,6 @@ def test_beam_search_with_concurrency_limit(
     max_tokens: int,
     beam_width: int,
 ) -> None:
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
-
     # example_prompts[1]&[3]&[7] fails due to unknown reason even without
     # concurrency limit. skip them for now.
     example_prompts = example_prompts[:8]
@@ -151,7 +233,6 @@ def test_beam_search_with_concurrency_limit(
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
 @pytest.mark.parametrize("beam_width", MM_BEAM_WIDTHS)
 def test_beam_search_passes_multimodal_data(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     dtype: str,
@@ -159,9 +240,6 @@ def test_beam_search_passes_multimodal_data(
     beam_width: int,
 ) -> None:
     """Ensure that beam search passes multimodal data through correctly."""
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
-
     # NOTE - this test is primarily to check that mm data is passed to beams
     # correctly. As such, we just need to check one extra modality to make
     # sure things pass through properly.
@@ -223,3 +301,61 @@ def test_beam_search_passes_multimodal_data(
 
 # NOTE: encoder/decoder tests are currently located under
 # tests/models/multimodal/generation/test_whisper.py
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_structured_output(
+    model: str,
+    dtype: str,
+    beam_width: int,
+) -> None:
+    """Ensure beam search with structured output produces valid JSON."""
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        },
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            disable_any_whitespace=True,
+        ),
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    )
+
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=64,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompts = [
+        "Generate a JSON object for a person with name and age:",
+    ]
+
+    outputs = llm.beam_search(prompts, params)
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert len(output.sequences) > 0
+        for seq in output.sequences:
+            assert seq.text is not None
+            print(f"Full text: {seq.text!r}")
+            # seq.text includes the prompt, extract generated JSON.
+            gen_start = seq.text.find("{")
+            assert gen_start != -1, f"No JSON found in output: {seq.text!r}"
+            generated = seq.text[gen_start:]
+            generated = generated.replace("</s>", "").strip()
+            print(f"Generated JSON: {generated!r}")
+            parsed = json.loads(generated)
+            jsonschema.validate(instance=parsed, schema=json_schema)

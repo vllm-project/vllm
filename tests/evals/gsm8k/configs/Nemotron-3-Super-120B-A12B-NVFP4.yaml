@@ -8,4 +8,5 @@ server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2
   --enable-expert-parallel
+  --mamba-backend flashinfer
   --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

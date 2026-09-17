@@ -35,14 +35,13 @@ Traces can be visualized using <https://ui.perfetto.dev/>.
 
 !!! tip
     To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
-    Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the server. Say something like 30 minutes.
-    `export VLLM_RPC_TIMEOUT=1800000`
+    The engine client waits for this flush to complete without timing out, so simply allow the stop call to run to completion.
 
 ### Example commands and usage
 
 #### Offline Inference
 
-Refer to [examples/offline_inference/simple_profiling.py](../../examples/offline_inference/simple_profiling.py) for an example.
+Refer to [examples/features/profiling/simple_profiling_offline.py](../../examples/features/profiling/simple_profiling_offline.py) for an example.
 
 #### OpenAI Server
 
@@ -84,6 +83,88 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 # After need call /stop_profile api to stop profile.
 $ curl -X POST http://localhost:8000/stop_profile
 ```
+
+## Profile with Triton Proton
+
+[Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)
+is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
+Chrome trace and works through the same vLLM profiling controls as the PyTorch
+and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
+supports CUDA graph attribution.
+
+Start a server with a local output directory and graph attribution:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{
+        "profiler": "proton",
+        "proton_profiler_dir": "./proton_profile",
+        "proton_output_format": "hatchet",
+        "proton_hook": "triton",
+        "proton_graph_attribution": true
+    }'
+```
+
+Then use `/start_profile` and `/stop_profile` as shown above, or pass
+`--profile` to a vLLM benchmark. Each worker uses a topology- and
+rank-qualified output name, such as
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
+so distributed workers, restarted servers, and repeated profiling runs do not
+overwrite one another. A `profile_prefix` is included when supplied. Each
+profile is written by `/stop_profile` and is ready to inspect immediately.
+
+The Proton-specific options are:
+
+- `proton_context`: `shadow` (default) or `python`
+- `proton_data`: `tree` (default) or `trace`
+- `proton_backend`: `cupti` or automatic
+- `proton_mode`: an optional backend mode string
+- `proton_hook`: `triton` to record Triton launch metadata, or unset
+- `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
+- `proton_graph_attribution`: observe CUDA graph capture for replay attribution;
+  disabled by default and requires `proton_data: "tree"`
+
+`hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
+`chrome_trace` requires `proton_data: "trace"`.
+
+Automatic backend selection is recommended. vLLM currently supports Proton's
+`cupti` backend on NVIDIA GPUs. ROCm support is not yet available. vLLM does not
+expose Proton's experimental instrumentation backend because current upstream
+can produce profiles without timing metrics. When `proton_graph_attribution` is
+enabled, Proton observes vLLM's CUDA graph capture with the configured profiling
+session active, then deactivates that same session until profiling starts. This
+lets later profiles attribute replayed kernels without retaining model-startup
+activity. Backend-specific modes can be selected with `proton_mode`;
+`pcsampling` synchronizes the CUDA context and therefore requires
+`--enforce-eager`. When CUDA graphs are enabled (including encoder graphs),
+Proton requires `proton_graph_attribution: true` to collect replayed kernels.
+For Chrome traces, disable CUDA graphs with `--enforce-eager`.
+
+CUDA graph-attributed profiles support repeated `start_profile`/`stop_profile`
+runs. Each stop flushes and writes one tree-data phase while preserving the
+graph-aware session. Without `proton_graph_attribution`, each `stop_profile`
+instead finalizes and writes an independent Proton session.
+
+CUDA graph attribution requires Triton 3.7 or newer. It uses the phase data API
+to discard graph-capture activity and separate profiling runs. The `hatchet_msgpack`
+output format and `periodic_flushing` mode also require Triton 3.7 or newer.
+`periodic_flushing` cannot be combined with graph attribution because both
+manage the session's data phases. Ordinary Proton profiling remains available
+with Triton 3.6.
+
+Graph attribution retains capture metadata for the worker lifetime. With eager
+execution or no graphs to capture, profiling uses ordinary independent sessions.
+
+Inspect tree profiles with:
+
+```bash
+proton-viewer -m time/ns \
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet
+```
+
+Chrome traces (`proton_data: "trace"`) can be opened in
+<https://ui.perfetto.dev/>. Proton is imported lazily, so selecting another
+profiler does not require a Proton-capable Triton installation.
 
 ## Profile with NVIDIA Nsight Systems
 
@@ -201,43 +282,45 @@ The profiling traces generated by the continuous profiling workflow are publicly
 
 The Python standard library includes
 [cProfile](https://docs.python.org/3/library/profile.html) for profiling Python
-code. vLLM includes a couple of helpers that make it easy to apply it to a section of vLLM.
-Both the `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` functions can be
-used to profile a section of code.
+code.
 
-!!! note
-    The legacy import paths `vllm.utils.cprofile` and `vllm.utils.cprofile_context` are deprecated.
-    Please use `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` instead.
+### Example usage - function call
 
-### Example usage - decorator
-
-The first helper is a Python decorator that can be used to profile a function.
-If a filename is specified, the profile will be saved to that file. If no filename is
-specified, profile data will be printed to stdout.
+If a filename is specified, the profile will be saved to that file. If no
+filename is specified, profile data can be printed to stdout.
 
 ```python
-from vllm.utils.profiling import cprofile
+import cProfile
 
-@cprofile("expensive_function.prof")
+
 def expensive_function():
     # some expensive code
     pass
+
+
+profiler = cProfile.Profile()
+profiler.runcall(expensive_function)
+profiler.dump_stats("expensive_function.prof")
 ```
 
-### Example Usage - context manager
-
-The second helper is a context manager that can be used to profile a block of
-code. Similar to the decorator, the filename is optional.
+### Example usage - context manager style
 
 ```python
-from vllm.utils.profiling import cprofile_context
+import cProfile
+
 
 def another_function():
     # more expensive code
     pass
 
-with cprofile_context("another_function.prof"):
+
+profiler = cProfile.Profile()
+profiler.enable()
+try:
     another_function()
+finally:
+    profiler.disable()
+    profiler.dump_stats("another_function.prof")
 ```
 
 ### Analyzing Profile Results

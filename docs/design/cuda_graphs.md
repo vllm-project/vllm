@@ -161,11 +161,11 @@ class AttentionCGSupport(enum.Enum):
     ALWAYS = 3
     """CUDA Graphs always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
-    """CUDA Graphs supported for batches the only contain query lengths that are
+    """CUDA Graphs supported for batches that only contain query lengths that are
     the same, this can be used for spec-decode 
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
-    """CUDA Graphs supported for batches the only contain query_len==1 decodes"""
+    """CUDA Graphs supported for batches that only contain query_len==1 decodes"""
     NEVER = 0
     """NO CUDA Graphs support"""
 ```

@@ -35,59 +35,32 @@ Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
 do not need a transformers dependency for output parsing.
 """
 
-import json
-
 import regex as re
 
-# Tool call delimiter tokens as they appear in decoded text.
-# Standard format: <|tool_call>call:name{args}<tool_call|>
-_TOOL_CALL_START_TAG = "<|tool_call>"
-_TOOL_CALL_END_TAG = "<tool_call|>"
 _TOOL_RESPONSE_START_TAG = "<|tool_response>"
-
-# Gemma4 escape token as it appears in decoded text.
-_ESCAPE_TOKEN = '<|"|>'
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     """Parse tool call arguments from the Gemma4 compact format.
 
-    Handles the ``key:<|"|>value<|"|>`` format used by Gemma4, with fallback
-    to heuristic key-value extraction. Also tolerates the slightly different
-    ``key: "value"`` format (space + plain quotes) that some chat templates
-    produce.
+    Delegates to the native ``<|"|>``-aware parser from
+    ``vllm.parser.gemma4``, which handles internal quotes, nested
+    objects, arrays, and all Gemma4 value types correctly.
 
     Args:
         args_str: Raw argument string from inside ``call:name{...}``.
 
     Returns:
-        Dictionary of argument name → value.
+        Dictionary of argument name → string value.
+
     """
     if not args_str or not args_str.strip():
         return {}
 
-    # Replace Gemma4 escape tokens with standard quotes.
-    cleaned = args_str.replace(_ESCAPE_TOKEN, '"')
+    from vllm.parser.gemma4 import _parse_gemma4_args
 
-    # Try JSON parsing first (handles nested values, arrays, etc.).
-    try:
-        parsed = json.loads("{" + cleaned + "}")
-        # Ensure all values are strings for consistency.
-        return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Fallback: extract key:"value" pairs (allow optional space after colon).
-    arguments = {}
-    for key, value in re.findall(r'(\w+):\s*"([^"]*)"', cleaned):
-        arguments[key] = value
-
-    if not arguments:
-        # Last resort: extract key:value pairs (unquoted).
-        for key, value in re.findall(r"(\w+):\s*([^,}]+)", args_str):
-            arguments[key] = value.strip().strip('"').replace(_ESCAPE_TOKEN, "")
-
-    return arguments
+    parsed = _parse_gemma4_args(args_str)
+    return {k: str(v) if not isinstance(v, str) else v for k, v in parsed.items()}
 
 
 def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
@@ -123,6 +96,7 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         >>> tool_calls = parse_tool_calls(output)
         >>> for tc in tool_calls:
         ...     print(f"Call: {tc['name']}({tc['arguments']})")
+
     """
     results = []
 
@@ -178,6 +152,7 @@ def has_tool_response_tag(text: str) -> bool:
         >>> if not has_tool_response_tag(model_output):
         ...     # Model used <eos> instead — inject <|tool_response> manually
         ...     next_prompt = "<|tool_response>" + tool_result
+
     """
     stripped = text.rstrip()
     return stripped.endswith(_TOOL_RESPONSE_START_TAG)

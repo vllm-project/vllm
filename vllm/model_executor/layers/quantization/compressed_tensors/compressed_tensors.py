@@ -1,30 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
-from compressed_tensors.config import (
-    CompressionFormat,
-    SparsityCompressionConfig,
-    SparsityStructure,
-)
+from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
+    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
 )
 from compressed_tensors.transform import TransformConfig
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -35,21 +32,25 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_embedding import (  # noqa: E501
+    CompressedTensorsEmbeddingWNA16Int,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS,
-    CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
-    CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA4Int,
+    CompressedTensorsWNA8Int,
+    CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
@@ -62,7 +63,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -82,8 +86,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
-        sparsity_ignore_list: list[str],
         kv_cache_scheme: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         transform_config: dict[str, Any] | None = None,
@@ -96,8 +98,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
         self.kv_cache_scheme = kv_cache_scheme
-        self.sparsity_scheme_map = sparsity_scheme_map
-        self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
@@ -121,8 +121,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        """
-        Transform layer paths in config targets to match vLLM's naming.
+        """Transform layer paths in config targets to match vLLM's naming.
 
         The WeightsMapper is designed for weight paths, but some backends
         (e.g. transformers) use broad prefix mappings like "" -> "model."
@@ -148,8 +147,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         self.target_scheme_map = _apply_dict(self.target_scheme_map)
         self.ignore = _apply_list(self.ignore)
-        self.sparsity_scheme_map = _apply_dict(self.sparsity_scheme_map)
-        self.sparsity_ignore_list = _apply_list(self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
@@ -189,27 +186,44 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer.scheme = quant_scheme
                 return CompressedTensorsLinearMethod(self)
 
+        # ParallelLMHead subclasses VocabParallelEmbedding but is handled above as
+        # a linear; only true embedding lookups land here.
+        if isinstance(layer, VocabParallelEmbedding):
+            scheme_dict = self.get_scheme_dict(layer, layer_name=prefix)
+            weight_quant = scheme_dict.get("weights") if scheme_dict else None
+            if weight_quant is None:
+                return None  # unquantized embedding
+            if not (
+                isinstance(weight_quant, QuantizationArgs)
+                and self._is_wNa16_group_channel(weight_quant, None)
+                and weight_quant.type == QuantizationType.INT
+            ):
+                raise ValueError(
+                    "compressed-tensors embeddings only support weight-only INT "
+                    f"group/channel (WNA16) quantization, got: {weight_quant}"
+                )
+            return CompressedTensorsEmbeddingWNA16Int(weight_quant)
+
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix
             )
         return None
 
-    def _add_fused_moe_to_target_scheme_map(self):
-        """
-        Helper function to update target_scheme_map
-        since linear layers get fused into FusedMoE
+    def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
+        """Helper function to update target_scheme_map
+        since linear layers get fused into RoutedExperts
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        RoutedExperts modules.
         """
         if (
             "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
+            or "RoutedExperts" in self.target_scheme_map
         ):
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -234,16 +248,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
-        sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
-            config=config
-        )
+
+        # Check for deprecated sparsity config
+        cls._parse_sparsity_config(config=config)
 
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
             quant_format=quant_format,
-            sparsity_scheme_map=sparsity_scheme_map,
-            sparsity_ignore_list=sparsity_ignore_list,
             config=config,
             transform_config=config.get("transform_config"),
             kv_cache_scheme=config.get("kv_cache_scheme"),
@@ -255,12 +267,15 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _parse_sparsity_config(
         cls, config: dict[str, Any]
     ) -> tuple[dict[str, SparsityCompressionConfig], list[str]]:
-        """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A tuple with two elements
+        """Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A tuple with two elements
             1. A dictionary mapping target layer names to their corresponding
                 sparsity_config
             2. A list of layer names to ignore for sparsity
+
         """
         if not (sparsity_config := config.get(SPARSITY_CONFIG_NAME)):
             return dict(), []
@@ -270,16 +285,27 @@ class CompressedTensorsConfig(QuantizationConfig):
             target: sparsity_config for target in sparsity_config.targets or list()
         }
         sparsity_ignore_list = sparsity_config.ignore or list()
+
+        # Raise DeprecationError if non-empty sparse_scheme_map is detected
+        if sparse_scheme_map:
+            raise DeprecationWarning(
+                "Sparsity support has been removed from compressed-tensors. "
+                "Please use a model without sparsity configuration."
+            )
+
         return sparse_scheme_map, sparsity_ignore_list
 
     @classmethod
     def _quantization_scheme_map_from_config(
         cls, config: dict[str, Any]
     ) -> QUANTIZATION_SCHEME_MAP_TYPE:
-        """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A dictionary mapping target layer names to their corresponding
+        """Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
+
         """
         target_scheme_map: dict[str, Any] = dict()
         quant_format = cast(str, config.get("format"))
@@ -298,9 +324,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 target_scheme_map[target] = {}
-                target_scheme_map[target]["weights"] = QuantizationArgs.model_validate(
+                weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
+                if weight_quant.actorder in (
+                    ActivationOrdering.GROUP.value,
+                    ActivationOrdering.DYNAMIC.value,
+                ):
+                    raise ValueError(
+                        "Compressed-tensors group/dynamic activation ordering "
+                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
+                        "Use a checkpoint with static/weight activation ordering or "
+                        "without activation ordering."
+                    )
+                target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
                 target_scheme_map[target]["format"] = quant_config.get("format")
@@ -330,6 +367,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                                 quant_config.get("input_activations")
                             )
                         )
+
+                # Static output-activation quant is applied as a float fake-quant
+                # on the layer output; capture it when present.
+                target_scheme_map[target]["output_activations"] = None
+                output_activations = quant_config.get("output_activations")
+                if output_activations:
+                    target_scheme_map[target]["output_activations"] = (
+                        QuantizationArgs.model_validate(output_activations)
+                    )
         return target_scheme_map
 
     @classmethod
@@ -348,21 +394,21 @@ class CompressedTensorsConfig(QuantizationConfig):
                 supported = capability == min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        "the current GPU. Required capability: ",
-                        f"{min_capability}. Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Required capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             else:
                 supported = capability >= min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        f"the current GPU. Min capability: {min_capability}. ",
-                        f"Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Min capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             return supported
         else:
-            return False
+            return not match_exact
 
     @staticmethod
     def _is_nvfp4_format(quant_args: QuantizationArgs):
@@ -401,6 +447,27 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+        )
+
+    @staticmethod
+    def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
+
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_8_bits = quant_args.num_bits == 8
+        is_mxfp8_scale_dtype = quant_args.scale_dtype == torch.uint8
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_8_bits
+            and is_group_size_32
+            and is_symmetric
+            and is_mxfp8_scale_dtype
         )
 
     @staticmethod
@@ -589,10 +656,84 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return is_channel_group and input_quant_none and is_static
 
+    @staticmethod
+    def _is_wNa8o8_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        output_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
+        with static per-tensor INT8 input/output activation quant, applied as a float
+        fake-quant around a weight-only matmul."""
+        is_int_pack_format = format in (
+            CompressionFormat.pack_quantized.value,
+            CompressionFormat.int_quantized.value,
+        )
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_static_int = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_intN_weight = is_static_int and is_channel_group and is_int_pack_format
+        is_static_int8_in = (
+            input_quant is not None
+            and input_quant.type == QuantizationType.INT
+            and input_quant.strategy == QuantizationStrategy.TENSOR.value
+            and input_quant.num_bits == 8
+            and not input_quant.dynamic
+        )
+        is_static_int8_out = (
+            output_quant is not None
+            and output_quant.type == QuantizationType.INT
+            and output_quant.strategy == QuantizationStrategy.TENSOR.value
+            and output_quant.num_bits == 8
+            and not output_quant.dynamic
+        )
+        return is_intN_weight and (is_static_int8_in and is_static_int8_out)
+
+    @staticmethod
+    def _is_wNaM_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT with symmetric dynamic INT activation quant
+        via Humming kernel."""
+        if input_quant is None:
+            return False
+        is_pack_format = format == CompressionFormat.pack_quantized.value
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_int_N_weight = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_int_input = input_quant.type == QuantizationType.INT
+        is_symmetric_input = input_quant.symmetric
+        is_dynamic_input = input_quant.dynamic
+        is_per_token_or_group_input = input_quant.strategy in (
+            QuantizationStrategy.TOKEN.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        return (
+            is_int_N_weight
+            and is_channel_group
+            and is_pack_format
+            and is_int_input
+            and is_symmetric_input
+            and is_dynamic_input
+            and is_per_token_or_group_input
+        )
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
+        output_quant: QuantizationArgs | None = None,
         format: str | None = None,
         layer_name: str | None = None,
     ) -> "CompressedTensorsScheme":
@@ -600,11 +741,22 @@ class CompressedTensorsConfig(QuantizationConfig):
         format = format if format is not None else self.quant_format
 
         # Detect If Mixed Precision
-        if self._is_nvfp4_format(weight_quant) and input_quant is None:
-            return CompressedTensorsW4A16Fp4()
+        if self._is_nvfp4_format(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW4A4Fp4(use_a16=True)
+
+            if not self._is_nvfp4_format(input_quant):
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 "
+                    "format, None for NVFP4A16"
+                )
+            return CompressedTensorsW4A4Fp4()
 
         if self._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A16Mxfp4()
+            return CompressedTensorsW4A4Mxfp4()
+
+        if self._is_mxfp8(weight_quant):
+            return CompressedTensorsW8A8Mxfp8()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
@@ -612,34 +764,80 @@ class CompressedTensorsConfig(QuantizationConfig):
                 strategy=weight_quant.strategy,
                 symmetric=weight_quant.symmetric,
                 group_size=weight_quant.group_size,
-                actorder=weight_quant.actorder,
+            )
+
+        # Must come before the WNA16 check; standard 4/8-bit weight-only (no
+        # output-activation scale) still falls through to WNA16.
+        if self._is_wNa8o8_int(weight_quant, input_quant, output_quant, format):
+            return CompressedTensorsWNA8O8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                has_input_act=input_quant is not None,
+                has_output_act=output_quant is not None,
+                layer_name=layer_name,
+                quant_format=format,
             )
 
         if (
-            self._is_wNa16_group_channel(weight_quant, input_quant)
-            and (format == CompressionFormat.pack_quantized.value)
-            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 8
+        ):
+            return CompressedTensorsWNA8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+        if (
+            self._is_wNaM_int(weight_quant, input_quant, format)
+            and input_quant.num_bits == 4
+        ):
+            return CompressedTensorsWNA4Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+
+        if self._is_wNa16_group_channel(weight_quant, input_quant) and (
+            format == CompressionFormat.pack_quantized.value
         ):
             return CompressedTensorsWNA16(
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 symmetric=weight_quant.symmetric,
                 group_size=weight_quant.group_size,
-                actorder=weight_quant.actorder,
                 layer_name=layer_name,
             )
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
-            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
-                input_quant
-            ):
-                return CompressedTensorsW4A4Fp4()
-
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
-                )
+                if current_platform.is_xpu():
+                    # On XPU, --linear-backend xpu or torch opts into W8A8 FP8
+                    # linear kernel; otherwise default to W8A16.
+                    config = get_current_vllm_config_or_none()
+                    is_fp8_w8a8_supported = config is not None and (
+                        config.kernel_config.linear_backend in ("xpu", "torch")
+                    )
+                    weight_quant_is_block_strategy = (
+                        weight_quant
+                        and weight_quant.strategy == QuantizationStrategy.BLOCK
+                    )
+                    if weight_quant_is_block_strategy and not is_fp8_w8a8_supported:
+                        # On XPU, block quantized weights always use the
+                        # W8A8 kernel, due to lack of w8a16 support.
+                        is_fp8_w8a8_supported = True
+
+                else:
+                    is_fp8_w8a8_supported = self._check_scheme_supported(
+                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                    )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         weight_quant=weight_quant,
@@ -687,13 +885,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_symmetric=input_quant.symmetric,
                 )
 
-        raise NotImplementedError("No compressed-tensors compatible scheme was found.")
+        raise NotImplementedError(
+            f"No compressed-tensors compatible scheme was found for {layer_name=}, "
+            f"{weight_quant=}, {input_quant=}, {output_quant=}, {format=}"
+        )
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
     ) -> "CompressedTensorsScheme | None":
-        """
-        compressed-tensors supports non uniform in the following way:
+        """compressed-tensors supports non uniform in the following way:
 
         targets of config_groups: There can be N config_groups which each
             have a quantization scheme. Each config_group has a list of targets
@@ -704,53 +904,20 @@ class CompressedTensorsConfig(QuantizationConfig):
         use the quantization scheme corresponding to the matched target
         to select the CompressedTensorsScheme used for inference.
         """
-
         # Use the new get_quant_args method to extract QuantizationArgs
         scheme_dict = self.get_scheme_dict(layer, layer_name)
 
         weight_quant = None
         input_quant = None
+        output_quant = None
         format = None
         if scheme_dict:
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
+            output_quant = scheme_dict.get("output_activations")
             format = scheme_dict.get("format")
 
-        # Find the sparsity scheme of the layer
-        # assume that fused layers inherit first component's sparsity scheme
-        sparsity_targets = self.sparsity_scheme_map.keys() - set(
-            self.sparsity_ignore_list
-        )
-        sparsity_scheme: SparsityCompressionConfig | None = None
-        with suppress(ValueError):
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=sparsity_targets,
-                fused_mapping=self.packed_modules_mapping,
-            )
-            sparsity_scheme = self.sparsity_scheme_map[matched_target]
-
-        if self.supports_cutlass_24(
-            weight_quant=weight_quant,
-            input_quant=input_quant,
-            sparsity_scheme=sparsity_scheme,
-        ):
-            # Have a valid sparsity scheme
-            # Validate layer is supported by Cutlass 2:4 Kernel
-            model_compression_config = (
-                None
-                if sparsity_scheme is None or sparsity_scheme.format == "dense"
-                else self.config
-            )
-
-            scheme = CompressedTensors24(
-                quantized=weight_quant is not None or input_quant is not None,
-                weight_quant=weight_quant,
-                input_quant=input_quant,
-                model_compression_config=model_compression_config,
-            )
-        elif weight_quant is None:
+        if weight_quant is None:
             # Falling back to UnquantizedLinearMethod
             return None
 
@@ -759,6 +926,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
+                output_quant=output_quant,
                 format=format,
                 layer_name=layer_name,
             )
@@ -772,8 +940,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_scheme_dict(
         self, layer: torch.nn.Module, layer_name: str | None = None
     ) -> dict[str, QuantizationArgs | str | None] | None:
-        """
-        Extract the QuantizationArgs for a given layer.
+        """Extract the QuantizationArgs for a given layer.
 
         Returns:
             dict with {
@@ -781,6 +948,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "input_activations": QuantizationArgs | None,
                 "format": str | None
             } | None
+
         """
         # TODO (@kylesayrs): support ignore module names with ct matching utils
         if should_ignore_layer(
@@ -796,10 +964,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
             )
-            scheme_dict = self.target_scheme_map[matched_target]
-            if scheme_dict.get("format") is None:
-                scheme_dict["format"] = self.quant_format
-            return scheme_dict
+            if matched_target is not None:
+                scheme_dict = self.target_scheme_map[matched_target]
+                if scheme_dict.get("format") is None:
+                    scheme_dict["format"] = self.quant_format
+                return scheme_dict
 
         return None
 
@@ -812,72 +981,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             ):
                 return True
         return False
-
-    @staticmethod
-    def supports_cutlass_24(
-        weight_quant: QuantizationArgs | None,
-        input_quant: QuantizationArgs | None,
-        sparsity_scheme: SparsityCompressionConfig | None = None,
-    ) -> bool:
-        """
-        Check if the layer is supported by the Cutlass 2:4 Kernel
-        Conditions:
-            - Overarching condition: Sparsity Structure is 2:4
-            - Unquantized cases are supported
-            - Weight only quantization is not-supported
-            - Supported weight quantization strategies are TENSOR and CHANNEL
-            - Supported input quantization strategies are TENSOR and TOKEN
-            - Only 8 bit quantization is supported
-
-        :return: True if the layer is supported by the Cutlass 2:4 Kernel
-            False otherwise
-        """
-        if sparsity_scheme is None:
-            return False
-
-        is_valid_sparsity_structure: bool = (
-            sparsity_scheme.sparsity_structure == SparsityStructure.TWO_FOUR.value
-        )
-
-        valid_compressors = {
-            CompressionFormat.dense.value,
-            CompressionFormat.sparse_24_bitmask.value,
-        }
-
-        is_valid_sparsity = (
-            is_valid_sparsity_structure and sparsity_scheme.format in valid_compressors
-        )
-
-        if not is_valid_sparsity:
-            return False
-
-        # Unquantized cases are supported
-        if weight_quant is None and input_quant is None:
-            return True
-
-        # Weight only quantization is not-supported
-        if weight_quant is not None and input_quant is None:
-            return False
-
-        supported_weight_quant_strategies = [
-            QuantizationStrategy.TENSOR.value,
-            QuantizationStrategy.CHANNEL.value,
-        ]
-
-        assert weight_quant is not None
-        assert input_quant is not None
-        if weight_quant.strategy not in supported_weight_quant_strategies:
-            return False
-
-        supported_input_quant_strategies = [
-            QuantizationStrategy.TENSOR.value,
-            QuantizationStrategy.TOKEN.value,
-        ]
-
-        if input_quant.strategy not in supported_input_quant_strategies:
-            return False
-
-        return weight_quant.num_bits == input_quant.num_bits == 8
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):
@@ -897,8 +1000,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        """
-        Use the CompressedTensorsScheme associated with each layer to create
+        """Use the CompressedTensorsScheme associated with each layer to create
         the necessary parameters for the layer. See LinearMethodBase for param
         details
         """
@@ -919,8 +1021,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        """
-        Use the output of create_weights and the CompressedTensorsScheme
+        """Use the output of create_weights and the CompressedTensorsScheme
         associated with the layer to apply the forward pass with the
         layer input.  See LinearMethodBase for param details
 
@@ -932,8 +1033,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from compressed-tensors
+    """Supports loading kv-cache scaling factors from compressed-tensors
     checkpoints.
     """
 
@@ -943,10 +1043,12 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
     @staticmethod
     def validate_kv_cache_scheme(kv_cache_scheme: dict[str, Any] | None):
-        """
-        Validator for the kv cache scheme. Useful for controlling the
+        """Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_scheme: the compressed-tensors kv cache scheme
+
+        Args:
+            kv_cache_scheme: the compressed-tensors kv cache scheme
+
         """
         if kv_cache_scheme is None:
             return
@@ -954,7 +1056,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" and num_bits != 8:
+        if type_ != "float" or num_bits != 8:
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
                 "num_bits=8, type=float, however "
@@ -982,8 +1084,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             )
 
     def create_weights(self, layer: torch.nn.Module):
-        """
-        Initialize placeholder scales and zero points to enable loading of
+        """Initialize placeholder scales and zero points to enable loading of
         quantized params from compressed-tensors checkpoints.
         """
         strategy = None  # for backward compatibility
@@ -1090,13 +1191,27 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """
-        Override the default vLLM placeholder scales with the llm-compressor loaded
+        """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
         layer._k_scale = layer.k_scale
         layer._v_scale = layer.v_scale
         layer._q_scale = layer.q_scale
+
+        # Set the _float variants that the attention backend uses.
+        def _to_scalar(tensor: torch.Tensor) -> float:
+            # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
+            if tensor.numel() > 1:
+                return tensor.max().item()
+            return tensor.item()
+
+        layer._k_scale_float = _to_scalar(layer.k_scale)
+        layer._v_scale_float = _to_scalar(layer.v_scale)
+        layer._q_scale_float = _to_scalar(layer.q_scale)
+
+        # Sync host (cpu) scale copies read by AITER fused kernels.
+        layer._k_scale_cpu.fill_(layer._k_scale_float)
+        layer._v_scale_cpu.fill_(layer._v_scale_float)
 
         # Discard all placeholders.
         del layer.k_scale

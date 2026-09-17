@@ -16,3 +16,4 @@ class LoRAModulePath:
     name: str
     path: str
     base_model_name: str | None = None
+    is_3d_lora_weight: bool = False

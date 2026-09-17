@@ -17,9 +17,7 @@ SEED = 42
 
 @pytest.fixture
 def test_prompts():
-    """
-    Adapted from tests/v1/e2e/spec_decode/test_spec_decode.py
-    """
+    """Adapted from tests/v1/e2e/spec_decode/utils.py."""
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension
@@ -45,17 +43,30 @@ def test_prompts():
 
 
 use_fork_for_test = (
-    fork_new_process_for_each_test if not current_platform.is_rocm() else lambda x: x
+    fork_new_process_for_each_test
+    if not (current_platform.is_rocm() or current_platform.is_xpu())
+    else lambda x: x
 )
 
 
 @use_fork_for_test
-@pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
+@pytest.mark.parametrize(
+    "kv_sharing_fast_prefill,use_v2_model_runner",
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+        # (False, True) omitted: fast-prefill-off behavior is runner-generic,
+        # and skipping it saves ~9 min of mostly torch.compile time in CI. The
+        # no-silent-fallback assertion below is exercised by the V2 cases.
+    ],
+)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,
     enforce_eager: bool,
+    use_v2_model_runner: bool,
 ):
     if not enforce_eager and current_platform.is_rocm():
         # Relevant context: https://github.com/vllm-project/vllm/pull/29244
@@ -82,6 +93,7 @@ def test_kv_sharing_fast_prefill(
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         else:
             m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
 
         prompts, answer, indices = prep_prompts(batch_size)
 
@@ -93,6 +105,8 @@ def test_kv_sharing_fast_prefill(
             kv_sharing_fast_prefill=kv_sharing_fast_prefill,
             attention_backend="TRITON_ATTN",
         )
+        # Guard against a silent fallback to the other model runner.
+        assert llm.llm_engine.vllm_config.use_v2_model_runner == use_v2_model_runner
         responses = llm.generate(prompts, sampling_params)
         check_answers(
             indices,

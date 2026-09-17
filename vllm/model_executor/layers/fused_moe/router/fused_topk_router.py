@@ -5,13 +5,22 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+
+
+def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:num_tokens] if is_padding is not None else None
+    return None
 
 
 def vllm_topk_softmax(
@@ -27,6 +36,7 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
+        is_padding=_get_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -45,6 +55,7 @@ def vllm_topk_sigmoid(
         token_expert_indices,
         gating_output,
         renormalize,
+        is_padding=_get_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -120,18 +131,14 @@ class FusedTopKRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         scoring_func: str = "softmax",
         renormalize: bool = True,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
@@ -151,6 +158,8 @@ class FusedTopKRouter(BaseRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using standard fused top-k."""
         topk_weights, topk_ids, token_expert_indices = fused_topk(

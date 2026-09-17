@@ -33,6 +33,14 @@ if [[ -n "${ATTENTION_BACKEND:-}" ]]; then
   EXTRA_ARGS+=(--attention-backend "${ATTENTION_BACKEND}")
 fi
 
+# ROCm: run eager to avoid intermittent HIP-graph decode corruption.
+# See https://github.com/ROCm/clr/issues/279
+# TODO(aarushjain29): Revert after TheRock 7.14
+if command -v rocm-smi &> /dev/null || command -v amd-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
+  echo "ROCm platform detected: adding --enforce-eager to avoid HIP-graph decode corruption"
+  EXTRA_ARGS+=(--enforce-eager)
+fi
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     kill "${SERVER_PID}" 2>/dev/null || true
@@ -51,6 +59,7 @@ vllm serve "$MODEL" \
   --offload-num-in-group 2 \
   --offload-prefetch-step 1 \
   --offload-params w13_weight w2_weight \
+  --generation-config vllm \
   --port "$PORT" \
   ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"} &
 SERVER_PID=$!

@@ -25,7 +25,11 @@ Maintainers form a hierarchy based on sustained, high-quality contributions and 
 
 ### Core Maintainers
 
-Core Maintainers function like a project planning and decision making committee. In other convention, they might be called a Technical Steering Committee (TSC). In vLLM vocabulary, they are often known as "Project Leads". They meet weekly to coordinate roadmap priorities and allocate engineering resources.
+Core Maintainers function like a project planning and decision making committee.
+In other convention, they might be called a Technical Steering Committee (TSC).
+In vLLM vocabulary, they are often known as "Project Leads".
+This committee is also the Technical Steering Committee as defined by Linux Foundation Project Governance.
+They meet weekly to coordinate roadmap priorities and allocate engineering resources.
 
 **Project Leads:**
 
@@ -38,9 +42,8 @@ Core Maintainers function like a project planning and decision making committee.
 - Michael Goin ([@mgoin](https://github.com/mgoin))
 - Nick Hill ([@njhill](https://github.com/njhill))
 - Roger Wang ([@ywang96](https://github.com/ywang96))
-- Lu Fang ([@houseroad](https://github.com/houseroad))
-- Ye (Charlotte) Qi ([@yeqcharlotte](https://github.com/yeqcharlotte))
-- Yihua Cheng ([@ApostaC](https://github.com/ApostaC))
+- Lucas Wilkinson ([@LucasWilkinson](https://github.com/LucasWilkinson))
+- Xin Li ([@xinli-sw](https://github.com/xinli-sw))
 
 **Responsibilities:**
 

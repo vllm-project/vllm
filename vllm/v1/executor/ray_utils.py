@@ -7,6 +7,8 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
+import numpy as np
+
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -31,6 +33,7 @@ PG_WAIT_TIMEOUT = 1800
 WORKER_SPECIFIC_ENV_VARS: set[str] = {
     "VLLM_HOST_IP",
     "VLLM_HOST_PORT",
+    "VLLM_NIXL_SIDE_CHANNEL_HOST",
     "LOCAL_RANK",
     "CUDA_VISIBLE_DEVICES",
     "HIP_VISIBLE_DEVICES",
@@ -65,8 +68,7 @@ try:
         rpc_rank: int
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-            """
-            Adjust the rpc_rank based on the given mapping.
+            """Adjust the rpc_rank based on the given mapping.
             It is only used during the initialization of the executor,
             to adjust the rpc_rank of workers after we create all workers.
             """
@@ -90,7 +92,7 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
+        def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
@@ -98,8 +100,10 @@ try:
                     "current platform %s does not support ray.",
                     vllm.platforms.current_platform.device_name,
                 )
-            gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
-            return node_id, gpu_ids
+            physical_gpu_ids = ray.get_runtime_context().get_accelerator_ids()[
+                device_key
+            ]
+            return node_id, physical_gpu_ids
 
         def setup_device_if_necessary(self):
             # TODO(swang): This is needed right now because Ray CG executes
@@ -171,9 +175,6 @@ try:
                     output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: dict[str, str]):
-            os.environ.update(vars)
-
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
 
@@ -188,6 +189,58 @@ except ImportError as e:
     # prevent garbage collection in some cases
     ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
+
+
+def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> None:
+    """Detach Ray SHM-channel zero-copy buffers from a ModelRunnerOutput in-place.
+
+    Ray compiled DAG SHM channels may return zero-copy objects (e.g. `np.ndarray`)
+    backed by Ray's shared-memory object store. Ray's channel docs explicitly
+    warn that subsequent reads may block if such an object is still in scope.
+
+    vLLM can return numpy-backed logprobs and routed experts in
+    `ModelRunnerOutput`. If those arrays are backed by Ray SHM (commonly
+    read-only), retaining them in scope across scheduler iterations can stall
+    the channel and eventually hit `RAY_CGRAPH_get_timeout`.
+
+    Copy read-only numpy arrays so the returned output no longer retains
+    references to Ray's shared-memory buffers.
+
+    We intentionally do not touch `prompt_logprobs_dict`: those entries are
+    `LogprobsTensors` backed by PyTorch-owned CPU tensors (`to_cpu_nonblocking`
+    or `empty_cpu`), not NumPy views decoded from Ray channels.
+    """
+
+    def _copy_if_readonly(arr):
+        if isinstance(arr, np.ndarray) and not arr.flags.writeable:
+            return arr.copy()
+        return arr
+
+    if output.logprobs is not None:
+        token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
+
+        # `cu_num_generated_tokens` is already a plain Python list (or None),
+        # so it never aliases Ray SHM buffers and can be reused as-is.
+        token_ids_c = _copy_if_readonly(token_ids)
+        logprobs_c = _copy_if_readonly(logprobs)
+        ranks_c = _copy_if_readonly(ranks)
+        if (
+            token_ids_c is not token_ids
+            or logprobs_c is not logprobs
+            or ranks_c is not ranks
+        ):
+            output.logprobs = type(output.logprobs)(
+                token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
+            )
+
+    if output.routed_experts is not None:
+        routing_data, slot_mapping = output.routed_experts
+        routing_data_c = _copy_if_readonly(routing_data)
+        slot_mapping_c = _copy_if_readonly(slot_mapping)
+        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
+            output.routed_experts = type(output.routed_experts)(
+                routing_data_c, slot_mapping_c
+            )
 
 
 class FutureWrapper(Future):
@@ -207,8 +260,11 @@ class FutureWrapper(Future):
     def result(self, timeout=None):
         outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
+            detach_zero_copy_from_model_runner_output(outputs)
             return outputs
 
+        for output in outputs:
+            detach_zero_copy_from_model_runner_output(output)
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 
@@ -306,8 +362,7 @@ def get_bundles_for_indices(
     bundle_indices: list[int],
     world_size: int,
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs for
+    """Return GPU bundle indices paired with node IDs and node IPs for
     explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
     """
     assert len(bundle_indices) == world_size, (
@@ -334,8 +389,7 @@ def get_bundles_for_indices(
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs,
+    """Return GPU bundle indices paired with node IDs and node IPs,
     sorted driver-first.
 
     This utility has to be invoked from the driver node.
@@ -457,24 +511,6 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             ) from None
 
 
-def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
-    ray.util.remove_placement_group(current_placement_group)
-    s = time.time()
-    wait_interval = 10
-    while time.time() - s < PG_WAIT_TIMEOUT:
-        pg = ray.util.get_current_placement_group()
-        if pg is None:
-            break
-
-        # Exponential backoff for warning print.
-        wait_interval *= 2
-        logger.info(
-            "Waiting for removing a placement group of specs for %d seconds.",
-            int(time.time() - s),
-        )
-        time.sleep(wait_interval)
-
-
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
@@ -494,6 +530,7 @@ def initialize_ray_cluster(
             on the current (driver) node and pin the first PG bundle to it.
             Set to False for executors like RayExecutorV2 where all GPU work
             is delegated to remote Ray actors.
+
     """
     assert_ray_available()
     from vllm.platforms import current_platform
@@ -530,7 +567,7 @@ def initialize_ray_cluster(
             )
             ray.init(
                 address=ray_address,
-                num_gpus=parallel_config.world_size,
+                num_gpus=current_platform.device_count(),
                 runtime_env=parallel_config.ray_runtime_env,
             )
     else:
@@ -621,29 +658,3 @@ def initialize_ray_cluster(
     )
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
-
-
-def get_num_tpu_nodes() -> int:
-    from ray._private.accelerators import TPUAcceleratorManager
-
-    cluster_resources = ray.cluster_resources()
-    total_tpus = int(cluster_resources["TPU"])
-    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
-    assert total_tpus % tpus_per_node == 0
-    return total_tpus // tpus_per_node
-
-
-def get_num_nodes_in_placement_group() -> int:
-    pg_table = ray.util.placement_group_table()
-    current_pg = ray.util.get_current_placement_group()
-    num_nodes = 0
-
-    if current_pg:
-        nodes_in_pg = set()
-        for pg_key, pg in pg_table.items():
-            if pg_key == current_pg.id.hex():
-                for _, node in pg["bundles_to_node_id"].items():
-                    nodes_in_pg.add(node)
-        num_nodes = len(nodes_in_pg)
-
-    return num_nodes

@@ -4,6 +4,7 @@ import argparse
 
 from vllm.benchmarks.throughput import add_cli_args, main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):
@@ -13,7 +14,7 @@ class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):
     help = "Benchmark offline inference throughput."
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> None:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         add_cli_args(parser)
 
     @staticmethod

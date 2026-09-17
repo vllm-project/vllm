@@ -10,8 +10,7 @@ class LoRARequest(
     omit_defaults=True,  # type: ignore[call-arg]
     array_like=True,
 ):  # type: ignore[call-arg]
-    """
-    Request for a LoRA adapter.
+    """Request for a LoRA adapter.
 
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
@@ -28,6 +27,13 @@ class LoRARequest(
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
     load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+    """Whether this adapter's MoE weights are stored in the 3D fused
+    `gate_up_proj` / `down_proj` layout (one fused tensor per layer) or the
+    2D per-expert split layout (separate `gate_proj` / `up_proj` / `down_proj`
+    tensors per expert). Only consulted when the engine is started with
+    `enable_mixed_moe_lora_format=True`; otherwise it is ignored and the
+    on-disk format is inferred from the base model."""
 
     def __post_init__(self):
         if self.lora_int_id < 1:
@@ -49,16 +55,14 @@ class LoRARequest(
         return self.lora_path
 
     def __eq__(self, value: object) -> bool:
-        """
-        Overrides the equality method to compare LoRARequest
+        """Overrides the equality method to compare LoRARequest
         instances based on lora_name. This allows for identification
         and comparison lora adapter across engines.
         """
         return isinstance(value, self.__class__) and self.lora_name == value.lora_name
 
     def __hash__(self) -> int:
-        """
-        Overrides the hash method to hash LoRARequest instances
+        """Overrides the hash method to hash LoRARequest instances
         based on lora_name. This ensures that LoRARequest instances
         can be used in hash-based collections such as sets and dictionaries,
         identified by their names across engines.

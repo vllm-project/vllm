@@ -14,30 +14,47 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
+from .ir.clone_elimination import UnsafeCloneEliminationPass
 from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
-if rocm_aiter_ops.is_enabled():
+if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
+    from .fusion.allreduce_rms_fusion import (
+        RocmAiterAllReduceFusionPass,
+    )
     from .fusion.rocm_aiter_fusion import (
+        MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
     )
 
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    from .fusion.add_rms_fusion import (
+        AddRMSNormFusionPass,
+        RMSNormReshapeFusionPass,
+    )
+    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.sequence_parallelism import SequenceParallelismPass
+    from .utility.split_coalescing import SplitCoalescingPass
+
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
-    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
+    from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
-    from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
+
+if current_platform.is_xpu():
+    from .fusion.act_quant_fusion import ActivationQuantFusionPass
+    from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -54,8 +71,7 @@ R = TypeVar("R")
 
 
 def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
-    """
-    Function decorator that turns on inductor pattern match debug
+    """Function decorator that turns on inductor pattern match debug
     for the duration of the call.
     Used to avoid logging builtin Inductor pattern matching.
     """
@@ -72,8 +88,7 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
-    """
-    The pass manager for post-grad passes.
+    """The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
     It supports uuid for the Inductor code cache. That includes torch<2.6
     support using pickling (in .inductor_pass.CustomGraphPass).
@@ -110,6 +125,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
+        self.clone_elimination(graph)
+        VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
         self.post_cleanup(graph)
@@ -123,6 +140,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
+        model_config = config.model_config
+        enable_transformers_norm_canonicalization = (
+            (
+                self.pass_config.fuse_act_padding
+                or self.pass_config.fuse_allreduce_rms
+                or self.pass_config.fuse_norm_quant
+            )
+            and model_config is not None
+            and model_config.using_transformers_backend()
+        )
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -134,27 +161,60 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if enable_transformers_norm_canonicalization:
+                self.passes += [AddRMSNormFusionPass(config)]
+
+            if self.pass_config.fuse_act_padding and (
+                rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled()
+            ):
+                # Run the more specific RMSNorm+router-pad fusion before
+                # AR+RMS, since both consume fused_add_rms_norm.
+                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
             if self.pass_config.fuse_allreduce_rms:
-                self.passes += [AllReduceFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [RocmAiterAllReduceFusionPass(config)]
+                else:
+                    self.passes += [AllReduceFusionPass(config)]
+
+            if enable_transformers_norm_canonicalization:
+                # Let AR+RMS match before moving output reshapes ahead of the
+                # remaining RMSNorms, exposing them to RMS+Quant fusion.
+                self.passes += [RMSNormReshapeFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
-                self.passes += [RMSNormQuantFusionPass(config)]
-                if rocm_aiter_ops.is_enabled():
+                if (
+                    rocm_aiter_ops.is_enabled()
+                    or rocm_aiter_ops.is_rdna_aiter_enabled()
+                ):
                     self.passes += [
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
+                self.passes += [RMSNormQuantFusionPass(config)]
+
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
-                if rocm_aiter_ops.is_enabled():
+                if (
+                    rocm_aiter_ops.is_enabled()
+                    or rocm_aiter_ops.is_rdna_aiter_enabled()
+                ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
-                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+            if self.pass_config.fuse_qk_norm_rope_kvcache:
+                self.passes += [SplitCoalescingPass(config)]
+                self.passes += [ScatterSplitReplacementPass(config)]
+                self.passes += [QkNormRopeKvCacheFusionPass(config)]
+
+            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
+                self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache_cat_mla:
+                self.passes += [MLARoPEKVCacheCatFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnQuantFusionPass(config)]
@@ -165,6 +225,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
+            self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
@@ -173,8 +234,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         self.passes.append(pass_)
 
     def uuid(self) -> str:
-        """
-        The PostGradPassManager is set as a custom pass in the Inductor and
+        """The PostGradPassManager is set as a custom pass in the Inductor and
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
@@ -186,6 +246,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 

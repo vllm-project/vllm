@@ -35,7 +35,20 @@ class _FakeAttentionSpec:
 def _make_vllm_config(global_num_heads: int):
     cfg = MagicMock()
     cfg.model_config.get_num_attention_heads.return_value = global_num_heads
+    cfg.parallel_config.decode_context_parallel_size = 1
+    cfg.attention_config.use_non_causal = False
     return cfg
+
+
+def _make_group_spec(layer_names: list[str], num_kv_heads: int):
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    return UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            name: _FakeAttentionSpec(num_kv_heads) for name in layer_names
+        },
+    )
 
 
 def _patch_get_layers(layer_map: dict):
@@ -45,10 +58,19 @@ def _patch_get_layers(layer_map: dict):
     )
 
 
-def _patch_trtllm(*, supported: bool):
+def _patch_trtllm():
     return patch(
         "vllm.v1.attention.backends.flashinfer.can_use_trtllm_attention",
-        return_value=supported,
+        side_effect=lambda **kwargs: (
+            kwargs["num_qo_heads"] % kwargs["num_kv_heads"] == 0
+        ),
+    )
+
+
+def _patch_attention_spec_type():
+    return patch(
+        "vllm.v1.attention.backends.flashinfer.AttentionSpec",
+        _FakeAttentionSpec,
     )
 
 
@@ -66,12 +88,14 @@ def test_draft_group_uses_own_layer_heads_uniform_batch():
     draft_layers = {n: _FakeLayer(num_heads=12) for n in draft_layer_names}
 
     vllm_cfg = _make_vllm_config(global_num_heads=22)
-    kv_spec = _FakeAttentionSpec(num_kv_heads=3)
+    kv_spec = _make_group_spec(draft_layer_names, num_kv_heads=3)
 
-    with _patch_get_layers(draft_layers), _patch_trtllm(supported=True):
-        result = FlashInferMetadataBuilder.get_cudagraph_support(
-            vllm_cfg, kv_spec, layer_names=draft_layer_names
-        )
+    with (
+        _patch_get_layers(draft_layers),
+        _patch_trtllm(),
+        _patch_attention_spec_type(),
+    ):
+        result = FlashInferMetadataBuilder.get_cudagraph_support(vllm_cfg, kv_spec)
 
     assert result == AttentionCGSupport.UNIFORM_BATCH, (
         f"Expected UNIFORM_BATCH for draft group (12 q-heads / 3 kv-heads), "
@@ -90,10 +114,8 @@ def test_fallback_to_global_heads_when_no_layer_names():
     vllm_cfg = _make_vllm_config(global_num_heads=22)
     kv_spec = _FakeAttentionSpec(num_kv_heads=3)
 
-    with _patch_trtllm(supported=False):
-        result = FlashInferMetadataBuilder.get_cudagraph_support(
-            vllm_cfg, kv_spec, layer_names=None
-        )
+    with _patch_trtllm(), _patch_attention_spec_type():
+        result = FlashInferMetadataBuilder.get_cudagraph_support(vllm_cfg, kv_spec)
 
     assert result == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
@@ -107,11 +129,13 @@ def test_target_group_uniform_batch_unchanged():
     target_layers = {n: _FakeLayer(num_heads=24) for n in target_layer_names}
 
     vllm_cfg = _make_vllm_config(global_num_heads=24)
-    kv_spec = _FakeAttentionSpec(num_kv_heads=3)
+    kv_spec = _make_group_spec(target_layer_names, num_kv_heads=3)
 
-    with _patch_get_layers(target_layers), _patch_trtllm(supported=True):
-        result = FlashInferMetadataBuilder.get_cudagraph_support(
-            vllm_cfg, kv_spec, layer_names=target_layer_names
-        )
+    with (
+        _patch_get_layers(target_layers),
+        _patch_trtllm(),
+        _patch_attention_spec_type(),
+    ):
+        result = FlashInferMetadataBuilder.get_cudagraph_support(vllm_cfg, kv_spec)
 
     assert result == AttentionCGSupport.UNIFORM_BATCH

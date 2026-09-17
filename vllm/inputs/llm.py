@@ -62,8 +62,7 @@ The UUID will be used to identify the item for all caching purposes
 
 
 class _PromptOptions(TypedDict):
-    """
-    Additional options available to all
+    """Additional options available to all
     [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt] types.
     """
 
@@ -71,6 +70,12 @@ class _PromptOptions(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]
+    """
+    Optional per-modality media loading and decoding arguments.
+    Used only for hash derivation when using multi-modal UUIDs.
     """
 
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
@@ -115,6 +120,12 @@ class TokensPrompt(_PromptOptions):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when offsets were requested
+    AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
+    was present. The list length equals the length of `prompt_token_ids`."""
+
 
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""
@@ -124,6 +135,17 @@ class EmbedsPrompt(_PromptOptions):
 
     prompt: NotRequired[str]
     """The prompt text corresponding to the token embeddings, if available."""
+
+    prompt_token_ids: NotRequired[list[int]]
+    """Token IDs for mixed-mode inputs (chat completion with
+    `prompt_embeds` content parts). The tokens at positions where 
+    `prompt_is_token_ids` is `False` are placeholder tokens that 
+    get replaced by entries from `prompt_embeds` in the forward pass."""
+
+    prompt_is_token_ids: NotRequired[list[bool]]
+    """Per-position mask, `True` uses the real token ID, `False` uses
+    the corresponding entry from `prompt_embeds`. 
+    Must be the same length as `prompt_token_ids` when both are set."""
 
 
 DecoderOnlyPrompt: TypeAlias = (
@@ -166,11 +188,11 @@ Note:
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
-    """
-    Schema for a pair of encoder and decoder singleton prompts.
+    """Schema for a pair of encoder and decoder singleton prompts.
 
     Note:
         This schema is not valid for decoder-only models.
+
     """
 
     encoder_prompt: EncoderPrompt
@@ -210,8 +232,7 @@ This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs
 
 
 class DataPrompt(_PromptOptions):
-    """
-    Represents generic inputs that are converted to
+    """Represents generic inputs that are converted to
     [`PromptType`][vllm.inputs.llm.PromptType] by IO processor plugins.
     """
 

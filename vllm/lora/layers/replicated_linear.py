@@ -25,7 +25,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward of ReplicatedLinearWithLoRA
+        """Forward of ReplicatedLinearWithLoRA.
 
         Args:
             input_: Tensor whose last dimension is `input_size`.
@@ -33,6 +33,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
         """
         bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
@@ -46,6 +47,12 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         return output, output_bias
 
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        # ReplicatedLinear subclasses such as GateLinear override forward() to
+        # dispatch custom kernels and/or adjust the output dtype. Apply LoRA on
+        # top of the actual base-layer output instead of bypassing that path.
+        return self._apply_base_forward(x)
+
     # ReplicatedLinear should always be replaced, regardless of the fully
     # sharded LoRAs setting, because it is, by definition, copied per GPU.
     @classmethod
@@ -56,7 +63,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is maybe_get_oot_by_class(ReplicatedLinear)
+        return isinstance(source_layer, maybe_get_oot_by_class(ReplicatedLinear))
 
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]

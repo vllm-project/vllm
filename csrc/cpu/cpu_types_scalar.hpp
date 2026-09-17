@@ -6,6 +6,9 @@
 
 namespace vec_op {
 
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
@@ -145,6 +148,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   }
 
   void save(void* ptr) const { *reinterpret_cast<f16x32_t*>(ptr) = reg; }
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : reg{} {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : reg{} {}
 };
 
 struct FP32Vec4 : public Vec<FP32Vec4> {
@@ -302,6 +308,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
 
+  // FP8 stub: dead code on scalar path (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
+
   FP32Vec16 operator*(const FP32Vec16& b) const {
     f32x16_t ret;
     unroll_loop<int, VEC_ELEM_NUM>(
@@ -320,6 +330,13 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     f32x16_t ret;
     unroll_loop<int, VEC_ELEM_NUM>(
         [&ret, &b, this](int i) { ret.val[i] = reg.val[i] - b.reg.val[i]; });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 operator-() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = -reg.val[i]; });
     return FP32Vec16(ret);
   }
 
@@ -346,10 +363,35 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(ret);
   }
 
+  FP32Vec16 clamp(const FP32Vec16& min_v, const FP32Vec16& max_v) const {
+    return this->max(min_v).min(max_v);
+  }
+
   FP32Vec16 abs() const {
     f32x16_t ret;
     unroll_loop<int, VEC_ELEM_NUM>(
         [&ret, this](int i) { ret.val[i] = std::abs(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 exp() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::exp(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 er() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::erf(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 tanh() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::tanh(reg.val[i]); });
     return FP32Vec16(ret);
   }
 
@@ -385,6 +427,25 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   void save(void* ptr) const { *reinterpret_cast<f32x16_t*>(ptr) = reg; }
+};
+
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
 };
 
 template <typename T>

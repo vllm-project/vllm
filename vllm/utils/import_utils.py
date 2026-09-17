@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Contains helpers related to importing modules.
+"""Contains helpers related to importing modules.
 
 This is similar in concept to the `importlib` module.
 """
@@ -24,8 +23,7 @@ logger = init_logger(__name__)
 
 
 def import_pynvml():
-    """
-    Historical comments:
+    """Historical comments:
 
     libnvml.so is the library behind nvidia-smi, and
     pynvml is a Python wrapper around it. We use it to get GPU
@@ -57,8 +55,7 @@ def import_pynvml():
 
 @cache
 def import_triton_kernels():
-    """
-    For convenience, prioritize triton_kernels that is available in
+    """For convenience, prioritize triton_kernels that is available in
     `site-packages`. Use `vllm.third_party.triton_kernels` as a fall-back.
     """
     if _has_module("triton_kernels"):
@@ -66,14 +63,12 @@ def import_triton_kernels():
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
     elif _has_module("vllm.third_party.triton_kernels"):
         import vllm.third_party.triton_kernels as triton_kernels
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
         sys.modules["triton_kernels"] = triton_kernels
     else:
@@ -84,9 +79,28 @@ def import_triton_kernels():
         )
 
 
-def import_from_path(module_name: str, file_path: str | os.PathLike):
+def import_plugin(plugin_path: str) -> ModuleType | None:
+    """Import a user-defined plugin.
+
+    Plugin can be either:
+    * a module in site-packages
+    * a Python file specified by its path
     """
-    Import a Python file according to its file path.
+    try:
+        return importlib.import_module(plugin_path)
+    except ModuleNotFoundError:
+        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        try:
+            return import_from_path(module_name, plugin_path)
+        except Exception:
+            logger.exception(
+                "Failed to load module '%s' from %s.", module_name, plugin_path
+            )
+            return None
+
+
+def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleType:
+    """Import a Python file according to its file path.
 
     Based on the official recipe:
     https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
@@ -104,9 +118,7 @@ def import_from_path(module_name: str, file_path: str | os.PathLike):
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
-    """
-    Resolve an object by its fully-qualified class name.
-    """
+    """Resolve an object by its fully-qualified class name."""
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
@@ -129,8 +141,7 @@ def get_vllm_optional_dependencies():
 
 
 class _PlaceholderBase:
-    """
-    Disallows downstream usage of placeholder modules.
+    """Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
     [`__getattr__`][vllm.utils.import_utils._PlaceholderBase.__getattr__]
@@ -141,8 +152,7 @@ class _PlaceholderBase:
     """
 
     def __getattr__(self, key: str) -> Never:
-        """
-        The main class should implement this to throw an error
+        """The main class should implement this to throw an error
         for attribute accesses representing downstream usage.
         """
         raise NotImplementedError
@@ -285,8 +295,7 @@ class _PlaceholderBase:
 
 
 class PlaceholderModule(_PlaceholderBase):
-    """
-    A placeholder object to use when a module does not exist.
+    """A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
     of a module that does not exist.
@@ -341,8 +350,7 @@ class _PlaceholderModuleAttr(_PlaceholderBase):
 
 
 class LazyLoader(ModuleType):
-    """
-    `LazyLoader` module borrowed from [Tensorflow]
+    """`LazyLoader` module borrowed from [Tensorflow]
     (https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py)
     with an addition of "module caching".
 
@@ -394,12 +402,39 @@ class LazyLoader(ModuleType):
 # Optional dependency detection utilities
 @cache
 def _has_module(module_name: str) -> bool:
-    """Return True if *module_name* can be found in the current environment.
+    """Return True if *module_name* can be imported in the current environment.
 
-    The result is cached so that subsequent queries for the same module incur
-    no additional overhead.
+    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
+    trial import to verify that native dependencies (shared libraries, etc.)
+    are also satisfied. Any failure during the trial import is treated as the
+    module being unavailable. The result is cached so that subsequent queries
+    for the same module incur no additional overhead.
     """
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return False
+        importlib.import_module(module_name)
+    except Exception:
+        logger.warning(
+            "Module %s was found but failed to import", module_name, exc_info=True
+        )
+        return False
+    return True
+
+
+@cache
+def _has_module_spec(module_name: str) -> bool:
+    """Return True if *module_name* is installed, without importing it.
+
+    Unlike [`_has_module`][vllm.utils.import_utils._has_module], this only
+    resolves the import spec. It therefore does not pay the import cost of
+    heavyweight modules, at the price of not verifying that native
+    dependencies (shared libraries, etc.) are satisfied. The result is cached.
+    """
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
 
 
 def has_deep_ep() -> bool:
@@ -407,14 +442,79 @@ def has_deep_ep() -> bool:
     return _has_module("deep_ep")
 
 
+DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
+
+
+def _get_runtime_nccl_version() -> int | None:
+    """Get the runtime NCCL version by loading the actual library.
+
+    Returns the raw version int (e.g. 23004 for 2.30.4), or None on failure.
+    torch.cuda.nccl.version() is a compile-time constant from the PyTorch
+    wheel and does not reflect a separately installed NCCL.
+    """
+    import ctypes
+
+    try:
+        from vllm.utils.nccl import find_nccl_library
+
+        lib = ctypes.CDLL(find_nccl_library())
+        version = ctypes.c_int()
+        lib.ncclGetVersion(ctypes.byref(version))
+        return version.value
+    except Exception:
+        return None
+
+
+def _format_nccl_raw_version(raw: int) -> str:
+    s = str(raw)
+    return f"{s[0]}.{s[1:3].lstrip('0') or '0'}.{s[3:].lstrip('0') or '0'}"
+
+
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available.
+
+    Requires both the ElasticBuffer class in the deep_ep module and
+    NCCL >= 2.30.4 (GIN backend), checked against the runtime library.
+    """
+    if not _has_module("deep_ep"):
+        return False
+    import deep_ep  # type: ignore[import-not-found]
+
+    if not hasattr(deep_ep, "ElasticBuffer"):
+        return False
+    try:
+        nccl_ver = _get_runtime_nccl_version()
+        if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
+            logger.info_once(
+                "DeepEP v2 requires NCCL >= %s but found %s. "
+                "deepep_v2 backend will not be available.",
+                _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW),
+                _format_nccl_raw_version(nccl_ver) if nccl_ver else "unknown",
+            )
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return _has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    override with a newer version), then falls back to the vendored copy
+    bundled in the vLLM wheel.
+    """
+    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
+
+
+def is_numba_available() -> bool:
+    """Whether the optional `numba` package is available."""
+    return _has_module("numba")
 
 
 def has_triton_kernels() -> bool:
@@ -427,14 +527,50 @@ def has_triton_kernels() -> bool:
     return is_available
 
 
+@cache
+def get_triton_kernels_version() -> str | None:
+    """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
+
+    Inferred by capability since the package exposes no usable version: 3.8
+    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    """
+    if not has_triton_kernels():
+        return None
+    try:
+        import triton_kernels.matmul_ogs  # noqa: F401
+    except ImportError:
+        return "3.8"
+    try:
+        from triton_kernels.tensor import SparseMatrix  # noqa: F401
+    except ImportError:
+        return "3.5.1"
+    return "3.6"
+
+
+@cache
 def has_tilelang() -> bool:
-    """Whether the optional `tilelang` package is available."""
-    return _has_module("tilelang")
+    """Whether the optional `tilelang` package is available.
+
+    Only the import spec is checked: importing `tilelang` is expensive, so
+    callers must import it lazily at their point of use rather than relying
+    on this function to have imported it already.
+    """
+    if not _has_module_spec("tilelang"):
+        return False
+    # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        # TODO: Re-enable when tilelang supports gfx1250
+        if on_gfx1250():
+            return False
+    return True
 
 
 def has_arctic_inference() -> bool:
     """Whether the optional `arctic_inference` package is available."""
-
     return _has_module("arctic_inference")
 
 
@@ -461,3 +597,41 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")
+
+
+def has_cutedsl() -> bool:
+    """Whether the optional `cutelass` package is available."""
+    return _has_module("cutlass")
+
+
+def has_humming() -> bool:
+    """Whether the optional `humming` package is available."""
+    return _has_module("humming")
+
+
+def has_quark():
+    """Whether the optional `quark` package is available."""
+    return _has_module("quark")
+
+
+def check_torchcodec_available():
+    """Whether the optional `torchcodec` package is available."""
+    try:
+        import torchcodec  # noqa: F401
+    except RuntimeError as e:
+        # torchcodec will raise RuntimeError during import instead
+        # of ImportError when system ffmpeg unavailable, with a
+        # message that can leak sensitive system information.
+        # Trim it down to avoid it.
+        marker = (
+            "The following exceptions were raised as we tried to load libtorchcodec:"
+        )
+        message = str(e)
+        if marker in message:
+            raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
+        raise e
