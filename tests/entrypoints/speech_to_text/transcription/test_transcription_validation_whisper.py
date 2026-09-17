@@ -85,7 +85,7 @@ async def whisper_client(server):
 async def tiny_whisper_client():
     args = [*_ROCM_ARGS]
     if current_platform.is_cpu():
-        args += ["--gpu-memory-utilization", "0.1"]
+        args += ["--kv-cache-memory-bytes", "128m"]
     with RemoteOpenAIServer(TINY_MODEL_NAME, args) as remote_server:
         async with remote_server.get_async_client() as async_client:
             yield async_client
