@@ -167,7 +167,8 @@ def test_region_pull_ignores_allocation_padding(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("num_pages", [0, 3, 19])
-def test_dcp_region_pull(region_pull_worker, num_pages):
+@pytest.mark.parametrize("region_groups", [(0, 1), (1, 0, 1)])
+def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     """Read each uncached page from its DCP stripe; notify empty stripes."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         RemoteMeta,
@@ -176,6 +177,13 @@ def test_dcp_region_pull(region_pull_worker, num_pages):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 
     worker = region_pull_worker
+    worker.region_group_ids = list(region_groups)
+    worker.num_regions = len(region_groups)
+    worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
+    worker.dst_region_num_blocks = {
+        engine: [100] * worker.num_regions for engine in ("P", "D")
+    }
+    worker.block_len_per_layer = [1024] * worker.num_regions
     worker.dcp_rank = 0
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 8
@@ -212,9 +220,9 @@ def test_dcp_region_pull(region_pull_worker, num_pages):
     notified = {call.args[0] for call in worker.nixl_wrapper.send_notif.call_args_list}
     for rank in ranks:
         expected = [
-            (region * 100 + base + page, region * 100 + 10 + page // 8)
-            for region, base in enumerate((30, 40))
-            for page in range(region + 1, num_pages)
+            (region * 100 + 30 + group * 10 + page, region * 100 + 10 + page // 8)
+            for region, group in enumerate(region_groups)
+            for page in range(group + 1, num_pages)
             if page % 8 == rank
         ]
         if expected:
@@ -227,7 +235,9 @@ def test_dcp_region_pull(region_pull_worker, num_pages):
         else:
             assert rank not in reads and f"P-rank{rank}" in notified
     assert meta.region_blocks_to_zero == (
-        [[30 + num_pages], [40 + num_pages]] if num_pages else None
+        [[30 + group * 10 + num_pages] for group in region_groups]
+        if num_pages
+        else None
     )
 
 
