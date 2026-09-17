@@ -874,6 +874,7 @@ class LocalSnapshotTools:
             boundary="post-engine-init-reloadable-state-released",
             created_at=datetime.now(UTC).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
+            portable=bool(getattr(args, "portable", False)),
             **identity.model_dump(),
             model=source_model,
             served_model_name=str(served_model_name),
