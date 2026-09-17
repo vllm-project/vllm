@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 import torch
 
@@ -27,6 +28,8 @@ class UMBPRuntimeCapabilities:
     publish: bool = True
     ranged_io: bool = False
     layerwise_load: bool = False
+    layerwise_store: bool = False
+    partial_hash_hits: bool = False
     cancellation: bool = False
     async_transfer: bool = False
     eviction_events: bool = False

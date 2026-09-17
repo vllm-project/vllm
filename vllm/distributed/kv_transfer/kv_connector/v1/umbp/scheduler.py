@@ -9,10 +9,10 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -22,11 +22,11 @@ from .data import (
     BlockTransferPlan,
     KVLayoutPlanner,
     LoadSpec,
+    LookupState,
     PartialTailPlan,
     RankCompletenessPolicy,
     RankTopology,
     RequestTracker,
-    LookupState,
     TPShardMapping,
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
@@ -61,17 +61,17 @@ class UMBPStoreConnectorScheduler:
             self.topology,
             tp_shard_mapping=self.tp_shard_mapping,
         )
-        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        transfer_config = vllm_config.kv_transfer_config
+        assert transfer_config is not None
+        extra = transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         self.lazy_offload = bool(extra.get("lazy_offload", False))
-        if extra.get("enable_partial_hash_hits", False):
-            raise ValueError(
-                "UMBP partial hash hits require a runtime tail-key protocol"
-            )
-        self.enable_partial_hash_hits = False
+        self.enable_partial_hash_hits = bool(
+            extra.get("enable_partial_hash_hits", False)
+        )
         self.hash_block_size = int(extra.get("hash_block_size", self.block_size))
         if self.hash_block_size <= 0 or self.block_size % self.hash_block_size:
             raise ValueError(
@@ -92,9 +92,7 @@ class UMBPStoreConnectorScheduler:
         self._pending_partial_tails: dict[str, list[PartialTailPlan]] = {}
         self._gpu_block_pool: BlockPool | None = None
         self._pinned_store_blocks: dict[tuple[str, int], list[int]] = {}
-        self._store_plan_requests: dict[
-            tuple[str, int], tuple[str, int]
-        ] = {}
+        self._store_plan_requests: dict[tuple[str, int], tuple[str, int]] = {}
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
 
     def _build_local_tp_mapping(self) -> TPShardMapping | None:
@@ -125,20 +123,22 @@ class UMBPStoreConnectorScheduler:
         )
         hashes = list(request.block_hashes)
         align = (
-            self.hash_block_size
-            if self.enable_partial_hash_hits
-            else self.block_size
+            self.hash_block_size if self.enable_partial_hash_hits else self.block_size
         )
         if not hashes or request.num_tokens < align:
             return 0, False
+        if num_computed_tokens % self.block_size != 0:
+            return 0, False
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         scale = self.block_size // self.hash_block_size
+        num_skipped_hashes = num_computed_tokens // self.hash_block_size
+        remaining_hashes = hashes[num_skipped_hashes:]
         lookup_hashes = (
-            hashes
+            remaining_hashes
             if self.enable_partial_hash_hits
             else [
-                hashes[index * scale + scale - 1]
-                for index in range(len(hashes) // scale)
+                remaining_hashes[index * scale + scale - 1]
+                for index in range(len(remaining_hashes) // scale)
             ]
         )
         keys = [
@@ -183,14 +183,14 @@ class UMBPStoreConnectorScheduler:
                 break
             matched_units += 1
         unit_size = (
-            self.hash_block_size
-            if self.enable_partial_hash_hits
-            else self.block_size
+            self.hash_block_size if self.enable_partial_hash_hits else self.block_size
         )
-        matched_tokens = matched_units * unit_size
-        matched_tokens = min(matched_tokens, request.num_tokens)
+        need_to_load = min(
+            matched_units * unit_size,
+            max(request.num_tokens - num_computed_tokens, 0),
+        )
+        matched_tokens = num_computed_tokens + need_to_load
         lookup_state.complete(matched_tokens)
-        need_to_load = max(matched_tokens - num_computed_tokens, 0)
         if need_to_load <= 0:
             return 0, False
         self._load_specs[request.request_id] = LoadSpec(
@@ -224,34 +224,18 @@ class UMBPStoreConnectorScheduler:
             self._pending_loads.pop(request.request_id, None)
             self._load_specs.pop(request.request_id, None)
             return
-        num_blocks = num_external_tokens // self.block_size
         spec = self._load_specs.get(request.request_id)
         if spec is not None:
-            spec.can_load = (
-                num_external_tokens == spec.num_tokens_to_load
-            )
+            spec.can_load = num_external_tokens == spec.num_tokens_to_load
             tracker.load_spec = spec
             if not spec.can_load:
                 return
-        start_hash = request.num_tokens - num_external_tokens
-        plans = [
-            BlockTransferPlan(
-                key=self.codec.key(
-                    self._object_hash(
-                        request.block_hashes,
-                        start_hash // self.block_size + index,
-                    ),
-                    group_id=group_id,
-                ),
-                block_id=block_groups[group_index][-num_blocks + index],
-                request_id=request.request_id,
-                generation=tracker.generation,
-            )
-            for index in range(num_blocks)
-            for group_index, group_id in enumerate(
-                self.kv_cache_config.prefix_cacheable_group_ids
-            )
-        ]
+        plans = self._load_plans_for_external_tokens(
+            request,
+            tracker,
+            block_groups,
+            num_external_tokens,
+        )
         self._pending_loads[request.request_id] = plans
 
     def build_connector_meta(
@@ -289,11 +273,10 @@ class UMBPStoreConnectorScheduler:
                 if store_plans:
                     meta.store_requests[request.req_id] = store_plans
             if request.req_id in self._lookup_states:
-                meta.lookup_states[request.req_id] = self._lookup_states[
-                    request.req_id
-                ]
+                meta.lookup_states[request.req_id] = self._lookup_states[request.req_id]
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
+        resumed_ids: set[str] = set(getattr(cached_reqs, "resumed_req_ids", ()))
         for request_id in cached_reqs.req_ids:
             load_plans = self._pending_loads.pop(request_id, [])
             self._load_specs.pop(request_id, None)
@@ -301,28 +284,32 @@ class UMBPStoreConnectorScheduler:
                 meta.load_plans.extend(load_plans)
                 meta.load_requests[request_id] = load_plans
             elif self.save_decode_cache and not self.lazy_offload:
-                request = self._requests.get(request_id)
-                tracker = self._request_trackers.get(request_id)
-                if request is not None and tracker is not None:
+                cached_request = self._requests.get(request_id)
+                cached_tracker = self._request_trackers.get(request_id)
+                if cached_request is not None and cached_tracker is not None:
                     request_index = cached_reqs.req_ids.index(request_id)
                     new_block_ids = cached_reqs.new_block_ids[request_index]
                     if new_block_ids:
-                        tracker.update_blocks(
-                            tuple(
-                                new_block_ids[group_id]
-                                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+                        selected = tuple(
+                            new_block_ids[group_id]
+                            for group_id in (
+                                self.kv_cache_config.prefix_cacheable_group_ids
                             )
                         )
+                        if request_id in resumed_ids:
+                            cached_tracker.replace_blocks(selected)
+                        else:
+                            cached_tracker.update_blocks(selected)
                     total_tokens = (
                         cached_reqs.num_computed_tokens[request_index]
                         + scheduler_output.num_scheduled_tokens[request_id]
                     )
-                    tracker.token_len = total_tokens
+                    cached_tracker.token_len = total_tokens
                     store_plans = self._store_plans(
-                        request,
-                        tracker,
+                        cached_request,
+                        cached_tracker,
                         total_tokens,
-                        block_ids_override=tracker.block_ids,
+                        block_ids_override=cached_tracker.block_ids,
                     )
                     meta.store_plans.extend(store_plans)
                     if store_plans:
@@ -333,12 +320,10 @@ class UMBPStoreConnectorScheduler:
             plans = self._pending_loads.pop(request_id, [])
             meta.preempted_block_ids.update(plan.block_id for plan in plans)
             self._load_specs.pop(request_id, None)
-            if tracker := self._request_trackers.get(request_id):
-                tracker.reset()
+            if preempted_tracker := self._request_trackers.get(request_id):
+                preempted_tracker.reset()
 
-        block_state = getattr(
-            scheduler_output, "kv_connector_block_state", None
-        )
+        block_state = getattr(scheduler_output, "kv_connector_block_state", None)
         if block_state is not None and block_state.boundary_state_offloads:
             self._add_boundary_state_plans(
                 block_state.boundary_state_offloads,
@@ -347,8 +332,8 @@ class UMBPStoreConnectorScheduler:
                 set(scheduler_output.preempted_req_ids or ()),
             )
 
-        for plans in self._pending_partial_tails.values():
-            meta.partial_tail_plans.extend(plans)
+        for partial_plans in self._pending_partial_tails.values():
+            meta.partial_tail_plans.extend(partial_plans)
         self._pending_partial_tails.clear()
         meta.store_plans.extend(self._pending_stores)
         self._pending_stores.clear()
@@ -402,19 +387,24 @@ class UMBPStoreConnectorScheduler:
                 meta.store_plans.extend(plans)
                 meta.store_requests.setdefault(request_id, []).extend(plans)
 
-    @staticmethod
-    def _group_layer_plans(meta: UMBPConnectorMetadata) -> None:
+    def _group_layer_plans(self, meta: UMBPConnectorMetadata) -> None:
         """Expose layer ownership without changing bulk plan semantics."""
         for plan in meta.load_plans:
-            for item in plan.ranges:
-                meta.load_plans_by_layer.setdefault(item.layer_name, []).append(
-                    plan
-                )
+            layer_names = {item.layer_name for item in plan.ranges} or {
+                region.layer_name
+                for region in self.layout.regions
+                if plan.group_id is None or region.group_id == plan.group_id
+            }
+            for layer_name in layer_names:
+                meta.load_plans_by_layer.setdefault(layer_name, []).append(plan)
         for plan in meta.store_plans:
-            for item in plan.ranges:
-                meta.store_plans_by_layer.setdefault(item.layer_name, []).append(
-                    plan
-                )
+            layer_names = {item.layer_name for item in plan.ranges} or {
+                region.layer_name
+                for region in self.layout.regions
+                if plan.group_id is None or region.group_id == plan.group_id
+            }
+            for layer_name in layer_names:
+                meta.store_plans_by_layer.setdefault(layer_name, []).append(plan)
 
     def _reference_store_blocks(self, metadata: UMBPConnectorMetadata) -> None:
         if self._gpu_block_pool is None:
@@ -432,10 +422,7 @@ class UMBPStoreConnectorScheduler:
                 new_block_ids.append(plan.block_id)
         if new_block_ids:
             self._gpu_block_pool.touch(
-                [
-                    self._gpu_block_pool.blocks[block_id]
-                    for block_id in new_block_ids
-                ]
+                [self._gpu_block_pool.blocks[block_id] for block_id in new_block_ids]
             )
 
     def _tracker_for_request(self, request_id: str) -> RequestTracker:
@@ -448,6 +435,62 @@ class UMBPStoreConnectorScheduler:
             self._next_generation += 1
             self._request_trackers[request_id] = tracker
         return tracker
+
+    def _load_plans_for_external_tokens(
+        self,
+        request: Any,
+        tracker: RequestTracker,
+        block_groups: tuple[list[int], ...],
+        num_external_tokens: int,
+    ) -> list[BlockTransferPlan]:
+        """Build full and partial-prefix load plans for one external hit."""
+        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        spec = tracker.load_spec
+        local_tokens = spec.local_tokens if spec is not None else 0
+        start_block = local_tokens // self.block_size
+        end_tokens = local_tokens + num_external_tokens
+        num_full_blocks = end_tokens // self.block_size - start_block
+        partial_tokens = end_tokens % self.block_size
+        plans: list[BlockTransferPlan] = []
+        for index in range(num_full_blocks):
+            block_index = start_block + index
+            for group_index, group_id in enumerate(group_ids):
+                plans.append(
+                    BlockTransferPlan(
+                        key=self.codec.key(
+                            self._object_hash(request.block_hashes, block_index),
+                            group_id=group_id,
+                        ),
+                        block_id=block_groups[group_index][block_index],
+                        request_id=request.request_id,
+                        generation=tracker.generation,
+                        group_id=group_id,
+                    )
+                )
+        if partial_tokens and self.enable_partial_hash_hits:
+            block_index = start_block + num_full_blocks
+            hash_index = end_tokens // self.hash_block_size - 1
+            token_start = 0
+            token_end = partial_tokens
+            for group_index, group_id in enumerate(group_ids):
+                group_block_ids = block_groups[group_index]
+                if block_index >= len(group_block_ids):
+                    continue
+                plans.append(
+                    BlockTransferPlan(
+                        key=self.codec.key(
+                            request.block_hashes[hash_index],
+                            group_id=group_id,
+                        ),
+                        block_id=group_block_ids[block_index],
+                        request_id=request.request_id,
+                        generation=tracker.generation,
+                        group_id=group_id,
+                        token_start=token_start,
+                        token_end=token_end,
+                    )
+                )
+        return plans
 
     def _object_hash(self, hashes: list[bytes], block_index: int) -> bytes:
         scale = self.block_size // self.hash_block_size
@@ -500,19 +543,14 @@ class UMBPStoreConnectorScheduler:
                         request_id=request_id,
                         generation=tracker.generation,
                         group_id=group_id,
-                        block_hash=self._object_hash(
-                            request.block_hashes, index
-                        ),
+                        block_hash=self._object_hash(request.block_hashes, index),
                         parent_block_hash=(
                             self._object_hash(request.block_hashes, index - 1)
                             if index > 0
                             else None
                         ),
-                        token_ids=tuple(
-                            getattr(request, "prompt_token_ids", [])
-                        )[
-                            index * self.block_size : (index + 1)
-                            * self.block_size
+                        token_ids=tuple(getattr(request, "prompt_token_ids", []))[
+                            index * self.block_size : (index + 1) * self.block_size
                         ],
                         block_size=self.block_size,
                     )
@@ -556,12 +594,11 @@ class UMBPStoreConnectorScheduler:
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
-        """Queue a single full-attention partial tail for the next step."""
+        """Queue partial-tail stores for one or more prefix-cacheable groups."""
         del block_ids
         if not partial_tail_offloads:
             return False
-        if len(self.kv_cache_config.prefix_cacheable_group_ids) != 1:
-            return False
+        prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None:
             return False
@@ -574,22 +611,26 @@ class UMBPStoreConnectorScheduler:
         hash_index = boundary // self.hash_block_size - 1
         if hash_index >= len(request.block_hashes):
             return False
-        group_id = self.kv_cache_config.prefix_cacheable_group_ids[0]
         start_token = (boundary - 1) // self.block_size * self.block_size
         plans: list[PartialTailPlan] = []
-        for entry_group_id, block_id, _ in partial_tail_offloads:
-            if entry_group_id != group_id:
+        for entry_group_id, block_id, entry_boundary in partial_tail_offloads:
+            if entry_group_id not in prefix_groups:
                 return False
+            if entry_boundary != boundary:
+                return False
+            group_block_size = self.group_block_sizes[entry_group_id]
             plans.append(
                 PartialTailPlan(
                     request_id=request.request_id,
                     generation=tracker.generation,
                     block_id=block_id,
-                    group_id=group_id,
+                    group_id=entry_group_id,
                     start_token=start_token,
                     end_token=boundary,
-                    key=self.codec.key(request.block_hashes[hash_index], group_id),
-                    block_size=self.block_size,
+                    key=self.codec.key(
+                        request.block_hashes[hash_index], entry_group_id
+                    ),
+                    block_size=group_block_size,
                 )
             )
         self._pending_partial_tails[request.request_id] = plans

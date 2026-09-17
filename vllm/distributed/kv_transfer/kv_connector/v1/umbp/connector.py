@@ -33,7 +33,7 @@ from .data import (
     UMBPConnectorWorkerMetadata,
     UMBPNamespace,
 )
-from .runtime import UMBPRuntimeFactory, UMBPRuntimeConfig
+from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
 from .scheduler import UMBPStoreConnectorScheduler
 from .stats import UMBPStoreConnectorStats, UMBPStorePromMetrics
 from .worker import UMBPStoreConnectorWorker
@@ -54,7 +54,7 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
     def add_events(self, events: list[KVCacheEvent]) -> None:
         self._events.extend(events)
 
-    def aggregate(self) -> "UMBPStoreKVEvents":
+    def aggregate(self) -> UMBPStoreKVEvents:
         return self
 
     def increment_workers(self, count: int = 1) -> None:
@@ -80,7 +80,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig",
+        kv_cache_config: KVCacheConfig,
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
         runtime_config = UMBPRuntimeConfig.from_vllm(vllm_config)
@@ -116,10 +116,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 ),
                 layout,
                 layerwise_load=runtime.capabilities.layerwise_load,
+                layerwise_store=runtime.capabilities.layerwise_store,
             )
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -128,8 +129,8 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def update_state_after_alloc(
         self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
+        request: Request,
+        blocks: KVCacheBlocks,
         num_external_tokens: int,
     ) -> None:
         assert self.connector_scheduler is not None
@@ -148,14 +149,14 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-        self, request: "Request", block_ids: list[int]
+        self, request: Request, block_ids: list[int]
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, (block_ids,))
 
     def request_finished_all_groups(
         self,
-        request: "Request",
+        request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -163,7 +164,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def register_finished_partial_tail(
         self,
-        request: "Request",
+        request: Request,
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
@@ -213,8 +214,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         **kwargs: Any,
     ) -> None:
         assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, UMBPConnectorMetadata)
         self.connector_worker.save_kv_layer(
-            layer_name, kv_layer, attn_metadata, **kwargs
+            metadata, layer_name, kv_layer, attn_metadata, **kwargs
         )
 
     def wait_for_save(self) -> None:
