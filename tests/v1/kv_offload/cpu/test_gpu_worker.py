@@ -101,6 +101,13 @@ def test_canonical_load_path_follows_fragment_size(cuda_like_platform) -> None:
     assert direct is ops.swap_blocks_batch
     assert getattr(canonical, "func", None) is gpu_worker.swap_blocks_batch
 
+    # The kernel chunk keeps following the page, not the fragment: a 4 KiB
+    # page split into 2 KiB fragments still gets a 4 KiB chunk.
+    small = gpu_worker._select_swap_blocks_fn(
+        _two_fragment_refs(4096, 2048), gpu_to_cpu=False, canonical_layout=True
+    )
+    assert small.keywords["bytes_per_chunk"] == 4096
+
 
 def test_canonical_load_path_requires_aligned_fragments(cuda_like_platform) -> None:
     """The Triton kernel copies whole 8-byte words per descriptor, so an aligned

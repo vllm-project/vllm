@@ -73,7 +73,10 @@ def _select_swap_blocks_fn(
     # Triton wins only on small, 8-byte-aligned payloads.
     if not sizes or max(sizes) >= THRESHOLD_BYTES or any(s % 8 for s in sizes):
         return ops.swap_blocks_batch
-    chunk = min(triton.next_power_of_2(max(sizes)), 8192)
+    # The chunk still follows the page: sizing it to 512-byte fragments was
+    # slower than the page-sized chunk.
+    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
+    chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
     return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
 
