@@ -18,6 +18,7 @@ Covered:
   * the bf16 dtype path;
   * apply_router_weight_on_input=True skips the topk re-weighting.
 """
+
 import pytest
 import torch
 
@@ -84,9 +85,7 @@ def test_matches_float64_reference_multi_expert_per_token(topk):
         apply_router_weight_on_input=False,
     )
     assert out.shape == (num_tokens, K)
-    torch.testing.assert_close(
-        out.cpu().to(torch.float64), ref, rtol=1e-5, atol=1e-5
-    )
+    torch.testing.assert_close(out.cpu().to(torch.float64), ref, rtol=1e-5, atol=1e-5)
 
 
 def test_bitwise_deterministic_across_calls():
@@ -124,9 +123,7 @@ def test_bf16_path_matches_reference():
         apply_router_weight_on_input=False,
     )
     assert out.dtype == torch.bfloat16
-    torch.testing.assert_close(
-        out.cpu().to(torch.float64), ref, rtol=3e-2, atol=3e-2
-    )
+    torch.testing.assert_close(out.cpu().to(torch.float64), ref, rtol=3e-2, atol=3e-2)
 
 
 def test_apply_router_weight_on_input_skips_reweight():
@@ -154,6 +151,4 @@ def test_apply_router_weight_on_input_skips_reweight():
         topk_ids=topk_ids,
         apply_router_weight_on_input=True,
     )
-    torch.testing.assert_close(
-        out.cpu().to(torch.float64), ref, rtol=1e-5, atol=1e-5
-    )
+    torch.testing.assert_close(out.cpu().to(torch.float64), ref, rtol=1e-5, atol=1e-5)
