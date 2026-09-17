@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -93,6 +102,106 @@ def awq_gemm_fused_fp32_kernel(
     )
 
 
+class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.CompileKey"]):
+    """Warmup-aware wrapper for awq_gemm_fused_fp32_kernel.
+
+    ``M`` (token count) is excluded from the compile key via
+    ``do_not_specialize``; only ``BLOCK_SIZE_M``/``BLOCK_SIZE_N`` (chosen from
+    which side of the M<=128 threshold a call falls on) and the per-layer
+    weight shape (N, K, GROUP_SIZE) affect specialization.
+    """
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        N: int
+        K: int
+        GROUP_SIZE: int
+        BLOCK_SIZE_M: int
+        BLOCK_SIZE_N: int
+        BLOCK_SIZE_K: int = 32
+
+    kernel: Any = staticmethod(awq_gemm_fused_fp32_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self, *, m: int, N: int, K: int, GROUP_SIZE: int
+    ) -> CompileKey:
+        block_m = 32 if m <= 128 else 128
+        block_n = 32 if m <= 128 else 64
+        return self.CompileKey(
+            N=N, K=K, GROUP_SIZE=GROUP_SIZE, BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=block_n
+        )
+
+    def get_warmup_keys(
+        self, *, N: int, K: int, GROUP_SIZE: int = 128
+    ) -> list[CompileKey]:
+        # One representative M on each side of the 128 threshold covers both
+        # BLOCK_SIZE_M/N configs dispatch(...) can ever select.
+        return self._trace_dispatch(self.dispatch)(
+            m=(1, 129), N=N, K=K, GROUP_SIZE=GROUP_SIZE
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        m = 1 if compile_key.BLOCK_SIZE_M == 32 else 129
+        num_groups = compile_key.K // compile_key.GROUP_SIZE
+        return dict(
+            input=TritonWarmupTensor(torch.float16, shape=(m, compile_key.K)),
+            qweight=TritonWarmupTensor(
+                torch.int32, shape=(compile_key.K, compile_key.N // 8)
+            ),
+            scales=TritonWarmupTensor(
+                torch.float16, shape=(num_groups, compile_key.N)
+            ),
+            zeros=TritonWarmupTensor(
+                torch.int32, shape=(num_groups, compile_key.N // 8)
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        input: torch.Tensor,
+        qweight: torch.Tensor,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+    ) -> LaunchSpec:
+        m, k = input.shape
+        n = qweight.shape[1] * 8
+        group_size = k // scales.shape[0]
+        compile_key = self.dispatch(m=m, N=n, K=k, GROUP_SIZE=group_size)
+        output = (
+            TritonWarmupTensor(input.dtype, shape=(m, n))
+            if self._warming
+            else torch.empty((m, n), device=input.device, dtype=input.dtype)
+        )
+        grid = (
+            triton.cdiv(m, compile_key.BLOCK_SIZE_M)
+            * triton.cdiv(n, compile_key.BLOCK_SIZE_N),
+        )
+        return (
+            grid,
+            dict(
+                output_ptr=output,
+                M=m,
+                N=compile_key.N,
+                K=compile_key.K,
+                GROUP_SIZE=compile_key.GROUP_SIZE,
+                BLOCK_SIZE_M=compile_key.BLOCK_SIZE_M,
+                BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
+                BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
+                num_warps=4,
+                num_stages=2,
+            ),
+            output,
+        )
+
+
+_AWQ_GEMM_FUSED_FP32_KERNEL = AwqGemmFusedFp32Kernel()
+
+
+def register_awq_fused_fp32_warmup(*, N: int, K: int, GROUP_SIZE: int = 128) -> None:
+    _AWQ_GEMM_FUSED_FP32_KERNEL.register_warmup(N=N, K=K, GROUP_SIZE=GROUP_SIZE)
+
+
 def _awq_gemm_fused_fp32_impl(
     inputs: torch.Tensor,
     qweight: torch.Tensor,
@@ -125,26 +234,7 @@ def _awq_gemm_fused_fp32_impl(
     if k % 32 != 0 or n % 32 != 0:
         raise ValueError("fused AWQ GEMM requires K and N aligned to 32")
 
-    block_m, block_n = (32, 32) if m <= 128 else (128, 64)
-    output = torch.empty((m, n), device=inputs.device, dtype=inputs.dtype)
-    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
-    awq_gemm_fused_fp32_kernel[grid](
-        inputs,
-        qweight,
-        scales,
-        qzeros,
-        output,
-        M=m,
-        N=n,
-        K=k,
-        GROUP_SIZE=group_size,
-        BLOCK_SIZE_M=block_m,
-        BLOCK_SIZE_N=block_n,
-        BLOCK_SIZE_K=32,
-        num_warps=4,
-        num_stages=2,
-    )
-    return output
+    return _AWQ_GEMM_FUSED_FP32_KERNEL(inputs, qweight, scales, qzeros)
 
 
 def _awq_gemm_fused_fp32_fake(

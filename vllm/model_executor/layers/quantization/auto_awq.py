@@ -41,6 +41,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.awq_triton import (
     AWQ_FUSED_FP32_SUPPORTED,
     awq_gemm_fused_fp32,
+    register_awq_fused_fp32_warmup,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -891,6 +892,20 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
 
+        k = layer.qweight.shape[0]
+        n = layer.qweight.shape[1] * self.quant_config.pack_factor
+        num_groups = layer.scales.shape[0]
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and AWQ_FUSED_FP32_SUPPORTED
+            and num_groups > 0
+            and k % num_groups == 0
+            and k // num_groups == 128
+            and k % 32 == 0
+            and n % 32 == 0
+        ):
+            register_awq_fused_fp32_warmup(N=n, K=k, GROUP_SIZE=128)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -927,8 +942,11 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
             and qweight.shape[0] == scales.shape[0] * 128
         )
         if use_fused_bi_gemm:
-            # Fused and legacy paths aren't numerically identical, so
-            # dispatch must not depend on incidental input contiguity.
+            # Fused vs. legacy dequant+matmul are not numerically identical
+            # (different reduction order/accumulation), so dispatch must not
+            # depend on incidental input contiguity: a non-contiguous
+            # reshaped_x must still take the fused path, not silently fall
+            # back to the other algorithm for the same layer.
             out = awq_gemm_fused_fp32(reshaped_x.contiguous(), qweight, scales, qzeros)
         elif FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
