@@ -297,6 +297,8 @@ def _build_qsa_metadata_kernel(
     elif compress_ratio != 1:
         compressed_position = tl.maximum(logical_position, 0) // compress_ratio
         logical_block = compressed_position // storage_block_size
+        # No ownership term: this cache is replicated, so every rank stores
+        # every state. The raw key ring above is gated the same way.
         valid = (
             mapped
             & (logical_position >= 0)
@@ -311,12 +313,6 @@ def _build_qsa_metadata_kernel(
             other=-1,
         )
         valid &= physical_block >= 0
-        # No ownership gate here. The compressed cache is replicated, so every
-        # rank stores every state. The main slot mapping is DCP-sharded and
-        # holds PAD for a position this rank does not own, and gating on it made
-        # rank 0 store nothing: a state lands where (position + 1) % 8 == 0, and
-        # every such position is odd. The padding tail is already excluded by
-        # `mapped`, so the gate only ever removed owned-elsewhere positions.
         slot = physical_block * storage_block_size + (
             compressed_position % storage_block_size
         )

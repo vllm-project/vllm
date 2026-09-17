@@ -10,45 +10,56 @@ every such position is odd at ratio 8.
 
 The equivalence test in test_qsa_dcp_equivalence.py cannot see this. It builds
 each rank's cache by hand from the ownership rule and never calls the builder.
-These tests call the builder.
+These tests call the builder, both of them.
 """
 
 import pytest
 import torch
 
+from vllm.models.qwen4_exp.common.qsa_cache import (
+    _build_qsa_metadata_torch,
+    build_qsa_metadata_triton,
+)
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import CommonAttentionMetadata
 
-requires_gpu = pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="the metadata builder needs CUDA"
 )
 
 RATIO = 8
 STORAGE_BLOCK = 98
+# Enough tokens that the compressed positions span several logical blocks, so
+# the block-table lookup is exercised rather than always landing in block 0.
+NUM_TOKENS = 2048
 PAD = -1
 
+BUILDERS = [build_qsa_metadata_triton, _build_qsa_metadata_torch]
 
-def _metadata(num_tokens, seq_len, slot_mapping, device="cuda"):
-    from vllm.v1.attention.backend import CommonAttentionMetadata
 
-    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+def _metadata(main_slots):
+    query_start_loc = torch.tensor([0, NUM_TOKENS], dtype=torch.int32, device="cuda")
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
-        seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
+        seq_lens=torch.tensor([NUM_TOKENS], dtype=torch.int32, device="cuda"),
         num_reqs=1,
-        num_actual_tokens=num_tokens,
-        max_query_len=num_tokens,
-        max_seq_len=seq_len,
-        block_table_tensor=torch.arange(8, dtype=torch.int32, device=device).unsqueeze(
+        num_actual_tokens=NUM_TOKENS,
+        max_query_len=NUM_TOKENS,
+        max_seq_len=NUM_TOKENS,
+        block_table_tensor=torch.arange(64, dtype=torch.int32, device="cuda").unsqueeze(
             0
         ),
-        slot_mapping=slot_mapping,
+        slot_mapping=main_slots,
     )
 
 
-def _sharded_main_slots(num_tokens, world, rank, interleave=1, device="cuda"):
-    """What the DCP slot-mapping kernel writes: PAD where the rank is not owner."""
-    positions = torch.arange(num_tokens, device=device)
+def _sharded_main_slots(world, rank, interleave=1):
+    """What the DCP slot-mapping kernel writes: PAD where the rank is not owner.
+
+    Transcribed from the `is_local` test in vllm/v1/worker/block_table.py.
+    """
+    positions = torch.arange(NUM_TOKENS, device="cuda")
     owned = (positions // interleave) % world == rank
     return torch.where(
         owned,
@@ -57,72 +68,48 @@ def _sharded_main_slots(num_tokens, world, rank, interleave=1, device="cuda"):
     )
 
 
-def _build(meta, num_tokens, device="cuda"):
-    from vllm.models.qwen4_exp.common.qsa_cache import build_qsa_metadata_triton
-
-    buffers = [
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int64, device=device),
-    ]
-    _, _, _, slots = build_qsa_metadata_triton(
-        meta, *buffers, storage_block_size=STORAGE_BLOCK, compress_ratio=RATIO
-    )
-    return slots
+def _slot_mapping(builder, main_slots):
+    return builder(
+        _metadata(main_slots),
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        storage_block_size=STORAGE_BLOCK,
+        compress_ratio=RATIO,
+    )[3]
 
 
-@requires_gpu
+@pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
 @pytest.mark.parametrize("world,interleave", [(2, 1), (2, 4), (4, 1)])
-def test_every_rank_stores_every_compressed_state(world, interleave):
-    """The defect: at world 2 and interleave 1, rank 0 stored nothing."""
-    num_tokens, seq_len = 256, 256
-    expected = (torch.arange(num_tokens) + 1) % RATIO == 0
-    expected_count = int(expected.sum())
-    assert expected_count > 0
+def test_every_rank_stores_every_compressed_state(builder, world, interleave):
+    """The defect: at world 2 and interleave 1, rank 0 stored nothing.
+
+    Parametrized over both builders because both carried the gate, and an
+    equivalence check between them would have agreed while both were wrong.
+    """
+    expected = NUM_TOKENS // RATIO
 
     for rank in range(world):
-        main = _sharded_main_slots(num_tokens, world, rank, interleave)
-        slots = _build(_metadata(num_tokens, seq_len, main), num_tokens)
-        stored = (slots >= 0).sum().item()
-        assert stored == expected_count, (
-            f"rank {rank} of {world} stored {stored} states, expected "
-            f"{expected_count}. A replicated cache must be written by every rank."
+        slots = _slot_mapping(builder, _sharded_main_slots(world, rank, interleave))
+        stored = int((slots >= 0).sum())
+        assert stored == expected, (
+            f"rank {rank} of {world} stored {stored} states, expected {expected}. "
+            "A replicated cache must be written by every rank."
         )
 
 
-@requires_gpu
-def test_one_rank_is_unchanged():
+@pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
+def test_one_rank_is_unchanged(builder):
     """The fix must be a no-op without DCP, where nothing is PAD anyway."""
-    num_tokens, seq_len = 256, 256
-    whole = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
-    sharded = _sharded_main_slots(num_tokens, 1, 0)
-    assert torch.equal(whole, sharded), "world 1 owns everything"
-
-    slots = _build(_metadata(num_tokens, seq_len, whole), num_tokens)
-    assert (slots >= 0).sum().item() == num_tokens // RATIO
+    whole = torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda")
+    slots = _slot_mapping(builder, whole)
+    assert int((slots >= 0).sum()) == NUM_TOKENS // RATIO
 
 
-@requires_gpu
-@pytest.mark.parametrize("world", [1, 2])
-def test_the_fused_and_torch_paths_agree(world):
-    """Both paths carried the gate. Both must drop it, and stay identical."""
-    from vllm.models.qwen4_exp.common.qsa_cache import _build_qsa_metadata_torch
-
-    num_tokens, seq_len, device = 256, 256, "cuda"
-    main = _sharded_main_slots(num_tokens, world, 0)
-    fused = _build(_metadata(num_tokens, seq_len, main), num_tokens)
-
-    buffers = [
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int32, device=device),
-        torch.zeros(num_tokens, dtype=torch.int64, device=device),
-    ]
-    _, _, _, torch_slots = _build_qsa_metadata_torch(
-        _metadata(num_tokens, seq_len, main),
-        *buffers,
-        storage_block_size=STORAGE_BLOCK,
-        compress_ratio=RATIO,
-    )
-    torch.testing.assert_close(fused, torch_slots)
+def test_the_states_land_on_distinct_slots():
+    """A wrong block index would collide rather than drop, so count the slots."""
+    slots = _slot_mapping(build_qsa_metadata_triton, _sharded_main_slots(2, 0))
+    stored = slots[slots >= 0]
+    assert stored.numel() == NUM_TOKENS // RATIO
+    assert torch.unique(stored).numel() == stored.numel(), "two states collided"
