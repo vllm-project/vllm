@@ -88,6 +88,9 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
+    # Sampled-token logprob per generated token for requests that set
+    # ``SamplingParams.sampled_logprobs_only``; ``logprobs`` is None then.
+    sampled_logprobs: list[float] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
