@@ -705,3 +705,27 @@ def check_accuracy(a, b, atol, rtol, percent):
             f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
             f"(threshold: {1 - percent:.4f})"
         )
+
+
+def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):
+    """Weight/scale layouts for mxfp4 MoE, as (layout, opts) pairs.
+
+    triton_kernels 3.8 returns layout instances; earlier versions return a
+    (layout, opts) tuple.
+    """
+    from triton_kernels.tensor_details import layout
+
+    from vllm.utils.import_utils import get_triton_kernels_version
+
+    if get_triton_kernels_version() == "3.8":
+        w = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+        s = layout.make_default_matmul_mxfp4_w_scale_layout(
+            mx_axis=mx_axis, num_warps=num_warps
+        )
+        return w, {}, s, {}
+
+    w, w_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+    s, s_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+        mx_axis=mx_axis, num_warps=num_warps
+    )
+    return w, w_opts, s, s_opts
