@@ -54,6 +54,22 @@ def is_breakable_cudagraph_enabled() -> bool:
     return bool(envs.VLLM_USE_BREAKABLE_CUDAGRAPH)
 
 
+_replay_tls = threading.local()
+
+
+def is_in_breakable_cuda_graph() -> bool:
+    """True while a breakable CUDA graph is being captured or replayed.
+
+    Code that must stay on the capture stream (e.g. cross-stream fork/join
+    that the eager-break replay would re-evaluate) can use this to keep a
+    single-stream execution under breakable graphs while overlapping freely
+    in plain eager mode.
+    """
+    return BreakableCUDAGraphCapture.is_active() or getattr(
+        _replay_tls, "active", False
+    )
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -212,8 +228,13 @@ class BreakableCUDAGraphCapture:
     # --- replay ----------------------------------------------------------
 
     def replay(self) -> None:
-        for r in self.segments:
-            r()
+        prev = getattr(_replay_tls, "active", False)
+        _replay_tls.active = True
+        try:
+            for r in self.segments:
+                r()
+        finally:
+            _replay_tls.active = prev
 
     # --- introspection ---------------------------------------------------
 
