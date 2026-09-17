@@ -237,42 +237,44 @@ def test_pattern_properties_constrains_keys_and_values(pattern_properties_schema
     assert not grammar_accepts(pattern_properties_schema, '{"grade_1": "five"}')
 
 
-@pytest.mark.parametrize("codepoint", [*range(0x20), 0x7F])
-def test_choice_as_grammar_preserves_control_characters(codepoint):
-    choice = f"a{chr(codepoint)}f"
-    grammar = Grammar.from_ebnf(choice_as_grammar([choice]))
+class TestIsGrammarAcceptString:
+    class TestPR48115Regressions:
+        @pytest.mark.parametrize("codepoint", [*range(0x20), 0x7F])
+        def test_choice_as_grammar_preserves_control_characters(self, codepoint):
+            choice = f"a{chr(codepoint)}f"
+            grammar = Grammar.from_ebnf(choice_as_grammar([choice]))
 
-    assert _is_grammar_accept_string(grammar, choice)
-    assert not _is_grammar_accept_string(grammar, "a")
-    assert not _is_grammar_accept_string(grammar, "af")
-    assert not _is_grammar_accept_string(grammar, f"a\\u{codepoint:04x}f")
+            assert _is_grammar_accept_string(grammar, choice)
+            assert not _is_grammar_accept_string(grammar, "a")
+            assert not _is_grammar_accept_string(grammar, "af")
+            assert not _is_grammar_accept_string(grammar, f"a\\u{codepoint:04x}f")
 
+        @pytest.mark.parametrize(
+            ("choice", "other"),
+            [
+                (r"a\nf", "a\nf"),
+                ('a quote " and a backslash \\', 'a quote " and a backslash '),
+                ("café", "cafe"),
+                ("日本語", "日本"),
+                ("😀", "😁"),
+            ],
+        )
+        def test_choice_as_grammar_preserves_literal_choices(self, choice, other):
+            grammar = Grammar.from_ebnf(choice_as_grammar(["yes", choice]))
 
-@pytest.mark.parametrize(
-    ("choice", "other"),
-    [
-        (r"a\nf", "a\nf"),
-        ('a quote " and a backslash \\', 'a quote " and a backslash '),
-        ("café", "cafe"),
-        ("日本語", "日本"),
-        ("😀", "😁"),
-    ],
-)
-def test_choice_as_grammar_preserves_literal_choices(choice, other):
-    grammar = Grammar.from_ebnf(choice_as_grammar(["yes", choice]))
+            assert _is_grammar_accept_string(grammar, "yes")
+            assert _is_grammar_accept_string(grammar, choice)
+            assert not _is_grammar_accept_string(grammar, other)
+            assert not _is_grammar_accept_string(grammar, choice + "extra")
 
-    assert _is_grammar_accept_string(grammar, "yes")
-    assert _is_grammar_accept_string(grammar, choice)
-    assert not _is_grammar_accept_string(grammar, other)
-    assert not _is_grammar_accept_string(grammar, choice + "extra")
+        def test_validate_xgrammar_preserves_multiline_choice(self):
+            structured_outputs = StructuredOutputsParams(choice=["yes", "no\nplease"])
+            validate_xgrammar_grammar(
+                SamplingParams(structured_outputs=structured_outputs)
+            )
 
-
-def test_validate_xgrammar_preserves_multiline_choice():
-    structured_outputs = StructuredOutputsParams(choice=["yes", "no\nplease"])
-    validate_xgrammar_grammar(SamplingParams(structured_outputs=structured_outputs))
-
-    assert structured_outputs.choice is None
-    grammar = Grammar.from_ebnf(structured_outputs.grammar)
-    assert _is_grammar_accept_string(grammar, "yes")
-    assert _is_grammar_accept_string(grammar, "no\nplease")
-    assert not _is_grammar_accept_string(grammar, r"no\nplease")
+            assert structured_outputs.choice is None
+            grammar = Grammar.from_ebnf(structured_outputs.grammar)
+            assert _is_grammar_accept_string(grammar, "yes")
+            assert _is_grammar_accept_string(grammar, "no\nplease")
+            assert not _is_grammar_accept_string(grammar, r"no\nplease")

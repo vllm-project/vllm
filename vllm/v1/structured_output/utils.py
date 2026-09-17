@@ -573,6 +573,7 @@ def choice_as_grammar(choice: list[str]) -> str:
         def escape_char(ch: str) -> str:
             if ch in escapes:
                 return escapes[ch]
+            # Escape remaining C0 controls (U+0000-U+001F) and DEL (U+007F).
             if ord(ch) < 0x20 or ord(ch) == 0x7F:
                 return f"\\u{ord(ch):04x}"
             return ch

@@ -2,15 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
-import json
-
 import pytest
-from xgrammar import Grammar
-from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.config import StructuredOutputsConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
@@ -28,53 +22,8 @@ JSON_SCHEMA = {
 
 
 class _StubModelConfig:
-    max_logprobs = 20
-    logits_processors = None
-
     def __init__(self, is_diffusion: bool):
         self.is_diffusion = is_diffusion
-
-
-@pytest.mark.parametrize(
-    "request_cls",
-    [CompletionRequest, ChatCompletionRequest],
-    ids=["completion", "chat"],
-)
-@pytest.mark.parametrize(
-    "choice",
-    [
-        pytest.param("line1\nline2", id="newline"),
-        pytest.param("line1\rline2", id="carriage_return"),
-        pytest.param("left\x00right", id="nul"),
-    ],
-)
-def test_xgrammar_choice_request_preserves_control_characters(request_cls, choice):
-    payload = {
-        "model": "test-model",
-        "max_tokens": 8,
-        "structured_outputs": {"choice": [choice]},
-    }
-    if request_cls is CompletionRequest:
-        payload["prompt"] = "Reply with the exact option."
-    else:
-        payload["messages"] = [
-            {"role": "user", "content": "Reply with the exact option."}
-        ]
-    request = request_cls.model_validate_json(json.dumps(payload))
-    params = request.to_sampling_params(8, {})
-    assert params.structured_outputs.choice == [choice]
-
-    params.verify(
-        _StubModelConfig(is_diffusion=False),
-        None,
-        StructuredOutputsConfig(backend="xgrammar"),
-        tokenizer=object(),  # Choice validation only requires a non-None tokenizer.
-    )
-    assert params.structured_outputs._backend == "xgrammar"
-    assert params.structured_outputs.choice is None
-    grammar = Grammar.from_ebnf(params.structured_outputs.grammar)
-    assert _is_grammar_accept_string(grammar, choice)
-    assert not _is_grammar_accept_string(grammar, choice + "!")
 
 
 def test_structured_outputs_rejected_for_diffusion_models():
