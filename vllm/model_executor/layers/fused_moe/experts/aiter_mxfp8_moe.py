@@ -45,12 +45,9 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # gfx950 / MX-capable ROCm with the aiter fused-MoE runtime enabled.
-        return (
-            current_platform.is_rocm()
-            and current_platform.supports_mx()
-            and rocm_aiter_ops.is_fused_moe_enabled()
-        )
+        # gfx950-only path: MX-capable device + aiter fused-MoE enabled
+        # (which implies ROCm).
+        return current_platform.supports_mx() and rocm_aiter_ops.is_fused_moe_enabled()
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config) -> bool:
