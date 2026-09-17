@@ -1009,6 +1009,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             per_req_page_table.unsqueeze(1)
         )
 
+    def _decode_reads_aiter_schedule(
+        self, num_reqs: int, qo_len: int, uniform_qo_len: bool, causal: bool
+    ) -> bool:
+        """Whether this decode batch may read get_mla_metadata_v1's schedule."""
+        return True
+
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
@@ -1136,6 +1142,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 else:
                     qo_indptr = query_start_loc_device[: 1 + num_kernel_reqs]
 
+        uniform_qo_len = pad_uniform_mtp or bool(torch.all(qo_len == max_qo_len))
         has_persistent_metadata = False
         # Only the asm decode consumes the schedule, so gate on the routing
         # rather than on num_heads >= 16, which denies it to a padded rank
@@ -1160,6 +1167,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             and max_qo_len >= 1
             and max_qo_len <= self._mtp_decode_qlen
+            and self._decode_reads_aiter_schedule(
+                num_kernel_reqs, int(max_qo_len), uniform_qo_len, causal
+            )
         )
         if (
             not causal
@@ -1182,9 +1192,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 
-            uni_qo_len = (
-                max_qo_len if pad_uniform_mtp or torch.all(qo_len == max_qo_len) else -1
-            )
+            uni_qo_len = max_qo_len if uniform_qo_len else -1
             get_mla_metadata_v1(
                 qo_indptr,
                 paged_kv_indptr,

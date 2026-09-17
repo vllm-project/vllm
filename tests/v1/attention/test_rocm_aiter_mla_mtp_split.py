@@ -140,6 +140,9 @@ def _builder(
     stub._fill_dcp_verify_page_table = (
         AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
     )
+    stub._decode_reads_aiter_schedule = (
+        AiterMLAMetadataBuilder._decode_reads_aiter_schedule.__get__(stub)
+    )
     return stub
 
 
@@ -1044,3 +1047,30 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+@pytest.mark.parametrize(
+    "num_reqs,qo_len,uniform,causal,heads,reads_schedule",
+    [
+        (8, 4, True, True, 12, False),
+        (8, 1, True, True, 96, False),
+        (8, 4, False, True, 12, True),
+        (8, 4, True, False, 12, True),
+        (8, 4, True, True, 160, True),
+        (400, 4, True, True, 12, True),
+    ],
+)
+def test_moonmath_skips_aiter_schedule_only_for_batches_it_serves(
+    num_reqs, qo_len, uniform, causal, heads, reads_schedule
+):
+    from vllm.v1.attention.backends.mla.moonmath_mla import (
+        MoonmathMLAMetadataBuilder,
+    )
+
+    builder = SimpleNamespace(_decode_num_heads=heads)
+    assert (
+        MoonmathMLAMetadataBuilder._decode_reads_aiter_schedule(
+            builder, num_reqs, qo_len, uniform, causal
+        )
+        is reads_schedule
+    )

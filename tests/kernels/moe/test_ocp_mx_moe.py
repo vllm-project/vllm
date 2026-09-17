@@ -1887,6 +1887,28 @@ def test_aiter_w4a16_claims_situ_only_with_the_moonmath_kernels(
     assert aiter_cls._supports_activation(MoEActivation.SWIGLUOAI)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+@pytest.mark.parametrize("num_tokens,hidden", [(1, 7), (32, 7168)])
+def test_moonmath_weighted_topk_sum_matches_fp32_reference(num_tokens, hidden):
+    from vllm.model_executor.layers.fused_moe.experts import (
+        moonmath_mxfp4_moe as experts,
+    )
+    from vllm.triton_utils import triton
+
+    topk = 16
+    down = torch.randn(num_tokens * topk, hidden, device="cuda", dtype=torch.bfloat16)
+    weights = torch.rand(num_tokens, topk, device="cuda", dtype=torch.float32)
+    out = torch.empty(num_tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    experts._weighted_topk_sum_kernel[
+        (num_tokens, triton.cdiv(hidden, experts._REDUCE_BLOCK_H))
+    ](down, weights, out, hidden, TOPK=topk, BLOCK_H=experts._REDUCE_BLOCK_H)
+
+    ref = torch.zeros(num_tokens, hidden, device="cuda", dtype=torch.float32)
+    for k in range(topk):
+        ref += down.view(num_tokens, topk, hidden)[:, k].float() * weights[:, k, None]
+    torch.testing.assert_close(out, ref.to(torch.bfloat16))
+
+
 def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ):

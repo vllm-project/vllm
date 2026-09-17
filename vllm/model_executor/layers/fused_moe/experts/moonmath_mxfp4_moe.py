@@ -27,11 +27,34 @@ from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import weight_mx_scale
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_moonmath_amd
 
 logger = init_logger(__name__)
 
 __all__ = ["MoonmathW4A16SituExperts"]
+
+_REDUCE_BLOCK_H = 512
+
+
+@triton.jit
+def _weighted_topk_sum_kernel(
+    down_ptr,
+    weight_ptr,
+    out_ptr,
+    H,
+    TOPK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    t = tl.program_id(0).to(tl.int64)
+    offs = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask = offs < H
+    acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+    for k in tl.static_range(TOPK):
+        w = tl.load(weight_ptr + t * TOPK + k).to(tl.float32)
+        v = tl.load(down_ptr + (t * TOPK + k) * H + offs, mask=mask, other=0.0)
+        acc += v.to(tl.float32) * w
+    tl.store(out_ptr + t * H + offs, acc.to(out_ptr.dtype.element_ty), mask=mask)
 
 
 class MoonmathW4A16SituExperts(AiterW4A16ExpertsMonolithic):
@@ -214,7 +237,7 @@ def situ_moe_forward(
     assert hidden_states.is_contiguous(), (
         "moonmath MoE reads A by row; a strided [T, K] reads the wrong ones"
     )
-    tw = scal.reshape(-1).to(dt)
+    tw = scal.reshape(-1).to(dt) if apply_router_weight_on_input else None
 
     bm_g = ma.mxfp4_moe_gateup_block_m(rows, E)
     sg, eg, ng = moe_align_block_size(ids, bm_g, E)
@@ -260,7 +283,19 @@ def situ_moe_forward(
         nt,
         rows,
         1,
-        mul_routed_weight=not apply_router_weight_on_input,
+        mul_routed_weight=False,
     )
     # down writes one row per (token, expert); AITER scattered in-kernel.
-    return torch.sum(down.view(T, topk, H), dim=1, dtype=torch.float32).to(dt)
+    if apply_router_weight_on_input:
+        return torch.sum(down.view(T, topk, H), dim=1, dtype=torch.float32).to(dt)
+    out = torch.empty((T, H), dtype=dt, device=dev)
+    _weighted_topk_sum_kernel[(T, triton.cdiv(H, _REDUCE_BLOCK_H))](
+        down,
+        scal.contiguous(),
+        out,
+        H,
+        TOPK=topk,
+        BLOCK_H=_REDUCE_BLOCK_H,
+        num_warps=4,
+    )
+    return out
