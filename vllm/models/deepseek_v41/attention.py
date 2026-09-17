@@ -168,6 +168,16 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def _swa_cache_block_size() -> int:
+    """Page size for the V4.1 sliding-window cache.
+
+    FlashInfer's SM120 sparse-MLA decode kernels only ship 64-token pages
+    (``_DECODE_DSV4_PAGE_BLOCK_SIZE``), while the other sparse decode paths
+    accept any multiple of 32.
+    """
+    return 64 if current_platform.is_device_capability_family(120) else 32
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -512,11 +522,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "decodes only on SM100."
             )
 
-        # The SM120 FlashInfer sparse-MLA decode kernels only ship 64-token
-        # pages, so widen the sliding-window cache there.
-        swa_cache_block_size = (
-            64 if current_platform.is_device_capability_family(120) else 32
-        )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -524,7 +529,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=swa_cache_block_size,
+            block_size=_swa_cache_block_size(),
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
         )
