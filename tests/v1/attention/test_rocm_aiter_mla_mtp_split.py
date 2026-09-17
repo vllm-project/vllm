@@ -131,6 +131,17 @@ def _builder(
         _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
         _decode_causal=True,
+        # The round-robin (cprr) asm DCP-verify route is off in this stub, so
+        # these cases keep exercising the segmented/persistent route they were
+        # written for -- equivalent to VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented.
+        # The asm route has its own coverage in
+        # test_rocm_aiter_mla_dcp_cprr_numerics.py.
+        _asm_dcp_verify=False,
+        _asm_dcp_verify_heads=0,
+        _g_kv_indptr_buf=None,
+        # Only read when the asm route is on; the real builder derives it from
+        # the device CU count.
+        _mla_max_split_per_batch=256,
     )
     # Bound to the stub rather than faked: the verify flatten's per-row view is
     # part of what _build_decode is being tested for.
@@ -325,6 +336,9 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         dcp_verify=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
+        # 0 == the round-robin (cprr) asm route is off, this rank's decode takes
+        # the existing path. Mirrors the AiterMLADecodeMetadata default.
+        asm_decode_num_heads=0,
     )
     attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
     layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
