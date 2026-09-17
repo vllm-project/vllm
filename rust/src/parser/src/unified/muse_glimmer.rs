@@ -32,7 +32,7 @@ mod structural_tag;
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, eof, not, opt, peek, preceded, seq};
+use winnow::combinator::{alt, delimited, eof, not, opt, peek, preceded, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
@@ -535,26 +535,15 @@ fn parse_done_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmer
     rest.value(MuseGlimmerEvent::Skip).parse_next(input)
 }
 
-/// Parse a framed channel header: `<|start|>` + `\s*` + `assistant` +
-/// `[^\S\n]*` + optional `to=RECIPIENT` + `<|message|>`.
+/// Parse a framed channel header: `<|start|>` + `\s*` + `assistant` + the
+/// bare header tail (see [`bare_header_event`]).
 fn framed_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    let (recipient,) = seq!(
-        _: literal(START),
-        _: ws0,
-        _: literal(ASSISTANT),
-        _: take_while(0.., is_inline_ws),
-        opt(preceded(literal("to="), recipient_name)),
-        _: literal(MESSAGE),
-    )
-    .parse_next(input)?;
-    Ok(MuseGlimmerEvent::ChannelOpen(classify_recipient(
-        recipient.as_deref(),
-    )))
+    preceded((literal(START), ws0, literal(ASSISTANT)), bare_header_event).parse_next(input)
 }
 
-/// Parse a bare channel header at channel boundaries: optional inline
-/// whitespace, optional `to=RECIPIENT`, `<|message|>`. The first channel of a
-/// turn starts bare right after the prompt's trailing `<|start|>assistant`.
+/// Parse a bare channel header at channel boundaries: `[^\S\n]*` + optional
+/// `to=RECIPIENT` + `<|message|>`. The first channel of a turn starts bare
+/// right after the prompt's trailing `<|start|>assistant`.
 fn bare_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
     let (recipient,) = seq!(
         _: take_while(0.., is_inline_ws),
@@ -567,37 +556,32 @@ fn bare_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimme
     )))
 }
 
+/// Parse a bare `to=RECIPIENT<|message|>` header appearing mid-body.
+fn bare_recipient_header(input: &mut MuseGlimmerInput<'_>) -> ModalResult<String> {
+    delimited(literal("to="), recipient_name, literal(MESSAGE)).parse_next(input)
+}
+
 /// Parse a bare `to=<tool><|message|>` header that is immediately followed by
 /// `<atem:`: the model defect of an unterminated reasoning/content body closed
 /// by a bare tool header (deterministic for empty-argument calls).
 fn bare_tool_switch_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    let checkpoint = input.checkpoint();
-    let (recipient,) = seq!(
-        _: literal("to="),
-        recipient_name,
-        _: literal(MESSAGE),
-        _: peek(literal(ATEM_PREFIX)),
+    // A bare self/user header mid-body is literal text, not a switch.
+    let is_tool = |recipient: &str| !matches!(recipient, "self" | "user");
+    terminated(
+        bare_recipient_header.verify(is_tool),
+        peek(literal(ATEM_PREFIX)),
     )
-    .parse_next(input)?;
-    if matches!(recipient.as_str(), "self" | "user") {
-        // A bare self/user header mid-body is literal text, not a switch.
-        input.reset(&checkpoint);
-        return Err(ErrMode::Backtrack(ContextError::new()));
-    }
-    Ok(MuseGlimmerEvent::ChannelOpen(ChannelKind::Tool))
+    .value(MuseGlimmerEvent::ChannelOpen(ChannelKind::Tool))
+    .parse_next(input)
 }
 
 /// Consume a bare `to=RECIPIENT<|message|>` header that cannot be a tool
 /// switch (recipient is `self`/`user`, or no ATEM block follows) as literal
 /// body text: a quoted header must not truncate the body.
 fn failed_bare_header_text(input: &mut MuseGlimmerInput<'_>) -> ModalResult<()> {
-    seq!(
-        _: literal("to="),
-        _: recipient_name,
-        _: literal(MESSAGE),
-        _: peek(not(literal(ATEM_PREFIX))),
-    )
-    .parse_next(input)
+    terminated(bare_recipient_header, peek(not(literal(ATEM_PREFIX))))
+        .void()
+        .parse_next(input)
 }
 
 /// Reclassify an ATEM block inside a content body as a tool channel, emitting
