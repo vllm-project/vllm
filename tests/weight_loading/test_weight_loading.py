@@ -29,15 +29,9 @@ SAFETENSORS_LOAD_STRATEGY = os.environ.get(
     reason="Current system does not have minimum capability.",
 )
 def test_weight_loading(vllm_runner):
-    """
-    Test parameter weight loading with tp>1.
-    """
-
+    """Test parameter weight loading with tp>1."""
     # MoE models need fp16.
-    NEEDS_FP16 = (
-        QUANTIZATION == "gptq"
-        or MODEL_NAME == "nm-testing/test-w4a16-mixtral-actorder-group"
-    )
+    NEEDS_FP16 = QUANTIZATION == "gptq"
     with vllm_runner(
         model_name=MODEL_NAME,
         revision=REVISION,

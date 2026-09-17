@@ -47,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
     """Return exact per-token positions as ``[tokens, 1, 3]`` int64 rows."""
-
     if positions.ndim == 1:
         positions = positions.unsqueeze(0).expand(3, -1)
     elif positions.ndim != 2 or positions.shape[0] not in (1, 3):
@@ -115,7 +114,6 @@ def circular_qsa_slot_mapping(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Map each request to its fixed physical block as a circular token ring."""
-
     if compressor_state_size <= 0:
         raise ValueError("QSA circular buffer size must be positive")
     if block_table.ndim != 2:
@@ -167,7 +165,6 @@ def compressed_qsa_slot_mapping(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build boundary-only slots for an ``MLAAttentionSpec`` QSA cache."""
-
     if storage_block_size <= 0 or compress_ratio <= 0:
         raise ValueError("QSA block size and compression ratio must be positive")
     compressed_positions = torch.div(
@@ -591,6 +588,7 @@ class QSAForwardMetadata(AttentionMetadata):
     num_prefill_tokens: int
     max_query_len: int
     decode_query_len: int
+    max_seq_len: int
     storage_block_size: int
     compress_ratio: int
 
@@ -717,16 +715,23 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             num_prefill_tokens=num_prefill_tokens,
             max_query_len=common_attn_metadata.max_query_len,
             decode_query_len=decode_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )
 
 
 class QSAStateBackend(AttentionBackend):
-    """Key-only dummy backend for out-of-band BF16 QSA side-cache operations."""
+    """Key-only dummy backend for out-of-band QSA side-cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    # fp8 entries allow the optional e4m3 compressed indexer cache.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -788,8 +793,12 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
         """Adapt the unified [B, H, N, C] view to QSA's [B, N, H, C]."""
         if kv_cache.ndim != 4 or kv_cache.shape[1] != 1:
             raise ValueError("QSA state cache must be [blocks, 1, states, width]")
-        if kv_cache.dtype != torch.bfloat16 or kv_cache.shape[3] != self.head_size:
-            raise ValueError("QSA state cache does not match its packed BF16 spec")
+        if kv_cache.dtype != self.dtype or kv_cache.shape[3] != self.head_size:
+            raise ValueError(
+                f"QSA state cache does not match its spec "
+                f"(dtype {kv_cache.dtype} != {self.dtype} or width "
+                f"{kv_cache.shape[3]} != {self.head_size})"
+            )
         super().bind_kv_cache(kv_cache.transpose(1, 2))
 
     def get_attn_backend(self) -> type[AttentionBackend]:
@@ -848,7 +857,7 @@ class QSAKeyStateCache(_QSAStateCache):
 
 
 class QSACompressedKeyCache(_QSAStateCache):
-    """Normalized, group-first-RoPE BF16 key at one row per complete group."""
+    """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config

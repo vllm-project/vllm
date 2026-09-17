@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Configuration management for Helion kernels.
+"""Configuration management for Helion kernels.
 
 This module provides centralized configuration file management for Helion custom
 operations, including naming conventions, directory resolution, and file I/O.
