@@ -81,7 +81,13 @@ const IDLE_MARKERS: &[&str] = &[
     MESSAGE_CLOSE,
     END_OF_MSG,
 ];
-const REASONING_MARKERS: &[&str] = &[THINK_CLOSE, END_OF_MSG];
+const REASONING_MARKERS: &[&str] = &[
+    THINK_CLOSE,
+    RESPONSE_OPEN,
+    RESPONSE_CLOSE,
+    TOOLS_OPEN,
+    END_OF_MSG,
+];
 const RESPONSE_MARKERS: &[&str] = &[RESPONSE_CLOSE, TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const EPILOGUE_MARKERS: &[&str] = &[TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const TOOLS_MARKERS: &[&str] = &[CALL_OPEN, TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG];
@@ -352,6 +358,11 @@ fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
     alt((
         literal(THINK_CLOSE).value(KimiK3Event::ThinkClose),
+        // A later channel unambiguously ends reasoning even if the model
+        // omitted the explicit think-close marker.
+        literal(RESPONSE_OPEN).value(KimiK3Event::ResponseOpen),
+        literal(RESPONSE_CLOSE).value(KimiK3Event::ResponseClose),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
         // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
         // `include_stop_str_in_output`; never leak it into reasoning.
         literal(END_OF_MSG).value(KimiK3Event::MessageEnd),
@@ -784,6 +795,22 @@ mod tests {
             assert_eq!(output.normal_text(), "the answer", "chunk size {size}");
             assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
             assert_eq!(first_call(&output).arguments, r#"{"x":42}"#);
+        }
+    }
+
+    #[test]
+    fn kimi_k3_recovers_tool_call_when_think_close_is_missing() {
+        let tool = call("tool=\"bash\" index=\"1\"", &arg("command", "string", "ls"));
+        let text = format!("{THINK_OPEN}planning{RESPONSE_CLOSE}{TOOLS_OPEN}{tool}{TOOLS_CLOSE}");
+
+        for size in [1, 3, 7] {
+            let chunks = char_chunks(&text, size);
+            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let output = collect_stream(&mut test_parser(), &chunk_refs);
+
+            assert_eq!(output.reasoning_text(), "planning", "chunk size {size}");
+            assert_eq!(first_call(&output).name.as_deref(), Some("bash"));
+            assert_eq!(first_call(&output).arguments, r#"{"command":"ls"}"#);
         }
     }
 

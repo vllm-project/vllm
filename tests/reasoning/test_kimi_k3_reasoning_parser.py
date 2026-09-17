@@ -19,6 +19,8 @@ SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
 
 
 class DummyTokenizer:
@@ -78,6 +80,30 @@ def test_extract_reasoning_with_generation_prefix_consumed():
 
     assert reasoning == "step"
     assert content == "answer"
+
+
+def test_extract_reasoning_recovers_at_later_channel_without_think_close():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"type": "object"}},
+            }
+        ],
+        tool_choice="auto",
+    )
+    tools = f'{TOOLS_OPEN}{OPEN}call tool="bash" index="1"{SEP}'
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"planning{RESPONSE_CLOSE}{tools}",
+        request,
+    )
+
+    assert reasoning == "planning"
+    assert content == f"{RESPONSE_CLOSE}{tools}"
 
 
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
@@ -179,6 +205,25 @@ def test_streaming_split_close_marker_hands_content_downstream():
     assert closed.reasoning is None
     assert closed.content == f"{RESPONSE_OPEN}answer"
     assert parser.extract_content_ids([2, 3, 10]) == [10]
+
+
+def test_streaming_split_later_channel_recovers_without_think_close():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    previous_text = f"{THINK_OPEN}planning{CLOSE}respon"
+    current_text = f"{THINK_OPEN}planning{RESPONSE_CLOSE}{TOOLS_OPEN}"
+
+    delta = parser.extract_reasoning_content_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text=f"se{SEP}{TOOLS_OPEN}",
+        previous_token_ids=[1, 2, 3, 9],
+        current_token_ids=[1, 2, 3, 9, 10],
+        delta_token_ids=[10],
+    )
+
+    assert isinstance(delta, DeltaMessage)
+    assert delta.reasoning is None
+    assert delta.content == f"{RESPONSE_CLOSE}{TOOLS_OPEN}"
 
 
 def test_thinking_disabled_streams_content():

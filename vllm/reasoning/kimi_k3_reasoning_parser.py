@@ -106,6 +106,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         # bypassed and the reasoning parser must strip them itself.
         self._response_open = "<|open|>response<|sep|>"
         self._response_close = "<|close|>response<|sep|>"
+        self._tools_open = "<|open|>tools<|sep|>"
         self._message_close = "<|close|>message<|sep|>"
 
         # Tolerant matchers: defense-in-depth against vLLM's added-token spacing
@@ -123,6 +124,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._response_close_re = re.compile(
             close_marker + r"\s*response\s*" + sep_marker
         )
+        self._tools_open_re = re.compile(open_marker + r"\s*tools\s*" + sep_marker)
         self._message_close_re = re.compile(
             close_marker + r"\s*message\s*" + sep_marker
         )
@@ -251,6 +253,22 @@ class KimiK3ReasoningParser(ReasoningParser):
             return text or None
         return self._strip_content_wrapper(text) or None
 
+    def _inferred_reasoning_end(self, text: str, start: int = 0):
+        """Find the first later-channel marker after an omitted think close."""
+        matches = (
+            matcher.search(text, start)
+            for matcher in (
+                self._response_open_re,
+                self._response_close_re,
+                self._tools_open_re,
+            )
+        )
+        return min(
+            (match for match in matches if match is not None),
+            key=lambda match: match.start(),
+            default=None,
+        )
+
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
@@ -269,18 +287,33 @@ class KimiK3ReasoningParser(ReasoningParser):
         m_open = self._think_open_re.search(model_output)
         # reasoning content begins right after think-open (or at start if the
         # open marker was already consumed as a generation prefix)
-        content_start = m_open.end() if m_open is not None else 0
-        # if there is no think channel at all, everything is content
-        if m_open is None and self._think_close_re.search(model_output) is None:
+        reasoning_start = m_open.end() if m_open is not None else 0
+        m_close = self._think_close_re.search(model_output, reasoning_start)
+        m_inferred_close = self._inferred_reasoning_end(model_output, reasoning_start)
+        # if there is no think channel or later-channel boundary at all,
+        # everything is content
+        if m_open is None and m_close is None and m_inferred_close is None:
             return None, self._content_after_reasoning(model_output, request)
 
-        m_close = self._think_close_re.search(model_output, content_start)
-        if m_close is not None:
-            reasoning = model_output[content_start : m_close.start()]
-            rest = model_output[m_close.end() :]
+        if m_close is not None and (
+            m_inferred_close is None or m_close.start() < m_inferred_close.start()
+        ):
+            reasoning_end = m_close.start()
+            downstream_start = m_close.end()
+        elif m_inferred_close is not None:
+            reasoning_end = m_inferred_close.start()
+            # Preserve the inferred marker for the downstream parser.
+            downstream_start = m_inferred_close.start()
+        else:
+            reasoning_end = None
+            downstream_start = len(model_output)
+
+        if reasoning_end is not None:
+            reasoning = model_output[reasoning_start:reasoning_end]
+            rest = model_output[downstream_start:]
             return (reasoning or None, self._content_after_reasoning(rest, request))
         # think not closed -> still reasoning, no content yet
-        return (model_output[content_start:] or None, None)
+        return (model_output[reasoning_start:] or None, None)
 
     def _reasoning_text_ready_to_emit(self, text: str) -> str:
         """Return the reasoning prefix that is safe to stream now.
@@ -306,7 +339,13 @@ class KimiK3ReasoningParser(ReasoningParser):
         if m_open is not None:
             text = text[m_open.end() :]
         overlap = 0
-        for marker in (self._think_open, self._think_close):
+        for marker in (
+            self._think_open,
+            self._think_close,
+            self._response_open,
+            self._response_close,
+            self._tools_open,
+        ):
             max_check = min(len(marker) - 1, len(text))
             for n in range(max_check, 0, -1):
                 if text.endswith(marker[:n]):
@@ -382,26 +421,42 @@ class KimiK3ReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
         # reasoning already ended -> downstream content
-        if self._think_close_re.search(previous_text):
+        if self._think_close_re.search(previous_text) or self._inferred_reasoning_end(
+            previous_text
+        ):
             return DeltaMessage(content=delta_text)
 
         # the close marker completes within this delta's accumulated text:
         # split the buffer at the close marker into reasoning vs trailing content.
         m_close = self._think_close_re.search(current_text)
-        if m_close is not None:
+        m_inferred_close = self._inferred_reasoning_end(current_text)
+        if m_close is not None and (
+            m_inferred_close is None or m_close.start() < m_inferred_close.start()
+        ):
+            reasoning_end = m_close.start()
+            content_start = m_close.end()
+        elif m_inferred_close is not None:
+            reasoning_end = m_inferred_close.start()
+            content_start = m_inferred_close.start()
+        else:
+            reasoning_end = None
+
+        if reasoning_end is not None:
             self._last_streaming_delta_token_ids = tuple(delta_token_ids)
-            self._last_streaming_content_token_ids = self._extract_content_ids(
-                list(current_token_ids)
+            self._last_streaming_content_token_ids = (
+                self._extract_content_ids(list(current_token_ids))
+                if m_close is not None and reasoning_end == m_close.start()
+                else list(delta_token_ids)
             )
             m_open = self._think_open_re.search(current_text)
             r_start = m_open.end() if m_open is not None else 0
-            reasoning = current_text[r_start : m_close.start()]
+            reasoning = current_text[r_start:reasoning_end]
             already_sent = self._reasoning_text_ready_to_emit(previous_text)
             if reasoning.startswith(already_sent):
                 reasoning_delta = reasoning[len(already_sent) :]
             else:
                 reasoning_delta = reasoning
-            content = current_text[m_close.end() :]
+            content = current_text[content_start:]
             return DeltaMessage(
                 reasoning=reasoning_delta or None,
                 content=content or None,
