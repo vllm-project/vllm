@@ -5,11 +5,15 @@ DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
 
+import gc
+import time
+
 import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
@@ -28,8 +32,11 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import num_compute_units
+
+logger = init_logger(__name__)
 
 
 def _generate_optimal_warmup_m_values(
@@ -143,6 +150,18 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     return isinstance(fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
 
 
+def _grouped_gemm_max_tokens(module: MoERunner, max_tokens: int) -> int:
+    """Worst-case number of tokens the module's experts receive per forward."""
+    moe_kernel = module._quant_method.moe_kernel
+    assert moe_kernel is not None
+    max_recv_tokens = getattr(moe_kernel.impl, "max_num_recv_tokens", None)
+    if max_recv_tokens is not None:
+        return max_recv_tokens
+    # Assumes all ranks have the same max_num_batched_tokens
+    sp_size = module.moe_config.sp_size
+    return get_dp_group().world_size * round_up(max_tokens, sp_size)
+
+
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
 
 
@@ -209,9 +228,6 @@ def _get_grouped_gemm_params(
     block_m = get_mk_alignment_for_contiguous_layout()[0]
     num_experts = w1.size(0)
     device = w1.device
-
-    # Assumes all ranks have the same max_num_batched_tokens
-    max_tokens = get_dp_group().world_size * max_tokens
 
     request_m_values = _generate_optimal_warmup_m_values(
         max_tokens,
@@ -323,7 +339,13 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
             dgm
         )
         _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
-            w13, w2, w13_scale, w2_scale, num_topk, max_tokens, pbar=pbar
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            num_topk,
+            _grouped_gemm_max_tokens(dgm, max_tokens),
+            pbar=pbar,
         )
 
 
@@ -344,7 +366,9 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
             if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
                 continue
-            _, _, warmup_cases = _get_grouped_gemm_params(w13, w2, num_topk, max_tokens)
+            _, _, warmup_cases = _get_grouped_gemm_params(
+                w13, w2, num_topk, _grouped_gemm_max_tokens(m, max_tokens)
+            )
             n_values = len(warmup_cases)
             if w13.size() not in seen_grouped_sizes:
                 total += n_values
@@ -361,6 +385,13 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     if total == 0:
         return
 
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats()
+    allocated_before = torch.accelerator.memory_allocated()
+    reserved_before = torch.accelerator.memory_reserved()
+    free_before = torch.accelerator.get_memory_info()[0]
+    start = time.perf_counter()
+
     # Only show progress bar on rank 0 to avoid cluttered output
     if is_global_first_rank():
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
@@ -369,3 +400,26 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
+
+    torch.accelerator.synchronize()
+    peak_allocated = torch.accelerator.max_memory_allocated()
+    peak_reserved = torch.accelerator.max_memory_reserved()
+    # Return the warmup scratch buffers to the device so they do not stay
+    # reserved in the caching allocator ahead of CUDA graph capture.
+    gc.collect()
+    torch.accelerator.empty_cache()
+    logger.info(
+        "DeepGEMM warmup took %.2fs. Free memory: %s GiB before, %s GiB after. "
+        "Allocated: %s GiB before, %s GiB peak (+%s GiB), %s GiB after. "
+        "Reserved: %s GiB before, %s GiB peak, %s GiB after.",
+        time.perf_counter() - start,
+        format_gib(free_before),
+        format_gib(torch.accelerator.get_memory_info()[0]),
+        format_gib(allocated_before),
+        format_gib(peak_allocated),
+        format_gib(peak_allocated - allocated_before),
+        format_gib(torch.accelerator.memory_allocated()),
+        format_gib(reserved_before),
+        format_gib(peak_reserved),
+        format_gib(torch.accelerator.memory_reserved()),
+    )

@@ -88,3 +88,25 @@ def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
 
     provider = getattr(layer, "deep_gemm_warmup_provider", None)
     assert provider is (None if is_bmm else kernel)
+
+
+@pytest.mark.parametrize(
+    ("max_num_recv_tokens", "sp_size", "expected"),
+    [(300, 1, 300), (None, 1, 4 * 127), (None, 4, 4 * 128)],
+)
+def test_grouped_gemm_warmup_uses_reserved_recv_tokens(
+    monkeypatch, max_num_recv_tokens, sp_size, expected
+) -> None:
+    """Grouped GEMM warmup is sized by the kernel's reserved worst case, and
+    falls back to every DP rank's (SP-padded) tokens when the kernel has no
+    reservation."""
+    monkeypatch.setattr(
+        deep_gemm_warmup, "get_dp_group", lambda: SimpleNamespace(world_size=4)
+    )
+    impl = SimpleNamespace(max_num_recv_tokens=max_num_recv_tokens)
+    module = SimpleNamespace(
+        _quant_method=SimpleNamespace(moe_kernel=SimpleNamespace(impl=impl)),
+        moe_config=SimpleNamespace(sp_size=sp_size),
+    )
+
+    assert deep_gemm_warmup._grouped_gemm_max_tokens(module, 127) == expected

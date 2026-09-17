@@ -355,6 +355,9 @@ def FusedMoEFactory(
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
+        ep_max_recv_tokens_fraction=(
+            vllm_config.parallel_config.ep_max_recv_tokens_fraction
+        ),
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
         activation=moe_activation,

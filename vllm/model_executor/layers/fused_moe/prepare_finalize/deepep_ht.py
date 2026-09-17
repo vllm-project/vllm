@@ -88,6 +88,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def max_num_tokens_per_rank(self) -> int | None:
         return None
 
+    def recv_tokens_depend_on_routing(self) -> bool:
+        return True
+
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 

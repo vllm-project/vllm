@@ -507,6 +507,7 @@ class EngineArgs:
         ParallelConfig.enable_batch_sharded_sampling
     )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
+    ep_max_recv_tokens_fraction: float = ParallelConfig.ep_max_recv_tokens_fraction
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
@@ -1196,6 +1197,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
+        )
+        parallel_group.add_argument(
+            "--ep-max-recv-tokens-fraction",
+            **parallel_kwargs["ep_max_recv_tokens_fraction"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -2351,6 +2356,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
+            ep_max_recv_tokens_fraction=self.ep_max_recv_tokens_fraction,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,

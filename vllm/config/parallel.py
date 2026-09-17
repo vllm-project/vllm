@@ -184,6 +184,13 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    ep_max_recv_tokens_fraction: float = Field(default=1.0, gt=0.0, le=1.0)
+    """Worst-case fraction of all DP ranks' tokens that a single EP rank can
+    receive, i.e. `ceil(fraction * data_parallel_size * max_num_batched_tokens)`.
+    Used to size MoE workspaces during memory profiling and DeepGEMM warmup for
+    all2all backends whose per-rank token count depends on routing (e.g.
+    DeepEP high-throughput). 1.0 is the true worst case; lower values save
+    memory, but a batch that exceeds the bound will fail at runtime."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
     """The expert placement strategy for MoE layers:
 
@@ -843,6 +850,7 @@ class ParallelConfig:
             "node_rank",
             "nnodes",
             "max_parallel_loading_workers",
+            "ep_max_recv_tokens_fraction",
             "disable_custom_all_reduce",
             "ray_workers_use_nsight",
             "ray_runtime_env",

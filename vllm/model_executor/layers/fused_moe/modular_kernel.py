@@ -221,6 +221,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def recv_tokens_depend_on_routing(self) -> bool:
+        """Whether the number of tokens this rank receives depends on how
+        tokens are routed (e.g. unpadded all2all), as opposed to being fixed
+        by the batch size.
+        """
+        return False
+
     @abstractmethod
     def num_dispatchers(self) -> int:
         raise NotImplementedError
@@ -1071,6 +1078,55 @@ class FusedMoEKernelModularImpl:
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
         )
+        # Dispatchers without a fixed per-rank capacity deliver a
+        # routing-dependent number of tokens, so size the workspace for the
+        # configured worst case rather than whatever the profile run routed.
+        self.max_num_recv_tokens: int | None = None
+        if self.is_dp_ep and prepare_finalize.recv_tokens_depend_on_routing():
+            self.max_num_recv_tokens = (
+                fused_experts.moe_config.max_num_recv_tokens_per_rank
+            )
+            logger.info_once(
+                "Reserving MoE workspace for up to %d received tokens per EP "
+                "rank (ep_max_recv_tokens_fraction=%s).",
+                self.max_num_recv_tokens,
+                fused_experts.moe_config.ep_max_recv_tokens_fraction,
+            )
+
+    def _maybe_reserve_worst_case_buffers(
+        self,
+        out_dtype: torch.dtype,
+        device: torch.device,
+        M: int,
+        N: int,
+        K: int,
+        top_k: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        activation: MoEActivation,
+    ) -> None:
+        max_M = self.max_num_recv_tokens
+        if max_M is None:
+            return
+        if not current_workspace_manager().is_locked():
+            self._allocate_buffers(
+                out_dtype,
+                device,
+                max_M,
+                max_M,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                None,
+                activation,
+            )
+        elif max_M < M:
+            raise RuntimeError(
+                f"MoE layer received {M} tokens, more than the {max_M} tokens "
+                "reserved for this rank. Increase --ep-max-recv-tokens-fraction."
+            )
 
     def _allocate_buffers(
         self,
@@ -1271,6 +1327,18 @@ class FusedMoEKernelModularImpl:
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
+        )
+
+        self._maybe_reserve_worst_case_buffers(
+            in_dtype,
+            a1q.device,
+            M_full,
+            N,
+            K,
+            top_k,
+            global_num_experts,
+            local_num_experts,
+            activation,
         )
 
         # This happens when none of the tokens from the all2all reach this

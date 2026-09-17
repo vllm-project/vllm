@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Union
@@ -18,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -1271,6 +1272,8 @@ class FusedMoEConfig:
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     elastic_ep_max_dp_size: int | None = None
+    # See ParallelConfig.ep_max_recv_tokens_fraction.
+    ep_max_recv_tokens_fraction: float = 1.0
     has_bias: bool = False
     is_lora_enabled: bool = False
 
@@ -1369,6 +1372,21 @@ class FusedMoEConfig:
     @property
     def dp_size(self):
         return self.moe_parallel_config.dp_size
+
+    @property
+    def max_num_global_tokens(self) -> int:
+        """Max tokens dispatched across all DP ranks in one forward. With
+        sequence parallelism each DP rank pads its tokens to a multiple of
+        sp_size before sharding them across its TP ranks."""
+        return self.dp_size * round_up(self.max_num_tokens, self.sp_size)
+
+    @property
+    def max_num_recv_tokens_per_rank(self) -> int:
+        """Worst-case number of tokens dispatched to this rank."""
+        return max(
+            1,
+            math.ceil(self.ep_max_recv_tokens_fraction * self.max_num_global_tokens),
+        )
 
     @property
     def pcp_size(self):
