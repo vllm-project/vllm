@@ -30,9 +30,11 @@ class CustomBuilder(DefaultKVCacheConfigBuilder):
 
 @pytest.fixture(autouse=True)
 def _reset_active_builder():
-    KVCacheConfigBuilder.reset()
+    # Clear the cached builder directly; the cache attribute is private on
+    # purpose, so tests poke it instead of shipping a reset() production API.
+    KVCacheConfigBuilder._active = None
     yield
-    KVCacheConfigBuilder.reset()
+    KVCacheConfigBuilder._active = None
 
 
 class TestPlatformHookResolution:
@@ -71,7 +73,7 @@ class TestBuilderResolution:
         mock_platform.get_kv_cache_config_builder_cls.return_value = CUSTOM_PATH
         cfg = _make_vllm_config()
         first = KVCacheConfigBuilder._resolve(cfg)
-        KVCacheConfigBuilder.reset()
+        KVCacheConfigBuilder._active = None
         second = KVCacheConfigBuilder._resolve(cfg)
         assert first is not second
         assert isinstance(second, CustomBuilder)
@@ -156,3 +158,68 @@ class TestDefaultBuilderDelegation:
         result = KVCacheConfigBuilder.get_kv_cache_configs(cfg, specs, memory)
         assert result is mock_impl.return_value
         mock_impl.assert_called_once_with(cfg, specs, memory)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_profiling_kv_cache_config")
+    def test_get_profiling_kv_cache_config_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        spec = {"layer": MagicMock()}
+        result = KVCacheConfigBuilder.get_profiling_kv_cache_config(cfg, spec, 4)
+        assert result is mock_impl.return_value
+        mock_impl.assert_called_once_with(cfg, spec, 4)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "check_enough_kv_cache_memory")
+    def test_check_enough_kv_cache_memory_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        spec = {"layer": MagicMock()}
+        result = KVCacheConfigBuilder.check_enough_kv_cache_memory(cfg, spec, 0)
+        assert result is mock_impl.return_value
+        mock_impl.assert_called_once_with(cfg, spec, 0)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_pool_bytes_per_block")
+    def test_get_pool_bytes_per_block_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        groups = [MagicMock()]
+        assert (
+            KVCacheConfigBuilder.get_pool_bytes_per_block(groups, cfg)
+            is mock_impl.return_value
+        )
+        mock_impl.assert_called_once_with(groups)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_bytes_per_block")
+    def test_get_kv_cache_bytes_per_block_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        groups = [MagicMock()]
+        assert (
+            KVCacheConfigBuilder.get_kv_cache_bytes_per_block(groups, cfg)
+            is mock_impl.return_value
+        )
+        mock_impl.assert_called_once_with(groups)
+
+    @patch("vllm.platforms.current_platform")
+    @patch.object(DefaultKVCacheConfigBuilder, "validate_kv_cache_config")
+    def test_validate_kv_cache_config_delegates_to_default(
+        self, mock_impl, mock_platform
+    ):
+        mock_platform.get_kv_cache_config_builder_cls.return_value = DEFAULT_PATH
+        cfg = _make_vllm_config()
+        groups = [MagicMock()]
+        layout = MagicMock()
+        result = KVCacheConfigBuilder.validate_kv_cache_config(layout, groups, cfg)
+        assert result is mock_impl.return_value
+        mock_impl.assert_called_once_with(layout, groups)

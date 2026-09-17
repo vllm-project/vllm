@@ -6545,17 +6545,9 @@ class GPUModelRunner(
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
             or 1
         )
-
-        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
-        kv_cache_groups = KVCacheConfigBuilder.get_kv_cache_groups(
-            self.vllm_config, kv_cache_spec
+        minimal_config = KVCacheConfigBuilder.get_profiling_kv_cache_config(
+            self.vllm_config, kv_cache_spec, min_blocks
         )
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        minimal_config = KVCacheConfigBuilder.get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
-        )
-        self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks

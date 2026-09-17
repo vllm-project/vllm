@@ -31,7 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
 )
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
-    is_kv_cache_spec_uniform,
+    _is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
@@ -485,7 +485,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     specs = _dsa_specs(num_layers, block_size)
     # Differing head sizes make the specs non-identical but same-type, which is
     # what lands both caches of a layer in one group.
-    assert not is_kv_cache_spec_uniform(specs)
+    assert not _is_kv_cache_spec_uniform(specs)
     assert UniformTypeKVCacheSpecs.is_uniform_type(specs)
     group = KVCacheGroupSpec(
         list(specs),

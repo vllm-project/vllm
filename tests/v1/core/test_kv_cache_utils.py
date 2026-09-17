@@ -39,7 +39,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
-    estimate_max_model_len,
+    _estimate_max_model_len,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1664,41 +1664,41 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
-def test_is_kv_cache_spec_uniform():
+def test__is_kv_cache_spec_uniform():
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32),
     }
-    assert kv_cache_planning.is_kv_cache_spec_uniform(kv_cache_spec)
+    assert kv_cache_planning._is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert kv_cache_planning.is_kv_cache_spec_uniform(kv_cache_spec)
+    assert kv_cache_planning._is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert not kv_cache_planning.is_kv_cache_spec_uniform(kv_cache_spec)
+    assert not kv_cache_planning._is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert kv_cache_planning.is_kv_cache_spec_uniform(kv_cache_spec)
+    assert kv_cache_planning._is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
     }
-    assert not kv_cache_planning.is_kv_cache_spec_uniform(kv_cache_spec)
+    assert not kv_cache_planning._is_kv_cache_spec_uniform(kv_cache_spec)
 
     script = """
 import sys
 
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
+from vllm.v1.core.kv_cache_planning import _is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if sys.flags.optimize < 1:
@@ -1707,7 +1707,7 @@ specs = {
     "a": KVCacheSpec(block_size=1),
     "b": KVCacheSpec(block_size=2),
 }
-if is_kv_cache_spec_uniform(specs):
+if _is_kv_cache_spec_uniform(specs):
     raise RuntimeError("different specs were treated as uniform")
 """
     subprocess.run(
@@ -1755,7 +1755,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
             dtype=torch.float16,
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
-    estimated_max_len = estimate_max_model_len(
+    estimated_max_len = _estimate_max_model_len(
         vllm_config, kv_cache_spec, 8 * GiB_bytes
     )
     assert estimated_max_len == want_estimated_max_len
@@ -2554,7 +2554,7 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
         assert group.kv_cache_spec.page_size_padded == mla_page
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     # Every block id is charged the full per-block sum.
@@ -2562,7 +2562,7 @@ def test_get_kv_cache_config_balanced_mamba_hybrid():
     mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
     blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group
     assert (
-        default_builder._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        default_builder.get_max_memory_usage_bytes_from_groups(vllm_config, groups)
         == blocks_per_request * bytes_per_block
     )
 
@@ -2628,7 +2628,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
     assert tail_inner.page_size_padded == idx_page
 
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
@@ -2664,7 +2664,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
     blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group + 1
     assert (
-        default_builder._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        default_builder.get_max_memory_usage_bytes_from_groups(vllm_config, groups)
         == blocks_per_request * bytes_per_block
     )
 
@@ -2767,7 +2767,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )
@@ -2799,7 +2799,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     ]
     assert [len(group.layer_names) for group in mamba_groups] == [5, 5, 4, 4]
 
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     assert bytes_per_block == 5 * mla_page + 5 * idx_page
 
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
@@ -2887,7 +2887,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
 
     mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
     idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     assert bytes_per_block == 11 * mla_page + 11 * idx_page
 
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
@@ -2931,7 +2931,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_no_indexer():
     for group in mamba_groups:
         assert group.kv_cache_spec.page_size_bytes == mla_page
 
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     assert bytes_per_block == 7 * mla_page
 
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
@@ -2985,7 +2985,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
 
     groups = default_builder.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    bytes_per_block = default_builder._pool_bytes_per_block(groups)
+    bytes_per_block = default_builder.get_pool_bytes_per_block(groups)
     kv_cache_config = default_builder.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )
@@ -2999,10 +2999,10 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     )
 
     unwrapped_groups = scheduler_config.kv_cache_groups
-    expected_max_mem = default_builder._max_memory_usage_bytes_from_groups(
+    expected_max_mem = default_builder.get_max_memory_usage_bytes_from_groups(
         vllm_config, unwrapped_groups
     )
-    expected_pool = default_builder._pool_bytes_per_block(unwrapped_groups)
+    expected_pool = default_builder.get_pool_bytes_per_block(unwrapped_groups)
     expected_blocks_per_request = (
         expected_max_mem + expected_pool - 1
     ) // expected_pool
@@ -3544,7 +3544,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     assert block_hashes[1] == expected_hash2
 
 
-def test_auto_fit_max_model_len():
+def testauto_fit_max_model_len():
     """Test that max_model_len=-1 auto-fits to available GPU memory."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
     model_config = ModelConfig(max_model_len=1024)
@@ -3584,7 +3584,7 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
-def test_auto_fit_max_model_len_with_hybrid():
+def testauto_fit_max_model_len_with_hybrid():
     """Test that auto-fit works with hybrid KV cache specs."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
     model_config = ModelConfig(max_model_len=8192)
@@ -3609,7 +3609,7 @@ def test_auto_fit_max_model_len_with_hybrid():
     assert vllm_config.model_config.max_model_len == 1024
 
 
-def test_auto_fit_max_model_len_not_triggered():
+def testauto_fit_max_model_len_not_triggered():
     """Test that auto-fit is not triggered when original_max_model_len is not -1."""
     model_config = ModelConfig(max_model_len=16)
     # original_max_model_len should be None by default, not -1
@@ -3629,7 +3629,7 @@ def test_auto_fit_max_model_len_not_triggered():
     assert vllm_config.model_config.max_model_len == 16
 
 
-def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
+def testauto_fit_max_model_len_respects_num_gpu_blocks_override():
     """Auto-fit must size max_model_len against the override-clamped pool, not
     the raw `available_memory`. Without this, auto-fit could pick a
     max_model_len that no longer fits once `num_gpu_blocks_override` is applied.
@@ -3706,7 +3706,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
         sliding_window=1024,
     )
 
-    unified_specs = kv_cache_planning.unify_kv_cache_spec_page_size(
+    unified_specs = kv_cache_planning._unify_kv_cache_spec_page_size(
         {
             "target_attn": target_spec,
             "draft_attn": draft_spec,
@@ -3752,7 +3752,7 @@ def test_page_size_padded_wins():
     assert spec.page_size_bytes == 65536
 
 
-def test_unify_hybrid_kv_cache_specs():
+def test__unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec(block_size=64)
     before_spec_2 = new_sliding_window_spec(
@@ -3762,7 +3762,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
-    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning._unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec(block_size=64)
     expected_spec_2 = new_kv_cache_spec(
         block_size=64, page_size_padded=64 * 1024, sliding_window=1024
@@ -3780,7 +3780,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
-    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning._unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(
         page_size_padded=32 * 1024, attention_chunk_size=512
@@ -3802,7 +3802,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": before_spec_2,
         "layer_3": before_spec_3,
     }
-    kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    kv_cache_planning._unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
     expected_spec_3 = new_kv_cache_spec(
@@ -3819,7 +3819,7 @@ def test_unify_hybrid_kv_cache_specs():
     }
 
     with pytest.raises(ValueError):
-        kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
+        kv_cache_planning._unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
 def test_unify_kv_cache_spec_page_size_mamba():
@@ -3843,7 +3843,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     assert mamba_spec.page_size_bytes == main_attn_spec.page_size_bytes == 16384
     assert draft_attn_spec.page_size_bytes == 32768
 
-    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning._unify_kv_cache_spec_page_size(
         {
             "mamba_layer": mamba_spec,
             "main_attn_layer": main_attn_spec,
@@ -3867,7 +3867,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
         shapes=((2, 256), (3, 32, 32)), page_size_padded=16384
     )
     assert padded_mamba_spec.page_size_bytes == 16384
-    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning._unify_kv_cache_spec_page_size(
         {
             "mamba_layer": padded_mamba_spec,
             "draft_attn_layer": draft_attn_spec,
@@ -3882,7 +3882,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     odd_mamba_spec = new_mamba_spec(shapes=((6144,),))
     assert odd_mamba_spec.page_size_bytes == 24576
     assert 32768 % odd_mamba_spec.page_size_bytes != 0
-    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning._unify_kv_cache_spec_page_size(
         {
             "mamba_layer": odd_mamba_spec,
             "draft_attn_layer": draft_attn_spec,
@@ -3893,7 +3893,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
     # 4. Attention layers with non-divisible page sizes are padded too: every
     # backend reads a padded page through the view's block stride, so there is
     # no longer a case that must raise.
-    unified = kv_cache_planning.unify_kv_cache_spec_page_size(
+    unified = kv_cache_planning._unify_kv_cache_spec_page_size(
         {
             "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
             "draft_attn_layer": draft_attn_spec,  # 32768
@@ -3908,7 +3908,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
         "mamba_layer": new_mamba_spec(),
         "attn_layer": new_kv_cache_spec(),
     }
-    assert kv_cache_planning.unify_kv_cache_spec_page_size(specs) == specs
+    assert kv_cache_planning._unify_kv_cache_spec_page_size(specs) == specs
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
@@ -4024,7 +4024,7 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
         )
 
 
-def test_auto_fit_max_model_len_reserves_null_block():
+def testauto_fit_max_model_len_reserves_null_block():
     """Auto-fit (max_model_len=-1) must size max_model_len against usable
     blocks, not the total pool. With memory for exactly 64 blocks, one is the
     null block, so auto-fit must settle on 63 * block_size; picking the full
