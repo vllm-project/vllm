@@ -241,14 +241,12 @@ def prepare_fp8_moe_layer_for_marlin(
     w13_weight_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Shuffle weights and scales into marlin format.
+    """Shuffle weights and scales into marlin format.
 
     Note that this function has the side effect of adding a `workspace`
     attribute to the layer. This `workspace` does not need to be
     registered as a Parameter as it is not used during weight reloading.
     """
-
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
@@ -372,9 +370,7 @@ def prepare_fp8_moe_layer_for_marlin(
 def pack_fp8_to_int32(
     fp8_tensor: torch.Tensor, size_k_first: bool = True
 ) -> torch.Tensor:
-    """
-    Repack FP8 weights to gptq format (packed int32 elements)
-    """
+    """Repack FP8 weights to gptq format (packed int32 elements)."""
     assert fp8_tensor.dtype == torch.float8_e4m3fn
     assert fp8_tensor.ndim == 2
 
@@ -524,6 +520,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
 
     Returns:
         (w13, w2, w13_scale, w2_scale) in Marlin format.
+
     """
     group_size = 32
     e = w13.shape[0]
