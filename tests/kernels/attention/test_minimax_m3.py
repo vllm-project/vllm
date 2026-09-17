@@ -1430,7 +1430,7 @@ def test_index_topk_fp8(num_idx_heads: int, query_dtype, query_len: int, stage: 
 @pytest.mark.parametrize("stage", ["decode", "prefill"])
 @torch.inference_mode()
 def test_index_topk_fp8_quantization_preserves_bf16_selection(stage: str):
-    """Quantizing Q/K preserves prominent blocks and at least 14/16 selections."""
+    """Quantization preserves prominent blocks and separated BF16 selections."""
     torch.manual_seed(3)
     topk, num_pages, num_idx_heads = 16, 100, 1
     seq_len = 96 * BLOCK_SIZE + 37
@@ -1444,6 +1444,13 @@ def test_index_topk_fp8_quantization_preserves_bf16_selection(stage: str):
     query = torch.randn(1, num_idx_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
     for block in planted_blocks:
         keys[block * BLOCK_SIZE + 5] = query[0, 0] * 3
+    bf16_scores = keys.double() @ query[0, 0].double()
+    bf16_scores[seq_len:] = -float("inf")
+    bf16_blocks = bf16_scores.view(num_pages, BLOCK_SIZE).amax(dim=-1)
+    discarded_blocks = torch.ones(num_pages, dtype=torch.bool, device="cuda")
+    discarded_blocks[bf16_blocks.topk(topk).indices] = False
+    flip_keys = discarded_blocks.repeat_interleave(BLOCK_SIZE) & (bf16_scores > 0)
+    keys[flip_keys] = -keys[flip_keys]
     block_table = torch.arange(num_pages, dtype=torch.int32, device="cuda").unsqueeze(0)
     seq_lens = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
 
