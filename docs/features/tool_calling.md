@@ -136,7 +136,7 @@ VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 
 ### Server-Side Strictness Floor
 
-Most OpenAI-compatible clients and agent frameworks never set `strict` on their tools, so with `tool_choice="auto"` the model generates tool calls without any grammar and malformed markup can leak into the response. The `--tool-strict-level` option lets the server operator raise the floor for every request that carries tools, independently of what the client declares (similar to SGLang's `SGLANG_TOOL_STRICT_LEVEL`):
+Most OpenAI-compatible clients and agent frameworks never set `strict` on their tools, so with `tool_choice="auto"` the model generates tool calls without any grammar and malformed markup can leak into the response. The `--tool-strict-level` option lets the server operator raise the floor for every request that carries tools, independently of what the client declares:
 
 | Value | Behavior |
 | --- | --- |
