@@ -217,6 +217,7 @@ tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py  # CI jobs
 tests/v1/kv_connector/nixl_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_accuracy_rocm.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_edge_cases.py  # CI jobs disabled pending locked KV connectors installation
+tests/v1/kv_connector/nixl_integration/test_hybrid_pd_consistency.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_mamba_prefix_cache.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_multi_connector_edge_cases.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/nixl_integration/test_nixl_imports.py  # CI jobs disabled pending locked KV connectors installation
