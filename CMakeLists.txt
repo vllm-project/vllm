@@ -403,6 +403,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     LANGUAGE CUDA
     SOURCES
       "csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu"
+      "csrc/batch_invariant/sparse_index.cu"
       "csrc/batch_invariant/top_k.cu"
       "csrc/batch_invariant/torch_bindings.cpp"
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}

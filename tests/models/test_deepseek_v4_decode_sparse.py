@@ -95,6 +95,10 @@ def test_decode_sparse_reuses_prefill_kernel(
         lengths.fill_(1)
         return indices, lengths
 
+    def fake_fill_c128(out, lengths):
+        indices = torch.arange(out.shape[1], dtype=out.dtype)
+        out.copy_(torch.where(indices < lengths[:, None], indices, -1))
+
     def fake_sparse_fwd(**kwargs):
         captured["sparse"] = kwargs
         kwargs["out"].zero_()
@@ -107,6 +111,7 @@ def test_decode_sparse_reuses_prefill_kernel(
     )
     monkeypatch.setattr(flashmla_module, "dequantize_and_gather_k_cache", fake_gather)
     monkeypatch.setattr(flashmla_module, "combine_topk_swa_indices", fake_combine)
+    monkeypatch.setattr(flashmla_module, "fill_c128_topk", fake_fill_c128)
     monkeypatch.setattr(flashmla_module, "flash_mla_sparse_fwd", fake_sparse_fwd)
     monkeypatch.setattr(
         flashmla_module,
