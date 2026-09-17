@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
@@ -561,6 +562,15 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
+        if current_platform.is_xpu():
+            for layer_idx in range(all_k.shape[0]):
+                ops.rms_norm(
+                    all_k_normed[layer_idx],
+                    all_k[layer_idx],
+                    self._k_norm_weights[layer_idx],
+                    self._rms_norm_eps,
+                )
+            return all_k_normed
         ops.rms_norm(
             all_k_normed,
             all_k,
