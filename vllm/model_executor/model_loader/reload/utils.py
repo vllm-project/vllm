@@ -11,6 +11,7 @@ __all__ = [
     "get_layer_tensors",
     "get_layer_params_buffers",
     "get_layer_size",
+    "get_tensor_load_numel",
     "has_device_tensors",
     "get_info_size",
 ]
@@ -30,6 +31,11 @@ def get_layer_params_buffers(layer: torch.nn.Module) -> LayerTensors:
     )
 
 
+def get_tensor_load_numel(tensor: torch.Tensor) -> int:
+    """Count checkpoint elements, excluding padding declared by the weight creator."""
+    return getattr(tensor, "weight_loader_numel", tensor.numel())
+
+
 def get_layer_size(layer: torch.nn.Module) -> int:
     """Calculate total number of elements across loadable tensors in a layer.
 
@@ -39,7 +45,7 @@ def get_layer_size(layer: torch.nn.Module) -> int:
     from .meta import SKIP_LOAD_TENSORS
 
     return sum(
-        tensor.numel()
+        get_tensor_load_numel(tensor)
         for name, tensor in get_layer_tensors(layer).items()
         if name not in SKIP_LOAD_TENSORS
     )
