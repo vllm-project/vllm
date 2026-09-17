@@ -5,6 +5,7 @@ import importlib.machinery
 import inspect
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
@@ -465,6 +466,111 @@ def test_model_cleanup(dist_init, default_vllm_config):
 
     assert layer_ref() is None
     assert len(mock_info_dict) == 0
+
+
+@pytest.mark.parametrize("is_gated", [False, True])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("padded", [False, True])
+def test_padded_moe_reload_releases_each_layer(
+    monkeypatch, is_gated, has_bias, tp_rank, padded
+):
+    """Checkpoint-sized copies finish each layer without global finalization."""
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    hidden, intermediate, experts = 4, 3, 2
+    stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
+    config = SimpleNamespace(
+        hidden_dim_unpadded=hidden,
+        intermediate_size_per_partition_unpadded=intermediate,
+        is_act_and_mul=is_gated,
+        has_bias=has_bias,
+        tp_rank=tp_rank,
+        tp_shard_with_padding=False,
+        moe_parallel_config=SimpleNamespace(tp_size=2),
+    )
+    model = torch.nn.ModuleList()
+    processed: list[torch.nn.Module] = []
+    for _ in range(2):
+        method = object.__new__(UnquantizedFusedMoEMethod)
+        torch.nn.Module.__init__(method)
+        method.moe = config
+        # The regression concerns streaming reload, not kernel conversion.
+        monkeypatch.setattr(method, "process_weights_after_loading", processed.append)
+        layer = object.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = config
+        layer.quant_config = None
+        layer.quant_method = method
+        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer._loaded_expert_biases = set()
+        method.create_weights(
+            layer,
+            experts,
+            stored_hidden,
+            stored_intermediate,
+            torch.float32,
+            weight_loader=layer.weight_loader,
+        )
+        model.append(layer)
+
+    record_metadata_for_reloading(model)
+    original_params = [dict(layer.named_parameters()) for layer in model]
+    shards = ["w1", "w3", "w2"] if is_gated else ["w1", "w2"]
+    for cycle in range(2):
+        initialize_layerwise_reload(model)
+        for layer_index, layer in enumerate(model):
+            info = reload_layerwise.get_layerwise_info(layer)
+            inputs = []
+            expected = {
+                name: torch.full_like(p, float("nan"))
+                for name, p in original_params[layer_index].items()
+            }
+            params = dict(layer.named_parameters())
+            calls = [
+                (e, s, b)
+                for e in range(experts)
+                for s in shards
+                for b in ([False, True] if has_bias else [False])
+            ]
+            for call_index, (expert, shard, bias) in enumerate(calls):
+                name = ("w2" if shard == "w2" else "w13") + (
+                    "_bias" if bias else "_weight"
+                )
+                shape = (
+                    ((hidden,) if bias else (hidden, 2 * intermediate))
+                    if shard == "w2"
+                    else ((2 * intermediate,) if bias else (2 * intermediate, hidden))
+                )
+                weight = torch.arange(
+                    torch.Size(shape).numel(), dtype=torch.float32
+                ).reshape(shape)
+                weight = weight + 100 * (1 + call_index + cycle)
+                inputs.append(ref(weight))
+                # Direct checkpoint loading is the reference for deferred reload.
+                layer.weight_loader(expected[name], weight, name, shard, expert)
+                param = params[name]
+                param.weight_loader(param, weight, name, shard, expert)
+                del weight
+                if call_index != len(calls) - 1:
+                    assert info.can_load(), (
+                        "Layer processed before its final checkpoint shard"
+                    )
+
+            assert not info.can_load(), (
+                "Padding must not defer the layer until finalization"
+            )
+            assert not info.loaded_weights
+            assert len(processed) == cycle * len(model) + layer_index + 1
+            assert all(source() is None for source in inputs)
+            for name, original in original_params[layer_index].items():
+                assert getattr(layer, name) is original
+                # Kernel-specific tests cover padding, which is not checkpoint data.
+                mask = torch.isfinite(expected[name])
+                assert torch.equal(original[mask], expected[name][mask])
 
 
 def test_get_numel_loaded():

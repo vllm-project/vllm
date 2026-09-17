@@ -2414,7 +2414,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
-- label: ":amd: (MI300) Rust Frontend Serve/Admin Coverage"
+- label: ":amd: (MI300) Rust Frontend Serve-Admin Coverage"
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
