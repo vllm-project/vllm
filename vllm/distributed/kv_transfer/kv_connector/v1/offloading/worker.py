@@ -53,7 +53,9 @@ class OffloadingConnectorWorker:
         self.worker: OffloadingWorker | None = None
         # Non-writers still ack: pending_count waits for world_size per job.
         self._is_store_writer = (
-            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+            not self.spec.replicated_layout
+            or self.spec.config.canonical_layout
+            or self.spec.config.parallel.rank == 0
         )
 
         # job_id -> req_id for in-flight loads.
@@ -139,8 +141,9 @@ class OffloadingConnectorWorker:
             ),
             None,
         )
-        if packed_layer_name is not None and len(selected_groups) == len(
-            kv_cache_config.kv_cache_groups
+        if (
+            packed_layer_name is not None
+            and kv_cache_config.hisparse_host_num_blocks is None
         ):
             (tensor,) = tensors_per_block[packed_layer_name]
             num_blocks = tensor.shape[0]
