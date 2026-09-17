@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from xgrammar import Grammar, StructuralTag, builtin_structural_tag
+from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -22,6 +22,7 @@ from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
 from vllm.tool_parsers.deepseekv32_engine_tool_parser import (
     DeepSeekV32EngineToolParser,
 )
+from vllm.tool_parsers.deepseekv41_engine_tool_parser import DeepSeekV41EngineToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -80,51 +81,9 @@ def test_supported_structural_tag_models_include_vllm_builtins():
     assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 
 
-@pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
-def test_deepseek_v41_older_xgrammar_keeps_format_constraints(
-    choice,
-    sample_tools_strict,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        builtin_structural_tag, "get_deepseek_v4_1_structural_tag", None, raising=False
-    )
-    tool_choice = (
-        ChatCompletionNamedToolChoiceParam(
-            function=ChatCompletionNamedFunction(name=choice)
-        )
-        if choice == "get_weather"
-        else choice
-    )
-    tag = get_model_structural_tag(
-        "deepseek_v41", sample_tools_strict, tool_choice, reasoning=False
-    )
-    grammar = Grammar.from_structural_tag(tag)
-    begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
-    end = "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
-    parameter = (
-        '<｜DSML｜ parameter name="undeclared" string="false">'
-        '{"nested": [true, null, 1.5]}</｜DSML｜ parameter>\n'
-    )
-    # Required city is omitted; extra and repeated fields remain unconstrained.
-    assert _is_grammar_accept_string(grammar, begin + end)
-    assert _is_grammar_accept_string(grammar, begin + parameter * 2 + end)
-    assert not _is_grammar_accept_string(
-        grammar,
-        begin + parameter.replace('{"nested": [true, null, 1.5]}', "invalid") + end,
-    )
-    assert not _is_grammar_accept_string(
-        grammar, (begin + end).replace('name="get_weather"', 'name="unknown"')
-    )
-    assert not _is_grammar_accept_string(
-        grammar, begin + parameter.replace("｜ parameter", "｜parameter") + end
-    )
-    assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
-
-
 def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
     tag = get_model_structural_tag(
-        "deepseek_v41",
+        "deepseek_v4_1",
         sample_tools,
         ChatCompletionNamedToolChoiceParam(
             function=ChatCompletionNamedFunction(name="get_weather")
@@ -144,19 +103,14 @@ def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
         grammar, "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
     )
     assert (
-        get_model_structural_tag("deepseek_v41", sample_tools, "auto", reasoning=False)
+        get_model_structural_tag("deepseek_v4_1", sample_tools, "auto", reasoning=False)
         is None
     )
 
 
-@pytest.mark.skipif(
-    not hasattr(builtin_structural_tag, "get_deepseek_v4_1_structural_tag"),
-    reason="Requires XGrammar's DeepSeek V4.1 builtin",
-)
 @pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
-@pytest.mark.parametrize("reasoning", [False, True])
 def test_deepseek_v41_constrains_parameters_after_reasoning(
-    sample_tools_strict, choice, reasoning
+    sample_tools_strict, choice
 ):
     """Strict calls must enforce the schema without requiring another think close."""
     tool_choice = (
@@ -168,7 +122,7 @@ def test_deepseek_v41_constrains_parameters_after_reasoning(
     )
     sample_tools_strict[0].function.parameters["additionalProperties"] = False
     tag = get_model_structural_tag(
-        "deepseek_v41", sample_tools_strict, tool_choice, reasoning=reasoning
+        "deepseek_v4_1", sample_tools_strict, tool_choice, reasoning=False
     )
     grammar = Grammar.from_structural_tag(tag)
     begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
@@ -192,14 +146,10 @@ def test_deepseek_v41_constrains_parameters_after_reasoning(
     assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
 
 
-@pytest.mark.skipif(
-    not hasattr(builtin_structural_tag, "get_deepseek_v4_1_structural_tag"),
-    reason="Requires XGrammar's DeepSeek V4.1 builtin",
-)
 def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):
     sample_tools[0].function.strict = False
     tag = get_model_structural_tag(
-        "deepseek_v41", sample_tools, "required", reasoning=False
+        "deepseek_v4_1", sample_tools, "required", reasoning=False
     )
     grammar = Grammar.from_structural_tag(tag)
     call = (
@@ -531,6 +481,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (DeepSeekV31ToolParser, "deepseek_v3_1"),
         (DeepSeekV32EngineToolParser, "deepseek_v3_2"),
         (DeepSeekV4EngineToolParser, "deepseek_v4"),
+        (DeepSeekV41EngineToolParser, "deepseek_v4_1"),
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
@@ -598,7 +549,11 @@ def test_get_structural_tag_disables_reasoning(
     assert captured == [False]
 
 
+@pytest.mark.parametrize(
+    "parser_cls", [Qwen3EngineToolParser, DeepSeekV41EngineToolParser]
+)
 def test_unified_parser_get_structural_tag_disables_reasoning(
+    parser_cls,
     monkeypatch: pytest.MonkeyPatch,
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
@@ -614,7 +569,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
     )
 
     class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
+        tool_parser_cls = parser_cls
 
     request = ChatCompletionRequest(
         messages=[],
