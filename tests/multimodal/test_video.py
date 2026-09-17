@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
+import torch
 from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
@@ -173,9 +174,14 @@ def test_decode_video_imports_only_selected_backend(
     [
         (
             "torchcodec",
-            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {
+                "min_frames": 4,
+                "num_ffmpeg_threads": 2,
+                "seek_mode": "approximate",
+                "device": "cuda",
+            },
             {"min_frames": 4},
-            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate", "device": "cuda"},
         ),
         (
             "deepstream",
@@ -204,6 +210,11 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="num_ffmpeg_threads is not supported by the 'opencv' backend"
     ):
         resolve_video_backend_kwargs("opencv", {"num_ffmpeg_threads": 2})
+
+    with pytest.raises(
+        ValueError, match="device is not supported by the 'opencv' backend"
+    ):
+        resolve_video_backend_kwargs("opencv", {"device": "cuda"})
 
 
 @pytest.mark.parametrize(
@@ -831,8 +842,7 @@ def test_video_processor_from_model_repo(
 
 
 def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
-    """
-    Regression test for handling videos with broken frames.
+    """Regression test for handling videos with broken frames.
     This test uses a pre-corrupted video file (assets/corrupted.mp4) that
     contains broken frames to verify the video loader handles
     them gracefully without crashing and returns accurate metadata.
@@ -871,8 +881,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    """An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
     hides the decode lead-in: the header still counts every physical sample
     while sequential decode only yields the visible frames. Sampling over the
     header count used to collapse such videos to the few indices below the
@@ -912,8 +921,7 @@ def test_video_backend_handles_edit_list_trimmed_video(
 
 
 def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that frame recovery correctly uses the next valid frame when
+    """Test that frame recovery correctly uses the next valid frame when
     target frames fail to load.
 
     Uses corrupted.mp4 and mocks VideoCapture.grab() to fail on specific
@@ -1008,8 +1016,7 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test frame recovery with an actual corrupted video file using sparse sampling.
+    """Test frame recovery with an actual corrupted video file using sparse sampling.
 
     This test uses corrupted.mp4 which has genuine H.264 codec errors on
     frame 17. With num_frames=8, the target frames are [0, 3, 7, 10, 14, 17, 21, 25].
@@ -1077,8 +1084,7 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that frame_recovery works with the dynamic video backend.
+    """Test that frame_recovery works with the dynamic video backend.
 
     The dynamic backend samples frames based on fps/duration rather than
     loading all frames. This test verifies recovery works in that context.
@@ -1203,6 +1209,30 @@ def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
         loader.load_bytes(
             video_data, num_frames=8, backend="torchcodec", frame_recovery=True
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_torchcodec_backend_cuda_decodes_on_gpu(dummy_video_path):
+    """With device="cuda", torchcodec decodes via NVDEC and keeps the frames
+    on the GPU instead of returning a host-side numpy array."""
+    pytest.importorskip("torchcodec")
+
+    with open(dummy_video_path, "rb") as f:
+        video_data = f.read()
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_data, num_frames=8, backend="torchcodec", device="cuda"
+    )
+
+    assert isinstance(frames, torch.Tensor)
+    assert frames.device.type == "cuda"
+    assert frames.dtype == torch.uint8
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == 8
+    assert frames.shape[0] == len(metadata["frames_indices"])
+    assert metadata["video_backend"] == "torchcodec"
 
 
 def test_torchcodec_backend_returns_target_frames_not_keyframes():

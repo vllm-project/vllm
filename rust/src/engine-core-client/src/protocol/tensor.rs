@@ -6,8 +6,11 @@ use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use half::{bf16, f16};
 use rmpv::Value;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+
+use super::dtype::{NumpyDtype, TensorDtype};
 
 /// Tensors and ndarrays are encoded with this extension type in Python.
 ///
@@ -63,20 +66,20 @@ impl [usize] {
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L237-L273>
 /// <https://github.com/vllm-project/vllm/blob/5a0a8fc1ea7542394ff315138bd5677b7b53bca1/vllm/v1/serial_utils.py#L389-L425>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
-pub struct WireNdArray {
-    pub dtype: String,
+pub struct WireArray<Dtype: Serialize + DeserializeOwned> {
+    pub dtype: Dtype,
     pub shape: Vec<usize>,
     pub data: WireArrayData,
 }
 
-impl WireNdArray {
+impl<Dtype: From<TensorDtype> + Serialize + DeserializeOwned> WireArray<Dtype> {
     /// Build a float32 tensor/ndarray backed by native-endian raw-view bytes.
     ///
     /// Takes ownership of the backing buffer without copying its data.
     pub fn from_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
-            "float32",
+            TensorDtype::F32,
             shape,
             bytes_from_pod_vec(data),
         ))
@@ -88,7 +91,7 @@ impl WireNdArray {
     pub fn from_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
-            "float16",
+            TensorDtype::F16,
             shape,
             bytes_from_pod_vec(data),
         ))
@@ -100,7 +103,7 @@ impl WireNdArray {
     pub fn from_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
-            "bfloat16",
+            TensorDtype::Bf16,
             shape,
             bytes_from_pod_vec(data),
         ))
@@ -112,7 +115,7 @@ impl WireNdArray {
     pub fn from_i64(shape: Vec<usize>, data: Vec<i64>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
-            "int64",
+            TensorDtype::I64,
             shape,
             bytes_from_pod_vec(data),
         ))
@@ -124,7 +127,7 @@ impl WireNdArray {
     pub fn from_u32(shape: Vec<usize>, data: Vec<u32>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
-            "uint32",
+            TensorDtype::U32,
             shape,
             bytes_from_pod_vec(data),
         ))
@@ -137,7 +140,7 @@ impl WireNdArray {
     pub fn from_bool(shape: Vec<usize>, data: Vec<bool>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self {
-            dtype: "bool".to_string(),
+            dtype: TensorDtype::Bool.into(),
             shape,
             data: WireArrayData::RawView(Bytes::from(
                 data.into_iter().map(u8::from).collect::<Vec<_>>(),
@@ -149,12 +152,12 @@ impl WireNdArray {
     ///
     /// Use this as an escape hatch when the caller already owns bytes that
     /// match the requested `dtype` and `shape`.
-    pub fn from_raw(dtype: impl Into<String>, shape: Vec<usize>, data: Vec<u8>) -> Self {
+    pub fn from_raw(dtype: impl Into<Dtype>, shape: Vec<usize>, data: Vec<u8>) -> Self {
         Self::from_raw_bytes(dtype, shape, Bytes::from(data))
     }
 
     /// Build a tensor/ndarray from an owned immutable raw-view buffer.
-    pub fn from_raw_bytes(dtype: impl Into<String>, shape: Vec<usize>, data: Bytes) -> Self {
+    pub fn from_raw_bytes(dtype: impl Into<Dtype>, shape: Vec<usize>, data: Bytes) -> Self {
         Self {
             dtype: dtype.into(),
             shape,
@@ -192,7 +195,10 @@ fn validate_element_count(shape: &[usize], len: usize) -> Result<(), String> {
 ///
 /// This is the same wire shape as [`WireNdArray`]; multimodal request payloads
 /// use it for `torch.Tensor` values.
-pub type WireTensor = WireNdArray;
+pub type WireTensor = WireArray<TensorDtype>;
+
+/// Numeric array with a typed NumPy descriptor or native-endian Torch dtype.
+pub type WireNdArray = WireArray<NumpyDtype>;
 
 /// Python array/tensor payload reference inside [`WireNdArray`].
 ///
@@ -209,6 +215,27 @@ pub enum WireArrayData {
     AuxIndex(usize),
     /// The raw bytes of this array/tensor.
     RawView(Bytes),
+}
+
+impl WireTensor {
+    /// Validate the shape and storage of an inline tensor.
+    pub fn validate_inline(&self) -> Result<(), String> {
+        let expected = self
+            .shape
+            .checked_numel()
+            .and_then(|numel| numel.checked_mul(self.dtype.element_size()))
+            .ok_or_else(|| format!("tensor shape or byte length overflows: {:?}", self.shape))?;
+        match &self.data {
+            WireArrayData::RawView(bytes) if bytes.len() == expected => Ok(()),
+            WireArrayData::RawView(bytes) => Err(format!(
+                "tensor byte length {} does not match expected {expected}",
+                bytes.len()
+            )),
+            WireArrayData::AuxIndex(index) => {
+                Err(format!("inline tensor references auxiliary frame {index}"))
+            }
+        }
+    }
 }
 
 impl WireArrayData {
@@ -289,6 +316,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tensor_and_ndarray_preserve_their_dtype_wire_contracts() {
+        let tensor = WireTensor::from_f32(vec![1], vec![1.0]).unwrap();
+        let bytes = rmp_serde::to_vec_named(&tensor).unwrap();
+        let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("float32"));
+
+        let array: WireNdArray = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(array.dtype, NumpyDtype::native(TensorDtype::F32));
+        let bytes = rmp_serde::to_vec_named(&array).unwrap();
+        let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("=f4"));
+        assert!(rmp_serde::from_slice::<WireTensor>(&bytes).is_err());
+    }
+
+    #[test]
     fn raw_view_serializes_as_msgpack_ext() {
         let bytes = vec![1, 2, 3, 4];
         let encoded =
@@ -307,8 +349,8 @@ mod tests {
     fn constructors_build_raw_view_tensors() {
         let f32_data = vec![1.0, 2.5];
         let f32_data_ptr = f32_data.as_ptr().cast::<u8>();
-        let f32_tensor = WireNdArray::from_f32(vec![2], f32_data).unwrap();
-        assert_eq!(f32_tensor.dtype, "float32");
+        let f32_tensor = WireTensor::from_f32(vec![2], f32_data).unwrap();
+        assert_eq!(f32_tensor.dtype, TensorDtype::F32);
         assert_eq!(f32_tensor.shape, vec![2]);
         let f32_raw_view = f32_tensor.data.into_raw_view().expect("raw view");
         assert_eq!(f32_raw_view.as_ptr(), f32_data_ptr);
@@ -318,58 +360,49 @@ mod tests {
         );
 
         let f16_tensor =
-            WireNdArray::from_f16(vec![2], vec![f16::from_f32(1.0), f16::from_f32(2.5)]).unwrap();
-        assert_eq!(f16_tensor.dtype, "float16");
+            WireTensor::from_f16(vec![2], vec![f16::from_f32(1.0), f16::from_f32(2.5)]).unwrap();
+        assert_eq!(f16_tensor.dtype, TensorDtype::F16);
         assert_eq!(f16_tensor.shape, vec![2]);
         assert_eq!(f16_tensor.data.into_raw_view().expect("raw view").len(), 4);
 
         let bf16_tensor =
-            WireNdArray::from_bf16(vec![2], vec![bf16::from_f32(1.0), bf16::from_f32(2.5)])
-                .unwrap();
-        assert_eq!(bf16_tensor.dtype, "bfloat16");
+            WireTensor::from_bf16(vec![2], vec![bf16::from_f32(1.0), bf16::from_f32(2.5)]).unwrap();
+        assert_eq!(bf16_tensor.dtype, TensorDtype::Bf16);
         assert_eq!(bf16_tensor.shape, vec![2]);
         assert_eq!(bf16_tensor.data.into_raw_view().expect("raw view").len(), 4);
 
-        let i64_tensor = WireNdArray::from_i64(vec![1], vec![-7]).unwrap();
-        assert_eq!(i64_tensor.dtype, "int64");
+        let i64_tensor = WireTensor::from_i64(vec![1], vec![-7]).unwrap();
+        assert_eq!(i64_tensor.dtype, TensorDtype::I64);
         assert_eq!(
             i64_tensor.data.into_raw_view().expect("raw view").as_ref(),
             (-7_i64).to_ne_bytes().as_ref()
         );
 
-        let u32_tensor = WireNdArray::from_u32(vec![1], vec![42]).unwrap();
-        assert_eq!(u32_tensor.dtype, "uint32");
+        let u32_tensor = WireTensor::from_u32(vec![1], vec![42]).unwrap();
+        assert_eq!(u32_tensor.dtype, TensorDtype::U32);
         assert_eq!(
             u32_tensor.data.into_raw_view().expect("raw view").as_ref(),
             42_u32.to_ne_bytes().as_ref()
         );
 
-        let bool_tensor = WireNdArray::from_bool(vec![2], vec![false, true]).unwrap();
-        assert_eq!(bool_tensor.dtype, "bool");
+        let bool_tensor = WireTensor::from_bool(vec![2], vec![false, true]).unwrap();
+        assert_eq!(bool_tensor.dtype, TensorDtype::Bool);
         assert_eq!(
             bool_tensor.data.into_raw_view().expect("raw view"),
             vec![0, 1]
-        );
-
-        let raw_tensor = WireNdArray::from_raw("custom", vec![3], vec![1, 2, 3]);
-        assert_eq!(raw_tensor.dtype, "custom");
-        assert_eq!(raw_tensor.shape, vec![3]);
-        assert_eq!(
-            raw_tensor.data.into_raw_view().expect("raw view"),
-            vec![1, 2, 3]
         );
     }
 
     #[test]
     fn constructors_validate_shape_product() {
-        let err = WireNdArray::from_f32(vec![2, 2], vec![1.0, 2.0]).unwrap_err();
+        let err = WireTensor::from_f32(vec![2, 2], vec![1.0, 2.0]).unwrap_err();
         assert!(err.contains("does not match shape"));
     }
 
     #[test]
     fn resolve_aux_frame_shares_bytes_using_one_based_message_index() {
-        let mut tensor = WireNdArray {
-            dtype: "float32".to_string(),
+        let mut tensor = WireTensor {
+            dtype: TensorDtype::F32,
             shape: vec![2],
             data: WireArrayData::AuxIndex(1),
         };

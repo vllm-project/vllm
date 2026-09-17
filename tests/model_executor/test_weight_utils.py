@@ -72,28 +72,28 @@ class TestMaybeRemapKvScaleName:
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_modelopt_k_proj_k_scale(self):
-        """ModelOpt format: k_proj.k_scale -> attn.k_scale"""
+        """ModelOpt format: k_proj.k_scale -> attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_proj.k_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_modelopt_v_proj_v_scale(self):
-        """ModelOpt format: v_proj.v_scale -> attn.v_scale"""
+        """ModelOpt format: v_proj.v_scale -> attn.v_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.v_proj.v_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.v_scale"
 
     def test_deprecated_kv_scale(self):
-        """Old format: kv_scale -> attn.k_scale (deprecated)"""
+        """Old format: kv_scale -> attn.k_scale (deprecated)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.kv_scale", self.PARAMS_DICT
         )
         assert result == "model.layers.0.self_attn.attn.k_scale"
 
     def test_default_bare_k_scale(self):
-        """Default format: .k_scale -> .attn.k_scale"""
+        """Default format: .k_scale -> .attn.k_scale."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_scale", self.PARAMS_DICT
         )
@@ -158,6 +158,17 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+def test_checkpoint_weight_mapper_discards_serialized_g_idx():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+
+    mapper = QuantizationConfig.get_checkpoint_weight_mapper()
+
+    assert mapper._map_name("model.layers.0.g_idx") is None
+    assert mapper._map_name("model.layers.0.qweight") == "model.layers.0.qweight"
 
 
 class TestKvCacheScaleMapper:

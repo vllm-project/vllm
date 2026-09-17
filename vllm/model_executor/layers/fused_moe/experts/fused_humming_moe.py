@@ -352,8 +352,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def _prequantizes_dispatch_activation(self) -> bool:
-        """
-        Whether the prepare/finalize step should quantize activations before
+        """Whether the prepare/finalize step should quantize activations before
         the (EP all-to-all) dispatch instead of leaving it to Humming.
 
         This is enabled only for block-FP8 (group-128) activations: quantizing
@@ -373,8 +372,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        """
-        Whether the prepare/finalize step should defer input quantization to
+        """Whether the prepare/finalize step should defer input quantization to
         the experts (by setting defer_input_quant=True and passing unquantized
         inputs).
 
@@ -832,8 +830,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming indexed experts.
+        """Standard apply implementation for Humming indexed experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
@@ -967,8 +964,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming grouped experts.
+        """Standard apply implementation for Humming grouped experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
@@ -1090,8 +1086,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming batched grouped experts.
+        """Standard apply implementation for Humming batched grouped experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual

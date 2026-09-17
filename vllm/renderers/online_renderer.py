@@ -512,7 +512,10 @@ class OnlineRenderer:
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
-            raise ValueError(f"Harmony does not support {reasoning_effort=}")
+            raise VLLMValidationError(
+                f"Harmony does not support {reasoning_effort=}",
+                parameter="reasoning_effort",
+            )
         tools = request.tools if should_include_tools else None
         messages.extend(
             build_harmony_preamble(
