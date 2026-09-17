@@ -18,8 +18,7 @@ logger = init_logger(__name__)
 
 @config
 class IrOpPriorityConfig:
-    """
-    Configuration for vLLM IR op priority for dispatching/lowering during the
+    """Configuration for vLLM IR op priority for dispatching/lowering during the
     forward pass. Each member is a list of strings, which will be installed
     in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
@@ -34,9 +33,11 @@ class IrOpPriorityConfig:
     fused_add_rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
+    gelu_and_mul_sparse: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
+
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
@@ -68,8 +69,7 @@ class IrOpPriorityConfig:
         return value
 
     def _iter_op_priorities(self):
-        """
-        Yield (IrOp, priority_list) for each field, after importing platform
+        """Yield (IrOp, priority_list) for each field, after importing platform
         kernels and validating each entry.
         """
         from vllm.ir.op import IrOp
@@ -86,16 +86,13 @@ class IrOpPriorityConfig:
             yield IrOp.registry[field.name], op_priority
 
     def set_default(self) -> None:
-        """
-        Permanently set the IR op priority for all op members.
-        """
+        """Permanently set the IR op priority for all op members."""
         for ir_op, op_priority in self._iter_op_priorities():
             ir_op.set_default(op_priority)
 
     @contextlib.contextmanager
     def set_priority(self):
-        """
-        Context manager to set the IR op priority for all op members.
+        """Context manager to set the IR op priority for all op members.
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
         """
@@ -108,8 +105,7 @@ class IrOpPriorityConfig:
     def with_default(
         cls, default: list[str], /, **kwargs: list[str]
     ) -> "IrOpPriorityConfig":
-        """
-        A helper to create an IrOpPriorityConfig where fields not specified in kwargs
+        """A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
         for field in fields(cls):  # type: ignore[arg-type]
@@ -141,6 +137,7 @@ MoEBackend = Literal[
     "flydsl",
     "hpc",
     "emulation",
+    "rdna3",
 ]
 
 # Backends that run the mega-MoE model path through the flashinfer moe_ep
@@ -158,6 +155,16 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
 # with a mega-MoE module may use (DeepSeek-V4, Kimi K3), plus the flashinfer
 # moe_ep variants.
 MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
+
+SparseIndexerTopkBackend = Literal[
+    "auto",
+    "deep_select",
+    "cooperative",
+    "persistent",
+    "per_row",
+    "flashinfer",
+    "torch",
+]
 
 # Architectures whose model code wires up the flashinfer moe_ep experts. MTP
 # and DSpark draft variants inherit the setting from these target models.
@@ -262,9 +269,25 @@ class KernelConfig:
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
+    """
+
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
+    """Backend for the DSA sparse indexer decode top-k kernel. Available options:
+
+    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
+      the other backends are opt-in
+    - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
+    - "cooperative": Use vLLM's cooperative_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel
+    - "per_row": Use vLLM's top_k_per_row_decode kernel
+    - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
+    - "torch": Use a plain torch.topk implementation (debug reference)
+
+    Explicit values raise RuntimeError when their constraints are not met.
     """
 
     linear_backend: LinearBackend = "auto"
@@ -296,6 +319,13 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
+        default=None, min_length=1
+    )
+    """Backend overrides keyed by linear quantization scheme. Overrides take
+    precedence over ``linear_backend``; for example,
+    ``{"nvfp4_w4a16": "humming"}``."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -310,9 +340,15 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
+    @field_validator("sparse_indexer_topk_backend", mode="before")
+    @classmethod
+    def _normalize_sparse_indexer_topk_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
@@ -322,6 +358,8 @@ class KernelConfig:
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
+        if self.linear_backend_per_quant is None:
+            ignored_factors.add("linear_backend_per_quant")
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)

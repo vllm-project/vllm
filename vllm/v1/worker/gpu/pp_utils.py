@@ -11,7 +11,7 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -39,7 +39,6 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     that produce a sampled token this step, and therefore must have that token
     (and the draft block proposed from it) propagated to the earlier PP stages.
     Returns None if no request in the batch produces a sample."""
-
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     # Exclude non-final prefill chunks (they don't produce a sample).
@@ -138,7 +137,7 @@ class PPHandler:
                 return None
             # Filter excluded request indices.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+            idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
 
         self.main_stream.wait_event(slot.event)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
@@ -148,7 +147,7 @@ class PPHandler:
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=self.device)
                 draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_copy_to_gpu(
+                draft_idx_mapping = async_tensor_h2d(
                     slot.idx_mapping_np[keep], device=self.device
                 )
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
