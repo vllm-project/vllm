@@ -1520,6 +1520,115 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
+@pytest.mark.parametrize(
+    ("method", "draft_is_moe"),
+    [
+        pytest.param("draft_model", False, id="dense-draft"),
+        pytest.param("eagle", False, id="eagle"),
+        pytest.param("eagle3", False, id="eagle3"),
+        pytest.param("draft_model", True, id="moe-draft"),
+        pytest.param("mtp", True, id="mtp"),
+        pytest.param("dspark", True, id="dspark"),
+    ],
+)
+def test_draft_inherits_ep_only_for_moe(
+    tmp_path: Path,
+    tp_size: int,
+    target_ep: bool,
+    method: str,
+    draft_is_moe: bool,
+):
+    """Validate final draft configs without loading weights or mocking validation."""
+    from transformers import LlamaConfig, MixtralConfig
+
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+
+    common = dict(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=128,
+        max_position_embeddings=2048,
+    )
+    if method in ("mtp", "dspark"):
+        target_hf_config = DeepseekV4Config(
+            architectures=["DeepseekV4ForCausalLM"],
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            num_nextn_predict_layers=1,
+            compress_ratios=[1, 1],
+            head_dim=32,
+            **common,
+        )
+    else:
+        target_hf_config = MixtralConfig(
+            architectures=["MixtralForCausalLM"], num_local_experts=4, **common
+        )
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    _write_json(target_path / "config.json", target_hf_config.to_dict())
+    _write_json(
+        draft_path / "config.json",
+        LlamaConfig(architectures=["LlamaForCausalLM"], **common).to_dict(),
+    )
+    target_model_config = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=2048
+    )
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=target_ep,
+        distributed_executor_backend="mp",
+    )
+    target_model_config.verify_with_parallel_config(target_parallel_config)
+    speculative_config = SpeculativeConfig(
+        method=method,
+        model=str(target_path if draft_is_moe else draft_path),
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+
+    assert speculative_config.method == method
+    assert speculative_config.draft_model_config.is_moe is draft_is_moe
+    assert speculative_config.draft_parallel_config.enable_expert_parallel is (
+        target_ep and draft_is_moe
+    )
+    assert speculative_config.draft_parallel_config.tensor_parallel_size == tp_size
+    assert target_parallel_config.enable_expert_parallel is target_ep
+    assert target_parallel_config.tensor_parallel_size == tp_size
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
+@pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "explicit-none"])
+def test_draft_parallel_config_preserves_ep_without_model(
+    target_ep: bool, pass_none: bool
+):
+    """Legacy callers without draft model information keep EP inheritance."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=target_ep,
+        distributed_executor_backend="mp",
+    )
+    if pass_none:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2, draft_model_config=None
+        )
+    else:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2
+        )
+
+    assert draft_parallel_config.enable_expert_parallel is target_ep
+    assert draft_parallel_config.tensor_parallel_size == 2
+    assert target_parallel_config.enable_expert_parallel is target_ep
+
+
 @pytest.mark.parametrize(
     ("method", "parallel_drafting", "expected_slots"),
     [
