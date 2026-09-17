@@ -59,6 +59,16 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # No reordering: QSA runs one varlen path over the whole batch, and
+        # under DCP that path is still one kernel over this rank's share of the
+        # selection. Saying so is the point. The base class leaves the
+        # threshold at None, which reads the same but decides nothing, and the
+        # DCP guard would otherwise force decode-only batches if that default
+        # ever changed.
+        self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
+
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
