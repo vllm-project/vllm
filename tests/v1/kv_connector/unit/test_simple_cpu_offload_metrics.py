@@ -222,6 +222,11 @@ def test_prom_metrics_registers_tier1_metrics() -> None:
     ]
     assert defs[USED_BLOCKS].kwargs["labelnames"] == ["model_name", "engine"]
 
+    # mostrecent: multiprocess scrapes expose one series per label set, not
+    # one pid-tagged series per writer process.
+    for gauge in (USED_BLOCKS, PENDING_STORE_BLOCKS, INFO):
+        assert defs[gauge].kwargs["multiprocess_mode"] == "mostrecent"
+
 
 def test_prom_metrics_observe_routes_each_series() -> None:
     prom = _make_prom_metrics()
