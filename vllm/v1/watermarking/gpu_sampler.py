@@ -61,6 +61,7 @@ class GPUWatermarkSampler(Sampler):
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
         use_flashinfer: bool,
+        use_xpu_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
             self.sampling_states.temperature.np[idx_mapping_np] != 0
@@ -74,6 +75,7 @@ class GPUWatermarkSampler(Sampler):
                 top_k,
                 top_p,
                 use_flashinfer,
+                use_xpu_sampler,
             )
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
