@@ -37,13 +37,10 @@ def server():
         "4096",
         "--enforce-eager",
         "--no-enable-prefix-caching",
+        "--enable-scale-out",
     ]
 
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -157,11 +154,28 @@ async def test_render_to_generate_roundtrip(client, test_image):
     )
 
 
-@pytest.mark.asyncio
-async def test_content_parts_generates_tokens(client, test_image):
-    """content_parts with raw media should produce output tokens."""
-    data_url = encode_image_url(test_image, format="PNG")
+def _collapse_placeholders(
+    token_ids: list[int], mm_placeholders: dict[str, list[dict[str, int]]]
+) -> list[int]:
+    """Undo placeholder expansion: each expanded range becomes one token.
 
+    ``/generate`` with ``content_parts`` expects unexpanded placeholders and
+    expands them itself, so the roundtrip must start from a collapsed prompt.
+    """
+    ranges = sorted(
+        (r["offset"], r["length"]) for rs in mm_placeholders.values() for r in rs
+    )
+    collapsed: list[int] = []
+    pos = 0
+    for offset, length in ranges:
+        collapsed.extend(token_ids[pos:offset])
+        collapsed.append(token_ids[offset])
+        pos = offset + length
+    collapsed.extend(token_ids[pos:])
+    return collapsed
+
+
+async def _render_image_prompt(client, data_url: str) -> dict:
     render_resp = await client.post(
         RENDER_ENDPOINT,
         json={
@@ -178,14 +192,26 @@ async def test_content_parts_generates_tokens(client, test_image):
         },
     )
     render_resp.raise_for_status()
-    token_ids = render_resp.json()["token_ids"]
+    return render_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_content_parts_generates_tokens(client, test_image):
+    """Unexpanded prompt + content_parts must expand exactly like /render."""
+    data_url = encode_image_url(test_image, format="PNG")
+    render_data = await _render_image_prompt(client, data_url)
+    expanded = render_data["token_ids"]
+    mm_placeholders = render_data["features"]["mm_placeholders"]
+    unexpanded = _collapse_placeholders(expanded, mm_placeholders)
+    assert len(unexpanded) < len(expanded)
 
     gen_resp = await client.post(
         GEN_ENDPOINT,
         json={
-            "token_ids": token_ids,
+            "token_ids": unexpanded,
             "content_parts": [{"type": "image_url", "url": data_url}],
             "sampling_params": {"max_tokens": 10, "temperature": 0.0},
+            "return_token_ids": True,
         },
     )
     gen_resp.raise_for_status()
@@ -195,6 +221,8 @@ async def test_content_parts_generates_tokens(client, test_image):
     choice = gen_data["choices"][0]
     assert "token_ids" in choice
     assert len(choice["token_ids"]) > 0
+    assert gen_data["prompt_token_ids"] == expanded
+    assert gen_data["mm_placeholders"] == mm_placeholders
 
 
 @pytest.mark.asyncio
@@ -203,33 +231,20 @@ async def test_content_parts_streaming(client, test_image):
     import json as json_mod
 
     data_url = encode_image_url(test_image, format="PNG")
-
-    render_resp = await client.post(
-        RENDER_ENDPOINT,
-        json={
-            "model": MODEL_NAME,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "Describe this."},
-                    ],
-                }
-            ],
-        },
-    )
-    render_resp.raise_for_status()
-    token_ids = render_resp.json()["token_ids"]
+    render_data = await _render_image_prompt(client, data_url)
+    expanded = render_data["token_ids"]
+    mm_placeholders = render_data["features"]["mm_placeholders"]
+    unexpanded = _collapse_placeholders(expanded, mm_placeholders)
 
     async with client.stream(
         "POST",
         GEN_ENDPOINT,
         json={
-            "token_ids": token_ids,
+            "token_ids": unexpanded,
             "content_parts": [{"type": "image_url", "url": data_url}],
             "sampling_params": {"max_tokens": 8, "temperature": 0.0},
             "stream": True,
+            "return_token_ids": True,
         },
     ) as resp:
         resp.raise_for_status()
@@ -239,3 +254,9 @@ async def test_content_parts_streaming(client, test_image):
                 chunks.append(json_mod.loads(line[6:]))
 
     assert len(chunks) > 0
+    prompt_metadata_chunks = [
+        chunk for chunk in chunks if chunk.get("prompt_token_ids") is not None
+    ]
+    assert len(prompt_metadata_chunks) == 1
+    assert prompt_metadata_chunks[0]["prompt_token_ids"] == expanded
+    assert prompt_metadata_chunks[0]["mm_placeholders"] == mm_placeholders

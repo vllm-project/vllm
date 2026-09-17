@@ -76,6 +76,10 @@ class ProfilerConfig:
     """Optional format passed to Proton when finalizing a profile. ``None``
     uses the default format for ``proton_data``."""
 
+    proton_graph_attribution: bool = False
+    """Observe CUDA graph capture so replayed kernels can be attributed.
+    Requires Triton >= 3.7 and ``proton_data='tree'``."""
+
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
     as it is useful for debugging. Can be disabled via 
@@ -147,8 +151,7 @@ class ProfilerConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -199,6 +202,7 @@ class ProfilerConfig:
                 ("proton_mode", self.proton_mode, None),
                 ("proton_hook", self.proton_hook, None),
                 ("proton_output_format", self.proton_output_format, None),
+                ("proton_graph_attribution", self.proton_graph_attribution, False),
             )
             if value != default
         ]
@@ -220,6 +224,17 @@ class ProfilerConfig:
 
         if self.profiler == "proton":
             output_format = self.proton_output_format
+            if self.proton_graph_attribution and self.proton_data != "tree":
+                raise ValueError("proton_graph_attribution requires proton_data='tree'")
+            if (
+                self.proton_graph_attribution
+                and self.proton_mode
+                and self.proton_mode.split(":", 1)[0].lower() == "periodic_flushing"
+            ):
+                raise ValueError(
+                    "proton_graph_attribution is incompatible with periodic_flushing: "
+                    "both manage Proton data phases."
+                )
             if output_format == "chrome_trace" and self.proton_data != "trace":
                 raise ValueError("chrome_trace output requires proton_data='trace'")
             if (

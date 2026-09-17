@@ -120,27 +120,32 @@ def init_hisparse_kv_cache(
     block_tables: "BlockTables",
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_pool = HiSparseHostPool()
-    kv_caches = allocate_hisparse_kv_caches(
-        kv_cache_config,
-        device,
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
-        kernel_block_sizes,
-        host_pool,
-    )
-    cache_handles = bind_hisparse_kv_caches(
-        forward_context=forward_context,
-        kv_cache_config=kv_cache_config,
-        kv_caches=kv_caches,
-        block_tables=block_tables,
-        host_pool=host_pool,
-    )
-    initialize_hisparse_runtime_buffers(
-        cache_handles,
-        max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-    )
-    return kv_caches
+    host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    try:
+        kv_caches = allocate_hisparse_kv_caches(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+            host_pool,
+        )
+        cache_handles = bind_hisparse_kv_caches(
+            forward_context=forward_context,
+            kv_cache_config=kv_cache_config,
+            kv_caches=kv_caches,
+            block_tables=block_tables,
+            host_pool=host_pool,
+        )
+        initialize_hisparse_runtime_buffers(
+            cache_handles,
+            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        return kv_caches
+    except Exception:
+        if host_pool.shared_region is not None:
+            host_pool.shared_region.cleanup()
+        raise
 
 
 def _get_hisparse_cache(
@@ -166,13 +171,24 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
     if not runtimes:
         return
 
-    registered_pools = list(
-        {
-            runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
-            for runtime in runtimes.values()
-        }.values()
+    shared_regions = {
+        id(runtime.shared_host_region): runtime.shared_host_region
+        for runtime in runtimes.values()
+        if runtime.shared_host_region is not None
+    }
+    assert len(shared_regions) <= 1
+    shared_region = next(iter(shared_regions.values()), None)
+    registered_pools = (
+        []
+        if shared_region is not None
+        else list(
+            {
+                runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
+                for runtime in runtimes.values()
+            }.values()
+        )
     )
-    release_pinned_state(list(runtimes.values()), registered_pools)
+    release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
     for cache in cache_handles:
         cache.mirror_staging_cache = None
         cache.mirror_staging_slots = None
@@ -189,9 +205,12 @@ def bind_hisparse_kv_caches(
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
     tensor_configs = {
-        name: tensor_config
+        name: (
+            tensor_config,
+            tensor_config.offset + layer_index * tensor_config.layer_stride,
+        )
         for tensor_config in kv_cache_config.kv_cache_tensors
-        for name in tensor_config.layers
+        for layer_index, name in enumerate(tensor_config.layers)
     }
     resident_source_index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -200,12 +219,12 @@ def bind_hisparse_kv_caches(
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             cache_handle.bind_cache(
                 kv_caches[cache_name],
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -233,11 +252,11 @@ def bind_hisparse_kv_caches(
                 raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
             layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
-            tensor_config = tensor_configs[cache_name]
+            tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle.runtime.bind_hot_cache(
                 raw_tensor,
-                byte_offset=tensor_config.offset,
+                byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -257,6 +276,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
