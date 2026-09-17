@@ -110,8 +110,11 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
+@pytest.mark.parametrize("full_sleep", [False, True], ids=["kv-only", "then-sleep"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-def test_release_kv_cache_memory_then_sleep():
+def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
+    """Rejected release and KV-only/full sleep cycles preserve greedy tokens."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     kv_cache_memory_bytes = 256 * 1024 * 1024
     llm = LLM(
         "Qwen/Qwen3-0.6B",
@@ -120,23 +123,37 @@ def test_release_kv_cache_memory_then_sleep():
         kv_cache_memory_bytes=kv_cache_memory_bytes,
         max_model_len=1024,
         max_num_seqs=4,
+        gpu_memory_utilization=0.05,
     )
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
+    expected = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
 
-    free_bytes = current_platform.mem_get_info()[0]
+    def get_mapped_bytes(worker):
+        return mapped_usage(get_mem_allocator_instance())
+
+    mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
+    # Utility RPC transports the engine error as a plain Exception.
+    with pytest.raises(Exception, match="requires a completed pause"):
+        llm.release_kv_cache_memory()
+    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
+    assert not llm.llm_engine.is_sleeping()
+    assert llm.generate(prompt, sampling_params)[0].outputs[0].token_ids == expected
+
     llm.sleep(level=0)
     llm.release_kv_cache_memory()
-    free_bytes_after_release = current_platform.mem_get_info()[0]
-    assert free_bytes_after_release - free_bytes >= kv_cache_memory_bytes * 0.99
+    mapped_after = llm.collective_rpc(get_mapped_bytes)[0]
+    assert mapped_before - mapped_after >= kv_cache_memory_bytes * 0.99
+    assert mapped_after > 0
     assert llm.llm_engine.is_sleeping()
 
-    llm.sleep(level=1)
-    assert current_platform.mem_get_info()[0] > free_bytes_after_release
-    llm.wake_up()
+    if full_sleep:
+        llm.sleep(level=1)
+        assert llm.collective_rpc(get_mapped_bytes)[0] == 0
+    llm.wake_up(tags=None if full_sleep else ["kv_cache"])
+    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
     assert not llm.llm_engine.is_sleeping()
-    actual = llm.generate(prompt, sampling_params)[0].outputs[0].text
+    actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
     assert actual == expected
 
 
