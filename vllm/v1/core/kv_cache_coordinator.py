@@ -176,6 +176,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -197,6 +198,9 @@ class KVCacheCoordinator(ABC):
                 per-request admission cap (SWA / chunked-local). Set only by
                 the full-sequence admission gate; per-step allocation must
                 leave it False so the predictor matches `allocate_new_blocks`.
+            prefill_end: The token index the request's prefill ends at, the
+                same value the scheduler splits chunks against. Mamba needs it
+                to place the prefill checkpoint.
 
         Returns:
             The number of blocks to allocate.
@@ -225,6 +229,7 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
 
