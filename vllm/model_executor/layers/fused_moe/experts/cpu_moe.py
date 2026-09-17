@@ -745,6 +745,7 @@ def prepare_int4_moe_layer_for_cpu(
 
     Returns:
         (blocked_w13, blocked_w2, blocked_s13, blocked_s2, blocked_z13, blocked_z2)
+
     """
     E = w13_packed.size(0)
 
@@ -1055,7 +1056,6 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """VNNI-prepack INT8 MoE weights for CPU kernel."""
-
         w13 = torch.ops._C.convert_weight_packed(layer.w13_weight)
         w2 = torch.ops._C.convert_weight_packed(layer.w2_weight)
         replace_parameter(layer, "w13_weight", w13)
