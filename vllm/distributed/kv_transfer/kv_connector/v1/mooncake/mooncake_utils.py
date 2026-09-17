@@ -32,8 +32,7 @@ class EngineEntry:
 
 
 class MooncakeBootstrapServer:
-    """
-    A centralized server running on the global rank 0 prefiller worker.
+    """A centralized server running on the global rank 0 prefiller worker.
     Prefiller workers register their connection info (IP, port, ranks) here.
     """
 
