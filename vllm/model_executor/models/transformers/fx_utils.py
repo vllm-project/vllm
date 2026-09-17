@@ -33,6 +33,21 @@ _MODULE_CALL = nn.Module.__call__
 """The unpatched `nn.Module.__call__`. During tracing fx patches it to record
 `call_module` nodes; meta execution must call modules for real."""
 
+_MODULE_GETATTR = nn.Module.__getattr__
+"""The unpatched `nn.Module.__getattr__`. During tracing fx patches it to record
+`get_attr` nodes; reading one while inferring a `get_attr`'s own value would
+recurse until the stack runs out, truncating the graph."""
+
+
+@contextlib.contextmanager
+def _unpatched_modules():
+    """Restores the module hooks fx patches, so meta execution records nothing."""
+    with (
+        mock.patch.object(nn.Module, "__call__", _MODULE_CALL),
+        mock.patch.object(nn.Module, "__getattr__", _MODULE_GETATTR),
+    ):
+        yield
+
 
 def is_leaf_call(node: object) -> bool:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
@@ -130,7 +145,8 @@ class _AllLeafTracer(fx.Tracer):
                 )
             return _UNKNOWN
         if kind == "get_attr":
-            value = operator.attrgetter(str(target))(self.root)
+            with _unpatched_modules():
+                value = operator.attrgetter(str(target))(self.root)
             if isinstance(value, torch.Tensor):
                 value = torch.empty_like(value, device="meta")
             return value
@@ -156,8 +172,6 @@ class _AllLeafTracer(fx.Tracer):
         if kind == "call_module":
             # Run the child's forward with all its state on "meta", without
             # mutating it (at match time params may be meta but buffers real).
-            # fx patches `nn.Module.__call__` while tracing; restore the real
-            # one so this execution is not itself recorded.
             child = self.root.get_submodule(str(target))
             state = {
                 name: torch.empty_like(tensor, device="meta")
@@ -165,7 +179,7 @@ class _AllLeafTracer(fx.Tracer):
                     child.named_parameters(), child.named_buffers()
                 )
             }
-            with mock.patch.object(nn.Module, "__call__", _MODULE_CALL):
+            with _unpatched_modules():
                 return torch.func.functional_call(child, state, meta_args, meta_kwargs)
         return _UNKNOWN
 
