@@ -50,6 +50,7 @@ impl ControlServiceImpl {
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
             world_size: ready.world_size,
+            data_parallel_size_local: self.client().engine_count() as u32,
         }
     }
 
@@ -195,6 +196,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
+            effective_attention_block_size: self.client().effective_attention_block_size(),
         }))
     }
 

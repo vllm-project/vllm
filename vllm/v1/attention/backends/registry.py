@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention backend registry"""
+"""Attention backend registry."""
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta
@@ -49,6 +49,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     TRITON_ATTN_DIFFKV = (
         "vllm.v1.attention.backends.triton_attn_diffkv.TritonAttentionDiffKVBackend"
     )
+    TRITON_FLASH_ATTN = (
+        "vllm.v1.attention.backends.triton_flash_attn.TritonFlashAttentionBackend"
+    )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
@@ -63,6 +66,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     XPU_MLA_SPARSE = "vllm.v1.attention.backends.mla.xpu_mla_sparse.XPUMLASparseBackend"
     TORCH_SDPA = ""  # this tag is only used for ViT
     FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+    TRITON_FLASHINFER = (
+        "vllm.v1.attention.backends.triton_flashinfer.TritonFlashInferBackend"
+    )
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
@@ -97,6 +103,19 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     ROCM_FLASHMLA_SPARSE_DSV4 = (
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
+    )
+    # DeepSeek V4.1 sparse MLA backends (model-driven; selected via the V4.1
+    # layer). Separate names from DSV4 so a V4.1 model never resolves the
+    # V4.0 backend classes through this enum.
+    FLASHMLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.sparse_mla.DeepseekV4FlashMLABackend"
+    )
+    FLASHINFER_MLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
+        "DeepseekV4FlashInferMLASparseBackend"
+    )
+    FLASHMLA_MEGA_ATTN_DSV41 = (
+        "vllm.models.deepseek_v41.sparse_mla.FlashMLAMegaAttnBackend"
     )
     B12X = "vllm.v1.attention.backends.b12x.B12xPagedAttentionBackend"
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
@@ -142,6 +161,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -162,6 +182,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -170,6 +191,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _ATTN_OVERRIDES
 
@@ -205,6 +227,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _MAMBA_ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -225,6 +248,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -233,6 +257,7 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
         Returns:
             True if the backend has a registered override
+
         """
         return self in _MAMBA_ATTN_OVERRIDES
 
@@ -256,6 +281,7 @@ def register_backend(
         backend: The AttentionBackendEnum member to register
         class_path: Optional class path. If not provided and used as
             decorator, will be auto-generated from the class.
+        is_mamba: Whether the backend is a Mamba attention backend.
 
     Returns:
         Decorator function if class_path is None, otherwise a no-op
@@ -281,6 +307,7 @@ def register_backend(
             AttentionBackendEnum.CUSTOM,
             "my.module.MyCustomBackend"
         )
+
     """
 
     def decorator(cls: type) -> type:

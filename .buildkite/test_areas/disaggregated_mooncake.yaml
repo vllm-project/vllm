@@ -40,7 +40,14 @@ steps:
     - vllm/v1/worker/gpu_worker.py
     - vllm/v1/worker/gpu/ec_connector.py
     - vllm/v1/worker/gpu/model_runner.py
+    - vllm/v1/worker/mm_encoder_model_runner.py
+    - vllm/v1/worker/encoder_cudagraph.py
+    - vllm/v1/worker/encoder_cudagraph_defs.py
+    - vllm/v1/attention/ops/vit_attn_wrappers.py
+    - vllm/v1/worker/gpu/model_states/
     - vllm/v1/worker/gpu/mm/
+    - tests/v1/cudagraph/test_encoder_cudagraph.py
+    - tests/models/multimodal/generation/test_vit_cudagraph.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/
     - requirements/kv_connectors.txt
@@ -49,6 +56,9 @@ steps:
     PYTHONUNBUFFERED: "1"
     VLLM_HOST_IP: "127.0.0.1"
     VLLM_USE_V2_MODEL_RUNNER: "1"
+    E_CUDAGRAPH_MM_ENCODER: "1"
+    # FA padding NaNs are tracked separately in #57136.
+    E_MM_ENCODER_ATTN_BACKEND: "TRITON_ATTN"
     MOONCAKE_EC_PROTOCOL: "tcp"
     USE_MM_PROMPTS: "1"
     SKIP_BASELINE: "0"

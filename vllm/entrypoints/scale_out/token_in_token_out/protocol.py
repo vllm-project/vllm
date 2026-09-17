@@ -192,19 +192,33 @@ class GenerateRequest(BaseModel):
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
-        if _has_serialized_mm_items(features.kwargs_data):
-            return self
         if self.ec_transfer_params:
             return self
-        raise ValueError(
-            "features.mm_metadata without features.kwargs_data requires "
-            "ec_transfer_params so embeddings can be loaded by the EC connector"
-        )
+        kwargs_data = features.kwargs_data or {}
+        for modality, metadata_items in (features.mm_metadata or {}).items():
+            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+            if any(
+                metadata is not None and kwargs is None
+                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+            ):
+                raise ValueError(
+                    "metadata-only multimodal items require ec_transfer_params"
+                )
+        return self
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
 
     model: str | None = None
+
+    return_token_ids: bool | None = Field(
+        default=None,
+        description=(
+            "If true, return the final prompt token IDs after multimodal "
+            "placeholder expansion, together with multimodal placeholder ranges. "
+            "In streaming mode, this metadata is included only in the first chunk."
+        ),
+    )
 
     stream: bool | None = False
     stream_options: StreamOptions | None = None
@@ -250,6 +264,9 @@ class GenerateRequest(BaseModel):
     # ``SamplingParams`` instance (e.g. from internal callers that have
     # already resolved values), in which case all fields are considered set.
     _sampling_params_provided_keys: set[str] | None = PrivateAttr(default=None)
+    _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
+        PrivateAttr(default=None)
+    )
 
     @model_validator(mode="wrap")
     @classmethod
@@ -349,6 +366,8 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -365,6 +384,8 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_ids: list[int] | None = None
+    mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
