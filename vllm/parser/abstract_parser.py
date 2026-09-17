@@ -412,9 +412,15 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        # Grammar covers the reasoning phase only when the reasoning parser
+        # explicitly reports that thinking is enabled for this request
+        # (defaults to False for parsers without a `thinking_enabled` flag).
+        thinking_enabled = getattr(self._reasoning_parser, "thinking_enabled", None)
+        reasoning_enabled = isinstance(thinking_enabled, bool) and thinking_enabled
+
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=reasoning_enabled,
         )
         if structure_tag is None:
             return request

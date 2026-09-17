@@ -313,6 +313,7 @@ _K3_CALL_CLOSE = "<|close|>call<|sep|>"
 _K3_ARG_CLOSE = "<|close|>argument<|sep|>"
 _K3_MESSAGE_CLOSE = "<|close|>message<|sep|>"
 _K3_END_OF_MSG = "<|end_of_msg|>"
+_K3_THINK_CLOSE = "<|close|>think<|sep|>"
 
 
 def _k3_tools_by_name() -> list[ChatCompletionToolsParam]:
@@ -507,6 +508,73 @@ def test_kimi_k3_response_body_rejects_reserved_marker_prefixes(body: str):
     )
 
 
+def _k3_thinking_grammar(tool_choice, tools=None) -> Grammar:
+    tag = get_model_structural_tag(
+        model="kimi_k3",
+        tools=tools if tools is not None else _k3_tools_by_name(),
+        tool_choice=tool_choice,
+        reasoning=True,
+    )
+    assert isinstance(tag, StructuralTag)
+    return Grammar.from_structural_tag(tag)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # free-form reasoning, think-close, then response + tool call
+        "Let me think."
+        + _K3_THINK_CLOSE
+        + _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # empty reasoning body
+        _K3_THINK_CLOSE
+        + _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # response channel carries visible content
+        "thinking hard"
+        + _K3_THINK_CLOSE
+        + _k3_response("Checking.")
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # trailing message-close marker after the tools channel
+        "reasoning"
+        + _K3_THINK_CLOSE
+        + _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris")))
+        + _K3_MESSAGE_CLOSE,
+    ],
+)
+def test_kimi_k3_thinking_accepts_reasoning_prefixed_tool_calls(body: str):
+    assert _is_grammar_accept_string(_k3_thinking_grammar("required"), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # response emitted while still in the reasoning phase (no think-close)
+        _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # message-close cannot terminate the reasoning phase
+        "reasoning"
+        + _K3_MESSAGE_CLOSE
+        + _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+    ],
+)
+def test_kimi_k3_thinking_rejects_missing_think_close(body: str):
+    assert not _is_grammar_accept_string(_k3_thinking_grammar("required"), body)
+
+
+def test_kimi_k3_non_thinking_rejects_reasoning_prefix():
+    body = (
+        "reasoning"
+        + _K3_THINK_CLOSE
+        + _k3_response()
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris")))
+    )
+    assert not _is_grammar_accept_string(_k3_grammar("required"), body)
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_named_tool_choice(
     model: str,
@@ -627,6 +695,46 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
 
     parser.adjust_request(request)
 
+    assert captured == [False]
+
+
+def test_unified_parser_get_structural_tag_uses_thinking_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools_strict: list[ChatCompletionToolsParam],
+):
+    captured: list[bool] = []
+
+    def fake_get_model_structural_tag(*, reasoning: bool, **kwargs):
+        captured.append(reasoning)
+        return None
+
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+        fake_get_model_structural_tag,
+    )
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3EngineToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+    )
+    parser = TestParser(MagicMock(), tools=sample_tools_strict)
+
+    parser._reasoning_parser = MagicMock(
+        adjust_request=lambda request: request, thinking_enabled=True
+    )
+    parser.adjust_request(request)
+    assert captured == [True]
+
+    captured.clear()
+    parser._reasoning_parser = MagicMock(
+        adjust_request=lambda request: request, thinking_enabled=False
+    )
+    parser.adjust_request(request)
     assert captured == [False]
 
 

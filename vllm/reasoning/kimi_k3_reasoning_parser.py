@@ -145,6 +145,11 @@ class KimiK3ReasoningParser(ReasoningParser):
     def reasoning_end_str(self) -> str | None:
         return self._think_close
 
+    @property
+    def thinking_enabled(self) -> bool:
+        """Whether this request's Kimi chat template enables reasoning."""
+        return self._thinking_enabled
+
     def adjust_request(
         self,
         request: "ChatCompletionRequest | ResponsesRequest",
