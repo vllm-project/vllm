@@ -997,6 +997,11 @@ def test_embedded_connector_core_flow(monkeypatch):
     worker_connector.register_kv_caches(caches)
 
     assert scheduler_connector.get_num_new_matched_tokens(producer, 0) == (0, False)
+    scheduler_connector.update_state_after_alloc(
+        producer,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2],)),
+        0,
+    )
     metadata = scheduler_connector.build_connector_meta(scheduler_output)
     worker_connector.bind_connector_metadata(metadata)
     worker_connector.wait_for_save()
@@ -1269,6 +1274,18 @@ def test_embedded_tp_dcp_pp_rank_local_store_flow(monkeypatch):
         vllm_config, KVConnectorRole.SCHEDULER, config
     )
     worker_connector = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    scheduler_connector.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([3, 4],)),
+        0,
+    )
+    scheduler_output.scheduled_new_reqs = [
+        SimpleNamespace(
+            req_id="ranked",
+            num_computed_tokens=0,
+            block_ids=([3, 4],),
+        )
+    ]
     worker_connector.register_kv_caches(
         {
             name: torch.empty_strided(

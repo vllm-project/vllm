@@ -264,10 +264,20 @@ class UMBPStoreConnectorScheduler:
                     request.num_computed_tokens
                     + scheduler_output.num_scheduled_tokens[request.req_id]
                 )
+                tracked_request = self._requests.get(request.req_id)
+                selected_block_ids = tuple(
+                    request.block_ids[group_id]
+                    for group_id in (self.kv_cache_config.prefix_cacheable_group_ids)
+                )
                 store_plans = (
                     []
-                    if self.lazy_offload
-                    else self._store_plans(request, tracker, total_tokens)
+                    if self.lazy_offload or tracked_request is None
+                    else self._store_plans(
+                        tracked_request,
+                        tracker,
+                        total_tokens,
+                        block_ids_override=selected_block_ids,
+                    )
                 )
                 meta.store_plans.extend(store_plans)
                 if store_plans:
