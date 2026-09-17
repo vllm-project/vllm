@@ -4,10 +4,17 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
+from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
+from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    maybe_create_adaptive_verification_manager,
+    resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
@@ -29,6 +36,80 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+@pytest.mark.parametrize(
+    ("mode", "piecewise_capture_available", "expected"),
+    [
+        ("FULL_DECODE_ONLY", True, "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "FULL_DECODE_ONLY"),
+        ("FULL", True, "FULL_AND_PIECEWISE"),
+        ("FULL", False, "FULL_DECODE_ONLY"),
+        ("FULL_AND_PIECEWISE", True, "FULL_AND_PIECEWISE"),
+        ("FULL_AND_PIECEWISE", False, "FULL_DECODE_ONLY"),
+    ],
+)
+def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expected):
+    assert (
+        resolve_adaptive_cudagraph_mode(
+            CUDAGraphMode[mode], piecewise_capture_available=piecewise_capture_available
+        )
+        == CUDAGraphMode[expected]
+    )
+
+
+def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatch):
+    class Backend:
+        @classmethod
+        def supports_device_cpu_query_lens_mismatch(cls):
+            return True
+
+    class Builder:
+        def __init__(self, support):
+            self.support = support
+
+        def get_cudagraph_support(self, *_args):
+            return self.support
+
+    def group(layer_name, support):
+        builder = Builder(support)
+        return SimpleNamespace(
+            layer_names=[layer_name],
+            backend=Backend,
+            kv_cache_spec=None,
+            get_metadata_builder=lambda _index: builder,
+        )
+
+    groups = [
+        [
+            group("target", AttentionCGSupport.ALWAYS),
+            group("draft", AttentionCGSupport.UNIFORM_BATCH),
+        ]
+    ]
+    runner_support = AttentionCGSupportInfo(
+        AttentionCGSupport.UNIFORM_BATCH, "DraftBackend"
+    )
+    created = object()
+    monkeypatch.setattr(
+        adaptive_module,
+        "AdaptiveVerificationManager",
+        lambda *_args, **_kwargs: created,
+    )
+
+    manager = maybe_create_adaptive_verification_manager(
+        enable_adaptive_verification=True,
+        attn_groups=groups,
+        attn_cg_support=runner_support,
+        req_states=object(),
+        query_start_loc=object(),
+        num_bonus_tokens=1,
+        max_total_logits=1,
+        vllm_config=None,
+        target_layer_names={"target"},
+    )
+
+    assert manager is created
+    assert runner_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():

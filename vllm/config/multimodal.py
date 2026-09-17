@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, cast, final
+from typing import Any, Literal, TypeAlias, TypedDict, final
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -11,7 +11,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -73,16 +73,6 @@ MMProcessorDevice: TypeAlias = str
 """`"auto"`, `"cpu"`, or the platform's own accelerator name
 (`current_platform.device_type`, e.g. `"cuda"` on CUDA and ROCm,
 `"xpu"` on XPU). Validated against that set by the CLI."""
-
-
-def _get_mm_hasher_algorithm() -> MMHasherAlgorithm:
-    env_value = get_from_deprecated_env_if_set(
-        "VLLM_MM_HASHER_ALGORITHM",
-        "v0.27",
-        "mm_hasher_algorithm",
-    )
-    env_value = "blake3" if env_value is None else env_value
-    return cast(MMHasherAlgorithm, env_value.lower())
 
 
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
@@ -157,13 +147,14 @@ class MultiModalConfig:
     resulting in a total memory usage of
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
+    A single processed item larger than this budget is served uncached
+    (with a warning) instead of failing. Raise this value to cache such items.
+
     Set to `0` to disable this cache completely (not recommended)."""
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
-    mm_hasher_algorithm: MMHasherAlgorithm = Field(
-        default_factory=_get_mm_hasher_algorithm
-    )
+    mm_hasher_algorithm: MMHasherAlgorithm = "blake3"
     """Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
     `"sha512"` for FIPS-compliant deployments."""
     mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
@@ -236,17 +227,17 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
-    mm_embeds_from_ec_connector: bool = False
+    allow_missing_mm_embeddings: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
 
     In an encode/prefill/decode (EPD) deployment the encoder instance publishes
-    embeddings through the EC connector, so the request that reaches the
-    prefill/decode instance only needs to carry the grid/size metadata that
-    sizes the placeholder range — the embeddings themselves come from the
-    connector, keyed by `mm_hash`.
+    embeddings through the EC connector. An EC consumer loads those embeddings
+    from the connector, while a KV consumer receives the resulting prompt KV
+    cache. Their requests only need the grid/size metadata that sizes the
+    placeholder range.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
-    exactly on EC consumers. Everywhere else it stays False so that a request
+    on EC and KV consumers. Everywhere else it stays False so that a request
     which forgets its embeddings still fails fast in the frontend, with a clear
     error, rather than deep inside the model."""
 
@@ -366,6 +357,7 @@ class MultiModalConfig:
         Returns:
             The kwargs to build the config with, unchanged unless the flag adds
             a `device`.
+
         """
         if mm_processor_device in (None, "auto"):
             return mm_processor_kwargs
@@ -399,6 +391,7 @@ class MultiModalConfig:
             ValueError: If `device` is not something `torch.device` accepts.
                 `validate_mm_processor_device` is what surfaces this during
                 startup, so the value is only parsed once.
+
         """
         device = (self.mm_processor_kwargs or {}).get("device")
         if device is None:
@@ -427,6 +420,7 @@ class MultiModalConfig:
             ValueError: If the requested device is not a torch device, or if it
                 is the accelerator on an instance that also runs the language
                 model.
+
         """
         from vllm.platforms import current_platform
 
@@ -461,8 +455,7 @@ class MultiModalConfig:
         )
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -485,8 +478,7 @@ class MultiModalConfig:
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
-        """
-        Get the maximum number of input items allowed per prompt
+        """Get the maximum number of input items allowed per prompt
         for the given modality (backward compatible).
         """
         if self.language_model_only:
@@ -504,8 +496,7 @@ class MultiModalConfig:
         self,
         inference_kwargs: Mapping[str, object],
     ) -> dict[str, object]:
-        """
-        Get the keyword arguments to pass to the multi-modal processor
+        """Get the keyword arguments to pass to the multi-modal processor
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}

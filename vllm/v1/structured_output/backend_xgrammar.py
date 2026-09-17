@@ -157,11 +157,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
+        Returns True if all grammar-constrained tokens were accepted.
+        Tokens after termination are ignored. Returns False if the FSM
+        failed to advance.
         """
         if self._is_terminated:
-            return False
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
                 logger.error(
@@ -172,7 +173,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 )
                 return False
             self.num_processed_tokens += 1
-        self._is_terminated = self.matcher.is_terminated()
+            self._is_terminated = self.matcher.is_terminated()
+            if self._is_terminated:
+                break
         return True
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
@@ -181,10 +184,15 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._is_terminated:
+            return []
+
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):
                 accepted_tokens.append(token)
+                if self.matcher.is_terminated():
+                    break
             else:
                 break
         if len(accepted_tokens) > 0:
@@ -204,8 +212,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return self._is_terminated
 
     def reset(self):
-        self.num_processed_tokens = 0
         self.matcher.reset()
+        self.num_processed_tokens = 0
+        self._is_terminated = False
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
@@ -225,6 +234,12 @@ STRING_SUPPORTED_FORMATS = {
     "json-pointer",
     "relative-json-pointer",
 }
+
+
+def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
+    return ("pattern" in schema or "format" in schema) and (
+        "minLength" in schema or "maxLength" in schema
+    )
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
@@ -253,9 +268,46 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
-        # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(
-            key in obj for key in ("patternProperties", "propertyNames")
+        # A string mixing a generative constraint (pattern or format) with
+        # explicit length bounds. xgrammar compiles the pattern/format side
+        # and silently drops minLength/maxLength from the grammar, so output
+        # can violate the bound without any error surfacing. Verified against
+        # the compiled EBNF: pattern/format grammars come out byte-identical
+        # with and without the length keywords, while maxLength alone lowers
+        # to {0, N} correctly.
+        if obj.get("type") == "string" and _has_pattern_and_length_bounds(obj):
+            return True
+
+        # propertyNames validates names, so it is a string schema even when it
+        # omits "type", which is the form that escapes the check above.
+        if (
+            obj.get("type") == "object"
+            and isinstance(obj.get("propertyNames"), dict)
+            and _has_pattern_and_length_bounds(obj["propertyNames"])
+        ):
+            return True
+
+        # FIXME: propertyNames conflicts with properties/patternProperties/
+        # additionalProperties/unevaluatedProperties under xgrammar.
+        # https://github.com/mlc-ai/xgrammar/issues/826
+        if (
+            obj.get("type") == "object"
+            and "propertyNames" in obj
+            and (
+                "properties" in obj
+                or "patternProperties" in obj
+                or isinstance(obj.get("additionalProperties"), dict)
+                or obj.get("unevaluatedProperties", True) is not True
+            )
+        ):
+            return True
+
+        # FIXME: multiple patternProperties, or patternProperties alongside
+        # properties, conflict under xgrammar.
+        if (
+            obj.get("type") == "object"
+            and isinstance(obj.get("patternProperties"), dict)
+            and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
 

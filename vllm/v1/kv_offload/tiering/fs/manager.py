@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-FileSystemTierManager: Pure-Python file system secondary tier for KV cache offloading.
+"""FileSystemTierManager: pure-Python filesystem tier for KV cache offloading.
 
 Store path:
     Data is written to a temp file (<dest_path.tmp>) via os.write,
@@ -84,8 +83,7 @@ class FsAsyncLookupManager(AsyncLookupManager):
 
 
 class FileSystemTierManager(SecondaryTierManager):
-    """
-    Pure-Python disk-backed secondary tier.
+    """Pure-Python disk-backed secondary tier.
 
     Read-priority threads service load jobs preferentially; write-priority
     threads service store jobs preferentially.  Both groups can drain either
@@ -95,13 +93,14 @@ class FileSystemTierManager(SecondaryTierManager):
     get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
-        In order to enable KV cache sharing between multiple vLLM instances
-        using the same ``root_dir`` (e.g., via a shared PVC) the environment
-        variable ``PYTHONHASHSEED`` must be set to the same fixed value
-        (e.g., "0") on all instances. Without this, each process initializes
-        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
-        content.
+        KV cache sharing between multiple vLLM instances using the same
+        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        (the chain-hash seed for block content hashes) is derived from a fixed
+        default seed, so identical token content produces identical block
+        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        variable to the same value on all instances overrides the default seed,
+        and is required to share a cache when using a non-cryptographic
+        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -117,20 +116,20 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
-        """
-        Args:
-            offloading_spec: Contains normalized offloading configuration and
-                blocks_per_chunk.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            root_dir: Root directory for block files.
-            n_read_threads: Number of read-priority I/O threads.
-            n_write_threads: Number of write-priority I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
+        """Args:
+        offloading_spec: Contains normalized offloading configuration and
+            blocks_per_chunk.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        root_dir: Root directory for block files.
+        n_read_threads: Number of read-priority I/O threads.
+        n_write_threads: Number of write-priority I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         self.locality = Locality(locality) if locality is not None else None
@@ -222,7 +221,7 @@ class FileSystemTierManager(SecondaryTierManager):
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
             self._block_size,
             self._use_o_direct,
         )
@@ -236,7 +235,7 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
             try:
@@ -332,8 +331,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def shutdown(self) -> None:
-        """
-        Release resources held by this tier.
+        """Release resources held by this tier.
 
         Shuts down the lookup manager and the thread pool,
         clearing pending tasks and waiting for active threads to complete.
