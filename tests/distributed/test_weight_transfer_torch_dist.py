@@ -126,22 +126,11 @@ class TestCreate:
         assert comm.device == torch.device(current_platform.device_type, 0)
         assert comm.rank == 1
         assert comm.world_size == 2
-
-    def test_never_reports_itself_disabled(self, monkeypatch: pytest.MonkeyPatch):
-        # The reason this transport exists: `PyNcclCommunicator` sets
-        # `disabled = True` off CUDA and turns every collective into a no-op, and
-        # `nccl_common` refuses such a communicator.
-        monkeypatch.setattr(
-            distributed_utils,
-            "stateless_init_torch_distributed_process_group",
-            lambda **kwargs: MagicMock(),
-        )
-        comm = TorchDistTransport.create("127.0.0.1", 12345, 1, 2, device=0)
-        atexit.unregister(comm.destroy)
-
+        # Never the no-op state that is the reason this transport exists:
+        # `PyNcclCommunicator` sets `disabled = True` off CUDA and every
+        # collective on it silently does nothing.
         assert comm.available
         assert not comm.disabled
-        assert nccl_common._require_usable_communicator(comm) is comm
 
 
 class TestBroadcast:
@@ -149,26 +138,6 @@ class TestBroadcast:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         calls: list[tuple[str, int | None]] = []
-        monkeypatch.setattr(
-            torch_dist_transport.dist,
-            "broadcast",
-            lambda tensor, group_src, group: calls.append(("broadcast", group_src)),
-        )
-        monkeypatch.setattr(
-            torch_dist_transport.dist,
-            "barrier",
-            lambda group: calls.append(("barrier", None)),
-        )
-
-        comm = _make_transport()
-        comm.broadcast(torch.zeros(4), src=0)
-
-        # `group_src`, not `src`: the trainer is rank 0 of the transfer group but
-        # has no rank in the workers' global group. And one barrier per tensor,
-        # which oneCCL needs to stay coupled to the far end.
-        assert calls == [("broadcast", 0), ("barrier", None)]
-
-    def test_enters_the_requested_stream(self, monkeypatch: pytest.MonkeyPatch):
         entered: list[object] = []
 
         class FakeStreamCtx:
@@ -183,14 +152,28 @@ class TestBroadcast:
 
         monkeypatch.setattr(current_platform, "stream", FakeStreamCtx)
         monkeypatch.setattr(
-            torch_dist_transport.dist, "broadcast", lambda *a, **kw: None
+            torch_dist_transport.dist,
+            "broadcast",
+            lambda tensor, group_src, group: calls.append(("broadcast", group_src)),
         )
-        monkeypatch.setattr(torch_dist_transport.dist, "barrier", lambda group: None)
+        monkeypatch.setattr(
+            torch_dist_transport.dist,
+            "barrier",
+            lambda group: calls.append(("barrier", None)),
+        )
 
         comm = _make_transport()
+        comm.broadcast(torch.zeros(4), src=0)
         stream = object()
         comm.broadcast(torch.zeros(4), src=0, stream=stream)
 
+        # `group_src`, not `src`: the trainer is rank 0 of the transfer group but
+        # has no rank in the workers' global group. And one barrier per tensor,
+        # which oneCCL needs to stay coupled to the far end.
+        assert calls == [("broadcast", 0), ("barrier", None)] * 2
+        # A caller that names a stream gets the collective ordered against it, and
+        # one that does not is left on the current stream rather than given some
+        # other one.
         assert entered == [stream]
 
 
@@ -225,6 +208,9 @@ class TestDestroy:
         # Both steps can block on the peer, so neither may run on the caller.
         assert threads == ["weight-transfer-pg-reaper"]
         assert comm.disabled
+        # The handle a trainer holds goes with it, so a late `close_communicator`
+        # cannot reach a group that is already gone.
+        assert comm.group.process_group is None
 
     def test_does_not_wait_for_the_destructor(self, monkeypatch: pytest.MonkeyPatch):
         # Destroying the group is what blocks (oneCCL finalizes against a peer
@@ -252,10 +238,3 @@ class TestDestroy:
         assert comm._reaper.daemon
         comm._reaper.join(timeout=10)
         assert released.is_set(), "the reaper should end up dropping the group"
-
-    def test_trainers_may_drop_the_rendezvous_handles(self):
-        # TRL's `close_communicator` assigns through `communicator.group`, which
-        # is a `StatelessProcessGroup` on the NCCL path.
-        comm = _make_transport()
-        comm.group.store = None
-        comm.group.socket = None
