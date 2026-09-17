@@ -34,6 +34,7 @@ from vllm.v1.worker.utils import (
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
     request_memory,
+    zero_null_kv_block,
 )
 
 
@@ -1426,3 +1427,27 @@ def test_request_memory_charges_external_weights():
         request_memory(
             _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
         )
+
+
+def test_zero_null_kv_block_clears_only_block_zero():
+    """Capture can leave non-finite values in the null block, which kernels that
+    gather it for masked entries then turn into NaN. Only block 0 may be reset."""
+    cache = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3)
+    cache[0] = torch.tensor([[float("nan"), 3.2e35, 0.0], [float("nan")] * 3])
+    untouched = cache[1:].clone()
+
+    zero_null_kv_block([cache])
+
+    assert torch.all(cache[0] == 0)
+    assert torch.equal(cache[1:], untouched)
+
+
+def test_zero_null_kv_block_skips_empty_caches():
+    """A layer may hold a placeholder with no blocks; indexing it would raise."""
+    empty = torch.empty(0)
+    no_blocks = torch.empty(0, 4)
+
+    zero_null_kv_block([empty, no_blocks])
+
+    assert empty.numel() == 0
+    assert no_blocks.shape == (0, 4)
