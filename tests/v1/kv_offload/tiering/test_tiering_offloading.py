@@ -1520,8 +1520,10 @@ if __name__ == "__main__":
 
 def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
     """A secondary tier cannot know its own index, so the manager gives it one.
-    The index separates two tiers of one type. No in-tree tier publishes a fact
-    yet, so the primary tier adds nothing here."""
+    The index separates two tiers of one type. The primary tier here gets no
+    configuration, so it adds no label of its own. See
+    test_tiering_primary_tier_publishes_the_cpu_labels for the labels it adds
+    with one."""
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
