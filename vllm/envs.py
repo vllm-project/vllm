@@ -222,6 +222,7 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
+    VLLM_MOE_LOCALIZE_BACKFILL: bool = False
     VLLM_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
     VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1712,6 +1713,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Rubin (SM107) NVFP4 only; requires cuda-bindings >= 13.4.
     "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
         int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
+    ),
+    # Fill each locality-domain compute partition to an equal share of all SMs.
+    # Backfilled SMs may come from another locality domain, trading a small
+    # amount of remote memory traffic for full-device SM utilization.
+    "VLLM_MOE_LOCALIZE_BACKFILL": lambda: bool(
+        int(os.getenv("VLLM_MOE_LOCALIZE_BACKFILL", "0"))
     ),
     # Run the MoE output memset on its own stream, overlapping FC1, instead
     # of between the FC1 and FC2 joins. On by default; 0 restores the old

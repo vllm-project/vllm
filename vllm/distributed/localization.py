@@ -94,6 +94,66 @@ def localization_enabled() -> bool:
     return envs.VLLM_USE_LOCALITY_DOMAINS
 
 
+def _backfilled_contexts(device_index: int, num_domains: int):
+    """Create equal-sized locality-domain groups that consume all usable SMs."""
+    from torch.cuda._utils import _check_cuda_bindings as _chk
+    from torch.cuda._utils import _cuda_bindings_driver as _drv
+    from torch.cuda.green_contexts import GreenContext
+
+    device = _chk(_drv.cuDeviceGet(device_index))
+    sm_resource = _chk(
+        _drv.cuDeviceGetDevResource(
+            device, _drv.CUdevResourceType.CU_DEV_RESOURCE_TYPE_SM
+        )
+    )
+    target_sm_count = int(sm_resource.sm.smCount) // num_domains
+    if target_sm_count <= 0:
+        raise RuntimeError(
+            f"cannot split {sm_resource.sm.smCount} SMs across {num_domains} domains"
+        )
+
+    # CUDA defines BACKFILL as 0x1 and LOCALITY_DOMAIN_ID as 0x1 << 1;
+    # bitwise OR sets both independent flag bits.
+    flags = (
+        _drv.CUdevSmResourceGroup_flags.CU_DEV_SM_RESOURCE_GROUP_BACKFILL
+        | _drv.CUdevSmResourceGroup_flags.CU_DEV_SM_RESOURCE_GROUP_LOCALITY_DOMAIN_ID
+    )
+    params = []
+    for domain_id in range(num_domains):
+        p = _drv.CU_DEV_SM_RESOURCE_GROUP_PARAMS()
+        p.smCount = target_sm_count
+        p.coscheduledSmCount = 0
+        p.flags = flags
+        p.localityDomainId = domain_id
+        params.append(p)
+
+    split, remaining = _chk(
+        _drv.cuDevSmResourceSplit(num_domains, sm_resource, 0, params)
+    )
+    sm_counts = [int(resource.sm.smCount) for resource in split]
+    expected_sm_counts = [target_sm_count] * num_domains
+    if sm_counts != expected_sm_counts:
+        raise RuntimeError(
+            f"requested backfilled partitions {expected_sm_counts}, got {sm_counts}"
+        )
+
+    def _make_context(resource):
+        desc = _chk(_drv.cuDevResourceGenerateDesc([resource], 1))
+        green_ctx = _chk(
+            _drv.cuGreenCtxCreate(
+                desc,
+                device,
+                _drv.CUgreenCtxCreate_flags.CU_GREEN_CTX_DEFAULT_STREAM,
+            )
+        )
+        return GreenContext(green_context_obj=green_ctx)
+
+    contexts = [_make_context(resource) for resource in split]
+    rem_sms = int(remaining.sm.smCount)
+    remainder_ctx = _make_context(remaining) if rem_sms > 0 else None
+    return contexts, sm_counts, remainder_ctx, rem_sms
+
+
 def _reserved_remainder_stream(device_index: int, num_domains: int):
     """Create an auxiliary stream from resources outside the compute domains."""
     try:
@@ -239,24 +299,59 @@ def maybe_init_localized_resources(
             return None
 
         # ---- split resources: one green context / stream / pool per die ----
-        contexts = [
-            GreenContext(locality_domain_id=i, device_id=idx)
-            for i in range(num_domains)
-        ]
+        backfill = False
+        rem_ctx = None
+        rem_sms = 0
+        if envs.VLLM_MOE_LOCALIZE_BACKFILL:
+            try:
+                (
+                    contexts,
+                    compute_sm_counts,
+                    rem_ctx,
+                    rem_sms,
+                ) = _backfilled_contexts(idx, num_domains)
+                backfill = True
+            except Exception as e:  # noqa: BLE001 - optional optimization
+                logger.warning(
+                    "[locality domains] backfill unavailable (%s: %s); "
+                    "using node-local compute partitions",
+                    type(e).__name__,
+                    e,
+                )
+        if not backfill:
+            contexts = [
+                GreenContext(locality_domain_id=i, device_id=idx)
+                for i in range(num_domains)
+            ]
         streams = [c.Stream() for c in contexts]
         pools: list[Any | None] = [
             LocalizedMemPool(i, device=idx) for i in range(num_domains)
         ]
         total_sm = torch.cuda.get_device_properties(idx).multi_processor_count
-        sm_per_die = _node_local_sm_count(idx) or (total_sm // num_domains)
-        sm_per_resource = [sm_per_die] * num_domains
+        if backfill:
+            sm_per_resource = compute_sm_counts
+            logger.info(
+                "[locality domains] backfill compute partitions: %s SMs",
+                compute_sm_counts,
+            )
+        else:
+            sm_per_die = _node_local_sm_count(idx) or (total_sm // num_domains)
+            sm_per_resource = [sm_per_die] * num_domains
 
         # ---- auxiliary resource: the memset context ------------------------
         # Appended to the SAME lists, so there is one construction path and one
         # index space. It owns no allocator, hence a None pool.
-        aux_stream, aux_ctx, memset_reason, aux_sms = _reserved_remainder_stream(
-            idx, num_domains
-        )
+        if backfill:
+            if rem_ctx is not None:
+                aux_ctx, aux_stream, aux_sms = rem_ctx, rem_ctx.Stream(), rem_sms
+                memset_reason = f"reserved {aux_sms}-SM backfill remainder green ctx"
+            else:
+                aux_stream, aux_ctx, aux_sms = None, None, 0
+                memset_reason = "no remainder after backfill"
+        else:
+            aux_stream, aux_ctx, memset_reason, aux_sms = _reserved_remainder_stream(
+                idx, num_domains
+            )
         if aux_stream is None:
             aux_stream = torch.cuda.Stream(device=idx)
             aux_ctx = None
