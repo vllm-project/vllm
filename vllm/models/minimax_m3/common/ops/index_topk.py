@@ -122,7 +122,7 @@ def _index_block_score_kernel(
         block_shape=(BLOCK_SIZE_Q, head_dim),
         order=(1, 0),
     )
-    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero").to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -359,7 +359,7 @@ def _decode_index_score_kernel(
         + off_d[:, None] * stride_q_d,
         mask=q_mask[None, :],
         other=0.0,
-    )  # [D,HQ]
+    ).to(tl.bfloat16)  # [D,HQ]
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = blk * BLOCK_SIZE_K + off_k
