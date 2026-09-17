@@ -64,3 +64,14 @@ def test_special_tokens(tokenizer_name: str, n_tokens: int):
     prompts = "[UNK]" * n_tokens
     prompt_token_ids = tokenizer.encode(prompts)
     assert len(prompt_token_ids) == n_tokens + 2
+
+
+def test_gte_qwen2_eos_token():
+    """GTE pools the EOS token, which its custom tokenizer must append."""
+    tokenizer = get_tokenizer(
+        "Alibaba-NLP/gte-Qwen2-1.5B-instruct", trust_remote_code=True
+    )
+    prompt = "The chef prepared a delicious meal."
+    text_ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+    assert tokenizer.encode(prompt) == text_ids + [tokenizer.eos_token_id]
