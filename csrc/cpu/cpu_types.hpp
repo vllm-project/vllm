@@ -16,9 +16,9 @@
 #elif defined(__aarch64__)
   // arm implementation
   #if defined(CPU_CAPABILITY_SVE256)
-    #include "cpu_types_sve256.hpp"
+    #include "sve/cpu_types_sve256.hpp"
   #elif defined(CPU_CAPABILITY_SVE128)
-    #include "cpu_types_sve128.hpp"
+    #include "sve/cpu_types_sve128.hpp"
   #else
     #include "cpu_types_neon.hpp"
   #endif

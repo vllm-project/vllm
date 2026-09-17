@@ -7,7 +7,7 @@
 
 #include "cpu_erf_sve.hpp"
 #include "cpu_tanhf_sve.hpp"
-#include "cpu_types_arm.hpp"
+#include "../cpu_types_arm.hpp"
 
 using namespace at::vec;
 
