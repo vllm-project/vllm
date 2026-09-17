@@ -489,6 +489,7 @@ def test_padded_moe_reload_releases_each_layer(
         is_act_and_mul=is_gated,
         has_bias=has_bias,
         tp_rank=tp_rank,
+        tp_shard_with_padding=False,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
