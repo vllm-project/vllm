@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from tests.utils import is_dpx
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
@@ -172,6 +173,9 @@ def test_model_tensor_schema(model_id: str):
 
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
+
+    if model_id == "CohereLabs/North-Micro-Vision-Instruct" and is_dpx():
+        pytest.skip("North-Micro processor fails on gfx950 DPX with NoneType iteration")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")

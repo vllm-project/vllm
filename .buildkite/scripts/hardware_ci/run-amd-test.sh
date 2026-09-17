@@ -87,6 +87,24 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
+# Any Buildkite queue whose name contains "dpx" (dpx, amd_mi355_dpx, …).
+# Export so pytest skipif() sees it before CUDA init. Explicit VLLM_DPX_CI=0/1
+# still wins.
+if [[ -z "${VLLM_DPX_CI:-}" ]]; then
+  dpx_queue="$(
+    printf '%s\n%s\n%s' \
+      "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" \
+      "${BUILDKITE_AGENT_META_DATA_queue:-}" \
+      "${BUILDKITE_QUEUE:-}" \
+      | tr '[:upper:]' '[:lower:]'
+  )"
+  if [[ "${dpx_queue}" == *dpx* ]]; then
+    export VLLM_DPX_CI=1
+    echo "VLLM_DPX_CI=1 (Buildkite queue contains dpx: ${dpx_queue//$'\n'/ })"
+  fi
+  unset -v dpx_queue
+fi
+
 ci_started_at=$SECONDS
 
 ###############################################################################
@@ -1759,6 +1777,7 @@ else
     -e PYTHONFAULTHANDLER \
     -e PYTEST_ADDOPTS \
     -e PYTEST_TIMEOUT \
+    -e VLLM_DPX_CI \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \

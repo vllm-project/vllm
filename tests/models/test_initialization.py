@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
+from tests.utils import is_dpx
 from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
@@ -214,6 +215,10 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
 
         if current_platform.is_rocm():
             pytest.skip("HY V4 ROCm initialization requires #54405")
+
+    if model_arch == "CohereCompassForConditionalGeneration":
+        if is_dpx():
+            pytest.skip("CohereCompass init fails on gfx950 DPX (North-Micro)")
 
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 

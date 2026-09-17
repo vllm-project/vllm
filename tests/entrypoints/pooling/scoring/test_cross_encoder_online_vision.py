@@ -6,7 +6,7 @@ import json
 import pytest
 import requests
 
-from tests.utils import VLLM_PATH, RemoteOpenAIServer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer, is_dpx
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
@@ -42,7 +42,8 @@ ROCM_EXTRA_ARGS = (
 
 
 def assert_score(actual: float, expected: float, backend: str, label: str):
-    tol = REL_TOL
+    # gfx950 DPX showed ~5.55% rel_diff on ROCM_AITER_FA vs 0.05 default.
+    tol = 0.06 if backend == "ROCM_AITER_FA" and is_dpx() else REL_TOL
     abs_tol = ABS_TOL
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff

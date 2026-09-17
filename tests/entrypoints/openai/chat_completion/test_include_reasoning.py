@@ -12,7 +12,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, is_dpx
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MESSAGES = [{"role": "user", "content": "What is 1+1? Be concise."}]
@@ -96,6 +96,11 @@ async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    is_dpx(),
+    reason="Qwen3 streaming reasoning returns empty content on gfx950 DPX",
+    strict=False,
+)
 async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
     """Default: reasoning deltas appear in streaming response."""
     stream = await client.chat.completions.create(

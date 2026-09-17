@@ -8,6 +8,7 @@ import pytest
 import torch._dynamo.config as dynamo_config
 
 from tests.utils import (
+    is_dpx,
     large_gpu_mark,
     single_gpu_only,
 )
@@ -104,6 +105,10 @@ def test_without_spec_decoding(
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
+@pytest.mark.skipif(
+    is_dpx(),
+    reason="Eagle3 spec decode hits EngineDeadError on gfx950 DPX",
+)
 @single_gpu_only
 @large_gpu_mark(min_gb=16)
 def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):

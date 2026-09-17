@@ -171,6 +171,50 @@ def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
     return redacted_args
 
 
+def is_dpx() -> bool:
+    """Return True on gfx950 DPX/NPS2 partitions, not full-card SPX MI355.
+
+    ``VLLM_DPX_CI`` is set automatically when the Buildkite queue name
+    contains ``dpx`` (``dpx``, ``amd_mi355_dpx``, …). ``VLLM_DPX_CI=0``
+    forces off. A DPX queue still requires gfx950 so MI300 DPX jobs are
+    unaffected. Without CI metadata, gfx950 with HIP-visible VRAM < 200 GiB
+    counts as DPX.
+    """
+    flag = os.getenv("VLLM_DPX_CI", "").strip().lower()
+    if flag in ("0", "false", "no"):
+        return False
+
+    on_dpx_queue = flag in ("1", "true", "yes")
+    if not on_dpx_queue:
+        raw_queue = (
+            os.getenv("BUILDKITE_AGENT_META_DATA_QUEUE", "")
+            or os.getenv("BUILDKITE_AGENT_META_DATA_queue", "")
+            or os.getenv("BUILDKITE_QUEUE", "")
+        ).strip().lower()
+        on_dpx_queue = "dpx" in raw_queue
+        if not on_dpx_queue:
+            on_dpx_queue = "dpx" in os.getenv("BUILDKITE_LABEL", "").lower()
+
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except ImportError:
+        return False
+    if not on_gfx950():
+        return False
+    if on_dpx_queue:
+        return True
+    try:
+        if not torch.cuda.is_available():
+            return False
+        _, total = torch.cuda.mem_get_info(0)
+        # NPS2 ~144 GiB; SPX MI355 ~256-288 GiB.
+        return total / (1024**3) < 200.0
+    except Exception:
+        return False
+
+
 def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
     if not pythonpath:
         return ""

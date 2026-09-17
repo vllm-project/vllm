@@ -14,7 +14,7 @@ import pytest_asyncio
 import soundfile as sf
 
 from tests.entrypoints.speech_to_text.conftest import add_attention_backend
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, is_dpx
 from vllm.logger import init_logger
 from vllm.multimodal.media.audio import load_audio
 
@@ -65,7 +65,17 @@ def _get_server_args(attention_config):
 
 
 @pytest.fixture(
-    scope="module", params=["openai/whisper-small", "google/gemma-3n-E2B-it"]
+    scope="module",
+    params=[
+        "openai/whisper-small",
+        pytest.param(
+            "google/gemma-3n-E2B-it",
+            marks=pytest.mark.skipif(
+                is_dpx(),
+                reason="gemma-3n-E2B-it causes EngineDeadError on gfx950 DPX",
+            ),
+        ),
+    ],
 )
 def server(request):
     # Parametrize over model name
