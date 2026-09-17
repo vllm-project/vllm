@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
-import types
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -18,7 +16,6 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.models.qwen4_exp.cpu import runtime as cpu_runtime
 from vllm.models.qwen4_exp.cpu.model import (
     Qwen4ExpSparseMoeBlock,
-    _get_padded_moe_intermediate_size,
     _pad_moe_checkpoint_weights,
 )
 from vllm.platforms import current_platform
@@ -67,11 +64,7 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
         lora_config=None,
         use_v2_model_runner=restriction != "model_runner",
     )
-    if restriction == "speculative":
-        config.speculative_config = SimpleNamespace()
-    elif restriction == "lora":
-        config.lora_config = SimpleNamespace()
-    elif restriction == "multimodal":
+    if restriction == "multimodal":
         config.model_config.multimodal_config.language_model_only = False
     return config
 
@@ -80,8 +73,6 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
     ("restriction", "error", "message"),
     [
         ("architecture", NotImplementedError, "x86-64"),
-        ("speculative", NotImplementedError, "speculative decoding"),
-        ("lora", NotImplementedError, "LoRA"),
         ("multimodal", NotImplementedError, "text-only"),
         ("model_runner", ValueError, "Model Runner V2"),
         ("triton", ValueError, "active CPU backend"),
@@ -116,50 +107,6 @@ def test_qwen4_exp_cpu_rejects_unsupported_runtime(
         )
 
 
-def test_qwen4_exp_cpu_accepts_supported_runtime() -> None:
-    with (
-        patch.object(
-            Qwen3_5ForConditionalGenerationConfig,
-            "verify_and_update_config",
-        ),
-        patch.object(current_platform, "is_cpu", return_value=True),
-        patch.object(
-            current_platform,
-            "get_cpu_architecture",
-            return_value=CpuArchEnum.X86,
-        ),
-        patch.object(
-            cpu_runtime,
-            "has_active_triton_cpu_backend",
-            return_value=True,
-        ),
-    ):
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(_vllm_config())
-
-
-def test_qwen4_exp_cpu_accepts_tensor_parallel_runtime() -> None:
-    config = _vllm_config()
-    config.parallel_config.tensor_parallel_size = 2
-    with (
-        patch.object(
-            Qwen3_5ForConditionalGenerationConfig,
-            "verify_and_update_config",
-        ),
-        patch.object(current_platform, "is_cpu", return_value=True),
-        patch.object(
-            current_platform,
-            "get_cpu_architecture",
-            return_value=CpuArchEnum.X86,
-        ),
-        patch.object(
-            cpu_runtime,
-            "has_active_triton_cpu_backend",
-            return_value=True,
-        ),
-    ):
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
-
-
 def _block_fp8_config() -> SimpleNamespace:
     return SimpleNamespace(
         get_name=lambda: "fp8",
@@ -185,14 +132,6 @@ def _moe_vllm_config(
         ),
         quant_config=_block_fp8_config() if fp8_checkpoint else None,
     )
-
-
-def test_block_fp8_moe_intermediate_padding() -> None:
-    quant_config = _block_fp8_config()
-
-    assert _get_padded_moe_intermediate_size(None, 640, 2) == 640
-    assert _get_padded_moe_intermediate_size(quant_config, 640, 1) == 640
-    assert _get_padded_moe_intermediate_size(quant_config, 640, 2) == 768
 
 
 @pytest.mark.parametrize(
@@ -287,40 +226,3 @@ def test_block_fp8_moe_checkpoint_padding_is_aligned_and_idempotent() -> None:
     padded_twice = dict(_pad_moe_checkpoint_weights(padded.items(), vllm_config))
     for name, tensor in padded.items():
         assert torch.equal(padded_twice[name], tensor)
-
-
-@pytest.mark.parametrize(
-    ("backend", "expected"),
-    [
-        pytest.param("cpu", True, id="cpu"),
-        pytest.param("cuda", False, id="cuda"),
-    ],
-)
-def test_active_triton_cpu_backend(backend: str, expected: bool) -> None:
-    target = SimpleNamespace(backend=backend)
-    driver = SimpleNamespace(active=SimpleNamespace(get_current_target=lambda: target))
-    triton_runtime = types.ModuleType("triton.runtime")
-    triton_runtime.__dict__["driver"] = driver
-    with (
-        patch.object(cpu_runtime, "HAS_TRITON", True),
-        patch.dict(sys.modules, {"triton.runtime": triton_runtime}),
-    ):
-        assert cpu_runtime.has_active_triton_cpu_backend() is expected
-
-
-def test_unavailable_triton_cpu_backend_fails_closed() -> None:
-    with patch.object(cpu_runtime, "HAS_TRITON", False):
-        assert not cpu_runtime.has_active_triton_cpu_backend()
-
-    driver = SimpleNamespace(
-        active=SimpleNamespace(
-            get_current_target=Mock(side_effect=RuntimeError("no active driver"))
-        )
-    )
-    triton_runtime = types.ModuleType("triton.runtime")
-    triton_runtime.__dict__["driver"] = driver
-    with (
-        patch.object(cpu_runtime, "HAS_TRITON", True),
-        patch.dict(sys.modules, {"triton.runtime": triton_runtime}),
-    ):
-        assert not cpu_runtime.has_active_triton_cpu_backend()

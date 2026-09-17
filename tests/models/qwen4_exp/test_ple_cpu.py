@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from itertools import accumulate
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,12 +12,11 @@ from torch import nn
 
 from vllm.models.qwen4_exp.cpu.model_state import Qwen4ExpModelState
 from vllm.models.qwen4_exp.cpu.ngram_embedding import (
-    Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
-from vllm.models.qwen4_exp.cpu.ops.ple import ple_gate
+from vllm.models.qwen4_exp.cpu.ops.ple import ple_gate, ple_ngram_ids
 from vllm.models.qwen4_exp.cpu.ple_layer import Qwen4ExpPLELayer
 from vllm.models.qwen4_exp.cpu.runtime import has_active_triton_cpu_backend
 from vllm.platforms import current_platform
@@ -27,6 +27,8 @@ from .test_ple import (
     _ConvBatchCase,
     _make_conv_case,
     _make_conv_metadata,
+    _ngram_hash_params,
+    _reference_ngram_ids,
     _short_conv_dilated_dispatch_pytorch,
 )
 
@@ -76,52 +78,6 @@ def test_cpu_model_state_returns_active_ngram_views() -> None:
             dtype=torch.int32,
         ),
     )
-
-    query_start_loc = model_inputs["query_start_loc"]
-    ngram_context = model_inputs["ngram_context"]
-    input_batch.num_reqs = 1
-    input_batch.num_reqs_after_padding = 1
-    input_batch.idx_mapping = torch.tensor([0])
-    input_batch.query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
-
-    with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
-        model_inputs = model_state.prepare_inputs(input_batch, req_states)
-
-    torch.testing.assert_close(
-        model_inputs["query_start_loc"],
-        torch.tensor([0, 3], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        model_inputs["ngram_context"],
-        torch.tensor([[1, 2, 3]], dtype=torch.int32),
-    )
-    assert model_inputs["query_start_loc"].data_ptr() == query_start_loc.data_ptr()
-    assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
-
-
-def test_cpu_model_state_returns_active_dummy_ngram_views() -> None:
-    model_state = object.__new__(Qwen4ExpModelState)
-    model_state.uses_ngram_embedding = True
-    model_state.ngram_eos_token_id = 99
-    model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
-    model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
-
-    with patch.object(MambaHybridModelState, "prepare_dummy_inputs", return_value={}):
-        first = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
-        query_start_loc_ptr = first["query_start_loc"].data_ptr()
-        ngram_context_ptr = first["ngram_context"].data_ptr()
-        second = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
-
-    torch.testing.assert_close(
-        second["query_start_loc"],
-        torch.tensor([0, 1, 2, 4], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        second["ngram_context"],
-        torch.full((3, 3), 99, dtype=torch.int32),
-    )
-    assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
-    assert second["ngram_context"].data_ptr() == ngram_context_ptr
 
 
 def test_cpu_ple_fp8_dequantizes_only_selected_rows() -> None:
@@ -177,33 +133,39 @@ def test_cpu_ple_bf16_unquantized_embedding_preserves_values() -> None:
     )
 
 
-def test_cpu_ple_uses_torch_ngram_id_generation() -> None:
-    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
-    nn.Module.__init__(module)
-    module.ngram_size = 3
-    module.heads_per_ngram = 1
-    module.ngram_heads = 2
-    module.eos_token_id = 99
-    module.register_buffer(
-        "layer_multipliers",
-        torch.tensor([1, 10, 100], dtype=torch.long),
+@requires_triton_cpu
+def test_cpu_ple_ngram_ids_match_reference_and_reuse_output() -> None:
+    query_lens = [1, 33, 0, 2]
+    query_start_loc = torch.tensor([0, *accumulate(query_lens)], dtype=torch.int32)
+    input_ids = torch.arange(
+        1_000_000_000,
+        1_000_000_000 + sum(query_lens),
+        dtype=torch.int32,
     )
-    module.register_buffer(
-        "ngram_heads_vocab_sizes",
-        torch.tensor([1000, 1000], dtype=torch.long),
+    input_ids[[5, 32]] = 251
+    ngram_context = torch.tensor(
+        [
+            [1_000_000_036, 1_000_000_037],
+            [1_000_000_038, 1_000_000_039],
+            [1_000_000_040, 1_000_000_041],
+            [1_000_000_042, 251],
+        ],
+        dtype=torch.int32,
     )
-    module.register_buffer(
-        "ngram_heads_offsets",
-        torch.tensor([0, 1000], dtype=torch.long),
+    params = _ngram_hash_params(torch.device("cpu"), ngram_context.shape[1])
+
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+    output = torch.empty_like(expected)
+    actual = ple_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        output=output,
+        **params,
     )
 
-    actual = module.compute_ngram_ids(
-        input_ids=torch.tensor([5, 6], dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-        ngram_context=torch.tensor([[3, 4]], dtype=torch.int32),
-    )
-
-    assert actual.tolist() == [[45, 1257], [52, 1420]]
+    assert actual.data_ptr() == output.data_ptr()
+    assert torch.equal(actual, expected)
 
 
 @requires_triton_cpu

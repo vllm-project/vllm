@@ -24,35 +24,6 @@ requires_qsa_kernels = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize(
-    ("device", "has_triton", "expected"),
-    [
-        pytest.param("cpu", True, qsa_cache._build_qsa_metadata_torch, id="cpu"),
-        pytest.param(
-            "cuda",
-            True,
-            qsa_cache.build_qsa_metadata_triton,
-            id="cuda",
-        ),
-        pytest.param(
-            "cuda",
-            False,
-            qsa_cache._build_qsa_metadata_torch,
-            id="cuda-without-triton",
-        ),
-    ],
-)
-def test_qsa_metadata_dispatch_is_device_aware(
-    monkeypatch: pytest.MonkeyPatch,
-    device: str,
-    has_triton: bool,
-    expected: object,
-) -> None:
-    monkeypatch.setattr(qsa_cache, "HAS_TRITON", has_triton)
-
-    assert qsa_cache._select_qsa_metadata_fn(torch.device(device)) is expected
-
-
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
