@@ -20,6 +20,230 @@ def _require_cpu_triton(*tensors: torch.Tensor) -> None:
         raise RuntimeError("CPU Qwen4Exp PLE requires CPU tensors")
 
 
+@triton.jit(do_not_specialize=["num_tokens", "num_reqs", "binary_search_iters"])
+def _ple_ngram_ids_kernel(
+    input_ids_ptr,
+    query_start_ptr,
+    context_ptr,
+    multipliers_ptr,
+    sizes_ptr,
+    offsets_ptr,
+    output_ptr,
+    num_tokens,
+    num_reqs,
+    eos_token_id,
+    binary_search_iters,
+    NGRAM_CONTEXT_LEN: tl.constexpr,
+    HEADS_PER_NGRAM: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    ngram_heads: tl.constexpr = NGRAM_CONTEXT_LEN * HEADS_PER_NGRAM
+    block_h: tl.constexpr = triton.next_power_of_2(ngram_heads)
+    pid = tl.program_id(0)
+    token_offsets = pid * BLOCK_T + tl.arange(0, BLOCK_T)
+    token_mask = token_offsets < num_tokens
+
+    request_lo = tl.full([BLOCK_T], 1, tl.int32)
+    request_hi = tl.full([BLOCK_T], num_reqs + 1, tl.int32)
+    for _ in range(binary_search_iters):
+        middle = (request_lo + request_hi) // 2
+        boundary = tl.load(
+            query_start_ptr + middle,
+            mask=token_mask & (middle <= num_reqs),
+            other=0,
+        )
+        boundary_precedes_token = boundary <= token_offsets
+        request_lo = tl.where(boundary_precedes_token, middle + 1, request_lo)
+        request_hi = tl.where(boundary_precedes_token, request_hi, middle)
+    request = tl.minimum(request_lo - 1, num_reqs - 1).to(tl.int64)
+    request_start = tl.load(query_start_ptr + request, mask=token_mask, other=0)
+    chunk_position = token_offsets - request_start
+
+    current_token = tl.load(input_ids_ptr + token_offsets, mask=token_mask, other=0).to(
+        tl.int64
+    )
+    mixed = current_token[:, None] * tl.load(multipliers_ptr)
+
+    head = tl.arange(0, block_h)
+    head_mask = head < ngram_heads
+    ngram_order = head // HEADS_PER_NGRAM + 2
+
+    crossed_eos = tl.zeros([BLOCK_T], tl.int1)
+    for shift in tl.static_range(1, NGRAM_CONTEXT_LEN + 1):
+        in_chunk = chunk_position >= shift
+        context_column = NGRAM_CONTEXT_LEN - shift + chunk_position
+        chunk_token = tl.load(
+            input_ids_ptr + token_offsets - shift,
+            mask=token_mask & in_chunk,
+            other=0,
+        )
+        context_token = tl.load(
+            context_ptr + request * NGRAM_CONTEXT_LEN + context_column,
+            mask=token_mask & (~in_chunk),
+            other=0,
+        )
+        candidate = tl.where(in_chunk, chunk_token, context_token).to(tl.int64)
+        candidate = tl.where(crossed_eos, eos_token_id, candidate)
+        crossed_eos = crossed_eos | (candidate == eos_token_id)
+        term = candidate[:, None] * tl.load(multipliers_ptr + shift)
+        mixed = mixed ^ tl.where((ngram_order > shift)[None, :], term, 0)
+
+    sizes = tl.load(sizes_ptr + head, mask=head_mask, other=1)[None, :]
+    head_offsets = tl.load(offsets_ptr + head, mask=head_mask, other=0)[None, :]
+    remainders = mixed % sizes
+    remainders = tl.where(remainders < 0, remainders + sizes, remainders)
+    ids = remainders + head_offsets
+    tl.store(
+        output_ptr + token_offsets[:, None] * ngram_heads + head[None, :],
+        ids,
+        mask=token_mask[:, None] & head_mask[None, :],
+    )
+
+
+def _ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    output: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> None:
+    tensors = (
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        layer_multipliers,
+        ngram_heads_vocab_sizes,
+        ngram_heads_offsets,
+        output,
+    )
+    _require_cpu_triton(*tensors)
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("PLE n-gram tensors must be contiguous")
+    if input_ids.dtype != torch.int32 or query_start_loc.dtype != torch.int32:
+        raise ValueError("PLE n-gram input IDs and request offsets must be int32")
+    if ngram_context.dtype != torch.int32:
+        raise ValueError("PLE n-gram context must be int32")
+    if any(
+        tensor.dtype != torch.int64
+        for tensor in (
+            layer_multipliers,
+            ngram_heads_vocab_sizes,
+            ngram_heads_offsets,
+            output,
+        )
+    ):
+        raise ValueError("PLE n-gram hash parameters and output must be int64")
+    if ngram_context.ndim != 2 or query_start_loc.ndim != 1:
+        raise ValueError("PLE n-gram context and request offsets must be 2D and 1D")
+
+    num_tokens = input_ids.numel()
+    num_reqs = query_start_loc.numel() - 1
+    context_len = ngram_context.shape[1]
+    ngram_heads = context_len * heads_per_ngram
+    if num_reqs < 0 or ngram_context.shape[0] != num_reqs:
+        raise ValueError("PLE n-gram context must have one row per request")
+    if context_len <= 0 or heads_per_ngram <= 0:
+        raise ValueError("PLE n-gram context and heads per n-gram must be positive")
+    if layer_multipliers.numel() != context_len + 1:
+        raise ValueError("PLE n-gram multipliers must cover every context position")
+    if (
+        ngram_heads_vocab_sizes.numel() != ngram_heads
+        or ngram_heads_offsets.numel() != ngram_heads
+    ):
+        raise ValueError("PLE n-gram hash parameters must cover every head")
+    if output.shape != (num_tokens, ngram_heads):
+        raise ValueError("PLE n-gram output has an unexpected shape")
+    if num_tokens and num_reqs == 0:
+        raise ValueError("PLE n-gram tokens require at least one request")
+
+    block_tokens = 8
+    if num_tokens:
+        _ple_ngram_ids_kernel[(triton.cdiv(num_tokens, block_tokens),)](
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            layer_multipliers,
+            ngram_heads_vocab_sizes,
+            ngram_heads_offsets,
+            output,
+            num_tokens,
+            num_reqs,
+            eos_token_id,
+            binary_search_iters=num_reqs.bit_length(),
+            NGRAM_CONTEXT_LEN=context_len,
+            HEADS_PER_NGRAM=heads_per_ngram,
+            BLOCK_T=block_tokens,
+            num_cpu_threads=0,
+        )
+
+
+def _ple_ngram_ids_fake(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    output: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> None:
+    del (
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        layer_multipliers,
+        ngram_heads_vocab_sizes,
+        ngram_heads_offsets,
+        output,
+        eos_token_id,
+        heads_per_ngram,
+    )
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_cpu_ple_ngram_ids",
+    op_func=_ple_ngram_ids,
+    mutates_args=["output"],
+    fake_impl=_ple_ngram_ids_fake,
+)
+
+
+def ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if output is None:
+        output = torch.empty(
+            (input_ids.numel(), ngram_context.shape[1] * heads_per_ngram),
+            dtype=torch.int64,
+            device=input_ids.device,
+        )
+    torch.ops.vllm.qwen4_exp_cpu_ple_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        layer_multipliers,
+        ngram_heads_vocab_sizes,
+        ngram_heads_offsets,
+        output,
+        eos_token_id,
+        heads_per_ngram,
+    )
+    return output
+
+
 @triton.jit
 def _ple_gate_kernel(
     key_ptr,
@@ -620,4 +844,4 @@ def ple_conv(
     )
 
 
-__all__ = ["ple_conv", "ple_gate"]
+__all__ = ["ple_conv", "ple_gate", "ple_ngram_ids"]
