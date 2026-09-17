@@ -16,10 +16,7 @@ from setuptools_scm import get_version
 ROOT_DIR = Path(__file__).resolve().parents[1]
 VLLM_RS_BUILD_VERSION = "VLLM_RS_BUILD_VERSION"
 
-# Only match "v"-prefixed release tags (e.g. "v0.29.0"); other tag namespaces
-# such as "proto-v*" (used for the Rust vllm-proto crate) must not be mistaken
-# for vLLM package version tags.
-VLLM_TAG_REGEX = r"^v(?P<version>[0-9][^+]*)$"
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
 VLLM_GIT_DESCRIBE_COMMAND = [
     "git",
     "describe",
@@ -39,7 +36,6 @@ def prepare_build_environment() -> str | None:
         try:
             version = get_version(
                 root=ROOT_DIR,
-                tag_regex=VLLM_TAG_REGEX,
                 git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
             )
         except LookupError:

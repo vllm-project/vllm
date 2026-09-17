@@ -22,10 +22,7 @@ from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
-# Only match "v"-prefixed release tags (e.g. "v0.29.0"); other tag namespaces
-# such as "proto-v*" (used for the Rust vllm-proto crate) must not be mistaken
-# for vLLM package version tags.
-VLLM_TAG_REGEX = r"^v(?P<version>[0-9][^+]*)$"
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
 VLLM_GIT_DESCRIBE_COMMAND = [
     "git",
     "describe",
@@ -1266,13 +1263,11 @@ def get_vllm_version() -> str:
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
         return get_version(
             write_to="vllm/_version.py",
-            tag_regex=VLLM_TAG_REGEX,
             git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
         )
 
     version = get_version(
         write_to="vllm/_version.py",
-        tag_regex=VLLM_TAG_REGEX,
         git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
     )
     sep = "+" if "+" not in version else "."  # dev versions might contain +
