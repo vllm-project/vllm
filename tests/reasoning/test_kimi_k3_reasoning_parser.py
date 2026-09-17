@@ -80,6 +80,30 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
+def test_extract_reasoning_without_markers_is_unfinished_reasoning():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(
+        "truncated reasoning", request
+    )
+
+    assert reasoning == "truncated reasoning"
+    assert content is None
+
+
+def test_extract_reasoning_without_markers_is_content_when_thinking_disabled():
+    parser = KimiK3ReasoningParser(
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+    )
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content("answer", request)
+
+    assert reasoning is None
+    assert content == "answer"
+
+
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     parser = ReasoningOnlyParser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
