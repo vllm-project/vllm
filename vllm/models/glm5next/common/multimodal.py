@@ -619,17 +619,29 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     inherited Glm4v ``size.longest_edge`` path does not apply.
     """
 
+    @staticmethod
+    def _alignment_factor(proc) -> int:
+        """Spatial factor canvases align to, as ``smart_resize`` takes it."""
+        return proc.patch_size * proc.merge_size * proc.patch_expand_factor
+
+    @classmethod
+    def _pixels_per_token(cls, proc) -> int:
+        """Pixels one vision token covers, matching ``smart_resize``'s own
+        ``temporal_factor * factor ** 2``."""
+        return proc.temporal_patch_size * cls._alignment_factor(proc) ** 2
+
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
-        """(min_pixels, max_pixels) from the processor's token bounds; one
-        vision token covers ``temporal_patch_size * (patch_size * merge_size)
-        ** 2`` pixels."""
+        """(min_pixels, max_pixels) from the processor's token bounds."""
         if proc.min_image_tokens is None or proc.max_image_tokens is None:
             raise ValueError(
                 "min_image_tokens and max_image_tokens must be provided by "
                 "processor_config.json (or per-call kwargs)."
             )
-        factor = proc.temporal_patch_size * (proc.patch_size * proc.merge_size) ** 2
-        return proc.min_image_tokens * factor, proc.max_image_tokens * factor
+        pixels_per_token = self._pixels_per_token(proc)
+        return (
+            proc.min_image_tokens * pixels_per_token,
+            proc.max_image_tokens * pixels_per_token,
+        )
 
     def _get_image_max_pixels(self) -> int:
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
@@ -670,20 +682,22 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         image_processor = self.get_hf_processor().image_processor
-        factor = patch_size * merge_size * image_processor.patch_expand_factor
+        factor = self._alignment_factor(image_processor)
+        temporal_factor = image_processor.temporal_patch_size
         # `smart_resize` denominates its bounds in vision tokens. Round down,
         # but keep the profiling search viable when the caller's budget is
         # below one aligned canvas of the requested duration.
-        pixels_per_token = temporal_patch_size * factor * factor
-        max_image_tokens = max(max_image_pixels // pixels_per_token, 1)
+        max_image_tokens = max(
+            max_image_pixels // self._pixels_per_token(image_processor), 1
+        )
 
         if do_resize:
-            t = num_frames if num_frames > temporal_patch_size else temporal_patch_size
+            t = num_frames if num_frames > temporal_factor else temporal_factor
             resized_height, resized_width = smart_resize(
                 num_frames=t,
                 height=image_height,
                 width=image_width,
-                temporal_factor=temporal_patch_size,
+                temporal_factor=temporal_factor,
                 factor=factor,
                 min_pixels=1,
                 max_pixels=max_image_tokens,
@@ -704,7 +718,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
 
 class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
-    """The vLLM-native ``Glm5NextProcessor`` extracts image/video features
+    """``Glm5NextProcessor`` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
     (image token repeat, video frame/timestamp structure) is owned by vLLM's
     prompt-update machinery — the inherited ``_get_prompt_updates`` builds

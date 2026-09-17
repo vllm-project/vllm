@@ -1145,8 +1145,6 @@ class Glm5NextForConditionalGeneration(
             self.visual = Glm5NextVisionTransformer(
                 config.text_config,
                 config.vision_config,
-                # Not `config.vision_config.rms_norm_eps`; see
-                # `_VISION_RMS_NORM_EPS`.
                 norm_eps=_VISION_RMS_NORM_EPS,
                 # Vision tower ships BF16 weights in this fp8 checkpoint (no
                 # weight_scale_inv for visual.*), so it must NOT inherit the
