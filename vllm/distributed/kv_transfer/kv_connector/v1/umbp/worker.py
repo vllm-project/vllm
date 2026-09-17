@@ -86,6 +86,10 @@ class UMBPStoreConnectorWorker:
             self._finished_recving.add(request_id)
             if result.status != TransferJobStatus.COMPLETED:
                 self._failed_recving.add(request_id)
+                for key in result.failed_keys:
+                    self._worker_meta.failed_loads[key] = (
+                        result.error or "load failed"
+                    )
         else:
             if result.status == TransferJobStatus.COMPLETED:
                 self.runtime.publish(result)
@@ -118,6 +122,10 @@ class UMBPStoreConnectorWorker:
                             self._worker_meta.failed_store_tokens.get(token, 0)
                             + 1
                         )
+                for key in failed_keys:
+                    self._worker_meta.failed_store_errors[key] = (
+                        result.error or "store failed"
+                    )
             self._finished_sending.add(request_id)
         self._worker_meta.failed_block_ids.update(result.failed_block_ids)
 

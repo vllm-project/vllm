@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 from math import gcd
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import torch
 
@@ -543,6 +543,51 @@ class LoadSpec:
         return max(self.external_tokens - self.local_tokens, 0)
 
 
+class LookupStatus(str, Enum):
+    PENDING = "pending"
+    HIT = "hit"
+    MISS = "miss"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class LookupState:
+    """Request-scoped lookup state owned by the scheduler."""
+
+    request_id: str
+    status: LookupStatus = LookupStatus.PENDING
+    matched_tokens: int = 0
+    error: str | None = None
+
+    def complete(self, matched_tokens: int) -> None:
+        self.status = LookupStatus.HIT if matched_tokens else LookupStatus.MISS
+        self.matched_tokens = matched_tokens
+        self.error = None
+
+    def fail(self, error: str) -> None:
+        self.status = LookupStatus.ERROR
+        self.matched_tokens = 0
+        self.error = error
+
+    def cancel(self) -> None:
+        self.status = LookupStatus.CANCELLED
+        self.matched_tokens = 0
+
+
+@dataclass(frozen=True)
+class PartialTailPlan:
+    """A non-block-aligned tail that must be pinned and stored separately."""
+
+    request_id: str
+    generation: int
+    block_id: int
+    group_id: int
+    start_token: int
+    end_token: int
+    key: str
+
+
 @dataclass
 class RequestTracker:
     """Core request state shared by every runtime mode."""
@@ -553,12 +598,19 @@ class RequestTracker:
     saved_tokens: int = 0
     block_ids: tuple[list[int], ...] = ()
     load_spec: LoadSpec | None = None
+    save_mode: Literal["eager", "lazy"] = "eager"
+    prefill_end_tokens: int = 0
+    retry_from_tokens: int | None = None
+    pending_tail: PartialTailPlan | None = None
 
     def reset(self) -> None:
         self.token_len = 0
         self.saved_tokens = 0
         self.block_ids = ()
         self.load_spec = None
+        self.prefill_end_tokens = 0
+        self.retry_from_tokens = None
+        self.pending_tail = None
         self.generation += 1
 
     def update_blocks(self, block_ids: tuple[list[int], ...]) -> None:
@@ -584,6 +636,16 @@ class RequestTracker:
             return self.saved_tokens
         self.saved_tokens = complete_tokens
         return complete_tokens
+
+    def record_store_failure(self, start_tokens: int) -> None:
+        """Retry from the earliest suffix not durably stored."""
+        if self.retry_from_tokens is None:
+            self.retry_from_tokens = start_tokens
+        else:
+            self.retry_from_tokens = min(self.retry_from_tokens, start_tokens)
+
+    def clear_store_retry(self) -> None:
+        self.retry_from_tokens = None
 
 
 class TransferJobStatus(str, Enum):
@@ -646,6 +708,14 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
     store_plans: list[BlockTransferPlan] = field(default_factory=list)
     load_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
     store_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
+    load_plans_by_layer: dict[str, list[BlockTransferPlan]] = field(
+        default_factory=dict
+    )
+    store_plans_by_layer: dict[str, list[BlockTransferPlan]] = field(
+        default_factory=dict
+    )
+    partial_tail_plans: list[PartialTailPlan] = field(default_factory=list)
+    lookup_states: dict[str, LookupState] = field(default_factory=dict)
     preempted_block_ids: set[int] = field(default_factory=set)
     preempted_request_ids: set[str] = field(default_factory=set)
 
@@ -656,6 +726,8 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
     completed_loads: set[str] = field(default_factory=set)
     completed_stores: set[str] = field(default_factory=set)
+    failed_loads: dict[str, str] = field(default_factory=dict)
+    failed_store_errors: dict[str, str] = field(default_factory=dict)
     failed_stores: set[str] = field(default_factory=set)
     completed_store_counts: dict[str, int] = field(default_factory=dict)
     failed_store_counts: dict[str, int] = field(default_factory=dict)
@@ -670,6 +742,8 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             raise TypeError("cannot aggregate incompatible UMBP worker metadata")
         self.completed_loads.update(other.completed_loads)
         self.completed_stores.update(other.completed_stores)
+        self.failed_loads.update(other.failed_loads)
+        self.failed_store_errors.update(other.failed_store_errors)
         self.failed_stores.update(other.failed_stores)
         for key, count in other.completed_store_counts.items():
             self.completed_store_counts[key] = (

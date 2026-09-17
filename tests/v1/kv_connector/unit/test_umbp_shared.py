@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     KVRange,
     KVShardSlice,
     LoadSpec,
+    LookupState,
+    LookupStatus,
     RankTopology,
     RequestTracker,
     TPShardMapping,
@@ -233,6 +235,29 @@ def test_load_spec_reports_only_external_tokens():
     spec = LoadSpec(local_tokens=32, external_tokens=48)
 
     assert spec.num_tokens_to_load == 16
+
+
+def test_lookup_state_transitions_to_error_and_cancelled():
+    state = LookupState("req")
+
+    state.fail("lookup timeout")
+    assert state.status is LookupStatus.ERROR
+    assert state.error == "lookup timeout"
+    state.cancel()
+    assert state.status is LookupStatus.CANCELLED
+    assert state.matched_tokens == 0
+
+
+def test_request_tracker_retries_failed_store_suffix():
+    tracker = RequestTracker("req", generation=1)
+    tracker.mark_saved(48, 16)
+    tracker.record_store_failure(32)
+    tracker.record_store_failure(16)
+
+    assert tracker.saved_tokens == 48
+    assert tracker.retry_from_tokens == 16
+    tracker.clear_store_retry()
+    assert tracker.retry_from_tokens is None
 
 
 def test_worker_metadata_aggregates_per_key_and_block_failures():
