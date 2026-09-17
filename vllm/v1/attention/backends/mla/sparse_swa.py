@@ -203,7 +203,7 @@ class DeepseekSparseSWAMetadata:
     prefill_left_visible: torch.Tensor | None = None
     prefill_right_visible: torch.Tensor | None = None
     # SWA bounded replay: [num_reqs] lower bound of the positions a request's
-    # window attention may read (see CommonAttentionMetadata.replay_start);
+    # window attention may read (SWA bounded replay);
     # zeros when nothing replays.
     replay_start: torch.Tensor | None = None
 
@@ -576,6 +576,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekSparseSWAMetadata:
         """Build SWA metadata for mixed decode/prefill batches.
 
@@ -584,6 +585,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         separate window_topk_idxs for each portion.
 
         For prefill, we use chunked prefill to align with the indexer's chunking.
+
+        ``replay_start`` ([num_reqs], SWA bounded replay): the position from
+        which each request holds window KV; the model state passes it for every
+        batch of a replaying group, graph captures pass nothing.
         """
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
@@ -607,10 +612,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         is_valid_token.copy_(slot_mapping >= 0)
-        replay_start = common_attn_metadata.replay_start
         if replay_start is None:
-            # The runner supplies it whenever a group replays.
-            assert self.kv_cache_spec.prefix_replay_tokens == 0
+            # Graph captures build without it; their dummy batches replay nothing.
             replay_start = self.no_replay_start
 
         non_causal = not common_attn_metadata.causal

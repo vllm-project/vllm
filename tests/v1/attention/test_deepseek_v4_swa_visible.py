@@ -522,6 +522,7 @@ def make_builder(
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
     mm_prefix_clamp_sliding_window: bool = True,
+    bounded_replay: bool = False,
 ) -> DeepseekSparseSWAMetadataBuilder:
     overrides: dict = {"sliding_window": window}
     if vision:
@@ -548,6 +549,7 @@ def make_builder(
         sliding_window=window,
         cache_dtype_str="auto",
         model_version="deepseek_v4",
+        bounded_replay=bounded_replay,
     )
     return builder_cls(
         kv_cache_spec=spec,
@@ -588,8 +590,8 @@ def build_metadata(
             slot_mapping=slot_mapping,
             causal=True,
             mm_req_doc_ranges=mm_req_doc_ranges,
-            replay_start=replay_start,
         ),
+        replay_start=replay_start,
     )
 
 
@@ -750,6 +752,16 @@ def test_builder_replay_start_bounds_prefill_window_and_gather():
         12,
         10 + min(20, WINDOW - 1),
     ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_builder_replaying_group_builds_without_replay_start():
+    """Graph captures build without model-specific kwargs: a replaying group's
+    metadata then bounds nothing."""
+    builder = make_builder(vision=False, bounded_replay=True)
+    md = build_metadata(builder, [40, 12], [24, 12], None)
+    assert not md.replay_start.any()
+    assert md.prefill_swa_lens[0].item() == WINDOW
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
