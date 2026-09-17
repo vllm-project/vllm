@@ -97,7 +97,7 @@ def test_resolve_kda_spec_decode_backend(monkeypatch: pytest.MonkeyPatch):
         lambda *args: False,
     )
     assert resolve_kda_spec_decode_backend("auto", *args, False) == "native"
-    with pytest.raises(RuntimeError, match="fused_kda_decode_packed"):
+    with pytest.raises(RuntimeError, match="packed_fused_kda_decode"):
         resolve_kda_spec_decode_backend("flashinfer", *args, False)
 
 

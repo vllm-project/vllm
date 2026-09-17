@@ -52,10 +52,10 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
-    flashinfer_fused_kda_decode_packed,
+    flashinfer_packed_fused_kda_decode,
     flashinfer_recurrent_kda,
     has_flashinfer_fused_kda_decode,
-    has_flashinfer_fused_kda_decode_packed,
+    has_flashinfer_packed_fused_kda_decode,
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
@@ -226,7 +226,7 @@ def is_flashinfer_fused_kda_spec_decode_supported(
     use_recoverssm: bool,
 ) -> bool:
     return (
-        has_flashinfer_fused_kda_decode_packed()
+        has_flashinfer_packed_fused_kda_decode()
         and current_platform.is_device_capability_family(100)
         and num_heads in (12, 24, 32, 48, 96)
         and head_dim == 128
@@ -270,7 +270,7 @@ def resolve_kda_spec_decode_backend(
     if backend == "flashinfer" and not supported:
         raise RuntimeError(
             "FlashInfer packed fused KDA decode requires its "
-            "fused_kda_decode_packed API, CUDA SM10x, bfloat16 inputs and "
+            "packed_fused_kda_decode API, CUDA SM10x, bfloat16 inputs and "
             "convolution state, float32 recurrent state, D=128, W=4, a "
             "bounded gate, 1-7 speculative tokens, a supported head count, "
             "the SD convolution-state layout, and RecoverSSM disabled."
@@ -1018,7 +1018,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_query_start_loc is not None
             assert num_accepted_tokens is not None
             assert self.gate_lower_bound is not None
-            flashinfer_fused_kda_decode_packed(
+            flashinfer_packed_fused_kda_decode(
                 x=mixed_qkv,
                 weight=self.decode_conv1d_weight,
                 conv_state=conv_state,

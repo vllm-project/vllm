@@ -267,8 +267,8 @@ flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
 )
-flashinfer_fused_kda_decode_packed = _lazy_import_wrapper(
-    "flashinfer", "fused_kda_decode_packed"
+flashinfer_packed_fused_kda_decode = _lazy_import_wrapper(
+    "flashinfer", "packed_fused_kda_decode"
 )
 flashinfer_recurrent_kda = _lazy_import_wrapper(
     "flashinfer.kda",
@@ -295,12 +295,12 @@ def has_flashinfer_comm() -> bool:
 
 
 @functools.cache
-def has_flashinfer_fused_kda_decode_packed() -> bool:
+def has_flashinfer_packed_fused_kda_decode() -> bool:
     """Return whether FlashInfer's packed fused KDA decode API is available."""
     if not has_flashinfer():
         return False
     module = _get_submodule("flashinfer")
-    return bool(module and callable(getattr(module, "fused_kda_decode_packed", None)))
+    return bool(module and callable(getattr(module, "packed_fused_kda_decode", None)))
 
 
 @functools.cache
