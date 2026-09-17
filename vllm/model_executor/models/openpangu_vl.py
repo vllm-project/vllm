@@ -1039,17 +1039,20 @@ class OpenPanguVLForConditionalGeneration(
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings=None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.embed_input_ids(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id],
-            )
-        return inputs_embeds
+        if multimodal_embeddings is None:
+            return self.language_model.embed_input_ids(input_ids)
+
+        mm_token_ids = input_ids.new_tensor(
+            [self.config.image_token_id, self.config.video_token_id]
+        )
+        is_multimodal = torch.isin(input_ids, mm_token_ids)
+        return self.embed_input_ids(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
@@ -1132,9 +1135,7 @@ class OpenPanguVLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger.",
@@ -1303,9 +1304,7 @@ def rescale_and_normalize(
     image_std: float | list[float],
     dtype: torch.dtype = torch.bfloat16,
 ) -> "torch.Tensor":
-    """
-    Rescale and normalize images.
-    """
+    """Rescale and normalize images."""
     image_mean, image_std, do_rescale = _fuse_mean_std_and_rescale_factor(
         do_normalize=do_normalize,
         image_mean=image_mean,

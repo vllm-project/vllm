@@ -140,8 +140,7 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self._init_mup_vector()
 
     def _init_mup_vector(self):
-        """
-        Non learnable per-block scaling vector composed of element-wise
+        """Non learnable per-block scaling vector composed of element-wise
         multipliersapplied to each separate contiguous block of the output
         of the linear projection (in_proj) before further processing
         (gating, convolution, SSM):
@@ -313,8 +312,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
 
 
 class FalconH1ParallelHybrid(nn.Module):
-    """
-    A hybrid decoder layer for FalconH1 where the input is processed
+    """A hybrid decoder layer for FalconH1 where the input is processed
     in parallel through both the self-attention branch and the SSM (Mamba)
     branch. Their outputs are then summed to produce the final hidden state.
 
@@ -449,8 +447,10 @@ class FalconH1Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        # FalconH1ParallelHybrid recomputes residual internally each layer,
+        # it is never threaded across the PP boundary.
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
         if get_pp_group().is_last_rank:
             self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -550,6 +550,7 @@ class FalconH1ForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -643,8 +644,5 @@ class FalconH1ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

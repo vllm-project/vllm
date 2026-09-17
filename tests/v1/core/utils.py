@@ -10,11 +10,14 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    MultiModalConfig,
+    ObservabilityConfig,
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -49,6 +52,7 @@ def mock_kv(matched_tokens: int, is_async: bool, num_defers_before_matching: int
 def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
+    max_num_active_seqs: int | None = None,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
@@ -71,6 +75,8 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    per_request_spec_decode_metrics: str = "none",
+    scheduling_policy: SchedulerPolicy = "fcfs",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -84,6 +90,7 @@ def create_scheduler(
 
     Returns:
       {class}`Scheduler` instance
+
     """
     model_config = ModelConfig(
         model=model,
@@ -91,11 +98,17 @@ def create_scheduler(
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
+        # The scheduler reads model_config.max_model_len, not the
+        # SchedulerConfig one, so both must agree.
+        max_model_len=max_model_len,
     )
+    if use_ec_connector and ec_role == "ec_producer":
+        model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
@@ -105,6 +118,7 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
+        policy=scheduling_policy,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -175,6 +189,9 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        observability_config=ObservabilityConfig(
+            per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+        ),
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(

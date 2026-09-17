@@ -29,7 +29,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
-NUM_CPU_BLOCKS = [256]
+NUM_CPU_CHUNKS = [256]
 GPU_PAGE_SIZES = [512, 1024]
 BLOCKS_PER_CHUNK_VALUES = [1, 3]
 NUM_TENSORS = [4]
@@ -52,15 +52,20 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
 def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
+    """The Triton load path dereferences CPU pointers on the GPU, so pageable
+    host memory takes the DMA path even for pages where Triton would win."""
     monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
 
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is not (
+        ops.swap_blocks_batch
+    )
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
-    ) is ops.swap_blocks_batch
+    ) is (ops.swap_blocks_batch)
 
 
 def _pin_mmap_coordination(group: Any) -> gpu_worker._ModelParallelCoordination:
@@ -96,13 +101,15 @@ def _pin_mmap_region_worker(
         region.rank = 0
         region._base.data_ptr.return_value = 4096 + rank
         region.total_size_bytes = 8192
+        region._row_stride = 4096
+        region.pinned_addresses = []
         region.is_pinned = False
 
         cudart = MagicMock()
-        cudart.cudaHostRegister.return_value = SimpleNamespace(
-            value=int(failure_mode == "return" and rank == 1)
-        )
-        cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
+        cudart.cudaHostRegister.return_value = 0
+        if failure_mode == "return" and rank == 1:
+            cudart.cudaHostRegister.side_effect = [0, 1]
+        cudart.cudaHostUnregister.return_value = 0
         if failure_mode == "setup" and rank == 1:
             region._base.data_ptr.side_effect = RuntimeError("setup failed")
         if failure_mode == "register" and rank == 1:
@@ -112,7 +119,8 @@ def _pin_mmap_region_worker(
             patch.object(
                 gpu_worker.current_platform, "is_cuda_alike", return_value=True
             ),
-            patch.object(torch.cuda, "cudart", return_value=cudart),
+            patch.object(gpu_worker, "CudaRTLibrary", return_value=cudart),
+            patch.object(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 4096),
         ):
             raised = False
             try:
@@ -139,28 +147,28 @@ def _pin_mmap_region_worker(
         (
             "success",
             [
-                (0, True, 1, 0, False),
-                (1, True, 1, 0, False),
+                (0, True, 2, 0, False),
+                (1, True, 2, 0, False),
             ],
         ),
         (
             "return",
             [
-                (0, False, 1, 1, False),
-                (1, False, 1, 0, False),
+                (0, False, 2, 2, False),
+                (1, False, 2, 1, False),
             ],
         ),
         (
             "setup",
             [
-                (0, False, 1, 1, True),
+                (0, False, 2, 2, True),
                 (1, False, 0, 0, True),
             ],
         ),
         (
             "register",
             [
-                (0, False, 1, 1, True),
+                (0, False, 2, 2, True),
                 (1, False, 1, 0, True),
             ],
         ),
@@ -228,16 +236,18 @@ def test_pin_mmap_region_uses_group_rank_for_registration_turn(monkeypatch) -> N
     region.rank = 0
     region._base.data_ptr.return_value = 4096
     region.total_size_bytes = 8192
+    region._row_stride = 4096
+    region.pinned_addresses = []
     region.is_pinned = False
     cudart = MagicMock()
 
-    def register(*_args: Any) -> SimpleNamespace:
+    def register(*_args: Any) -> int:
         events.append("register")
-        return SimpleNamespace(value=0)
+        return 0
 
     cudart.cudaHostRegister.side_effect = register
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(gpu_worker, "CudaRTLibrary", lambda: cudart)
     monkeypatch.setattr(gpu_worker, "_group_max", lambda *_args: 0)
 
     gpu_worker.pin_mmap_region(region, _pin_mmap_coordination(group))
@@ -258,13 +268,15 @@ def test_pin_mmap_region_fails_after_rollback_error(monkeypatch) -> None:
     region.rank = 0
     region._base.data_ptr.return_value = 4096
     region.total_size_bytes = 8192
+    region._row_stride = 4096
+    region.pinned_addresses = []
     region.is_pinned = False
     cudart = MagicMock()
-    cudart.cudaHostRegister.return_value = SimpleNamespace(value=0)
-    cudart.cudaHostUnregister.return_value = SimpleNamespace(value=1)
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 1
 
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(gpu_worker, "CudaRTLibrary", lambda: cudart)
     monkeypatch.setattr(gpu_worker, "_group_max", MagicMock(side_effect=[1, 1]))
 
     with pytest.raises(RuntimeError, match="could not roll back"):
@@ -285,9 +297,7 @@ def test_worker_uses_model_parallel_coordination(monkeypatch) -> None:
     handler = MagicMock()
 
     monkeypatch.setattr(gpu_worker, "PIN_MEMORY", True)
-    monkeypatch.setattr(
-        gpu_worker, "model_parallel_is_initialized", lambda: True
-    )
+    monkeypatch.setattr(gpu_worker, "model_parallel_is_initialized", lambda: True)
     monkeypatch.setattr(
         gpu_worker, "_model_parallel_coordination", lambda: coordination
     )
@@ -302,12 +312,10 @@ def test_worker_uses_model_parallel_coordination(monkeypatch) -> None:
                     page_size_bytes=8,
                 )
             ],
-            group_data_refs=[
-                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=8)]
-            ],
+            group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=8)]],
         ),
         blocks_per_chunk=1,
-        num_cpu_blocks=1,
+        num_cpu_chunks=1,
         mmap_region=region,
     )
 
@@ -492,7 +500,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
 @pytest.mark.parametrize("num_gpu_blocks", NUM_GPU_BLOCKS)
-@pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
+@pytest.mark.parametrize("num_cpu_chunks", NUM_CPU_CHUNKS)
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
@@ -508,7 +516,7 @@ def test_transfer(
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
     num_gpu_blocks: int,
-    num_cpu_blocks: int,
+    num_cpu_chunks: int,
     num_tensors: int,
     seed: int,
     device: str,
@@ -555,41 +563,41 @@ def test_transfer(
             SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
         )
         simulated_world_size = 2
-        kv_bytes_per_block = (
+        kv_bytes_per_chunk = (
             cpu_page_size if replicated_layout else cpu_page_size * simulated_world_size
         )
         mmap_region = SharedOffloadRegion(
             engine_id=str(uuid.uuid4()),
-            num_blocks=num_cpu_blocks,
+            num_chunks=num_cpu_chunks,
             rank=0,
-            kv_bytes_per_block=kv_bytes_per_block,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
             cpu_page_size=cpu_page_size,
         )
 
     worker = CPUOffloadingWorker(
         kv_caches=kv_caches,
         blocks_per_chunk=blocks_per_chunk,
-        num_cpu_blocks=num_cpu_blocks,
+        num_cpu_chunks=num_cpu_chunks,
         mmap_region=mmap_region,
     )
 
     # select block mappings
     gpu_blocks = random.sample(range(num_gpu_blocks), num_mappings * blocks_per_chunk)
-    cpu_blocks = random.sample(range(num_cpu_blocks), num_mappings)
+    cpu_chunks = random.sample(range(num_cpu_chunks), num_mappings)
 
-    # expand cpu blocks to gpu-page granularity for uniform comparison:
-    # each cpu block maps to blocks_per_chunk consecutive sub-blocks
-    cpu_blocks_expanded = [
-        cpu_block * blocks_per_chunk + j
-        for cpu_block in cpu_blocks
+    # expand cpu chunks to gpu-page granularity for uniform comparison:
+    # each cpu chunk maps to blocks_per_chunk consecutive sub-blocks
+    cpu_chunks_expanded = [
+        cpu_chunk * blocks_per_chunk + j
+        for cpu_chunk in cpu_chunks
         for j in range(blocks_per_chunk)
     ]
 
-    # maybe skip some GPU blocks to test reading/writing from the middle of a CPU block
+    # maybe skip some GPU blocks to test reading/writing from the middle of a CPU chunk
     blocks_to_skip = blocks_per_chunk - 1
     if blocks_to_skip > 0:
         gpu_blocks = gpu_blocks[blocks_to_skip:]
-        cpu_blocks_expanded = cpu_blocks_expanded[blocks_to_skip:]
+        cpu_chunks_expanded = cpu_chunks_expanded[blocks_to_skip:]
 
     # set transfer direction
     if gpu_to_cpu:
@@ -597,16 +605,16 @@ def test_transfer(
         src_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
-        dst_spec = CPULoadStoreSpec(cpu_blocks)
-        dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
+        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_blocks)
+        src_spec = CPULoadStoreSpec(cpu_chunks)
         dst_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
-        dst_to_src = dict(zip(gpu_blocks, cpu_blocks_expanded))
+        dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
         num_dst_sub_blocks = num_gpu_blocks
 
     # randomize src and dst tensors before transfer
@@ -677,7 +685,7 @@ def test_transfer(
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
 @pytest.mark.parametrize("num_gpu_blocks", NUM_GPU_BLOCKS)
-@pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
+@pytest.mark.parametrize("num_cpu_chunks", NUM_CPU_CHUNKS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
@@ -688,7 +696,7 @@ def test_transfer_multi_group(
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
     num_gpu_blocks: int,
-    num_cpu_blocks: int,
+    num_cpu_chunks: int,
     seed: int,
     device: str,
 ) -> None:
@@ -737,37 +745,37 @@ def test_transfer_multi_group(
     worker = CPUOffloadingWorker(
         kv_caches=canonical_kv_caches,
         blocks_per_chunk=blocks_per_chunk,
-        num_cpu_blocks=num_cpu_blocks,
+        num_cpu_chunks=num_cpu_chunks,
     )
 
     # group 0: aligned, group 1: empty, group 2: unaligned on CPU->GPU
-    group_sizes_in_cpu_blocks = [num_mappings_per_group, 0, num_mappings_per_group]
+    group_sizes_in_cpu_chunks = [num_mappings_per_group, 0, num_mappings_per_group]
 
-    total_cpu_blocks = sum(group_sizes_in_cpu_blocks)
-    total_gpu_blocks_needed = total_cpu_blocks * blocks_per_chunk
+    total_cpu_chunks = sum(group_sizes_in_cpu_chunks)
+    total_gpu_blocks_needed = total_cpu_chunks * blocks_per_chunk
     gpu_blocks_all = random.sample(range(num_gpu_blocks), total_gpu_blocks_needed)
-    cpu_blocks_all = random.sample(range(num_cpu_blocks), total_cpu_blocks)
+    cpu_chunks_all = random.sample(range(num_cpu_chunks), total_cpu_chunks)
 
-    # split gpu/cpu blocks per group
+    # split gpu blocks / cpu chunks per group
     gpu_blocks_per_group: list[list[int]] = []
-    cpu_blocks_per_group: list[list[int]] = []
+    cpu_chunks_per_group: list[list[int]] = []
     gpu_offset = 0
     cpu_offset = 0
-    for size in group_sizes_in_cpu_blocks:
+    for size in group_sizes_in_cpu_chunks:
         gpu_count = size * blocks_per_chunk
         gpu_blocks_per_group.append(gpu_blocks_all[gpu_offset : gpu_offset + gpu_count])
-        cpu_blocks_per_group.append(cpu_blocks_all[cpu_offset : cpu_offset + size])
+        cpu_chunks_per_group.append(cpu_chunks_all[cpu_offset : cpu_offset + size])
         gpu_offset += gpu_count
         cpu_offset += size
 
-    # expand cpu blocks to gpu-page granularity
-    cpu_blocks_expanded_per_group = [
+    # expand cpu chunks to gpu-page granularity
+    cpu_chunks_expanded_per_group = [
         [
-            cpu_block * blocks_per_chunk + j
-            for cpu_block in cpu_blocks
+            cpu_chunk * blocks_per_chunk + j
+            for cpu_chunk in cpu_chunks
             for j in range(blocks_per_chunk)
         ]
-        for cpu_blocks in cpu_blocks_per_group
+        for cpu_chunks in cpu_chunks_per_group
     ]
 
     # skip sub-blocks from group 2 to test unaligned transfers.
@@ -776,7 +784,7 @@ def test_transfer_multi_group(
         gpu_blocks_per_group[2] = gpu_blocks_per_group[2][
             sub_blocks_to_skip:-sub_blocks_to_skip
         ]
-        cpu_blocks_expanded_per_group[2] = cpu_blocks_expanded_per_group[2][
+        cpu_chunks_expanded_per_group[2] = cpu_chunks_expanded_per_group[2][
             sub_blocks_to_skip:-sub_blocks_to_skip
         ]
 
@@ -787,10 +795,10 @@ def test_transfer_multi_group(
         gpu_blocks.extend(gpu_blks)
         group_sizes.append(len(gpu_blks))
 
-    # build flat cpu_blocks list
-    cpu_blocks = []
-    for cpu_blks in cpu_blocks_per_group:
-        cpu_blocks.extend(cpu_blks)
+    # build flat cpu_chunks list
+    cpu_chunks = []
+    for cpu_chnks in cpu_chunks_per_group:
+        cpu_chunks.extend(cpu_chnks)
 
     # block_indices: only relevant for unaligned transfers
     block_indices: list[int] = [0, 0, sub_blocks_to_skip]
@@ -800,18 +808,18 @@ def test_transfer_multi_group(
         src_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
-        dst_spec = CPULoadStoreSpec(cpu_blocks)
+        dst_spec = CPULoadStoreSpec(cpu_chunks)
         # per-group mapping: cpu sub-block -> gpu sub-block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
             for expanded, gpu_blks in zip(
-                cpu_blocks_expanded_per_group, gpu_blocks_per_group
+                cpu_chunks_expanded_per_group, gpu_blocks_per_group
             )
         ]
-        num_dst_sub_blocks = num_cpu_blocks * blocks_per_chunk
+        num_dst_sub_blocks = num_cpu_chunks * blocks_per_chunk
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_blocks)
+        src_spec = CPULoadStoreSpec(cpu_chunks)
         dst_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
@@ -819,7 +827,7 @@ def test_transfer_multi_group(
         dst_to_src_per_group = [
             dict(zip(gpu_blks, expanded))
             for gpu_blks, expanded in zip(
-                gpu_blocks_per_group, cpu_blocks_expanded_per_group
+                gpu_blocks_per_group, cpu_chunks_expanded_per_group
             )
         ]
         num_dst_sub_blocks = num_gpu_blocks
@@ -911,7 +919,7 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             ],
         ),
         blocks_per_chunk=1,
-        num_cpu_blocks=num_blocks,
+        num_cpu_chunks=num_blocks,
     )
     worker._load_handler.src_tensors[0].fill_(sentinel)
     expected = torch.full((page_size_bytes,), sentinel, dtype=torch.int8)
