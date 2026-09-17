@@ -931,8 +931,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if cache_dtype != "auto":
             return cache_dtype
 
-        if self.kv_cache_spec.cache_dtype not in (None, "auto"):
-            return self.kv_cache_spec.cache_dtype
+        spec_cache_dtype = self.kv_cache_spec.cache_dtype
+        if spec_cache_dtype is not None and spec_cache_dtype != "auto":
+            return spec_cache_dtype
 
         raise ValueError(
             "FlashInfer requires a logical cache dtype for quantized "

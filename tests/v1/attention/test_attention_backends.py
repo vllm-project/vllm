@@ -1035,12 +1035,13 @@ def test_flashinfer_global_cache_dtype_overrides_per_spec_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_rejects_ambiguous_quantized_cache_spec():
+@pytest.mark.parametrize("cache_dtype", [None, "auto"])
+def test_flashinfer_rejects_ambiguous_quantized_cache_spec(cache_dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
     builder.cache_config = SimpleNamespace(cache_dtype="auto")
-    builder.kv_cache_spec = SimpleNamespace(cache_dtype=None)
+    builder.kv_cache_spec = SimpleNamespace(cache_dtype=cache_dtype)
 
     with pytest.raises(ValueError, match="requires a logical cache dtype"):
         builder._resolve_cache_dtype()
