@@ -480,7 +480,9 @@ class FlexAttentionMetadata:
             physical_kv_idx: torch.Tensor,
         ) -> torch.Tensor:
             (is_valid, logical_q_idx, logical_kv_idx) = (
-                self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
+                self._convert_physical_to_logical(
+                    self.persistent_doc_ids, q_idx, physical_kv_idx
+                )
             )
             return is_valid & self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx)
 
@@ -514,13 +516,11 @@ class FlexAttentionMetadata:
         Note that the sliding window mask here is bidirectional, we need
         to mask it with the bidirectional/causal mask for encoder/decoder.
         """
-        if self.sliding_window is None:
-            raise ValueError("sliding_window must be set for sliding window attention")
 
         def sliding_window_mask_mod(
             b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
         ):
-            return torch.abs(q_idx - kv_idx) < self.sliding_window
+            return torch.abs(q_idx - kv_idx) < self._sliding_window_tensor
 
         def final_mask_mod(
             b: torch.Tensor,
@@ -529,7 +529,9 @@ class FlexAttentionMetadata:
             physical_kv_idx: torch.Tensor,
         ) -> torch.Tensor:
             (is_valid, logical_q_idx, logical_kv_idx) = (
-                self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
+                self._convert_physical_to_logical(
+                    self.persistent_doc_ids, q_idx, physical_kv_idx
+                )
             )
             return torch.where(
                 is_valid,
@@ -567,7 +569,9 @@ class FlexAttentionMetadata:
             physical_kv_idx: torch.Tensor,
         ) -> torch.Tensor:
             (is_valid, logical_q_idx, logical_kv_idx) = (
-                self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
+                self._convert_physical_to_logical(
+                    self.persistent_doc_ids, q_idx, physical_kv_idx
+                )
             )
             return torch.where(
                 is_valid,
@@ -590,7 +594,6 @@ class FlexAttentionMetadata:
         assert self.doc_ids is not None
         assert self.rswa_prefix_lens is not None
         assert self.rswa_window is not None
-        doc_ids = self.doc_ids
         prefix_lens = self.rswa_prefix_lens
         window = self.rswa_window
 
@@ -611,9 +614,11 @@ class FlexAttentionMetadata:
             physical_kv_idx: torch.Tensor,
         ) -> torch.Tensor:
             (is_valid, logical_q_idx, logical_kv_idx) = (
-                self._convert_physical_to_logical(doc_ids, q_idx, physical_kv_idx)
+                self._convert_physical_to_logical(
+                    self.persistent_doc_ids, q_idx, physical_kv_idx
+                )
             )
-            q_req = doc_ids[q_idx]
+            q_req = self.persistent_doc_ids[q_idx]
             return torch.where(
                 is_valid,
                 rswa_mask_mod(q_req, logical_q_idx, logical_kv_idx),
@@ -631,10 +636,10 @@ class FlexAttentionMetadata:
             mask_mod = self.get_bidirectional_mask_mod()
         # stage-2: add external mask_mod for special attention during
         # forwarding runtime to create the combined mask_mod.
-        if self.sliding_window is not None:
-            # Add sliding window mask for sliding window attention
-            sliding_window_mask_mod = self.get_sliding_window_mask_mod()
-            mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
+
+        # Add sliding window mask for sliding window attention
+        sliding_window_mask_mod = self.get_sliding_window_mask_mod()
+        mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
         if self.mm_prefix_range:
             # Add prefix LM mask for vision-language prefix LM attention
             prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
@@ -830,6 +835,13 @@ class FlexAttentionMetadata:
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
         )
 
+    def _effective_window(self) -> int:
+        return (
+            self.sliding_window
+            if self.sliding_window is not None
+            else self.max_possible_sequence_length
+        )
+
     def __post_init__(self):
         assert self.use_cascade is False, "Not implemented yet."
         assert self.common_prefix_len == 0, "Not implemented yet."
@@ -840,9 +852,10 @@ class FlexAttentionMetadata:
         self.doc_ids = _offsets_to_doc_ids_tensor(
             self.query_start_loc_cpu, self.query_start_loc.device
         )
-        self.doc_ids = copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
+        copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
+        self._sliding_window_tensor = self.seq_lens.new_tensor(self._effective_window())
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
@@ -1325,9 +1338,10 @@ class FlexAttentionImpl(AttentionImpl):
         needs_rebuild_block_mask = False
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
-            if attn_metadata.direct_build:
-                # update mask mod in attention metadata
-                attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            # update window tensor based on new sliding window
+            attn_metadata._sliding_window_tensor.fill_(
+                attn_metadata._effective_window()
+            )
             needs_rebuild_block_mask = True
 
         if self.mm_prefix_range != getattr(attn_metadata, "mm_prefix_range", None):
