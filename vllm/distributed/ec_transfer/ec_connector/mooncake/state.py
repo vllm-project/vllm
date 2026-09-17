@@ -236,6 +236,14 @@ class SchedulerTransferTable:
         self._loads_to_dispatch.clear()
         return records
 
+    def ready_hashes(self) -> set[str]:
+        return {
+            record.mm_hash
+            for transfer_id in self._active_ids
+            if (record := self._records[transfer_id]).state
+            is SchedulerTransferState.READY
+        }
+
     def complete_load(self, mm_hash: str) -> bool:
         record = self.first_for_hash(mm_hash, (SchedulerTransferState.LOADING,))
         if record is None:
@@ -307,8 +315,11 @@ class SchedulerTransferTable:
                 deadline=None,
             )
             self._insert(record)
+        # An in-flight load may satisfy another request for the same hash.
+        # Its completion or load deadline, not request cleanup, owns it now.
         if record.state in {
             SchedulerTransferState.CANCELLED,
+            SchedulerTransferState.LOADING,
             SchedulerTransferState.READY,
             SchedulerTransferState.RESIDENT,
             SchedulerTransferState.FAILED,

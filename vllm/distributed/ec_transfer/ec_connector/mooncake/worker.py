@@ -578,6 +578,10 @@ class ECMooncakeWorker:
             raise RuntimeError(
                 "ECMooncakeConnector requires CUDA for ec_buffer_device=cuda"
             )
+        # Connector-owned loads may be retired without ever having been
+        # allocated in the scheduler's encoder cache (e.g. after an abort).
+        for mm_hash in metadata.freed or ():
+            encoder_cache.pop(mm_hash, None)
         self._reservations.retire_stale(encoder_cache, metadata.freed)
 
         for spec in metadata.loads:
