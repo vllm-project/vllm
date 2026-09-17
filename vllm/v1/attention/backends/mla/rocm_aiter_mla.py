@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -215,6 +216,134 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     )
 
 
+# head counts the round-robin (cprr) asm decode has a native
+# kernel for. dcp_heads = num_heads * dcp_world_size is 96 for K3 at TP8/DCP8,
+# which is 16-aligned but *not* one of these, so the cprr path pads up to 128.
+_NATIVE_CPRR_HEADS: Final = (16, 32, 64, 128)
+
+
+def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
+    """Head count the cprr asm decode runs at, or 0 if it cannot serve this shape."""
+    if decode_num_heads in _NATIVE_CPRR_HEADS:
+        return decode_num_heads
+    for nat in _NATIVE_CPRR_HEADS:
+        if nat >= decode_num_heads:
+            return nat
+    return 0
+
+
+# shortest query length the cprr asm decode has a kernel for.
+# A DSpark draft group runs at qlen = 1 + num_speculative_tokens, so nspec=1
+# would sit below this and must not silently fall back to a non-cprr call.
+_MIN_CPRR_QLEN: Final = 3
+
+
+def _parse_dcp_verify_env() -> tuple[str, frozenset[int]]:
+    """Parse VLLM_ROCM_AITER_MLA_DCP_VERIFY into (route, head-count filter).
+
+    Accepted forms::
+
+        asm | segmented              apply that route to EVERY KV group
+        asm:64 | segmented:64,128    apply that route ONLY to the groups whose
+                                     DCP-gathered head count is listed; every
+                                     other group takes the opposite route.
+
+    The per-group form exists to bisect DSpark, where target and draft are
+    separate KV groups with different gathered head counts (96 and 64 at
+    TP8/DCP8) and only one of them may be at fault. ``segmented:64`` therefore
+    means "target on asm, draft on segmented".
+    """
+    raw = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.strip().lower()
+    route, sep, heads = raw.partition(":")
+    if sep and not heads.strip():
+        # A bare trailing ':' is a typo, and silently reading it as "no filter"
+        # would flip EVERY group instead of the one that was meant.
+        raise ValueError(
+            f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={raw!r} ends in ':' with no head "
+            "counts; write 'segmented:64' to route one group, or drop the ':'."
+        )
+    if route not in ("asm", "segmented"):
+        raise ValueError(
+            f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={raw!r} is not understood; expected "
+            "'asm', 'segmented', or either with a ':'-separated head-count list "
+            "such as 'segmented:64'."
+        )
+    if not heads:
+        return route, frozenset()
+    parts = [h.strip() for h in heads.split(",")]
+    if not all(parts):
+        # 'segmented:,' and 'segmented:64,,128' would otherwise drop the empty
+        # entries silently, and ':,' would leave an EMPTY filter, which applies
+        # the route to every group: the opposite of what was asked, and the same
+        # failure the trailing-':' check above exists to prevent.
+        raise ValueError(
+            f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={raw!r} has an empty entry in its "
+            "head-count list; write 'segmented:64' or 'segmented:64,128'."
+        )
+    try:
+        listed = frozenset(int(h) for h in parts)
+    except ValueError:
+        raise ValueError(
+            f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={raw!r}: the part after ':' must be "
+            "a comma-separated list of DCP-gathered head counts, e.g. "
+            "'segmented:64'."
+        ) from None
+    if any(h <= 0 for h in listed):
+        # A filter that can never match every group to the other route, which
+        # again inverts the request rather than failing.
+        raise ValueError(
+            f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={raw!r}: head counts must be "
+            "positive; a count that can never match would route every group to "
+            "the other path."
+        )
+    return route, listed
+
+
+def _asm_dcp_verify_selected(decode_num_heads: int) -> bool:
+    """Whether THIS KV group should take the asm cprr route.
+
+    Groups named in the env filter get the stated route; all others get the
+    opposite one. With no filter every group gets the stated route.
+    """
+    route, listed_heads = _parse_dcp_verify_env()
+    is_listed = decode_num_heads in listed_heads if listed_heads else True
+    return (route == "asm") == is_listed
+
+
+def _asm_dcp_verify_configured(
+    dcp_world_size: int, cp_interleave: int, multi_token_decode: bool
+) -> bool:
+    """Whether the asm cprr DCP verify route is *reachable* in this process.
+
+    Upstream serves DCP verify on segmented MLA, which is a Triton kernel. Every
+    MI355X GEMM/attention tuning we have targets the asm path, and the measured
+    A/B is decisive against Triton here, so the asm route is the default and the
+    segmented route stays reachable via VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented
+    for a same-tree comparison.
+
+    This is the config half only; which route a given KV group actually takes is
+    decided per group by _asm_dcp_verify_selected, once self.num_heads is known.
+
+    Four conditions, each narrowing the route to where it is both needed and
+    known to work:
+
+    * ``dcp_world_size > 1``: there is nothing to round-robin otherwise.
+    * ``cp_interleave == 1``: like the segmented gate, the kernel's
+      global-position causal window assumes it.
+    * ``multi_token_decode``: the route exists to serve the qlen > 1 verify step.
+      Single-token decode is already served, and enabling this for it would pad
+      the head count on every step for no benefit.
+    * gfx950: the cprr kernels are only built for it. ``hsa/gfx942/mla`` and
+      ``hsa/gfx1250/mla`` carry no ``cprr`` rows, so elsewhere the lookup fails
+      at the first verify step instead of falling back.
+    """
+    if not (dcp_world_size > 1 and cp_interleave == 1 and multi_token_decode):
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return bool(on_gfx950())
+
+
 def _aiter_mla_small_head_mode() -> str:
     """Small-head (<16) MLA decode kernel selection.
 
@@ -388,6 +517,22 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     min_kv_seq_len: int = 1
     # Set exactly when this batch routes to segmented DCP verification.
     dcp_verify: AiterMLADCPVerifyMetadata | None = None
+    # GLOBAL per-request page indptr. The cprr asm decode
+    # needs it to place each verify row's causal window in global coordinates
+    # before mapping to this rank's round-robin KV shard. cp_world_size==1
+    # leaves the non-DCP path untouched.
+    g_kv_indptr: torch.Tensor | None = None
+    cp_world_size: int = 1
+    cp_rank: int = 0
+    # Head count the cprr asm decode runs at, when that route is selected. The
+    # builder owns it so the persistent schedule and the kernel invocation
+    # cannot disagree about the padding; 0 means "not the asm DCP route".
+    asm_decode_num_heads: int = 0
+    # Split cap the persistent cprr schedule was built with. The kernel call
+    # MUST be given the same value or it writes outside the reduce scratch the
+    # builder sized -- and an undersized reduce buffer faults the GPU rather
+    # than raising. Carried here so the two cannot drift; 0 means unset.
+    mla_num_kv_splits: int = 0
     # Small-head decode uses Gluon (avoids padding to 16).
     use_gluon_decode: bool = False
     # Small-head non-DCP multi-token verify uses Gluon's native MTP entry.
@@ -436,6 +581,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Set from the common metadata every build; a batch is causal unless the
     # drafter says otherwise.
     _decode_causal: bool = True
+    # The round-robin decode applies causal masking on GLOBAL positions inside
+    # the kernel (g_kv_indptr), so a non-causal draft is safe under DCP.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -489,15 +637,66 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        # prefer the tuned fp8 asm cprr decode for DCP verify.
+        # When it can serve this shape it *replaces* the segmented route, so the
+        # two are mutually exclusive and only one set of buffers is allocated.
+        # The head-count half of the predicate needs self.num_heads, which is
+        # per-KV-group and only known after super().__init__; the config half is
+        # enough to answer supports_dcp_with_varlen for the DSpark DCP gate.
+        asm_dcp_verify_config = _asm_dcp_verify_configured(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+            multi_token_decode=vllm_config.speculative_config is not None,
+        )
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             AiterMLAMetadata,
-            supports_dcp_with_varlen=supports_segmented_dcp_verify,
+            supports_dcp_with_varlen=(
+                supports_segmented_dcp_verify or asm_dcp_verify_config
+            ),
         )
+        self._asm_dcp_verify = False
+        self._asm_dcp_verify_heads = 0
+        # The route is chosen per KV group: the head count is only known now,
+        # and a DSpark run has two groups that can be routed independently.
+        if asm_dcp_verify_config and _asm_dcp_verify_selected(
+            self.num_heads * self.dcp_world_size
+        ):
+            self._asm_dcp_verify_heads = _asm_dcp_verify_heads(
+                self.num_heads * self.dcp_world_size
+            )
+            if not self._asm_dcp_verify_heads:
+                raise ValueError(
+                    "VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm, but the round-robin asm "
+                    f"decode has no kernel for {self.num_heads * self.dcp_world_size} "
+                    f"DCP-gathered heads (native counts: {_NATIVE_CPRR_HEADS}). "
+                    "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
+                )
+            self._asm_dcp_verify = True
+            # The asm route replaces the segmented one; never build both.
+            supports_segmented_dcp_verify = False
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
+        # Cap on per-batch KV splits, defaulting to one split per CU.
+        #
+        # At decode the query side is tiny (T*H rows) while KV is huge, so at
+        # low batch the only long axis to parallelise over is the KV sequence.
+        # num_kv_splits partitions it, each split producing a partial output and
+        # LSE that mla_reduce merges, so too few splits leave most of the
+        # machine idle at batch 1.
+        #
+        # reduce_partial_map is sized with this cap in effect, so every DCP
+        # build must pass the same value: sizing (get_mla_metadata_info_v1) and
+        # runtime (get_mla_metadata_v1 and the decode call) all read this
+        # attribute. That consistency is the requirement, not the value.
+        try:
+            self._mla_max_split_per_batch = torch.cuda.get_device_properties(
+                device
+            ).multi_processor_count
+        except Exception:
+            self._mla_max_split_per_batch = 256
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -510,6 +709,24 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # whitelist sizes unlisted drafters for qlen=1, which closes the
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
+
+        # The cprr kernel starts at _MIN_CPRR_QLEN, and the per-step gate in
+        # _forward_decode omits the global-position window below it: correct
+        # for qlen 1 (a decode row sees every local token) but WRONG for qlen
+        # 2, where a row can still be causally truncated.
+        #
+        # This rejects a CONFIGURED qlen of 2, the steady state at nspec=1. It
+        # does not cover a qlen-2 batch arriving under a larger configured
+        # threshold, which the scheduler can produce by clamping a running spec
+        # request; _forward_decode raises for that.
+        if self._asm_dcp_verify and 1 < self._mtp_decode_qlen < _MIN_CPRR_QLEN:
+            raise ValueError(
+                "ROCM_AITER_MLA asm cprr DCP verify has no kernel below qlen "
+                f"{_MIN_CPRR_QLEN}, but this KV group decodes at qlen "
+                f"{self._mtp_decode_qlen} (num_speculative_tokens=1 gives draft "
+                "qlen 2). Use VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented, or raise "
+                "num_speculative_tokens."
+            )
 
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
@@ -552,6 +769,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
             self._decode_num_heads
         )
+        # the cprr kernel exists only at the native head
+        # counts, so run (and size the persistent schedule) at the padded count.
+        # 96 is 16-aligned, so get_actual_mla_num_heads leaves it alone and the
+        # pad has to be applied here explicitly.
+        if self._asm_dcp_verify:
+            self._num_attention_heads = self._asm_dcp_verify_heads
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
@@ -588,6 +811,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             kv_dtype,
             is_sparse=False,
             fast_mode=True,
+            # aiter max()es its own tight bound away, so the
+            # fp32 reduce scratch is sized from capacity (9.35 GiB) unless the
+            # cap is stated here. It must match the max_split_per_batch passed
+            # to get_mla_metadata_v1 on every DCP build.
+            **(
+                dict(max_split_per_batch=self._mla_max_split_per_batch)
+                if self.dcp_world_size > 1
+                else {}
+            ),
         )
         self._mla_work_meta_data = torch.empty(
             work_meta_data_size, dtype=work_meta_data_type, device=device
@@ -631,6 +863,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 vllm_config.model_config.dtype,
                 device,
+            )
+
+        # K3-DCP-GKV-PERSIST: stable address for the global page indptr the cprr
+        # kernel reads *inside* the captured region. A torch.cat in _build_decode
+        # returns a new tensor every step, which a FULL cudagraph cannot follow.
+        # Zero-initialized; element 0 is the indptr base and is never rewritten.
+        self._g_kv_indptr_buf: torch.Tensor | None = None
+        if self.dcp_world_size > 1:
+            self._g_kv_indptr_buf = torch.zeros(
+                max_num_reqs + 1, dtype=torch.int32, device=device
             )
 
         # Persistent buffers for segmented DCP verification. Captured graphs
@@ -1022,6 +1264,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         pad_uniform_mtp = padded_mtp_qo_len > 0
 
         seq_lens_for_kernel = seq_lens_device
+        # the global lengths need the same dummy-row
+        # treatment as the local ones below, but only for g_kv_indptr -- the
+        # metadata field keeps the true values, which is what the segmented
+        # route wants (it derives its own row lens and gives a dummy row
+        # length 0, correctly).
+        g_tot_seq_lens = dcp_tot_seq_lens_device
         num_kernel_reqs = num_reqs
         if pad_uniform_mtp:
             qo_lens_device = (
@@ -1033,6 +1281,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 seq_lens_for_kernel,
                 seq_lens_for_kernel.new_full((), max_qo_len),
             )
+            # A dummy row just got a LOCAL length of max_qo_len, so its GLOBAL
+            # length has to say the same thing or the cprr mask is degenerate:
+            # global_len 0 puts the row query positions at {-3,-2,-1} while its
+            # local shard sits at {rank, W+rank, 2W+rank}, so every entry is
+            # masked and the row softmaxes over nothing. max_qo_len * W is
+            # exactly the global length whose round-robin shard is max_qo_len
+            # on every rank.
+            if g_tot_seq_lens is not None:
+                g_tot_seq_lens = torch.where(
+                    qo_lens_device > 0,
+                    g_tot_seq_lens,
+                    g_tot_seq_lens.new_full((), max_qo_len * self.dcp_world_size),
+                )
 
         if self._graph_seq_lens is not None:
             self._graph_seq_lens[:num_kernel_reqs].copy_(
@@ -1126,6 +1387,28 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 else:
                     qo_indptr = query_start_loc_device[: 1 + num_kernel_reqs]
 
+        # build the GLOBAL per-request page indptr the cprr asm
+        # kernel needs to apply global-position causal masking over this rank's
+        # local round-robin KV shard (page_size==1, so pages==tokens).
+        # Only the cprr asm route consumes this, and only that route allocates
+        # the buffer; a DCP run on the segmented route must not enter here.
+        g_kv_indptr = None
+        if (
+            self._asm_dcp_verify
+            and self.dcp_world_size > 1
+            and g_tot_seq_lens is not None
+        ):
+            assert self._g_kv_indptr_buf is not None
+            _ngk = g_tot_seq_lens.shape[0]
+            g_kv_indptr = self._g_kv_indptr_buf[: _ngk + 1]
+            g_kv_indptr[1:].copy_(g_tot_seq_lens.cumsum(dim=0, dtype=torch.int32))
+            # A FULL cudagraph replays at its capture-time request count, so a
+            # smaller real batch leaves the tail holding the PREVIOUS step's
+            # cumsum. Flatten it the way paged_kv_indptr is flattened below, so
+            # padding rows read global_len == 0 and agree with their zero-length
+            # local shard instead of a stale global length.
+            self._g_kv_indptr_buf[_ngk + 1 :].fill_(g_kv_indptr[-1])
+
         has_persistent_metadata = False
         # Only the asm decode consumes the schedule, so gate on the routing
         # rather than on num_heads >= 16, which denies it to a padded rank
@@ -1175,13 +1458,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             uni_qo_len = (
                 max_qo_len if pad_uniform_mtp or torch.all(qo_len == max_qo_len) else -1
             )
+            # round-robin CP applies causality via global
+            # positions plus the qlen window *inside* the kernel, so is_causal
+            # must be False whenever g_kv_indptr is handed over.
+            cprr_kwargs: dict = {}
+            is_causal = True
+            if self.dcp_world_size > 1:
+                cprr_kwargs = dict(
+                    max_split_per_batch=self._mla_max_split_per_batch,
+                    intra_batch_mode=False,
+                )
+            if g_kv_indptr is not None:
+                is_causal = False
+                cprr_kwargs["is_cp_round_robin"] = True
             get_mla_metadata_v1(
                 qo_indptr,
                 paged_kv_indptr,
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
-                causal,
+                is_causal,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
                 self._mla_work_indptr,
@@ -1195,6 +1491,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 fast_mode=True,
                 dtype_q=self._mla_q_dtype,
                 dtype_kv=self._mla_kv_dtype,
+                **cprr_kwargs,
             )
             has_persistent_metadata = True
 
@@ -1237,6 +1534,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_qo_len=max_qo_len,
             min_kv_seq_len=min_kv_seq_len,
             dcp_verify=dcp_verify,
+            g_kv_indptr=g_kv_indptr,
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
+            asm_decode_num_heads=(
+                self._asm_dcp_verify_heads if self._asm_dcp_verify else 0
+            ),
+            mla_num_kv_splits=(
+                self._mla_max_split_per_batch if self.dcp_world_size > 1 else 0
+            ),
             use_gluon_decode=use_gluon_decode,
             use_gluon_verify=use_gluon_verify,
             attn_out_dtype=self.decode_attn_out_dtype,
@@ -2032,9 +2338,14 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.attn_out_dtype,
             )
 
-        if self.dcp_world_size > 1 and int(decode.max_qo_len) > 1:
+        if (
+            self.dcp_world_size > 1
+            and int(decode.max_qo_len) > 1
+            and decode.g_kv_indptr is None
+        ):
             raise RuntimeError(
-                "ROCM_AITER_MLA DCP multi-token verify requires segmented MLA."
+                "ROCM_AITER_MLA DCP multi-token verify requires either segmented "
+                "MLA or the round-robin asm decode (g_kv_indptr)."
             )
 
         if type(q) is tuple:
@@ -2049,8 +2360,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
             f"{self._decode_num_heads}, got {q.shape[1]}"
         )
-        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+        # the round-robin (cprr) asm decode only has kernels
+        # at the native head counts, so pad the DCP-gathered count (96 at
+        # TP8/DCP8) up to the next one (128) and run ONE native kernel. MLA
+        # heads attend independently over the shared KV, so the padding heads
+        # cannot affect heads [0:_decode_num_heads]; they are sliced back off
+        # the output below. The pad is a PRE-kernel copy, so unlike a post-kernel
+        # un-fold it does not race the symm-mem a2a combine.
+        asm_dcp_heads = decode.asm_decode_num_heads
+        if asm_dcp_heads > self._decode_num_heads:
+            mla_num_heads = asm_dcp_heads
+            mla_padded_q = AiterMLAHelper.get_mla_padded_q(
+                self._decode_num_heads, q, target_heads=mla_num_heads
+            )
+        else:
+            mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
+            mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(
+                self._decode_num_heads
+            )
         o = torch.empty(
             B,
             mla_num_heads,
@@ -2084,6 +2411,41 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         lse = None
         if self.dcp_world_size > 1:
+            # Drive the round-robin global-position causal mask over this
+            # rank's KV shard. Only needed when a row can be causally
+            # truncated: a qlen==1 decode sees every local token, so the plain
+            # kernel is already correct and the cprr entry (no kernel below
+            # _MIN_CPRR_QLEN) must not be asked for it.
+            #
+            # qlen 2 has neither. There is no cprr kernel for it, and the plain
+            # kernel would apply causality on LOCAL indices over a round-robin
+            # shard, which is silently wrong rather than an error. The
+            # constructor rejects a configured qlen of 2, but max_qo_len is a
+            # per-batch value: the scheduler clamps a running spec request near
+            # max_model_len (v1/core/sched/scheduler.py), so a qlen-2 batch can
+            # reach here with a larger threshold configured. Fail loudly.
+            if asm_dcp_heads:
+                batch_qlen = int(decode.max_qo_len)
+                if batch_qlen >= _MIN_CPRR_QLEN:
+                    assert decode.g_kv_indptr is not None
+                    mla_kwargs["g_kv_indptr"] = decode.g_kv_indptr
+                    mla_kwargs["cp_world_size"] = decode.cp_world_size
+                    mla_kwargs["cp_rank"] = decode.cp_rank
+                elif batch_qlen > 1:
+                    raise RuntimeError(
+                        f"AITER cprr DCP verify got a batch with max_qo_len="
+                        f"{batch_qlen}, which has no cprr kernel (minimum "
+                        f"{_MIN_CPRR_QLEN}) and cannot use the plain kernel, "
+                        f"whose causality is local to the round-robin shard. "
+                        f"Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented for this "
+                        f"configuration."
+                    )
+            if asm_dcp_heads:
+                # Must match the schedule get_mla_metadata_v1 was built with.
+                # The builder owns the value and carries it on the metadata.
+                assert decode.mla_num_kv_splits > 0
+                mla_kwargs["num_kv_splits"] = decode.mla_num_kv_splits
+                mla_kwargs["intra_batch_mode"] = False
             # The vLLM custom-op wrapper exposes only the in-place output and
             # drops aiter's final LSE, which the cross-shard merge needs, so go
             # through aiter's native entry point on the DCP path.
@@ -2098,6 +2460,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.max_qo_len,
                 sm_scale=self.scale,
                 return_lse=True,
+                # aiter defaults this to True. A non-causal group (a DSpark
+                # draft attends its whole block) would otherwise get the masked
+                # kernel and see only tokens <= its own index. The non-causal
+                # cprr kernels exist (msk0_lse_cprr); they just have to be asked
+                # for. The non-DCP branch below already forwards this.
+                #
+                # Untested: the numerics tests fix causal=True and
+                # non_causal_multi_token_decode=False, and reaching this line
+                # needs a real builder and device tensors. Dropping this kwarg
+                # fails nothing.
+                causal=attn_metadata.causal,
                 **mla_kwargs,
             )
             assert lse is not None, (
@@ -2119,7 +2492,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 **mla_kwargs,
             )
 
-        output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
-        if lse is not None:
-            lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
+        if asm_dcp_heads > self._decode_num_heads:
+            # Slice the real heads back off as a non-contiguous VIEW. NO
+            # .contiguous(): a post-kernel copy is exactly what races the
+            # symm-mem a2a combine, and the combine reads a strided
+            # partial_output correctly.
+            output = o[:, : self._decode_num_heads]
+            if lse is not None:
+                lse = lse[:, : self._decode_num_heads, ...]
+        else:
+            output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
+            if lse is not None:
+                lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
         return output, lse
