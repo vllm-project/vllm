@@ -74,6 +74,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_responses_tool_call_name_map,
+    encode_reasoning_state,
     resolve_responses_tool_call_name,
 )
 from vllm.outputs import CompletionOutput
@@ -823,6 +824,7 @@ class SimpleStreamingState:
     tool_call_namespace: str | None = None
     tool_call_index: int | None = None
     has_emitted_tool_call_delta: bool = False
+    encrypt_reasoning: bool = False
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -1010,6 +1012,11 @@ def emit_simple_reasoning_done(
                 status="completed",
                 id=state.current_item_id,
                 summary=[],
+                encrypted_content=(
+                    encode_reasoning_state(state.accumulated_text)
+                    if state.encrypt_reasoning
+                    else None
+                ),
             ),
         ),
     ]
@@ -1181,8 +1188,10 @@ class SimpleStreamingEventProcessor:
         self,
         state: SimpleStreamingState | None = None,
         tools: list[Tool] | None = None,
+        encrypt_reasoning: bool = False,
     ) -> None:
         self.state = state or SimpleStreamingState()
+        self.state.encrypt_reasoning = encrypt_reasoning
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
 
     def resolve_target_state(
