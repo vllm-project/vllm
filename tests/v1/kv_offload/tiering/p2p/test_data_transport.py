@@ -132,7 +132,7 @@ class TestNixlTransportWithMockedAgent:
         assert tid1 != tid2
 
     def test_poll_empty_when_no_inflight(self):
-        """poll returns empty when nothing is inflight."""
+        """Poll returns empty when nothing is inflight."""
         transport = self._make_transport()
         result = transport.poll()
         assert result == PollResult(done=(), failed=())
@@ -213,7 +213,7 @@ class TestNixlTransportWithMockedAgent:
         assert tid2 not in transport._inflight
 
     def test_cancel_removes_inflight(self):
-        """cancel removes transfers and releases handles."""
+        """Cancel removes transfers and releases handles."""
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
@@ -226,7 +226,7 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.release_xfer_handle.assert_called()
 
     def test_cancel_ignores_unknown_ids(self):
-        """cancel with unknown IDs doesn't crash."""
+        """Cancel with unknown IDs doesn't crash."""
         transport = self._make_transport()
         assert transport.cancel([999, 1000]) == []
         assert transport.cancel([999, 1000], mode="wait") == []
@@ -286,7 +286,7 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.remove_remote_agent.assert_called()
 
     def test_close_releases_everything(self):
-        """close releases all handles and clears state."""
+        """Close releases all handles and clears state."""
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
         transport.write_blocks("peer:1", [0], [1])

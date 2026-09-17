@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -107,10 +108,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "Consumers and kv_both require "
                 "prefill_context_parallel_size=1."
             )
-        if pcp_size > 1 and parallel_config.decode_context_parallel_size > 1:
+        dcp_size = parallel_config.decode_context_parallel_size
+        if (
+            pcp_size > 1
+            and dcp_size > 1
+            and (parallel_config.tensor_parallel_size != 1 or dcp_size != pcp_size)
+        ):
             raise NotImplementedError(
-                "NixlConnector PCP producers currently require "
-                "decode_context_parallel_size=1."
+                "NixlConnector PCP+DCP requires TP1 with DCP spanning "
+                "the full PCP group."
             )
         # TODO: Support PCP with bidirectional KV transfer by tracking separate
         # send and receive completion counts.
@@ -208,12 +214,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        """Set handshake metadata keyed by (pp_rank, tp_rank) so the side
         channel can serve every PP stage's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
@@ -233,6 +239,19 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        results = self.connector_worker.get_transfer_results()
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and self.connector_worker.pcp_rank > 0
+            and not self.connector_worker.pcp_dcp_sharded
+        ):
+            results.finished_sending.clear()
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
@@ -298,19 +317,20 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler.shutdown()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata for this connector.
+        """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
         between P/D workers.
 
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+
         """
         assert self.connector_worker is not None
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
+            and not self.connector_worker.pcp_dcp_sharded
         ):
             return None
         return self.connector_worker.xfer_handshake_metadata

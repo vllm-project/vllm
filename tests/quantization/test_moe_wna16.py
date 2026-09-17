@@ -93,6 +93,40 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
             False,
             "MoeWNA16 checkpoint layout",
         ),
+        (
+            WNA16MoEBackend.RDNA3,
+            AutoGPTQConfig(4, 128, False, True, False, {}, {}),
+            False,
+            False,
+            "compressed-tensors",
+        ),
+        (
+            WNA16MoEBackend.RDNA3,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                symmetric=False,
+                dynamic=False,
+                group_size=128,
+            ),
+            True,
+            False,
+            "asymmetric",
+        ),
+        (
+            WNA16MoEBackend.RDNA3,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.CHANNEL,
+                symmetric=True,
+                dynamic=False,
+            ),
+            False,
+            False,
+            "group-wise scales",
+        ),
     ],
 )
 def test_wna16_oracle_rejects_incompatible_quant_structures(

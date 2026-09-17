@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HyperCLOVAX V2 (32B Think Model) Implementation.
+"""HyperCLOVAX V2 (32B Think Model) Implementation.
 
 This module contains the V2 architecture that uses Qwen2.5 Vision Transformer
 instead of CLIP/SigLIP used in V1.
@@ -57,8 +56,7 @@ V2_VIDEO_TOKEN: str = "<|video_start|><|VIDEO_PAD|><|video_end|>"
 
 
 class HCXVisionV2ImagePixelInputs(TensorSchema):
-    """
-    V2 Image inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Image inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -72,8 +70,7 @@ class HCXVisionV2ImagePixelInputs(TensorSchema):
 
 
 class HCXVisionV2ImageEmbeddingInputs(TensorSchema):
-    """
-    V2 Image embedding inputs.
+    """V2 Image embedding inputs.
 
     Dimensions:
         - nf: Number of image features
@@ -90,8 +87,7 @@ HCXVisionV2ImageInputs = HCXVisionV2ImagePixelInputs | HCXVisionV2ImageEmbedding
 
 
 class HCXVisionV2VideoPixelInputs(TensorSchema):
-    """
-    V2 Video inputs using Qwen2.5-VL style grid_thw format.
+    """V2 Video inputs using Qwen2.5-VL style grid_thw format.
 
     Dimensions:
         - np: Number of patches
@@ -105,8 +101,7 @@ class HCXVisionV2VideoPixelInputs(TensorSchema):
 
 
 class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
-    """
-    V2 Video embedding inputs.
+    """V2 Video embedding inputs.
 
     Dimensions:
         - nf: Number of video features
@@ -266,44 +261,8 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        images = mm_data.get("images")
-        videos = mm_data.get("videos")
-
-        # Get the HF processor
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        # Build data dict for HF processor (images/videos only)
-        # NOTE: We pass the prompt as-is without token normalization.
-        # Token expansion is handled by vLLM via _get_prompt_updates.
-        data: dict[str, object] = dict(
-            text=prompt_text,
-            images=images,
-            videos=videos,
-        )
-
-        processed_data = self.info.ctx.call_hf_processor(
-            hf_processor=hf_processor,
-            data=data,
-            kwargs=hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-
-        return processed_data
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
         self,
@@ -419,8 +378,7 @@ class HCXVisionV2MultiModalProcessor(
     dummy_inputs=HCXVisionV2DummyInputsBuilder,
 )
 class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """
-    HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
+    """HyperCLOVAX-SEED Vision-Language Model (V2 architecture).
 
     Supports:
     - HyperCLOVAX-SEED-Think-32B: Vision + Text
