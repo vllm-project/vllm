@@ -18,9 +18,6 @@
 //! calls to one tool) and tags may appear in any order. `at_least_one`
 //! controls whether the empty string is accepted; `stop_after_first` caps the
 //! match at a single tag.
-//!
-//! ATEM numeric value patterns use plain capturing groups only: xgrammar's
-//! regex engine follows JavaScript syntax and rejects `(?...)` constructs.
 
 use serde_json::{Map, Value};
 use xgrammar_structural_tag::builders::StructuralTagOptions;
@@ -37,10 +34,6 @@ pub(super) static MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER: MuseGlimmerStructuralTagB
 const CHANNEL_SEPARATOR: &str = "<|start|>assistant";
 const REASONING_BEGIN: &str = " to=self<|message|>";
 const ANSWER_BEGIN: &str = " to=user<|message|>";
-
-const INTEGER_PATTERN: &str = "-?(0|[1-9][0-9]*)";
-const NUMBER_PATTERN: &str = r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?";
-const BOOLEAN_PATTERN: &str = "true|false";
 
 /// Muse Glimmer structural-tag builder.
 #[derive(Debug, Clone, Copy, Default)]
@@ -59,13 +52,13 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
             // sanction tool channels the request forbade.
             None => auto_turn(&[], caller_schema, options),
             Some(ScopedToolChoice::Auto) => auto_turn(tools, caller_schema, options),
-            Some(ScopedToolChoice::Required) => required_turn(tools),
+            Some(ScopedToolChoice::Required) => required_turn(tools, options),
             Some(ScopedToolChoice::Function(name)) => {
                 let tool = tools
                     .iter()
                     .find(|tool| tool.name == *name)
                     .ok_or_else(|| XgrammarError::ToolNotFound { name: name.clone() })?;
-                required_turn(std::slice::from_ref(tool))
+                required_turn(std::slice::from_ref(tool), options)
             }
         }
     }
@@ -81,7 +74,7 @@ fn auto_turn(
     validate_tool_names(tools)?;
     let mut tags = vec![reasoning_tag()];
     for tool in tools {
-        tags.extend(tool_tags(tool));
+        tags.extend(tool_tags(tool, options));
     }
     // The answer channel, when present, is always LAST. `<|eot|>` is a pure
     // stop token (never grammar content), and the model was never trained to
@@ -130,12 +123,12 @@ fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
 }
 
 /// `reasoning* tool+`: at least one tool call, with any reasoning before it.
-fn required_turn(tools: &[Tool]) -> XgrammarResult<StructuralTag> {
+fn required_turn(tools: &[Tool], options: &StructuralTagOptions) -> XgrammarResult<StructuralTag> {
     if tools.is_empty() {
         return Err(XgrammarError::RequiredWithoutTools);
     }
     validate_tool_names(tools)?;
-    let tool_tags = tools.iter().flat_map(tool_tags).collect();
+    let tool_tags = tools.iter().flat_map(|tool| tool_tags(tool, options)).collect();
     Ok(StructuralTag::new(Format::sequence(vec![
         Format::star(Format::sequence(vec![
             Format::Tag(reasoning_tag()),
@@ -167,11 +160,7 @@ fn reasoning_tag() -> TagFormat {
 /// `<|eom|>` and then emits `<|eot|>` purely as the stop token.
 fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> TagFormat {
     let content = match caller_schema {
-        Some(schema) => Format::JsonSchema(
-            JsonSchemaFormat::new(schema.clone())
-                .with_any_order(options.any_order)
-                .with_max_whitespace_cnt(options.max_whitespace_cnt),
-        ),
+        Some(schema) => json_schema(schema.clone(), options),
         None => Format::any_text_excluding(&[EOT, EOM, START]),
     };
     TagFormat::new(ANSWER_BEGIN, content, EOM)
@@ -180,8 +169,8 @@ fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> 
 /// Tool channel tags: one begin variant per model-known recipient spelling.
 /// The recipient is the registered tool name verbatim, but for a dot-less
 /// name `ns` the model is also known to emit the doubled `ns.ns`.
-fn tool_tags(tool: &Tool) -> Vec<TagFormat> {
-    let content = tool_channel_content(tool);
+fn tool_tags(tool: &Tool, options: &StructuralTagOptions) -> Vec<TagFormat> {
+    let content = tool_channel_content(tool, options);
     let mut begins = vec![format!(" to={}<|message|>", tool.name)];
     if !tool.name.contains('.') {
         begins.push(format!(" to={0}.{0}<|message|>", tool.name));
@@ -198,13 +187,18 @@ fn tool_tags(tool: &Tool) -> Vec<TagFormat> {
 /// renders it. A tool with no declared parameters, `strict: false`, or a
 /// schema the fixed-order typed encoding cannot express faithfully keeps the
 /// channel and invoke framing but leaves the invoke body free-form.
-fn tool_channel_content(tool: &Tool) -> Format {
+fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
     if tool.strict != Some(false)
         && let Some(properties) = tool.parameters.get("properties").and_then(Value::as_object)
         && !properties.is_empty()
         && typed_encoding_is_faithful(&tool.parameters, properties)
     {
-        return typed_invokes(&tool.name, properties, required_names(&tool.parameters));
+        return typed_invokes(
+            &tool.name,
+            properties,
+            required_names(&tool.parameters),
+            options,
+        );
     }
     Format::sequence(vec![
         Format::const_string(format!(
@@ -233,8 +227,13 @@ fn typed_encoding_is_faithful(parameters: &Value, properties: &Map<String, Value
 }
 
 /// One or more typed invokes: `invoke (\n invoke)*`, newline-separated.
-fn typed_invokes(name: &str, properties: &Map<String, Value>, required: Vec<&str>) -> Format {
-    let invoke = || typed_invoke(name, properties, &required);
+fn typed_invokes(
+    name: &str,
+    properties: &Map<String, Value>,
+    required: Vec<&str>,
+    options: &StructuralTagOptions,
+) -> Format {
+    let invoke = || typed_invoke(name, properties, &required, options);
     Format::sequence(vec![
         Format::const_string("<atem:function_calls>\n"),
         invoke(),
@@ -246,57 +245,60 @@ fn typed_invokes(name: &str, properties: &Map<String, Value>, required: Vec<&str
 /// One `<atem:invoke>` block. Required properties come first in schema order;
 /// each parameter carries its trailing newline, so a call with no arguments
 /// stays `<atem:invoke name="N">\n</atem:invoke>`.
-fn typed_invoke(name: &str, properties: &Map<String, Value>, required: &[&str]) -> Format {
+fn typed_invoke(
+    name: &str,
+    properties: &Map<String, Value>,
+    required: &[&str],
+    options: &StructuralTagOptions,
+) -> Format {
     let mut elements = vec![Format::const_string(format!(
         "<atem:invoke name=\"{name}\">\n"
     ))];
     let (required_props, optional_props): (Vec<_>, Vec<_>) =
         properties.iter().partition(|(key, _)| required.contains(&key.as_str()));
     for (key, schema) in required_props {
-        elements.push(parameter_line(key, schema));
+        elements.push(parameter_line(key, schema, options));
     }
     for (key, schema) in optional_props {
-        elements.push(Format::optional(parameter_line(key, schema)));
+        elements.push(Format::optional(parameter_line(key, schema, options)));
     }
     elements.push(Format::const_string(INVOKE_CLOSE));
     Format::sequence(elements)
 }
 
 /// One parameter plus the newline the template emits after it.
-fn parameter_line(key: &str, schema: &Value) -> Format {
-    Format::sequence(vec![parameter(key, schema), Format::const_string("\n")])
+fn parameter_line(key: &str, schema: &Value, options: &StructuralTagOptions) -> Format {
+    Format::sequence(vec![
+        parameter(key, schema, options),
+        Format::const_string("\n"),
+    ])
 }
 
 /// `<atem:parameter name="KEY">VALUE</atem:parameter>` with a typed value.
-fn parameter(key: &str, schema: &Value) -> Format {
+fn parameter(key: &str, schema: &Value, options: &StructuralTagOptions) -> Format {
     Format::sequence(vec![
         Format::const_string(format!("<atem:parameter name=\"{key}\">")),
-        parameter_value(schema),
+        parameter_value(schema, options),
         Format::const_string(PARAMETER_CLOSE),
     ])
 }
 
 /// Value grammar for one parameter, by JSON-schema type. Strings, objects,
 /// arrays, and unknown schemas stay free-form (the template renders objects
-/// and arrays as JSON text); scalars get exact patterns.
-fn parameter_value(schema: &Value) -> Format {
+/// and arrays as JSON text); the other scalars reuse xgrammar's JSON grammar
+/// over the parameter schema, whose single `type` is already the narrowing,
+/// so facets such as `minimum` keep applying.
+fn parameter_value(schema: &Value, options: &StructuralTagOptions) -> Format {
     if let Some(alternation) = scalar_enum(schema) {
         return alternation;
     }
-    // Framing markers and the invoke close stay excluded: the streaming
-    // parser cuts the invoke body at the first `</atem:invoke>` and treats
-    // quoted framing as a channel boundary, so the grammar must never force
-    // bytes the parser cannot round-trip.
-    let text = || Format::any_text_excluding(&[PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]);
-    let Some(json_type) = schema.get("type").and_then(Value::as_str) else {
-        return text();
-    };
-    match json_type {
-        "integer" => Format::regex(INTEGER_PATTERN),
-        "number" => Format::regex(NUMBER_PATTERN),
-        "boolean" => Format::regex(BOOLEAN_PATTERN),
-        "null" => Format::const_string("null"),
-        _ => text(),
+    match schema.get("type").and_then(Value::as_str) {
+        Some("integer" | "number" | "boolean" | "null") => json_schema(schema.clone(), options),
+        // Framing markers and the invoke close stay excluded: the streaming
+        // parser cuts the invoke body at the first `</atem:invoke>` and treats
+        // quoted framing as a channel boundary, so the grammar must never
+        // force bytes the parser cannot round-trip.
+        _ => Format::any_text_excluding(&[PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]),
     }
 }
 
@@ -327,6 +329,15 @@ fn scalar_enum(schema: &Value) -> Option<Format> {
         [literal] => Format::const_string(literal.clone()),
         _ => Format::or(literals.into_iter().map(Format::const_string).collect()),
     })
+}
+
+/// A JSON body honoring the request's key-order and whitespace options.
+fn json_schema(schema: Value, options: &StructuralTagOptions) -> Format {
+    Format::JsonSchema(
+        JsonSchemaFormat::new(schema)
+            .with_any_order(options.any_order)
+            .with_max_whitespace_cnt(options.max_whitespace_cnt),
+    )
 }
 
 fn required_names(parameters: &Value) -> Vec<&str> {
@@ -447,7 +458,7 @@ mod tests {
         assert!(json.contains(
             r#"{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]}"#
         ));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -595,7 +606,10 @@ mod tests {
 
     #[test]
     fn scalar_enum_members_become_const_string_alternation() {
-        let format = super::parameter_value(&json!({"enum": ["a.b", 1, true]}));
+        let format = super::parameter_value(
+            &json!({"enum": ["a.b", 1, true]}),
+            &StructuralTagOptions::default(),
+        );
 
         assert_eq!(
             serde_json::to_value(format).unwrap(),
@@ -609,11 +623,33 @@ mod tests {
 
     #[test]
     fn single_value_enum_becomes_const_string() {
-        let format = super::parameter_value(&json!({"type": "string", "enum": ["only"]}));
+        let format = super::parameter_value(
+            &json!({"type": "string", "enum": ["only"]}),
+            &StructuralTagOptions::default(),
+        );
 
         assert_eq!(
             serde_json::to_value(format).unwrap(),
             json!({"type": "const_string", "value": "only"})
+        );
+    }
+
+    #[test]
+    fn typed_scalar_parameter_keeps_schema_facets() {
+        let format = super::parameter_value(
+            &json!({"type": "integer", "minimum": 1}),
+            &StructuralTagOptions::default(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(format).unwrap(),
+            json!({
+                "type": "json_schema",
+                "json_schema": {"type": "integer", "minimum": 1},
+                "style": "json",
+                "any_order": false,
+                "max_whitespace_cnt": null
+            })
         );
     }
 }
