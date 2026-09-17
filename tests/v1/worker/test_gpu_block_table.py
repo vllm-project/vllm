@@ -212,6 +212,142 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
     assert torch.equal(actual, expected)
 
 
+@pytest.mark.parametrize("cp_rank", range(4))
+def test_slot_mappings_localize_only_context_parallel_groups(cp_rank: int):
+    """Only DCP-sharded groups get localized slot mappings.
+
+    Full-attention/MLA KV is sharded across DCP ranks, but groups holding
+    replicated per-rank state — Mamba/GDN recurrent state, the
+    ``KpoolTailSpec`` scratch — index global positions on every rank.
+    Localizing those would PAD out the tokens this rank does not "own" and
+    write the surviving ones to the wrong slots.
+    """
+    device = torch.device("cuda")
+    cp_size = 4
+    num_tokens = 64
+    sharded_block_size = 16
+    replicated_block_size = 4
+    sharded_block_id = 5
+    replicated_block_ids = list(range(20, 20 + num_tokens // replicated_block_size))
+
+    block_tables = BlockTables(
+        block_sizes=[sharded_block_size, replicated_block_size],
+        max_num_reqs=1,
+        max_num_batched_tokens=num_tokens,
+        max_num_blocks_per_group=[1, len(replicated_block_ids)],
+        device=device,
+        kernel_block_sizes=[sharded_block_size, replicated_block_size],
+        cp_size=cp_size,
+        cp_rank=cp_rank,
+        cp_interleave=1,
+        cp_enabled=[True, False],
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([sharded_block_id], replicated_block_ids),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=num_tokens,
+    )
+    torch.accelerator.synchronize()
+
+    # Sharded group: this rank owns every cp_size-th token (cp_interleave 1)
+    # and packs the tokens it owns densely into its local block.
+    assert slot_mappings[0].tolist() == _localized_slots(
+        num_tokens, sharded_block_size, [sharded_block_id], cp_size, cp_rank
+    )
+    # Replicated group: global positions, and no token is padded out.
+    assert slot_mappings[1].tolist() == _global_slots(
+        num_tokens, replicated_block_size, replicated_block_ids
+    )
+
+
+def test_slot_mappings_localize_every_group_by_default():
+    """``cp_enabled`` defaults to all groups, preserving the previous
+    behaviour for callers that do not pass it."""
+    device = torch.device("cuda")
+    cp_size = 4
+    cp_rank = 1
+    num_tokens = 64
+    block_size = 16
+    block_id = 5
+
+    block_tables = BlockTables(
+        block_sizes=[block_size],
+        max_num_reqs=1,
+        max_num_batched_tokens=num_tokens,
+        max_num_blocks_per_group=[1],
+        device=device,
+        kernel_block_sizes=[block_size],
+        cp_size=cp_size,
+        cp_rank=cp_rank,
+        cp_interleave=1,
+    )
+    assert block_tables.cp_enabled.tolist() == [True]
+
+    block_tables.append_block_ids(
+        req_index=0, new_block_ids=([block_id],), overwrite=True
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=num_tokens,
+    )
+    torch.accelerator.synchronize()
+
+    assert slot_mappings[0].tolist() == _localized_slots(
+        num_tokens, block_size, [block_id], cp_size, cp_rank
+    )
+
+
+def _localized_slots(
+    num_tokens: int,
+    block_size: int,
+    block_ids: list[int],
+    cp_size: int,
+    cp_rank: int,
+) -> list[int]:
+    """Reference for the DCP-localized slot mapping, cp_interleave == 1."""
+    virtual_block_size = block_size * cp_size
+    slots = []
+    for position in range(num_tokens):
+        virtual_offset = position % virtual_block_size
+        if virtual_offset % cp_size != cp_rank:
+            slots.append(-1)
+            continue
+        local_position = (
+            position // virtual_block_size
+        ) * block_size + virtual_offset // cp_size
+        slots.append(
+            block_ids[local_position // block_size] * block_size
+            + local_position % block_size
+        )
+    return slots
+
+
+def _global_slots(num_tokens: int, block_size: int, block_ids: list[int]) -> list[int]:
+    """Reference for a non-context-parallel group: global positions, no PAD."""
+    return [
+        block_ids[position // block_size] * block_size + position % block_size
+        for position in range(num_tokens)
+    ]
+
+
 def test_v1_block_table_move_row_clears_vacated_row():
     """condense() moves the last row into a freed slot; the vacated row must
     not keep stale block ids. Padded dummy-run batches dereference stale rows

@@ -64,6 +64,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.core.kv_cache_utils import dcp_world_size_for_kv_cache_spec
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -588,6 +589,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        cp_enabled = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -595,6 +597,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
             slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            # Only DCP-sharded groups get localized slot mappings. The
+            # helper returns the process DCP size for full-attention/MLA
+            # specs and 1 for every spec whose state is replicated across
+            # DCP ranks (Mamba/GDN, sliding window and its KpoolTailSpec
+            # subclass, chunked local).
+            cp_enabled.append(
+                dcp_world_size_for_kv_cache_spec(
+                    spec, self.parallel_config.decode_context_parallel_size
+                )
+                > 1
+            )
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -659,6 +672,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            cp_enabled=cp_enabled,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,

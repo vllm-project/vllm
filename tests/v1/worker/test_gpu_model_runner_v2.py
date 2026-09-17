@@ -112,6 +112,98 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     assert captured["slot_mapping_enabled"] == [False, True]
 
 
+def test_initialize_kv_cache_enables_cp_only_for_dcp_sharded_groups(monkeypatch):
+    """Under DCP, only the sharded groups may have localized slot mappings.
+
+    Mamba/GDN state and the ``KpoolTailSpec`` scratch are replicated across
+    DCP ranks and index global positions, so they must opt out of the
+    kernel's context-parallel branch.
+    """
+    dcp_size = 8
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_model_len = 4096
+    runner.is_encoder_decoder = False
+    runner.dcp_size = dcp_size
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    parallel_config = SimpleNamespace(
+        decode_context_parallel_size=dcp_size,
+        cp_kv_cache_interleave_size=1,
+    )
+    runner.parallel_config = parallel_config
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+    )
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
+    runner.model_state = SimpleNamespace(
+        get_additional_cg_support=lambda: (),
+        num_new_sampled_tokens_per_step=1,
+    )
+    runner.speculator = None
+    runner.req_states = []
+    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    runner.vocab_size = 1
+    runner.max_num_reqs = 1
+    runner.max_num_tokens = 2
+    runner.device = torch.device("cuda")
+
+    attention_spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        shapes=((1,),),
+        dtypes=(torch.bfloat16,),
+        block_size=16,
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], attention_spec),
+            KVCacheGroupSpec(["kda"], mamba_spec),
+        ],
+    )
+
+    class FakeAttnCGSupport:
+        def narrow(self, *args):
+            return self
+
+    monkeypatch.setattr(
+        model_runner_module,
+        "init_attn_backend",
+        lambda *args, **kwargs: ([], FakeAttnCGSupport(), [64, 16]),
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "maybe_create_adaptive_verification_manager",
+        lambda **kwargs: None,
+    )
+
+    captured = {}
+
+    class BlockTablesCaptured(Exception):
+        pass
+
+    def capture_block_tables(**kwargs):
+        captured.update(kwargs)
+        raise BlockTablesCaptured
+
+    monkeypatch.setattr(model_runner_module, "BlockTables", capture_block_tables)
+
+    with pytest.raises(BlockTablesCaptured):
+        runner.initialize_kv_cache(kv_cache_config)
+
+    assert captured["cp_size"] == dcp_size
+    assert captured["cp_enabled"] == [True, False]
+
+
 @pytest.mark.parametrize(
     ("mamba_cache_mode", "num_speculative_blocks", "expected"),
     [

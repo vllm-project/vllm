@@ -27,6 +27,7 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        cp_enabled: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -44,6 +45,17 @@ class BlockTables:
             slot_mapping_enabled = [True] * self.num_kv_cache_groups
         assert len(slot_mapping_enabled) == self.num_kv_cache_groups
         self._slot_mapping_enabled = slot_mapping_enabled
+        # Per-group context-parallel flag. Only groups whose KV is actually
+        # DCP-sharded (full attention and MLA) get localized slot mappings.
+        # Groups holding replicated per-rank state -- Mamba/GDN, sliding
+        # window, chunked local, the KpoolTailSpec scratch -- index global
+        # positions on every rank, so localizing them would corrupt their
+        # addressing. Defaults to all-enabled, which reproduces the previous
+        # behaviour exactly.
+        if cp_enabled is None:
+            cp_enabled = [True] * self.num_kv_cache_groups
+        assert len(cp_enabled) == self.num_kv_cache_groups
+        self._cp_enabled = cp_enabled
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -107,6 +119,9 @@ class BlockTables:
         )
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
+        )
+        self.cp_enabled = torch.tensor(
+            self._cp_enabled, dtype=torch.bool, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
@@ -211,6 +226,7 @@ class BlockTables:
             self.block_sizes_tensor,
             self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
+            self.cp_enabled,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
@@ -284,6 +300,7 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
+    cp_enabled,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -326,15 +343,24 @@ def _compute_slot_mappings_kernel(
             local_positions = positions
             is_local = True
         else:
-            # Context parallelism is used.
+            # Context parallelism is used, but only for the groups whose KV
+            # is actually sharded across DCP ranks. Groups with replicated
+            # state keep their global positions and own every token.
+            group_cp = tl.load(cp_enabled + group_id)
             virtual_block_size = kv_block_size * CP_SIZE
             virtual_block_indices = positions // virtual_block_size
             virtual_block_offsets = positions % virtual_block_size
-            is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            is_local = (virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank) | (
+                group_cp == 0
+            )
             rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
             remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
-            local_positions = virtual_block_indices * kv_block_size + local_offsets
+            local_positions = tl.where(
+                group_cp,
+                virtual_block_indices * kv_block_size + local_offsets,
+                positions,
+            )
 
         block_indices = tl.where(
             mapping_enabled, local_positions // kernel_block_size, 0
