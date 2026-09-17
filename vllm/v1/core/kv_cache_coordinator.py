@@ -318,19 +318,24 @@ class KVCacheCoordinator(ABC):
         at each position; EAGLE groups also keep the block above, which they
         match and drop back from (see ``reachable_block_mask``).
 
-        Two positions are reachable: a resend of the identical prompt is capped
-        at ``num_tokens - 1`` (its last token is recomputed for logits), a
+        For each alignment, a resend of the identical prompt is capped at
+        ``num_tokens - 1`` (its last token is recomputed for logits), while a
         longer sibling matches the final aligned block. They differ only on a
         block-aligned prompt, where retaining just the higher one collapses the
-        resend's hit to 0. The alignment is the scheduler block size, not the
-        finer hash granularity, which would over-estimate the reach.
+        resend's hit to 0. Keep scheduler-aligned fallback states as well as
+        finer replay boundaries when partial hash hits are enabled.
         """
         if not self.eagle_group_ids:
             return (request.num_prompt_tokens - 1,)
-        block = self.scheduler_block_size
-        resend = (request.num_prompt_tokens - 1) // block * block
-        extension = request.num_prompt_tokens // block * block
-        return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
+        alignments = {self.scheduler_block_size}
+        if self.enable_partial_hash_hits:
+            alignments.add(self.block_pool.hash_block_size)
+        boundaries: set[int] = set()
+        for block in alignments:
+            resend = (request.num_prompt_tokens - 1) // block * block
+            extension = request.num_prompt_tokens // block * block
+            boundaries.update((max(resend - block, 0), max(extension - block, 0)))
+        return tuple(sorted(boundaries))
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
