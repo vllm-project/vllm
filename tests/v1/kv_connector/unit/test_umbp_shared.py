@@ -48,11 +48,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.stats import (
     UMBPStoreConnectorStats,
 )
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 
 
@@ -71,6 +73,26 @@ def _kv_cache_config() -> KVCacheConfig:
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+    )
+
+
+def _hybrid_kv_cache_config() -> KVCacheConfig:
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
     )
 
 
@@ -512,6 +534,51 @@ def test_scheduler_emits_partial_tail_plan_for_next_step():
     tail = metadata.partial_tail_plans[0]
     assert (tail.start_token, tail.end_token) == (0, 12)
     assert tail.block_id == 7
+
+
+def test_scheduler_stores_exact_hybrid_boundary_state():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded", "load_async": False}),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("hybrid")),
+    )
+    request = SimpleNamespace(
+        request_id="hybrid",
+        req_id="hybrid",
+        num_tokens=32,
+        block_hashes=[b"a", b"b"],
+        block_ids=([1, 2], [8, 9]),
+        num_computed_tokens=16,
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2], [8, 9])),
+        0,
+    )
+    metadata = scheduler.build_connector_meta(
+        SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={},
+            kv_connector_block_state=SimpleNamespace(
+                boundary_state_offloads={
+                    "hybrid": [
+                        (1, 9, 16),
+                        (1, NULL_BLOCK_ID, 16),
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert len(metadata.store_plans) == 1
+    plan = metadata.store_plans[0]
+    assert plan.group_id == 1
+    assert plan.block_id == 9
+    assert plan.block_hash == b"a"
 
 
 class _WorkerHandle:

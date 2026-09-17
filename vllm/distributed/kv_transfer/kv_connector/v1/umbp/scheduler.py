@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -46,6 +47,10 @@ class UMBPStoreConnectorScheduler:
     ) -> None:
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
+        self.group_block_sizes = {
+            group_id: group.kv_cache_spec.block_size
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        }
         self.runtime = runtime
         self.codec = codec
         self.layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
@@ -331,6 +336,17 @@ class UMBPStoreConnectorScheduler:
             if tracker := self._request_trackers.get(request_id):
                 tracker.reset()
 
+        block_state = getattr(
+            scheduler_output, "kv_connector_block_state", None
+        )
+        if block_state is not None and block_state.boundary_state_offloads:
+            self._add_boundary_state_plans(
+                block_state.boundary_state_offloads,
+                meta,
+                set(scheduler_output.finished_req_ids),
+                set(scheduler_output.preempted_req_ids or ()),
+            )
+
         for plans in self._pending_partial_tails.values():
             meta.partial_tail_plans.extend(plans)
         self._pending_partial_tails.clear()
@@ -339,6 +355,52 @@ class UMBPStoreConnectorScheduler:
         self._reference_store_blocks(meta)
         self._group_layer_plans(meta)
         return meta
+
+    def _add_boundary_state_plans(
+        self,
+        offloads: dict[str, list[tuple[int, int, int]]],
+        meta: UMBPConnectorMetadata,
+        finished: set[str],
+        preempted: set[str],
+    ) -> None:
+        """Store exact Mamba/hybrid boundary blocks handed off by core."""
+        prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
+        for request_id, entries in offloads.items():
+            if request_id in finished or request_id in preempted:
+                continue
+            request = self._requests.get(request_id)
+            tracker = self._request_trackers.get(request_id)
+            if request is None or tracker is None:
+                continue
+            plans: list[BlockTransferPlan] = []
+            for group_id, block_id, boundary_tokens in entries:
+                if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:
+                    continue
+                if boundary_tokens <= 0:
+                    continue
+                hash_index = boundary_tokens // self.hash_block_size - 1
+                if not 0 <= hash_index < len(request.block_hashes):
+                    continue
+                block_hash = request.block_hashes[hash_index]
+                plans.append(
+                    BlockTransferPlan(
+                        key=self.codec.key(block_hash, group_id),
+                        block_id=block_id,
+                        request_id=request_id,
+                        generation=tracker.generation,
+                        group_id=group_id,
+                        block_hash=block_hash,
+                        parent_block_hash=(
+                            request.block_hashes[hash_index - 1]
+                            if hash_index > 0
+                            else None
+                        ),
+                        block_size=self.group_block_sizes[group_id],
+                    )
+                )
+            if plans:
+                meta.store_plans.extend(plans)
+                meta.store_requests.setdefault(request_id, []).extend(plans)
 
     @staticmethod
     def _group_layer_plans(meta: UMBPConnectorMetadata) -> None:
