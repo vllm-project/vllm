@@ -341,13 +341,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         vllm_config = get_current_vllm_config()
-        self.isa = _get_attn_isa(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.block_size,
-            self.head_size,
-            self.kv_cache_dtype,
-        )
-
         self.use_zentorch_sdpa = should_use_zentorch_sdpa(
             attn_type,
             self.alibi_slopes,
