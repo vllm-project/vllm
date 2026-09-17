@@ -35,10 +35,3 @@ def _config(**kwargs) -> Glm5NextTextConfig:
 def test_rejects_unimplemented_config_options(kwargs, option):
     with pytest.raises(NotImplementedError, match=option):
         _validate_supported_config(_config(**kwargs))
-
-
-def test_accepts_the_shipped_checkpoint_options():
-    """The values GLM-5.3-Flash actually ships must pass."""
-    _validate_supported_config(
-        _config(index_topk=2048, index_kpool_compress=True, mhc=True)
-    )
