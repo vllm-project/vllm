@@ -106,3 +106,43 @@ def qsa_localize_dcp_indices(
         BLOCK_W=triton.next_power_of_2(max(selection_width, 1)),
     )
     return packed_indices
+
+
+def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:
+    """Rows where this rank owns none of the selected positions.
+
+    Derive emptiness from the count column, never from scanning the ids for
+    ``-1``. A reused buffer holds stale ids past its count, and the kernel
+    honours the count while a scan does not. The difference only shows under a
+    captured graph, so an eager run passes either way.
+
+    This is not the same as an empty shard. A rank can hold plenty of KV for a
+    sequence and still own none of what the selector chose, which happens
+    routinely at short context.
+    """
+    if packed_indices.ndim != 2 or packed_indices.shape[1] < 2:
+        raise ValueError("QSA packed indices need selection columns plus a count")
+    return packed_indices[:, -1] <= 0
+
+
+def qsa_neutralize_empty_owner_(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    empty_rows: torch.Tensor,
+) -> None:
+    """Give an empty owner the identity of the cross-rank merge.
+
+    ``out = 0`` and ``lse = -inf``. The merge weights by ``exp(lse - max)``, so
+    ``-inf`` contributes nothing, and zeroing the output keeps an undefined
+    payload from reaching the reduction: a stale or NaN value multiplied by a
+    zero weight is still NaN, and it would corrupt every rank.
+
+    Masked in place with no host synchronization, so this is safe to capture.
+    """
+    if empty_rows.dtype != torch.bool:
+        raise ValueError("empty_rows must be a boolean mask")
+    if out.shape[0] != empty_rows.shape[0] or lse.shape[0] != empty_rows.shape[0]:
+        raise ValueError("empty_rows must have one entry per row of out and lse")
+    mask = empty_rows.to(device=out.device)
+    out.masked_fill_(mask.view(-1, *([1] * (out.ndim - 1))), 0.0)
+    lse.masked_fill_(mask.view(-1, *([1] * (lse.ndim - 1))), float("-inf"))

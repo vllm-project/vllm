@@ -110,3 +110,80 @@ def test_kernel_matches_the_reference(world, rank, interleave):
         assert got == expected
         # everything past the count must be padding
         assert all(int(v) == PAD for v in packed[i, count:width])
+
+
+# --- empty-owner rows -------------------------------------------------------
+
+
+def test_empty_owner_comes_from_the_count_not_a_scan():
+    """A reused buffer holds stale ids past its count.
+
+    The attention kernel bounds its tile loop by the count, so a row with
+    count 0 contributes nothing even though its columns still hold ids. A scan
+    for `-1` would call that row non-empty and skip the neutralization, and the
+    difference only appears under a captured graph.
+    """
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_dcp_empty_owner_rows
+
+    width = 4
+    packed = torch.tensor([[7, 9, 11, 13, 0]], dtype=torch.int32)  # stale ids, count 0
+    empty = qsa_dcp_empty_owner_rows(packed)
+    assert bool(empty[0]) is True, "count 0 means empty owner"
+    scan_says_empty = bool((packed[0, :width] == PAD).all())
+    assert scan_says_empty is False, "a scan would disagree; that is the bug"
+
+
+def test_empty_owner_mask_tracks_the_count():
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_dcp_empty_owner_rows
+
+    packed = torch.tensor(
+        [[0, 1, PAD, 2], [PAD, PAD, PAD, 0], [4, PAD, PAD, 1]], dtype=torch.int32
+    )
+    got = qsa_dcp_empty_owner_rows(packed).tolist()
+    assert got == [False, True, False]
+
+
+def test_neutral_values_are_zero_and_negative_infinity():
+    """The identity of the LSE merge."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_neutralize_empty_owner_
+
+    out = torch.full((3, 2, 4), 5.0)
+    lse = torch.full((3, 2), 1.5)
+    empty = torch.tensor([False, True, False])
+    qsa_neutralize_empty_owner_(out, lse, empty)
+
+    assert torch.equal(out[1], torch.zeros_like(out[1]))
+    assert torch.isneginf(lse[1]).all()
+    assert torch.equal(out[0], torch.full_like(out[0], 5.0)), "row 0 untouched"
+    assert torch.equal(lse[2], torch.full_like(lse[2], 1.5)), "row 2 untouched"
+
+
+def test_neutralizing_clears_a_poisoned_payload():
+    """`NaN * 0 = NaN`. Zeroing the output is what stops it spreading.
+
+    A sparse kernel can leave an unwritten row undefined. Relying on the `-inf`
+    weight alone leaves the NaN inside the product, and the reduction then
+    carries it to every rank.
+
+    Modelled with two ranks, because that is the case that matters: one rank
+    owns nothing and carries a poisoned payload, the other has a real result.
+    The merged answer must be the real one.
+    """
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_neutralize_empty_owner_
+
+    empty_out = torch.tensor([[[float("nan"), 1e30]]])
+    empty_lse = torch.tensor([[0.0]])
+    qsa_neutralize_empty_owner_(empty_out, empty_lse, torch.tensor([True]))
+    assert torch.isfinite(empty_out).all(), "a poisoned payload survived"
+
+    good_out = torch.tensor([[[2.0, 4.0]]])
+    good_lse = torch.tensor([[1.0]])
+
+    lses = torch.stack([empty_lse, good_lse])
+    outs = torch.stack([empty_out, good_out])
+    lse_max = lses.max(dim=0).values
+    weights = torch.exp(lses - lse_max)
+    merged = (outs * weights.unsqueeze(-1)).sum(0) / weights.sum(0).unsqueeze(-1)
+
+    assert torch.isfinite(merged).all(), "the empty rank poisoned the merge"
+    torch.testing.assert_close(merged, good_out)
