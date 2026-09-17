@@ -58,7 +58,6 @@ def test_batched_deepgemm_vs_triton(
     E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
-
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
 
     device = "cuda"
@@ -186,19 +185,17 @@ def test_deepep_ll_selects_batched_deepgemm_in_batch_invariant_mode(
 )
 def test_batched_deepgemm_needle_batch_invariance(workspace_init):
     """A routed token is bitwise stable across companions and expected_m."""
-
     import deep_gemm
-    import vllm.envs as envs
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+
+    import vllm.envs as envs
 
     assert BatchedDeepGemmExperts._supports_batch_invariance()
     E, K, N, topk = 8, 128, 256, 2
     max_num_tokens = 256
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(E, N, K, BLOCK_SIZE)
     generator = torch.Generator(device="cuda").manual_seed(17)
-    tokens = torch.randn(
-        8, K, device="cuda", dtype=torch.bfloat16, generator=generator
-    )
+    tokens = torch.randn(8, K, device="cuda", dtype=torch.bfloat16, generator=generator)
     topk_ids = torch.randint(
         E, (8, topk), device="cuda", dtype=torch.int64, generator=generator
     )

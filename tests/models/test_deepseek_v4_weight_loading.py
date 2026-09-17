@@ -34,20 +34,14 @@ def test_attn_sink_uses_weight_loader_with_padded_shape(
         named_parameters=lambda: [("layers.0.attn.attn_sink", param)],
         get_expert_mapping=lambda: [],
     )
-    monkeypatch.setattr(
-        model_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(
-        model_module, "get_tensor_model_parallel_rank", lambda: 0
-    )
+    monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(model_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         model_module, "is_pp_missing_parameter", lambda name, module: False
     )
 
     loaded = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
-    result = DeepseekV4Model.load_weights(
-        model, [("layers.0.attn.attn_sink", loaded)]
-    )
+    result = DeepseekV4Model.load_weights(model, [("layers.0.attn.attn_sink", loaded)])
 
     assert result == {"layers.0.attn.attn_sink"}
     assert len(calls) == 1

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -25,6 +25,11 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import round_up
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWABackend,
+    DeepseekSparseSWAMetadataBuilder,
+)
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -33,6 +38,18 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+
+class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
+        return DeepseekSparseSWAFlashMLAMetadataBuilder
 
 
 def _batch_invariant_prefill_chunk_plan(
@@ -74,6 +91,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
     backend_cls = DeepseekV4FlashMLABackend
+    swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -140,7 +158,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             else:
                 assert self.topk_indices_buffer is not None
                 top_k = self.topk_indices_buffer.shape[-1]
-            combined_topk = round_up(top_k + self.window_size, 128)
+            combined_topk = round_up(
+                top_k + self.window_size + self.max_image_tokens, 128
+            )
             warmup_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -149,9 +169,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if not swa_only and self.compress_ratio == 128:
                 # Reserve the same C128 decode buffer used by the real path so
                 # workspace locking cannot be tripped by the first replay.
-                warmup_specs.append(
-                    ((self.max_num_batched_tokens, top_k), torch.int32)
-                )
+                warmup_specs.append(((self.max_num_batched_tokens, top_k), torch.int32))
             current_workspace_manager().get_simultaneous(
                 *warmup_specs,
             )
@@ -247,9 +265,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
-                    output_buffers=self._global_topk_output_buffers(
-                        self.topk_indices_buffer[:num_decode_tokens]
-                    ),
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
@@ -356,8 +371,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         seq_lens = swa_metadata.seq_lens[request_start:request_end]
         seq_lens_cpu = swa_metadata.seq_lens_cpu[request_start:request_end]
         query_start_loc = (
-            swa_metadata.query_start_loc[request_start : request_end + 1]
-            - token_start
+            swa_metadata.query_start_loc[request_start : request_end + 1] - token_start
         )
         query_start_loc_cpu = (
             swa_metadata.query_start_loc_cpu[request_start : request_end + 1]
@@ -470,6 +484,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         if not swa_only and self.compress_ratio == 128:
             local_topk = workspace[3]
+            assert attn_metadata is not None
             assert attn_metadata.c128a_decode_topk_lens is not None
             fill_c128_topk(
                 local_topk,
@@ -568,7 +583,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
+        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
             workspace = workspace_manager.get_simultaneous(
@@ -626,6 +641,21 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_M,
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
+                left_visible=(
+                    swa_metadata.prefill_left_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    swa_metadata.prefill_right_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_right_visible is not None
+                    else None
+                ),
+                max_image_tokens=self.max_image_tokens,
             )
             flash_mla_sparse_fwd(
                 q=q[query_start:query_end],

@@ -105,9 +105,7 @@ def test_decode_sparse_reuses_prefill_kernel(
     monkeypatch.setattr(
         flashmla_module, "current_workspace_manager", lambda: _WorkspaceManager()
     )
-    monkeypatch.setattr(
-        flashmla_module, "dequantize_and_gather_k_cache", fake_gather
-    )
+    monkeypatch.setattr(flashmla_module, "dequantize_and_gather_k_cache", fake_gather)
     monkeypatch.setattr(flashmla_module, "combine_topk_swa_indices", fake_combine)
     monkeypatch.setattr(flashmla_module, "flash_mla_sparse_fwd", fake_sparse_fwd)
     monkeypatch.setattr(

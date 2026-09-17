@@ -39,7 +39,6 @@ _GENERATE_SUFFIXES = [
 
 def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
-
     dense_modules = try_get_dense_modules(
         model_config.model, revision=model_config.revision
     )
@@ -236,7 +235,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
 
             def default_load_weights(weights):
                 loader = AutoWeightsLoader(self)
-                return loader.load_weights(weights)
+                mapper = getattr(self, "hf_to_vllm_mapper", None)
+                return loader.load_weights(weights, mapper=mapper)
 
             load_weights = getattr(super(), "load_weights", default_load_weights)
             return load_weights(mapped_weights)
@@ -248,8 +248,7 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
 
 
 def as_embedding_model(cls: type[_T]) -> type[_T]:
-    """
-    Subclass an existing vLLM model to support embeddings.
+    """Subclass an existing vLLM model to support embeddings.
 
     By default, the embeddings of the whole prompt are extracted from the
     normalized hidden state corresponding to the last token.
@@ -257,6 +256,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
     Note:
         We assume that no extra layers are added to the original model;
         please implement your own model if this is not the case.
+
     """
     # Avoid modifying existing embedding models
     if is_pooling_model(cls):
@@ -305,8 +305,7 @@ def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
 
 
 def as_seq_cls_model(cls: type[_T]) -> type[_T]:
-    """
-    Subclass an existing vLLM model to support classify and score tasks.
+    """Subclass an existing vLLM model to support classify and score tasks.
 
     By default, the class probabilities are extracted from the softmaxed
     hidden state corresponding to the last token.
@@ -315,6 +314,7 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
         We assume that the classification head is a single linear layer
         stored as the attribute `score` of the top-level model;
         please implement your own model if this is not the case.
+
     """
     # Avoid modifying existing classification models
     if is_pooling_model(cls):
@@ -445,8 +445,7 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
 
 
 def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
-    """
-    Get the language model component for sequence classification conversion.
+    """Get the language model component for sequence classification conversion.
     For VLMs, returns the inner language model. For standard LLMs, returns model itself.
     """
     multimodal_model: object = model
@@ -480,8 +479,7 @@ def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
 
 @contextmanager
 def _disable_seq_cls_loading_on_inner_model(language_model, is_vlm: bool):
-    """
-    Context manager to temporarily disable sequence classification loading
+    """Context manager to temporarily disable sequence classification loading
     on inner VLM models to prevent recursive seq_cls_model_loader calls.
     """
     if not is_vlm:
@@ -584,10 +582,11 @@ def load_weights_using_from_2_way_softmax(
     )
     loaded_weights.add(score_weight_name)
 
-    lm_head_name = "lm_head.weight"
+    lm_head_name: str | None = "lm_head.weight"
     if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
         lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
-    loaded_weights.discard(lm_head_name)
+    if lm_head_name is not None:
+        loaded_weights.discard(lm_head_name)
     return loaded_weights
 
 
@@ -649,10 +648,11 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     )
     loaded_weights.add(score_weight_name)
 
-    lm_head_name = "lm_head.weight"
+    lm_head_name: str | None = "lm_head.weight"
     if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
         lm_head_name = hf_to_vllm_mapper._map_name(lm_head_name)
-    loaded_weights.discard(lm_head_name)
+    if lm_head_name is not None:
+        loaded_weights.discard(lm_head_name)
     return loaded_weights
 
 

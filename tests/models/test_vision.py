@@ -41,9 +41,7 @@ pytestmark = pytest.mark.cpu_test
 def test_resolve_visual_encoder_outputs(
     select_layers, num_layers_loaded, max_possible_layers, expected_features
 ):
-    """
-    Test that offsets are correctly handled for vision feature layers.
-    """
+    """Test that offsets are correctly handled for vision feature layers."""
     encoder_outputs = [torch.tensor([idx]) for idx in range(num_layers_loaded + 1)]
     output_tensor = resolve_visual_encoder_outputs(
         encoder_outputs=encoder_outputs,
@@ -94,15 +92,13 @@ def test_run_dp_sharded_vision_model(batch_size: int):
 def run_dp_sharded_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_vision_model produces the same results as
+    """Test that run_dp_sharded_vision_model produces the same results as
     calling the model directly.
     """
-
     # Set random seed for reproducibility
     set_random_seed(0)
 
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -282,13 +278,12 @@ def test_run_dp_sharded_mrope_vision_model(batch_size: int):
 def run_dp_sharded_mrope_vision_model_vs_direct(
     local_rank: int, world_size: int, batch_size: int, master_port: int
 ):
-    """
-    Test that run_dp_sharded_mrope_vision_model produces the same results as
+    """Test that run_dp_sharded_mrope_vision_model produces the same results as
     calling the model directly.
     """
     # Set random seed for reproducibility
     set_random_seed(0)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -365,7 +360,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
 ):
     """Test run_dp_sharded_mrope_vision_model with empty input."""
     # Set up distributed environment
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
@@ -414,7 +409,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
     # Set up distributed environment
     set_random_seed(123)
-    device = f"{current_platform.device_name}:{local_rank}"
+    device = f"{current_platform.device_type}:{local_rank}"
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 

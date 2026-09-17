@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils import fp8_utils
 
 
@@ -30,9 +31,7 @@ def test_required_batch_invariant_kernel_loads_configured_library(monkeypatch):
     assert calls == ["/test/bi-kernel.so"]
 
 
-def test_required_batch_invariant_kernel_rejects_missing_library(
-    monkeypatch, tmp_path
-):
+def test_required_batch_invariant_kernel_rejects_missing_library(monkeypatch, tmp_path):
     missing = tmp_path / "_vllm_batch_invariant_C.so"
     monkeypatch.setenv("VLLM_BATCH_INVARIANT_KERNEL_LIB", str(missing))
 
@@ -121,3 +120,20 @@ def test_masked_deepgemm_forwards_clamp_to_bi_kernel(monkeypatch):
     assert calls[0]["round_scale"] is True
     assert calls[0]["clamp_limit"] == 10.0
     assert calls[0]["masked_m"] is counts
+
+
+def test_quant_kernel_gated_on_batch_invariant_flag(monkeypatch, tmp_path):
+    """The BI fused quant kernel must not be selected when BI is disabled."""
+    lib = tmp_path / "_vllm_batch_invariant_C.so"
+    lib.write_bytes(b"")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT_KERNEL_LIB", str(lib))
+    monkeypatch.setattr(
+        fp8_utils, "_load_batch_invariant_kernel_library", lambda path: None
+    )
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert fp8_utils.batch_invariant_quant_kernel_available()
+    assert not fp8_utils.is_batch_invariant_quant_kernel_enabled()
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert fp8_utils.is_batch_invariant_quant_kernel_enabled()

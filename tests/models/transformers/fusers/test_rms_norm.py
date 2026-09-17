@@ -60,6 +60,54 @@ class LayerNorm(RMSNorm):
         return self.weight * self._rms(x)
 
 
+class NamedEpsRMSNorm(nn.Module):
+    """Holds eps under `attr`, with no `variance_epsilon` to find instead."""
+
+    attr = "eps"
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden))
+        setattr(self, self.attr, eps)
+
+    def forward(self, x):
+        eps = getattr(self, self.attr)
+        return self.weight * (x * torch.rsqrt(x.pow(2).mean(-1, True) + eps))
+
+
+class ToleranceRMSNorm(NamedEpsRMSNorm):
+    """Names eps something other than `eps`, so only its value identifies it."""
+
+    attr = "tolerance"
+
+
+class LiteralEpsRMSNorm(RMSNorm):
+    """eps is a literal in the source, and an unrelated attribute happens to
+    hold the same value: matching on the value alone would bind to it."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-5):
+        super().__init__(hidden, eps)
+        self.epsilon_lookalike = 1e-4
+
+    def forward(self, x):
+        return self.weight * (x * torch.rsqrt(x.pow(2).mean(-1, True) + 1e-4))
+
+
+class AmbiguousEpsRMSNorm(nn.Module):
+    """Two attributes hold the eps value, and the forward reads the second, so
+    their order cannot pick it."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden))
+        self.decoy_eps = eps
+        self.variance_epsilon = eps
+
+    def forward(self, x):
+        var = x.pow(2).mean(-1, True)
+        return self.weight * (x * torch.rsqrt(var + self.variance_epsilon))
+
+
 class NotAnRMSNorm(RMSNorm):
     """Mean-subtracting LayerNorm-like math -> not an RMSNorm."""
 
@@ -114,7 +162,7 @@ class UntraceableGatedRMSNorm(RMSNorm):
 )
 def test_detects_rms_norm_variants(cls, eps, zero_centered):
     with torch.device("meta"):
-        fuser = get_fuser(cls(16, eps=eps))
+        fuser = get_fuser(cls(16, eps=eps), RMSNormFuser)
     assert isinstance(fuser, RMSNormFuser)
     assert fuser.zero_centered == zero_centered
 
@@ -123,7 +171,7 @@ def test_detects_rms_norm_variants(cls, eps, zero_centered):
 def test_non_rms_norms_are_not_matched(cls):
     with torch.device("meta"):
         module = cls(16) if cls is nn.LayerNorm else cls()
-    assert not isinstance(get_fuser(module), RMSNormFuser)
+    assert get_fuser(module, RMSNormFuser) is None
 
 
 @pytest.mark.parametrize(
@@ -131,7 +179,7 @@ def test_non_rms_norms_are_not_matched(cls):
 )
 def test_gated_rms_norm_is_not_fused(cls):
     with torch.device("meta"):
-        assert not isinstance(get_fuser(cls()), RMSNormFuser)
+        assert get_fuser(cls(), RMSNormFuser) is None
 
 
 @pytest.mark.parametrize(
@@ -148,7 +196,7 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
 
     with torch.device("meta"):
         module = cls()
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         built = fuser.fuse(module, "norm", default_vllm_config)
     from vllm.model_executor.models.transformers.fusers.rms_norm import (
         TPAwareNormMixin,
@@ -173,7 +221,7 @@ def test_weightless_norm_has_no_hidden_size(default_vllm_config):
     matching the unfused norm and vLLM's native `RMSNorm(hidden_size=head_dim)`.
     """
     module = WeightlessRMSNorm(72)
-    built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
     assert built.hidden_size == 0
 
     built.tp_size = 2  # emulate TP=2 without a real process group
@@ -188,7 +236,7 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 
     with torch.device("meta"):
         module = torch.nn.RMSNorm(16)  # forward is a single `F.rms_norm` call
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         assert isinstance(fuser, RMSNormFuser)
         assert not fuser.zero_centered
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.float32))
@@ -203,8 +251,51 @@ def test_eps_is_derived_per_instance(default_vllm_config):
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
-            built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+            fuser = get_fuser(module, RMSNormFuser)
+            built = fuser.fuse(module, "norm", default_vllm_config)
             assert built.variance_epsilon == eps
+
+
+@pytest.mark.parametrize("cls", [NamedEpsRMSNorm, ToleranceRMSNorm])
+def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
+    """The eps attribute is identified by holding the traced value, so a norm
+    stays per-instance correct whatever it names it."""
+    with torch.device("meta"):
+        for eps in (1e-5, 1e-6):
+            module = cls(16, eps=eps)
+            fuser = get_fuser(module, RMSNormFuser)
+            assert fuser.eps_attr == cls.attr
+            built = fuser.fuse(module, "norm", default_vllm_config)
+            assert built.variance_epsilon == eps
+
+
+def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplog):
+    """A literal eps is recognised as coming from no attribute, even when one
+    holds the same value, and is taken from the traced source instead."""
+    logger = "vllm.model_executor.models.transformers.fusers.rms_norm"
+    with caplog.at_level("DEBUG", logger=logger), torch.device("meta"):
+        module = LiteralEpsRMSNorm()
+        fuser = get_fuser(module, RMSNormFuser)
+        built = fuser.fuse(module, "norm", default_vllm_config)
+    assert fuser.eps_attr is None
+    assert built.variance_epsilon == 1e-4
+    assert "does not hold its eps" in caplog.text
+
+
+def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
+    """When several attributes hold the eps value, the one the forward actually
+    reads is identified, and they are all left as they were found."""
+    with torch.device("meta"):
+        module = AmbiguousEpsRMSNorm(16, eps=1e-6)
+        before = dict(vars(module))
+        fuser = get_fuser(module, RMSNormFuser)
+        assert fuser.eps_attr == "variance_epsilon"
+        assert vars(module) == before
+
+        other = AmbiguousEpsRMSNorm(16, eps=1e-5)
+        other.decoy_eps = 1e-3
+        built = fuser.fuse(other, "norm", default_vllm_config)
+    assert built.variance_epsilon == 1e-5
 
 
 def test_fused_norm_is_gather_capable(default_vllm_config):
