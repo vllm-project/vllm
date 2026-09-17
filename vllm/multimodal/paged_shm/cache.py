@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Paged shared memory cache for multi-modal processing.
+"""Paged shared memory cache for multi-modal processing.
 
 **Workflow:**
 - **Sender**: Encodes item into MessagePack chunks. If multiple chunks (large tensor),
@@ -51,8 +50,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class CacheStats:
-    """
-    Thread-safe statistics collector for cache operations.
+    """Thread-safe statistics collector for cache operations.
     Maintains hit count, total accesses, and supports incremental reporting.
     """
 
@@ -76,8 +74,7 @@ class CacheStats:
             self._last_info = CacheInfo(hits=0, total=0)
 
     def make_stats(self, delta: bool = False) -> CacheInfo:
-        """
-        Return current statistics. If delta=True, return the increment since the
+        """Return current statistics. If delta=True, return the increment since the
         last call to make_stats(delta=True) (or since last reset).
         """
         with self._lock:
@@ -143,8 +140,7 @@ class PagedShmCache:
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        """
-        Encode and write the item to shared memory.
+        """Encode and write the item to shared memory.
 
         Steps:
         1. Encode the item into chunks;
@@ -209,8 +205,7 @@ class PagedShmCache:
     def get_item(
         self, mm_hash: str, skip_tensor_payload: bool = False
     ) -> MultiModalProcessorCacheOutItem:
-        """
-        Read and decode an item from shared memory.
+        """Read and decode an item from shared memory.
 
         Steps:
         1. Open a read handle for the given hash, retrieving the allocated blocks.
@@ -268,8 +263,7 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        """
-        Update the cache with the given item and return the cached representation.
+        """Update the cache with the given item and return the cached representation.
 
         If `mm_item` is provided, we treat it as a cache hit, record stats, and
         store it. Otherwise, we treat it as a miss and read from SHM.
@@ -315,8 +309,7 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        """
-        Return the cached item.
+        """Return the cached item.
 
         If `mm_item` is not None, return it directly (cache hit).
         Otherwise, read from SHM and return the reconstructed kwargs item.

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Paged shared memory storage
+"""Paged shared memory storage
 The paged shared memory storage is utilized by three components.
 - PagedShmServer: Manages the entire lifecycle—creates on start, unlinks on stop.
     No I/O operations.
@@ -84,9 +83,7 @@ class PagedShmStorage:
             )
 
     def _validate_blocks(self, size: int, blocks: list[int]) -> None:
-        """
-        Validate size and block indices for a read/write operation.
-        """
+        """Validate size and block indices for a read/write operation."""
         if size <= 0:
             raise ValueError(f"Size must be positive, got {size}")
         if not blocks:
@@ -103,8 +100,7 @@ class PagedShmStorage:
             )
 
     def _iterate_blocks(self, size: int, blocks: list[int], as_numpy: bool = True):
-        """
-        Yield (buffer_view, chunk_size, offset_in_data) for each block.
+        """Yield (buffer_view, chunk_size, offset_in_data) for each block.
         `buffer_view` is either a numpy array or a torch tensor.
         """
         data = self._shm_np if as_numpy else self._shm_tensor
@@ -120,8 +116,7 @@ class PagedShmStorage:
     def _build_address_lists(
         self, size: int, blocks: list[int], data_ptr: int, is_read: bool
     ) -> tuple[list[int], list[int], list[int]]:
-        """
-        Build source/destination address lists for batched CUDA transfers.
+        """Build source/destination address lists for batched CUDA transfers.
         Returns (src_addrs, dst_addrs, sizes).
         """
         src_addrs_list: list[int] = []
@@ -145,13 +140,13 @@ class PagedShmStorage:
         dst_addrs: list[int],
         sizes: list[int],
     ) -> None:
-        """
-        Execute a batched memcpy using the custom CUDA operation.
+        """Execute a batched memcpy using the custom CUDA operation.
 
         Args:
             src_addrs: List of source addresses.
             dst_addrs: List of destination addresses.
             sizes: List of transfer sizes in bytes.
+
         """
         src_t = torch.tensor(src_addrs, dtype=torch.int64, device="cpu")
         dst_t = torch.tensor(dst_addrs, dtype=torch.int64, device="cpu")
@@ -171,8 +166,7 @@ class PagedShmStorage:
     def get_iterator_numpy(
         self, size: int, blocks: list[int]
     ) -> Callable[[], Iterator[tuple[np.ndarray, int]]]:
-        """
-        Return a callable that yields (numpy_view, chunk_size) for each block.
+        """Return a callable that yields (numpy_view, chunk_size) for each block.
         The view is a slice of the shared memory buffer.
         """
         self._validate_blocks(size, blocks)
@@ -186,8 +180,7 @@ class PagedShmStorage:
     def get_iterator_tensor(
         self, size: int, blocks: list[int]
     ) -> Callable[[], Iterator[tuple[torch.Tensor, int]]]:
-        """
-        Return a callable that yields (torch_tensor_view, chunk_size) for each block.
+        """Return a callable that yields (torch_tensor_view, chunk_size) for each block.
         The view is a slice of the shared memory buffer.
         """
         self._validate_blocks(size, blocks)
@@ -221,8 +214,7 @@ class PagedShmStorage:
         self._batched_transfer(src_addrs, dst_addrs, sizes)
 
     def write(self, data: bytes | np.ndarray | torch.Tensor, blocks: list[int]) -> None:
-        """
-        Write data into the given blocks.
+        """Write data into the given blocks.
         - If `data` is a GPU tensor, it is transferred via the GPU path.
         - Otherwise, CPU data (bytes, numpy array, or CPU tensor) is written directly.
         """
@@ -240,16 +232,13 @@ class PagedShmStorage:
         self._write_cpu(data_np.flatten(), blocks)
 
     def write_from_device(self, data: torch.Tensor, blocks: list[int]) -> None:
-        """
-        Write a GPU tensor directly into shared memory (GPU -> CPU).
+        """Write a GPU tensor directly into shared memory (GPU -> CPU).
         The shared memory must be pinned.
         """
         self._write_gpu(data, blocks)
 
     def read_to_numpy(self, size: int, blocks: list[int]) -> np.ndarray:
-        """
-        Read data from blocks and return as a contiguous numpy array (CPU).
-        """
+        """Read data from blocks and return as a contiguous numpy array (CPU)."""
         self._validate_blocks(size, blocks)
         out = np.empty(size, dtype=np.uint8)
         for array, offset, start in self._iterate_blocks(size, blocks, as_numpy=True):
@@ -263,8 +252,7 @@ class PagedShmStorage:
         device: DeviceLikeType = "cpu",
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Read data into a torch tensor.
+        """Read data into a torch tensor.
         If `device` is not CPU, a batched GPU transfer is used (requires pinned memory).
         If `out` is provided, it will be used (must have correct size and device);
         otherwise a new tensor is allocated.
@@ -293,8 +281,7 @@ class PagedShmStorage:
         device: DeviceLikeType,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Read data from blocks into a GPU tensor via batched transfer.
+        """Read data from blocks into a GPU tensor via batched transfer.
         Requires pinned shared memory.
         If `out` is provided, it is used; otherwise a new tensor is allocated.
         """

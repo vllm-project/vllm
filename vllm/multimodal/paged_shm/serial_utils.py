@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Serialization utilities for paged shared memory cache.
+"""Serialization utilities for paged shared memory cache.
 
 This module provides functions to encode multi-modal cache items into chunks
 that can be stored in shared memory blocks, and to decode them back.
@@ -121,8 +120,7 @@ class PagedShmDecoder(MsgpackDecoder):
 
 
 def _build_metadata_chunk(chunk_lengths: list[int], chunk_types: list[int]) -> bytes:
-    """
-    Build the metadata chunk bytes.
+    """Build the metadata chunk bytes.
 
     Args:
         chunk_lengths: Original lengths (in bytes) of each data chunk.
@@ -130,6 +128,7 @@ def _build_metadata_chunk(chunk_lengths: list[int], chunk_types: list[int]) -> b
 
     Returns:
         Bytes of the complete metadata chunk (header + entries).
+
     """
     num_data = len(chunk_lengths)
     if num_data != len(chunk_types):
@@ -147,8 +146,7 @@ def _build_metadata_chunk(chunk_lengths: list[int], chunk_types: list[int]) -> b
 
 
 def _parse_metadata_chunk(meta_bytes: bytes) -> tuple[list[int], list[int]]:
-    """
-    Parse the metadata chunk bytes.
+    """Parse the metadata chunk bytes.
 
     Args:
         meta_bytes: Raw bytes of the metadata chunk (including header).
@@ -158,6 +156,7 @@ def _parse_metadata_chunk(meta_bytes: bytes) -> tuple[list[int], list[int]]:
 
     Raises:
         ValueError: If magic number is invalid or data is malformed.
+
     """
     if len(meta_bytes) < HEADER_SIZE:
         raise ValueError("Metadata chunk too short to contain header")
@@ -198,8 +197,7 @@ def encode_item(
     mm_item: MultiModalProcessorCacheInItem,
     encoder: PagedShmEncoder,
 ) -> tuple[list[bytes | np.ndarray | torch.Tensor], list[int]] | None:
-    """
-    Encode a multi-modal item into chunks suitable for shared memory storage.
+    """Encode a multi-modal item into chunks suitable for shared memory storage.
 
     When the encoded data consists of a single chunk (no large tensor), returns
     None to indicate that shared memory transfer is unnecessary.
@@ -213,6 +211,7 @@ def encode_item(
             - chunks: List of bytes, numpy arrays, or torch tensors.
             - lengths: List of byte sizes for each chunk (for easy block allocation).
         Or None if only one data chunk exists.
+
     """
     if mm_item is None:
         return None
@@ -267,8 +266,7 @@ def write_encoded_to_blocks(
     chunks: Sequence[bytes | np.ndarray | torch.Tensor],
     blocks: Sequence[int],
 ) -> None:
-    """
-    Write encoded chunks into shared memory blocks.
+    """Write encoded chunks into shared memory blocks.
 
     Args:
         storage: The shared memory storage instance.
@@ -277,6 +275,7 @@ def write_encoded_to_blocks(
 
     Raises:
         ValueError: If blocks list is empty or insufficient for any chunk.
+
     """
     if not blocks:
         raise ValueError("Blocks list cannot be empty")
@@ -306,8 +305,7 @@ def read_decoded_from_blocks(
     skip_tensor_payload: bool = False,
     device: DeviceLikeType = "cpu",
 ) -> MultiModalProcessorCacheOutItem:
-    """
-    Read and decode data from shared memory blocks.
+    """Read and decode data from shared memory blocks.
 
     The layout must match the format produced by `encode_item()`.
 
@@ -325,6 +323,7 @@ def read_decoded_from_blocks(
 
     Raises:
         ValueError: If blocks are insufficient, magic number invalid, or data malformed.
+
     """
     if not blocks:
         raise ValueError("Blocks list cannot be empty")

@@ -53,8 +53,7 @@ _ERROR_RESPONSE_TEMPLATE = '{"status":"error","message":"%s"}'
 # Priority queue with deadline caching (single‑threaded)
 # ------------------------------------------------------------------
 class PriorityQueue:
-    """
-    Simple priority queue with min‑heap ordering.
+    """Simple priority queue with min‑heap ordering.
     Maintains a cached next deadline to speed up expiration checks.
     Not thread‑safe – designed for single‑threaded event loops.
     """
@@ -89,8 +88,7 @@ class PriorityQueue:
         return self._heap[0] if self._heap else None
 
     def clean_expired(self, now: float, on_expired: Callable[[Any], None]) -> bool:
-        """
-        Remove all items whose deadline <= now, calling on_expired for each.
+        """Remove all items whose deadline <= now, calling on_expired for each.
         Returns True if the queue becomes empty.
         Uses the cached next deadline to skip if no item is due.
         """
@@ -111,9 +109,7 @@ class PriorityQueue:
 # PagedShmServer – core server logic
 # ------------------------------------------------------------------
 class PagedShmServer:
-    """
-    Server‑side wrapper that exposes PagedShmManager over ZMQ.
-    """
+    """Server‑side wrapper that exposes PagedShmManager over ZMQ."""
 
     def __init__(
         self,
@@ -423,8 +419,7 @@ class PagedShmServer:
         return self._build_write_response(allocated, item_objs)
 
     def _handle_open_read(self, payload: str, identity: bytes) -> str | None:
-        """
-        Acquire a read reference to an item, supporting both UUIDs and tokens.
+        """Acquire a read reference to an item, supporting both UUIDs and tokens.
         For UUIDs, generates a new read token and increments ref_count.
         For tokens, returns data without modifying ref_count.
         """
@@ -497,8 +492,7 @@ class PagedShmServer:
             return json.dumps({"status": "ok", "data": asdict(resp)})
 
     def _handle_open_write_or_read(self, payload: str, identity: bytes) -> str | None:
-        """
-        Atomically open for reading or writing a batch of items.
+        """Atomically open for reading or writing a batch of items.
 
         For each item:
           - If the UUID does not exist, it is allocated for writing.
@@ -512,9 +506,11 @@ class PagedShmServer:
         Returns:
             JSON response immediately if memory is available.
             None if the request is queued (timeout > 0 and MemoryError).
+
         Raises:
             MemoryError: if timeout=0 and not enough memory.
             ValueError: on invalid parameters.
+
         """
         req = json.loads(payload)
         items_data = req["items"]
@@ -660,8 +656,7 @@ class PagedShmServer:
     # Deferred request processing (FCFS with batch attempts)
     # ------------------------------------------------------------------
     def _defer_memory_requests(self, socket: zmq.Socket) -> None:
-        """
-        Process as many pending memory requests as possible.
+        """Process as many pending memory requests as possible.
         Stops when the next request cannot be satisfied.
         """
         while not self._memory_waiters.empty():
@@ -707,8 +702,7 @@ class PagedShmServer:
         return self._core_write_or_read(items_data)
 
     def defer_open_read(self, socket: zmq.Socket, uuid: str) -> None:
-        """
-        Wake up pending open_read waiters for the given UUID.
+        """Wake up pending open_read waiters for the given UUID.
         Assumes expired entries have already been cleaned.
         For each waiter:
           - If the original request was a token:

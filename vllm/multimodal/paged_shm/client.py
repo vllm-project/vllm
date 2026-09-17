@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Paged shared memory client.
+"""Paged shared memory client.
 
 This module provides a ZMQ-based client for the PagedShmServer, enabling
 remote processes to read and write large binary data (bytes, NumPy arrays,
@@ -102,8 +101,7 @@ class _BaseClient:
         return frames
 
     def _parse_response(self, response: list[bytes]) -> str:
-        """
-        Parse server response.
+        """Parse server response.
 
         REQ socket receives only application frames, stripped of routing envelope.
         Expected: [status, data_bytes] (data_bytes may be empty).
@@ -138,8 +136,7 @@ class _BaseClient:
         return sock
 
     def _request(self, command: bytes, payload: str | None = None) -> str:
-        """
-        Send a command to the server and return the decoded response.
+        """Send a command to the server and return the decoded response.
 
         Uses a socket from the pool; if pool is empty, creates a new one.
         Sockets are returned to the pool if the total pool size is below
@@ -175,8 +172,7 @@ class _BaseClient:
 
 
 class _WriteContext:
-    """
-    Context manager that acquires a write lock (allocates blocks) on enter
+    """Context manager that acquires a write lock (allocates blocks) on enter
     and commits (close_write) or rolls back (delete) on exit.
     """
 
@@ -230,8 +226,7 @@ class _WriteContext:
 
 
 class _ReadContext:
-    """
-    Context manager that acquires a read lock on enter and releases it on exit.
+    """Context manager that acquires a read lock on enter and releases it on exit.
     Exposes ``size`` and ``blocks`` attributes.
 
     The `uuid_or_token` parameter can be either:
@@ -295,8 +290,7 @@ class _ReadContext:
 
 
 class PagedShmClientWithoutStorage(_BaseClient):
-    """
-    ZMQ client without local storage (does not attach to shared memory).
+    """ZMQ client without local storage (does not attach to shared memory).
     Useful for administration or light-weight clients that only need to
     send commands.
     """
@@ -345,8 +339,7 @@ class PagedShmClientWithoutStorage(_BaseClient):
     def open_write_or_read(
         self, items: list[ShmWriteRequest], timeout: float = 0.0
     ) -> list[ShmAllocation]:
-        """
-        Atomically open for reading or writing a batch of items.
+        """Atomically open for reading or writing a batch of items.
 
         For each item:
           - If the UUID does not exist, it is allocated for writing.
@@ -383,8 +376,7 @@ class PagedShmClientWithoutStorage(_BaseClient):
         return [ShmAllocation(**a) for a in resp_dict["data"]]
 
     def close_write(self, uuid: str) -> None:
-        """
-        Finalise a write operation for the given UUID.
+        """Finalise a write operation for the given UUID.
         The server will automatically reserve one read reference for each
         generated read token associated with this UUID, effectively pinning
         the item in the cache until each token is closed.
@@ -393,8 +385,7 @@ class PagedShmClientWithoutStorage(_BaseClient):
         self._request(CLOSE_WRITE, payload)
 
     def open_read(self, uuid_or_token: str, timeout: float = 0.0) -> ShmAllocation:
-        """
-        Acquire a read lock (if UUID) or return data (if token) for an item.
+        """Acquire a read lock (if UUID) or return data (if token) for an item.
 
         - If `uuid_or_token` is a **real UUID**, the server will:
             * Generate a new read token.
@@ -413,8 +404,7 @@ class PagedShmClientWithoutStorage(_BaseClient):
         return ShmAllocation(**resp_dict["data"])
 
     def close_read(self, token: str) -> None:
-        """
-        Release a read reference. **Must be called with a read token**.
+        """Release a read reference. **Must be called with a read token**.
         The token is destroyed on the server and its reserved read reference
         is released.
         """
@@ -441,16 +431,14 @@ class PagedShmClientWithoutStorage(_BaseClient):
         return json.loads(resp)
 
     def get_info(self, uuid_or_token: str) -> dict[str, Any]:
-        """
-        Return object info for the given UUID or read token.
+        """Return object info for the given UUID or read token.
         (Resolved on the server.)
         """
         resp = self._request(GET_INFO, uuid_or_token)
         return json.loads(resp)
 
     def debug_cleanup(self) -> None:
-        """
-        Send a DEBUG_CLEAN command to the server to forcibly clean up all
+        """Send a DEBUG_CLEAN command to the server to forcibly clean up all
         pending waiters and purge tokens. This is only effective if the server
         was started with debug=True; otherwise it raises RuntimeError.
         """
@@ -461,8 +449,7 @@ class PagedShmClientWithoutStorage(_BaseClient):
 
 
 class PagedShmClient(PagedShmClientWithoutStorage):
-    """
-    Client for the paged shared‑memory storage server.
+    """Client for the paged shared‑memory storage server.
 
     Maintains a pool of ZMQ REQ sockets for thread‑safe concurrent access.
     All public operations that require read/write locks are exposed through
@@ -549,8 +536,7 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         blocks: list[int] | None = None,
         timeout: float = 0.0,
     ) -> _ReadContext:
-        """
-        Create a context manager for a read operation.
+        """Create a context manager for a read operation.
 
         `uuid_or_token` can be either a raw UUID or a read token.
         - If UUID, the server generates a new token and increments ref_count.
@@ -580,8 +566,7 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         timeout: float = 0.0,
         generate_read_token: bool = False,
     ):
-        """
-        Write an item to the shared memory store.
+        """Write an item to the shared memory store.
 
         If `generate_read_token` is True, the server generates a read token
         and reserves a read reference for it at `close_write` time.
@@ -594,6 +579,7 @@ class PagedShmClient(PagedShmClientWithoutStorage):
                 tuple[int, str] (size, token)
             - If `async_write` is True:
                 tuple[int, Future, str | None] (size, future, token)
+
         """
         # Determine size in bytes
         if isinstance(data, torch.Tensor):
@@ -659,8 +645,7 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         device: DeviceLikeType = "cpu",
         timeout: float = 0.0,
     ) -> np.ndarray | torch.Tensor:
-        """
-        Read an item from shared memory.
+        """Read an item from shared memory.
 
         `uuid_or_token` can be either a raw UUID or a read token.
         The method uses `read_context` internally, so it automatically

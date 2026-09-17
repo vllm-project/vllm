@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Paged shared memory manager with LRU eviction.
+"""Paged shared memory manager with LRU eviction.
 
 Write flow:
 - open_write(items):
@@ -59,8 +58,7 @@ class PagedShmManager:
         )
 
     def open_write(self, items: list[ShmWriteRequest]) -> list[ShmSlot]:
-        """
-        Allocate blocks for a batch of items. To avoid partial allocation,
+        """Allocate blocks for a batch of items. To avoid partial allocation,
         submit multiple items in one batch.
         Refer to the wiki: Dining philosophers problem.
         """
@@ -110,8 +108,7 @@ class PagedShmManager:
         return allocated
 
     def close_write(self, uuid: str, open_n_reads: int = 0):
-        """
-        Finalize a write operation. If open_n_reads == 0, the item becomes idle
+        """Finalize a write operation. If open_n_reads == 0, the item becomes idle
         and may be cached.
         For non-cacheable items (use_cache=False) with no open reads, delete
         immediately to free resources.
@@ -134,8 +131,7 @@ class PagedShmManager:
             item.ref_count = open_n_reads
 
     def open_read(self, uuid: str) -> ShmSlot:
-        """
-        Increment the read reference count. If the item is idle and cacheable,
+        """Increment the read reference count. If the item is idle and cacheable,
         it is removed from the LRU cache (making its blocks unavailable for eviction).
         """
         item = self._get_item(uuid)
@@ -152,10 +148,9 @@ class PagedShmManager:
         return item
 
     def close_read(self, uuid: str):
-        """
-        Decrement the read reference count. If the count drops to zero:
-          - For cacheable items: put back into LRU.
-          - For non-cacheable items: delete immediately to free blocks.
+        """Decrement the read reference count. If the count drops to zero:
+        - For cacheable items: put back into LRU.
+        - For non-cacheable items: delete immediately to free blocks.
         """
         item = self._get_item(uuid)
         if item.ref_count == _REF_WRITING:
@@ -177,8 +172,7 @@ class PagedShmManager:
             self._lru_cache.put(uuid, item)
 
     def delete(self, uuid: str, force: bool = False):
-        """
-        Permanently delete an item. Its blocks are returned to the free pool.
+        """Permanently delete an item. Its blocks are returned to the free pool.
         If force=True, the item is deleted regardless of ref_count.
         """
         item = self._get_item(uuid)
@@ -240,8 +234,7 @@ class PagedShmManager:
         }
 
     def _evict(self, needed: int) -> None:
-        """
-        Evict least-recently-used cacheable items until at least `needed`
+        """Evict least-recently-used cacheable items until at least `needed`
         physical free blocks are available.
         """
         while len(self._free_blocks) < needed:
@@ -257,9 +250,7 @@ class PagedShmManager:
         return item
 
     def _get_readable_item_blocks(self, uuid: str) -> tuple[int, list[int]]:
-        """
-        This is used for PagedShmServer token-based open_read.
-        """
+        """This is used for PagedShmServer token-based open_read."""
         item = self._all_items.get(uuid)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")

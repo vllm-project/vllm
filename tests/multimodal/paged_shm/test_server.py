@@ -30,8 +30,7 @@ def server():
 
 @pytest.fixture(scope="function")
 def client(server):
-    """
-    Create a fresh client for each test and perform a debug cleanup
+    """Create a fresh client for each test and perform a debug cleanup
     before the test starts to remove any leftover waiters/tokens from
     previous tests.
     """
@@ -56,8 +55,7 @@ def _blocks_needed(size: int, block_size: int = 4096) -> int:
 
 
 def _fill_memory_with_writing(client) -> str:
-    """
-    Allocate all free blocks with a writing item (open_write without close_write).
+    """Allocate all free blocks with a writing item (open_write without close_write).
     This holds the blocks in the 'writing' state, preventing eviction.
     Returns the UUID so the caller can delete it to free space.
     """
@@ -564,8 +562,7 @@ class TestConcurrency:
 
 class TestTokenProtection:
     def test_auto_protection_holds_read_lock(self, client):
-        """
-        Writing with generate_read_token=True automatically reserves one read
+        """Writing with generate_read_token=True automatically reserves one read
         reference per token. Token can be open_read multiple times without being
         consumed until close_read is called.
         """
@@ -1328,8 +1325,7 @@ class TestInfoAndCache:
         client.delete(uuid)
 
     def test_use_cache_false_does_not_cache(self, client):
-        """
-        Behavior of non-cacheable items (use_cache=False):
+        """Behavior of non-cacheable items (use_cache=False):
         - If no read reference is retained after close_write,
           the item is deleted immediately.
         - If a read reference is retained via generate_read_token=True,
@@ -1591,8 +1587,7 @@ class TestOpenWriteOrRead:
         client.delete(existing_uuid)
 
     def test_pending_writes_immediate_return(self, client):
-        """
-        When UUID is being written, open_write_or_read returns immediately with
+        """When UUID is being written, open_write_or_read returns immediately with
         a token (blocks empty). We store the original blocks from the first
         open_write, then after getting the token, we write data using those
         blocks and close_write. Then we verify via token.
@@ -1664,9 +1659,7 @@ class TestOpenWriteOrRead:
         client.delete(writing_uuid)
 
     def test_pending_writes_with_wait_and_read(self, client):
-        """
-        Test wait_for_readable on token from open_write_or_read.
-        """
+        """Test wait_for_readable on token from open_write_or_read."""
         writing_uuid = _unique_uuid()
         write_alloc = client.open_write(
             [ShmWriteRequest(uuid=writing_uuid, size=100, use_cache=True)], timeout=0.0

@@ -422,8 +422,7 @@ class TestIntegration:
         assert _compare_items(original_item, decoded_item)
 
     def test_metadata_chunk_cross_blocks(self, client):
-        """
-        Test that metadata chunk can span multiple blocks when it's large.
+        """Test that metadata chunk can span multiple blocks when it's large.
         Create many medium-sized tensor chunks to force a large metadata chunk.
         Each tensor is slightly above the encoder's size_threshold, so each
         becomes a separate data chunk.
@@ -495,8 +494,7 @@ class TestIntegration:
         )
 
     def test_read_skip_tensor_payload(self, client):
-        """
-        Test that skip_tensor_payload=True skips reading tensor data chunks,
+        """Test that skip_tensor_payload=True skips reading tensor data chunks,
         returning None for those fields, while inline tensors and prompt_updates
         remain intact.
         """

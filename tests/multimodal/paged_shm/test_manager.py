@@ -59,8 +59,7 @@ class TestBasicWriteLifecycle:
         assert "small" in manager._lru_cache
 
     def test_close_write_auto_deletes_non_cacheable(self, manager, item_nocache):
-        """
-        For use_cache=False and no open reads, close_write deletes the item
+        """For use_cache=False and no open reads, close_write deletes the item
         immediately, freeing its blocks.
         """
         [alloc] = manager.open_write([item_nocache])
@@ -72,8 +71,7 @@ class TestBasicWriteLifecycle:
         assert len(manager._free_blocks) == 4
 
     def test_close_write_keeps_non_cacheable_if_open_reads(self, manager, item_nocache):
-        """
-        If open_n_reads > 0, the non-cacheable item is kept with the given
+        """If open_n_reads > 0, the non-cacheable item is kept with the given
         reference count. After all reads are closed, it is automatically deleted.
         """
         [alloc] = manager.open_write([item_nocache])
@@ -174,8 +172,7 @@ class TestReadLifecycle:
             manager.close_read("small")
 
     def test_non_cacheable_read_and_auto_delete(self, manager, item_nocache):
-        """
-        For non-cacheable items, they must be kept alive by an open read
+        """For non-cacheable items, they must be kept alive by an open read
         reference (via close_write with open_n_reads).  After close_read,
         the item is auto-deleted.
         """
@@ -217,8 +214,7 @@ class TestDelete:
         assert manager._total_available_blocks == 4
 
     def test_delete_idle_noncacheable_item(self, manager, item_nocache):
-        """
-        Non-cacheable items are auto-deleted on close_write, so we cannot
+        """Non-cacheable items are auto-deleted on close_write, so we cannot
         have an idle non-cacheable item. We test force-deleting a busy one.
         """
         manager.open_write([item_nocache])
