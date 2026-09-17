@@ -824,13 +824,17 @@ fn atem_name_attr(attrs: &str) -> Option<String> {
                 .chars()
                 .next_back()
                 .is_some_and(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-        if is_boundary {
-            let value_start = start + "name=\"".len();
-            let value_end = attrs[value_start..].find('"')? + value_start;
-            // `[^"]+`: an empty name attribute does not count.
-            return (value_end > value_start).then(|| attrs[value_start..value_end].to_string());
+        if !is_boundary {
+            offset = start + 1;
+            continue;
         }
-        offset = start + 1;
+        let value_start = start + "name=\"".len();
+        let value_end = attrs[value_start..].find('"')? + value_start;
+        // `[^"]+`: an empty name attribute does not count; a later one may.
+        if value_end > value_start {
+            return Some(attrs[value_start..value_end].to_string());
+        }
+        offset = value_end + 1;
     }
     None
 }
@@ -1412,6 +1416,21 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_index, 0);
         assert_eq!(calls[0].name.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn muse_glimmer_empty_name_attribute_defers_to_a_later_one() {
+        let text = "<|start|>assistant to=real<|message|>\
+             <atem:function_calls>\n<atem:invoke name=\"\" name=\"real\">\n\
+             <atem:parameter name=\"\" name=\"k\">v</atem:parameter>\n</atem:invoke>\n\
+             </atem:function_calls><|eot|>";
+
+        let mut parser = test_parser();
+        let output = parser.parse_complete(text).unwrap();
+
+        let call = first_call(&output);
+        assert_eq!(call.name.as_deref(), Some("real"));
+        assert_eq!(call.arguments, r#"{"k":"v"}"#);
     }
 
     #[test]
