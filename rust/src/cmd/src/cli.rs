@@ -33,6 +33,7 @@ use vllm_server::{
     DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
     RendererSelection,
 };
+use vllm_text::backend::hf::HfOverrides;
 
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -113,6 +114,9 @@ pub struct RenderArgs {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     #[arg(long)]
     revision: Option<String>,
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    hf_overrides: HfOverrides,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -161,6 +165,7 @@ impl RenderArgs {
         RenderConfig {
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
@@ -203,6 +208,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub revision: Option<String>,
+
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    /// Objects merge recursively and arrays/scalars replace existing values.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub hf_overrides: HfOverrides,
 
     /// The source of generation-config sampling defaults. `"auto"` loads the
     /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
@@ -500,6 +511,7 @@ impl SharedRuntimeArgs {
             },
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
@@ -556,6 +568,7 @@ impl SharedRuntimeArgs {
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             revision: self.revision,
+            hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
@@ -761,6 +774,9 @@ impl ServeArgs {
         let reasoning_parser =
             effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
         let profiler_config = self.runtime.profiler_config_json();
+        let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
+            serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
+        });
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
@@ -773,6 +789,7 @@ impl ServeArgs {
             self.runtime.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
+            hf_overrides,
         )
     }
 }

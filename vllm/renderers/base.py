@@ -340,8 +340,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_warmup_future = None
 
     def warmup(self, chat_params: ChatParams) -> None:
-        """
-        Warm up this renderer to avoid first-request latency.
+        """Warm up this renderer to avoid first-request latency.
 
         For chat requests:
         - Jinja2 template compilation
@@ -408,8 +407,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return self.tokenizer.eos_token_id
 
     def get_dec_start_token_id(self) -> int:
-        """
-        Obtain the decoder start token id employed by an encoder/decoder model,
+        """Obtain the decoder start token id employed by an encoder/decoder model,
         raising an error if it is not available.
         """
         dec_start_token_id = getattr(
