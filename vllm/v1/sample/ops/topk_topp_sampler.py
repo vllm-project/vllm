@@ -83,8 +83,8 @@ def flashinfer_sampler_supported() -> bool:
     JIT-compile for the current GPU/CUDA toolchain. Raises ``RuntimeError`` if
     the user explicitly opted in via the env var but FlashInfer is unavailable.
 
-    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
-    otherwise importing the FlashInfer backend below raises ``ImportError``.
+    Treats an absent FlashInfer as just another unavailability reason, since
+    ``requirements/cuda.txt`` does not cover every platform vLLM runs on.
 
     Note: callers must additionally ensure ``logprobs_mode`` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
@@ -98,27 +98,33 @@ def flashinfer_sampler_supported() -> bool:
             "VLLM_USE_FLASHINFER_SAMPLER=0."
         )
         return False
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
     capability = current_platform.get_device_capability()
     assert capability is not None
     unsupported_reason: str | None = None
-    if not FlashInferBackend.supports_compute_capability(capability):
-        unsupported_reason = (
-            f"unsupported compute capability {capability.as_version_str()}"
-        )
-    elif (
-        num_sms := current_platform.num_compute_units(
-            torch.accelerator.current_device_index()
-        )
-    ) <= 16:
-        # FlashInfer 0.7+ rejects multi-CTA top-k masking on <=16 SMs because
-        # its cross-CTA software barrier cannot guarantee forward progress.
-        unsupported_reason = (
-            f"top-k masking requires more than 16 SMs; device has {num_sms}"
-        )
+    try:
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    except ImportError as exc:
+        # The sampler is on by default, so an unguarded import here aborts
+        # engine init on any install without flashinfer instead of falling
+        # back to native sampling.
+        unsupported_reason = f"FlashInfer is not installed ({exc})"
     else:
-        unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
+        if not FlashInferBackend.supports_compute_capability(capability):
+            unsupported_reason = (
+                f"unsupported compute capability {capability.as_version_str()}"
+            )
+        elif (
+            num_sms := current_platform.num_compute_units(
+                torch.accelerator.current_device_index()
+            )
+        ) <= 16:
+            # FlashInfer 0.7+ rejects multi-CTA top-k masking on <=16 SMs because
+            # its cross-CTA software barrier cannot guarantee forward progress.
+            unsupported_reason = (
+                f"top-k masking requires more than 16 SMs; device has {num_sms}"
+            )
+        else:
+            unsupported_reason = _flashinfer_jit_unsupported_reason(capability)
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
