@@ -163,7 +163,7 @@ def test_modular_bert_cross_encoder_score_parity(
             )
 
 
-@pytest.mark.parametrize("pooling_mode", ["mean", "lasttoken"])
+@pytest.mark.parametrize("pooling_mode", ["cls", "mean", "lasttoken"])
 def test_structured_cross_encoder_export_preserves_truncated_scores(
     vllm_runner, tmp_path: Path, pooling_mode: str
 ) -> None:

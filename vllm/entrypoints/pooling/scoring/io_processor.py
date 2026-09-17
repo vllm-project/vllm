@@ -9,20 +9,22 @@ import torch.nn.functional as F
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
-from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
+from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.config import (
-    SentenceTransformersCrossEncoderConfig,
-    get_sentence_transformers_cross_encoder_config,
-)
+from vllm.transformers_utils.config import SentenceTransformersCrossEncoderConfig
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ...chat_utils import ChatTemplateResolutionError, ConversationMessage
+from ...chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateResolutionError,
+    ConversationMessage,
+    parse_chat_messages,
+)
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
@@ -47,7 +49,6 @@ from .utils import (
     compute_maxsim_score,
     get_num_special_tokens_for_pair,
     parse_score_data,
-    parse_score_data_messages,
     score_data_to_prompts,
     truncate_text_to_tokens,
     validate_score_input,
@@ -64,7 +65,7 @@ def _validate_sentence_transformers_tokenizer(
 ) -> None:
     if (
         sentence_transformers_config is not None
-        and sentence_transformers_config.pooler_config["seq_pooling_type"] == "CLS"
+        and sentence_transformers_config.seq_pooling_type == "CLS"
         and getattr(tokenizer, "padding_side", None) == "left"
     ):
         raise ValueError(
@@ -480,11 +481,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
         self.sentence_transformers_config = (
-            get_sentence_transformers_cross_encoder_config(
-                self.model_config.model,
-                self.model_config.revision,
-                self.model_config.hf_token,
-            )
+            self.model_config.sentence_transformers_config
         )
         _validate_sentence_transformers_tokenizer(
             self.tokenizer,
@@ -771,29 +768,25 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             sentence_transformers_config is not None
             and sentence_transformers_config.uses_message_format
         )
-        if uses_message_format and chat_template_kwargs:
-            chat_template_kwargs = {
-                key: value
-                for key, value in chat_template_kwargs.items()
-                if key != "restore_suffix"
-            }
+        chat_template_kwargs = dict(chat_template_kwargs or {})
+        if uses_message_format:
+            chat_template_kwargs.pop("restore_suffix", None)
 
         system_prompt = None
         if (
             sentence_transformers_config is not None
-            and sentence_transformers_config.logit_score_config is not None
+            and sentence_transformers_config.logit_score_token_ids is not None
         ):
-            saved_config = sentence_transformers_config.model_config
             chat_template_kwargs = {
-                **(sentence_transformers_config.chat_template_kwargs or {}),
-                **(chat_template_kwargs or {}),
+                **sentence_transformers_config.chat_template_kwargs,
+                **chat_template_kwargs,
             }
-            prompt_name = chat_template_kwargs.pop(
-                "prompt_name", saved_config.get("default_prompt_name")
-            )
+            prompt_name = chat_template_kwargs.pop("prompt_name", None)
+            if prompt_name is None:
+                prompt_name = sentence_transformers_config.default_prompt_name
             system_prompt = chat_template_kwargs.pop("prompt", None)
             if system_prompt is None and prompt_name is not None:
-                prompts = saved_config.get("prompts") or {}
+                prompts = sentence_transformers_config.prompts
                 if not isinstance(prompt_name, str) or prompt_name not in prompts:
                     raise ValueError(
                         f"Unknown saved CrossEncoder prompt: {prompt_name!r}."
@@ -809,10 +802,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         prompt_1 = prompt_2 = ""
         messages: list[ConversationMessage] | None = None
         if uses_message_format:
-            messages, mm_data, mm_uuids = parse_score_data_messages(
-                data_1,
-                data_2,
+            messages, mm_data, mm_uuids = parse_chat_messages(
+                cast(
+                    list[ChatCompletionMessageParam],
+                    [
+                        {"role": "query", "content": data_1},
+                        {"role": "document", "content": data_2},
+                    ],
+                ),
                 model_config,
+                content_format="openai",
             )
             if max_tokens_per_query > 0:
                 messages[0] = _truncate_message_text_content(
@@ -887,20 +886,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        if chat_template is None and uses_message_format:
-            chat_template = resolve_chat_template(
-                tokenizer, None, None, model_config=model_config
-            )
-            if chat_template is None:
-                raise ValueError(
-                    "Unable to resolve the saved Sentence Transformers "
-                    "CrossEncoder chat template."
-                )
-
         # Most CrossEncoders use tokenizer pair encoding. Structured modular
         # CrossEncoders are the narrow exception: Sentence Transformers
         # converts pairs to query/document messages before tokenization.
-        if chat_template is None:
+        if chat_template is None and not uses_message_format:
             full_prompt, prompt_inputs = default_tokenizer_encode()
         else:
             try:

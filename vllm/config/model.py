@@ -30,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    SentenceTransformersCrossEncoderConfig,
     checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
@@ -190,6 +191,10 @@ class ModelConfig:
     """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
     (e.g. a multimodal model's text stack). Its architecture list is empty, so
     deployment-level validation must not run against it."""
+    sentence_transformers_config: SentenceTransformersCrossEncoderConfig | None = field(
+        init=False
+    )
+    """Validated modular CrossEncoder metadata loaded with the model config."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -456,6 +461,7 @@ class ModelConfig:
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
+            "sentence_transformers_config",
             "multimodal_config",
             "limit_mm_per_prompt",
             "media_io_kwargs",
@@ -647,38 +653,51 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        sentence_transformers_config = get_sentence_transformers_cross_encoder_config(
-            self.model, self.revision, self.hf_token
+        # A complete HF token-classifier contract takes precedence over ST metadata.
+        classifier_tokens = getattr(
+            hf_config,
+            "classifier_from_token",
+            getattr(self.hf_text_config, "classifier_from_token", None),
+        )
+        uses_hf_classifier = classifier_tokens is not None and (
+            self.convert == "classify"
+            or any(
+                try_match_architecture_defaults(
+                    arch, runner_type="pooling", convert_type="classify"
+                )
+                for arch in hf_config.architectures or []
+            )
+        )
+        self.sentence_transformers_config = sentence_transformers_config = (
+            None
+            if uses_hf_classifier
+            else get_sentence_transformers_cross_encoder_config(
+                self.model, self.revision, self.hf_token
+            )
         )
         if sentence_transformers_config is not None:
             dense_config = sentence_transformers_config.dense_config
-            num_labels = dense_config["out_features"] if dense_config is not None else 1
-            self.hf_config.sentence_transformers = (
-                sentence_transformers_config.model_config
-            )
-            if logit_config := sentence_transformers_config.logit_score_config:
-                true_id = logit_config["true_token_id"]
-                false_id = logit_config.get("false_token_id")
-                token_ids = [true_id] if false_id is None else [false_id, true_id]
-                if any(
-                    token_id >= self.hf_text_config.vocab_size for token_id in token_ids
-                ):
-                    raise ValueError(
-                        "LogitScore token ID is outside the model vocabulary."
-                    )
-                self.hf_config.classifier_from_token = token_ids
-                self.hf_config.method = (
-                    "no_post_processing" if false_id is None else "from_2_way_softmax"
+            token_ids = sentence_transformers_config.logit_score_token_ids
+            if token_ids is not None and any(
+                token_id >= self.hf_text_config.vocab_size for token_id in token_ids
+            ):
+                raise ValueError("LogitScore token ID is outside the model vocabulary.")
+            self.hf_config.sentence_transformers = {
+                "activation_fn": sentence_transformers_config.activation_fn
+            }
+            for config in (self.hf_config, self.hf_text_config):
+                config.num_labels = (
+                    dense_config.out_features if dense_config is not None else 1
                 )
-                self.hf_text_config.classifier_from_token = token_ids
-                self.hf_text_config.method = self.hf_config.method
-                # Without a message template, ST tokenizes a pair rather than
-                # concatenating query and document strings.
-                self.hf_config.use_sep_token = True
-                self.hf_text_config.use_sep_token = True
-            self.hf_config.num_labels = num_labels
-            if self.hf_text_config is not self.hf_config:
-                self.hf_text_config.num_labels = num_labels
+                if token_ids is not None:
+                    config.classifier_from_token = list(token_ids)
+                    config.method = (
+                        "no_post_processing"
+                        if len(token_ids) == 1
+                        else "from_2_way_softmax"
+                    )
+                    # ST tokenizes pairs when no message template is used.
+                    config.use_sep_token = True
         self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
@@ -771,13 +790,14 @@ class ModelConfig:
                 }
 
             base_config = (
-                sentence_transformers_config.pooler_config
+                {
+                    "seq_pooling_type": sentence_transformers_config.seq_pooling_type,
+                    "use_activation": True,
+                }
                 if sentence_transformers_config is not None
                 else get_pooling_config(self.model, self.revision)
             )
             if base_config is not None:
-                if sentence_transformers_config is not None:
-                    base_config = {**base_config, "use_activation": True}
                 # Only set values that are not overridden by the user
                 for k, v in base_config.items():
                     if getattr(self.pooler_config, k) is None:
@@ -1278,10 +1298,7 @@ class ModelConfig:
     ) -> RunnerType:
         registry = self.registry
 
-        sentence_transformers_config = get_sentence_transformers_cross_encoder_config(
-            self.model, self.revision, self.hf_token
-        )
-        if sentence_transformers_config is not None:
+        if self.sentence_transformers_config is not None:
             return "pooling"
         # Some Sentence Transformers models use *ForCausalLM archs
         if get_pooling_config(self.model, self.revision):
@@ -1332,13 +1349,7 @@ class ModelConfig:
     ) -> ConvertType:
         registry = self.registry
 
-        if (
-            runner_type == "pooling"
-            and get_sentence_transformers_cross_encoder_config(
-                self.model, self.revision, self.hf_token
-            )
-            is not None
-        ):
+        if runner_type == "pooling" and self.sentence_transformers_config is not None:
             return "classify"
         for arch in architectures:
             if arch in registry.get_supported_archs():
@@ -2150,6 +2161,7 @@ class ModelConfig:
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.tokenizer_revision,
+                hf_token=self.hf_token,
             )
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,

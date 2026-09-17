@@ -18,6 +18,7 @@ from vllm.model_executor.models.adapters import (
     _load_st_projector,
     _resolve_num_labels,
     as_seq_cls_model,
+    seq_cls_model_loader,
 )
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
@@ -29,6 +30,10 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     StageMissingLayer,
     WeightsMapper,
+)
+from vllm.transformers_utils.config import (
+    SentenceTransformersCrossEncoderConfig,
+    get_sentence_transformers_cross_encoder_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -336,6 +341,7 @@ def test_load_current_sentence_transformers_dense_module(tmp_path):
             revision=None,
             hf_token=None,
             head_dtype=torch.float32,
+            sentence_transformers_config=None,
         )
     )
 
@@ -448,21 +454,20 @@ def test_sequence_classification_preserves_native_cross_encoder():
         (1, 1, False, True),
     ],
 )
-def test_logit_score_rejects_unvalidated_loading_modes(
-    monkeypatch, tp, pp, quantized, lora
-):
+def test_logit_score_rejects_unvalidated_loading_modes(tp, pp, quantized, lora):
     """Reject modes for which deriving a static scoring row is not validated."""
-    monkeypatch.setattr(
-        adapters_module,
-        "get_sentence_transformers_cross_encoder_config",
-        lambda *_args: SimpleNamespace(logit_score_config={"true_token_id": 7}),
-    )
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=Qwen2Config(),
             model="unused",
             revision=None,
             hf_token=None,
+            sentence_transformers_config=SentenceTransformersCrossEncoderConfig(
+                activation_fn="torch.nn.Sigmoid",
+                seq_pooling_type="LAST",
+                uses_message_format=False,
+                logit_score_token_ids=(7,),
+            ),
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp, pipeline_parallel_size=pp
@@ -474,7 +479,7 @@ def test_logit_score_rejects_unvalidated_loading_modes(
         as_seq_cls_model(ExistingEmbeddingModel)(vllm_config=config)
 
 
-def test_sequence_classification_replaces_existing_embedding_pooler(
+def test_cross_encoder_dense_head_loads_only_during_weight_loading(
     monkeypatch,
     tmp_path,
 ):
@@ -541,10 +546,7 @@ def test_sequence_classification_replaces_existing_embedding_pooler(
         encoding="utf-8",
     )
 
-    initial_score = torch.nn.Sequential(torch.nn.Linear(4, 1, bias=False))
     reload_weight = torch.full((1, 4), 2.0)
-    with torch.no_grad():
-        initial_score[0].weight.zero_()
     model_config = SimpleNamespace(
         model=str(tmp_path),
         revision=None,
@@ -554,14 +556,12 @@ def test_sequence_classification_replaces_existing_embedding_pooler(
         get_hidden_size=lambda: 4,
         head_dtype=torch.float32,
         dtype=torch.float32,
+        convert_type="classify",
+        sentence_transformers_config=get_sentence_transformers_cross_encoder_config(
+            str(tmp_path)
+        ),
     )
     vllm_config = SimpleNamespace(model_config=model_config, quant_config=None)
-
-    monkeypatch.setattr(
-        adapters_module,
-        "_load_st_projector",
-        lambda *_args, **_kwargs: initial_score,
-    )
 
     loaded_folders = []
 
@@ -586,9 +586,13 @@ def test_sequence_classification_replaces_existing_embedding_pooler(
     model_cls = as_seq_cls_model(ExistingEmbeddingModel)
     model = model_cls(vllm_config=vllm_config)
 
+    # The discarded embedding pooler must not load the scoring Dense either.
+    assert _load_st_projector(model_config) is None
+    assert loaded_folders == []
     assert get_score_type(model_cls) == "cross-encoder"
     assert model.pooler is replacement_pooler
-    assert model.score is initial_score
+    assert isinstance(model.score[0], torch.nn.Linear)
+    assert isinstance(model.score[1], torch.nn.Identity)
     assert not any(
         name.startswith("pooler.weight") for name, _ in model.named_parameters()
     )
@@ -620,6 +624,87 @@ def test_sequence_classification_replaces_existing_embedding_pooler(
     assert reloaded == {"score.0.weight"}
     assert loaded_folders == ["2_Dense", "head"]
     torch.testing.assert_close(model.score[0].weight, reload_weight)
+
+    saved_parameters = {
+        name: parameter.detach().clone() for name, parameter in model.named_parameters()
+    }
+    reload_weight.fill_(11.0)
+    (pooling_path / "config.json").write_text(
+        json.dumps({"pooling_mode": "lasttoken", "include_prompt": True}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="incompatible .*CrossEncoder semantics"):
+        model.load_weights(
+            [("backbone.weight", torch.full_like(model.backbone.weight, 13.0))]
+        )
+
+    assert loaded_folders == ["2_Dense", "head"]
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, saved_parameters[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tokens", [(6,), (5, 6)])
+@pytest.mark.parametrize(
+    "outer_tied,text_tied", [(True, False), (False, True), (False, False)]
+)
+def test_token_classifier_resolves_tied_heads_from_outer_and_text_config(
+    monkeypatch, tokens, outer_tied, text_tied
+):
+    """Composite configs store tying at either level across Transformers versions."""
+    from vllm.model_executor.layers import vocab_parallel_embedding
+
+    class LMHead(torch.nn.Linear):
+        def __init__(self, vocab_size, hidden_size):
+            super().__init__(hidden_size, vocab_size, bias=False)
+
+        def tie_weights(self, embeddings):
+            self.weight = embeddings.weight
+            return self
+
+    monkeypatch.setattr(vocab_parallel_embedding, "ParallelLMHead", LMHead)
+    monkeypatch.setattr("vllm.tokenizers.get_tokenizer", lambda *_args, **_kwargs: None)
+    text_config = SimpleNamespace(
+        vocab_size=8,
+        hidden_size=4,
+        tie_word_embeddings=text_tied,
+        classifier_from_token=tokens,
+    )
+    hf_config = SimpleNamespace(
+        get_text_config=lambda: text_config,
+        tie_word_embeddings=outer_tied,
+        method="no_post_processing" if len(tokens) == 1 else "from_2_way_softmax",
+    )
+    model = torch.nn.Module()
+    model.config = hf_config
+    model.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=hf_config,
+            tokenizer="unused",
+            tokenizer_revision=None,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+        )
+    )
+    model.model = torch.nn.Module()
+    model.model.embed_tokens = torch.nn.Embedding(8, 4)
+    model.score = torch.nn.Linear(4, 1, bias=False)
+    model._load_pooling_model_weights = lambda weights: AutoWeightsLoader(
+        model
+    ).load_weights(weights)
+    embedding_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    weights = [("model.embed_tokens.weight", embedding_weight)]
+    lm_head_weight = embedding_weight if outer_tied or text_tied else -embedding_weight
+    if not (outer_tied or text_tied):
+        weights.append(("lm_head.weight", lm_head_weight))
+
+    loaded = seq_cls_model_loader(model, iter(weights))
+
+    expected = lm_head_weight[[tokens[-1]]]
+    if len(tokens) == 2:
+        expected = expected - lm_head_weight[[tokens[0]]]
+    torch.testing.assert_close(model.score.weight, expected)
+    assert loaded == {"model.embed_tokens.weight", "score.weight"}
+    assert not hasattr(model, "lm_head")
 
 
 def test_sentence_transformers_cross_encoder_pooling_order():

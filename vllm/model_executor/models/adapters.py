@@ -42,17 +42,20 @@ _GENERATE_SUFFIXES = [
 ]
 
 
-def _load_st_projector(
-    model_config: "ModelConfig",
-    dense_modules: list[dict[str, Any]] | None = None,
-) -> nn.Module | None:
+def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
-    if dense_modules is None:
-        dense_modules = try_get_dense_modules(
-            model_config.model,
-            revision=model_config.revision,
-            hf_token=model_config.hf_token,
-        )
+    # A converted CrossEncoder replaces this embedding pooler and owns its head.
+    if (
+        model_config.sentence_transformers_config is not None
+        and model_config.convert_type == "classify"
+    ):
+        return None
+
+    dense_modules = try_get_dense_modules(
+        model_config.model,
+        revision=model_config.revision,
+        hf_token=model_config.hf_token,
+    )
 
     if dense_modules is None:
         return None
@@ -378,19 +381,11 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             hf_config = vllm_config.model_config.hf_config
             text_config = hf_config.get_text_config()
             model_config = vllm_config.model_config
-            self._uses_sentence_transformers_score = False
-
-            sentence_transformers_config = (
-                get_sentence_transformers_cross_encoder_config(
-                    model_config.model,
-                    model_config.revision,
-                    model_config.hf_token,
-                )
-            )
+            sentence_transformers_config = model_config.sentence_transformers_config
             self._sentence_transformers_config = sentence_transformers_config
             if (
                 sentence_transformers_config is not None
-                and sentence_transformers_config.logit_score_config is not None
+                and sentence_transformers_config.logit_score_token_ids is not None
             ):
                 parallel_config = vllm_config.parallel_config
                 if (
@@ -423,57 +418,53 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             ):
                 dense_config = sentence_transformers_config.dense_config
                 hidden_size = model_config.get_hidden_size()
-                if dense_config["in_features"] != hidden_size:
+                if dense_config.in_features != hidden_size:
                     raise ValueError(
                         "The Sentence Transformers Dense module has "
-                        f"in_features={dense_config['in_features']}, but the "
+                        f"in_features={dense_config.in_features}, but the "
                         f"model hidden size is {hidden_size}."
                     )
+                self.score = nn.Sequential(
+                    nn.Linear(
+                        dense_config.in_features,
+                        dense_config.out_features,
+                        bias=dense_config.bias,
+                        dtype=model_config.head_dtype,
+                    ),
+                    get_act_fn(dense_config.activation_function),
+                )
+            else:
+                # Check if score weights are derived online from LM head
+                # (same condition as load_weights branch)
+                tokens = getattr(
+                    hf_config,
+                    "classifier_from_token",
+                    getattr(text_config, "classifier_from_token", None),
+                )
+                method = getattr(
+                    hf_config,
+                    "method",
+                    getattr(text_config, "method", None),
+                )
 
-                score = _load_st_projector(model_config, [dense_config])
-                if score is None:
-                    raise ValueError(
-                        "Unable to load the Dense scoring module from this "
-                        "Sentence Transformers CrossEncoder checkpoint."
-                    )
-                self.score = score
-                self._uses_sentence_transformers_score = True
-                self._sentence_transformers_config = sentence_transformers_config
+                # Online conversion: no score weights in checkpoint, don't
+                # quantize (small output_dim breaks FP8/Marlin tile alignment).
+                # Checkpoint-based: respect the model's quant_config.
+                quant_config = (
+                    None
+                    if (tokens is not None or method is not None)
+                    else vllm_config.quant_config
+                )
 
-                pooler_config = model_config.pooler_config
-                assert pooler_config is not None
-                return DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
-            # Check if score weights are derived online from LM head
-            # (same condition as load_weights branch)
-            tokens = getattr(
-                hf_config,
-                "classifier_from_token",
-                getattr(text_config, "classifier_from_token", None),
-            )
-            method = getattr(
-                hf_config,
-                "method",
-                getattr(text_config, "method", None),
-            )
-
-            # Online conversion: no score weights in checkpoint, don't
-            # quantize (small output_dim breaks FP8/Marlin tile alignment).
-            # Checkpoint-based: respect the model's quant_config.
-            quant_config = (
-                None
-                if (tokens is not None or method is not None)
-                else vllm_config.quant_config
-            )
-
-            self.score = ReplicatedLinear(
-                model_config.get_hidden_size(),
-                _resolve_num_labels(hf_config, text_config),
-                bias=False,
-                params_dtype=model_config.head_dtype,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=maybe_prefix(prefix, "score"),
-            )
+                self.score = ReplicatedLinear(
+                    model_config.get_hidden_size(),
+                    _resolve_num_labels(hf_config, text_config),
+                    bias=False,
+                    params_dtype=model_config.head_dtype,
+                    quant_config=quant_config,
+                    return_bias=False,
+                    prefix=maybe_prefix(prefix, "score"),
+                )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
@@ -492,25 +483,8 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             method = getattr(hf_config, "method", getattr(text_config, "method", None))
 
             original_config = self._sentence_transformers_config
-            if (
-                original_config is not None
-                and original_config.logit_score_config is not None
-            ):
-                get_sentence_transformers_cross_encoder_config.cache_clear()
-                if (
-                    get_sentence_transformers_cross_encoder_config(
-                        model_config.model, model_config.revision, model_config.hf_token
-                    )
-                    != original_config
-                ):
-                    raise ValueError(
-                        "The reload checkpoint has incompatible LogitScore semantics."
-                    )
-
-            if self._uses_sentence_transformers_score:
-                # The checkpoint may have been updated in place, so reload its
-                # module metadata rather than reusing the construction snapshot.
-                get_sentence_transformers_cross_encoder_config.cache_clear()
+            sentence_transformers_config = None
+            if original_config is not None:
                 sentence_transformers_config = (
                     get_sentence_transformers_cross_encoder_config(
                         model_config.model,
@@ -518,60 +492,25 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
                         model_config.hf_token,
                     )
                 )
-                if sentence_transformers_config is None:
-                    raise ValueError(
-                        "The reload checkpoint is not a supported Sentence "
-                        "Transformers CrossEncoder."
-                    )
-
-                original_config = self._sentence_transformers_config
-                dense_config = sentence_transformers_config.dense_config
-                if dense_config is None:
-                    raise ValueError("Cannot reload a Dense checkpoint as LogitScore.")
-                assert (
-                    original_config is not None
-                    and original_config.dense_config is not None
-                )
-                dense_keys = (
-                    "in_features",
-                    "out_features",
-                    "bias",
-                    "activation_function",
-                )
-                if (
-                    sentence_transformers_config.pooler_config
-                    != original_config.pooler_config
-                    or sentence_transformers_config.uses_message_format
-                    != original_config.uses_message_format
-                    or sentence_transformers_config.model_config.get("activation_fn")
-                    != original_config.model_config.get("activation_fn")
-                    or any(
-                        dense_config.get(key) != original_config.dense_config.get(key)
-                        for key in dense_keys
-                    )
-                ):
+                if sentence_transformers_config != original_config:
                     raise ValueError(
                         "The reload checkpoint has incompatible Sentence "
                         "Transformers CrossEncoder semantics."
                     )
 
-                linear = next(
-                    (
-                        module
-                        for module in self.score.modules()
-                        if isinstance(module, nn.Linear)
-                    ),
-                    None,
-                )
-                if linear is None or not _load_dense_weights(
-                    linear, dense_config["folder"], model_config
+            if (
+                sentence_transformers_config is not None
+                and sentence_transformers_config.dense_config is not None
+            ):
+                if not _load_dense_weights(
+                    self.score[0],
+                    sentence_transformers_config.dense_config.folder,
+                    model_config,
                 ):
                     raise ValueError(
                         "Unable to reload the Dense scoring module from this "
                         "Sentence Transformers CrossEncoder checkpoint."
                     )
-                self._sentence_transformers_config = sentence_transformers_config
-
                 loaded_weights = super().load_weights(weights)
                 if loaded_weights is not None:
                     loaded_weights.update(
@@ -731,10 +670,8 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if getattr(
-        text_config,
-        "tie_word_embeddings",
-        getattr(model_config.hf_config, "tie_word_embeddings", False),
+    if getattr(text_config, "tie_word_embeddings", False) or getattr(
+        model_config.hf_config, "tie_word_embeddings", False
     ):
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
@@ -806,10 +743,8 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if getattr(
-        text_config,
-        "tie_word_embeddings",
-        getattr(model_config.hf_config, "tie_word_embeddings", False),
+    if getattr(text_config, "tie_word_embeddings", False) or getattr(
+        model_config.hf_config, "tie_word_embeddings", False
     ):
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by

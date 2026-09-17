@@ -7,7 +7,7 @@ import pytest
 from transformers import BertConfig, BertModel, BertTokenizer
 
 from vllm import PoolingParams
-from vllm.entrypoints.pooling.scoring import utils as scoring_utils
+from vllm.entrypoints import chat_utils
 from vllm.entrypoints.pooling.scoring.io_processor import (
     CrossEncoderIOProcessor,
     _validate_sentence_transformers_tokenizer,
@@ -37,19 +37,22 @@ class _MultiModalParser:
 
     def parse_image(self, image_url, uuid=None):
         self.tracker.images.append(image_url)
+        self.tracker.image_uuids.append(uuid)
 
 
 class _MultiModalTracker:
-    def __init__(self, model_config):
+    def __init__(self, model_config, **_kwargs):
         self.model_config = model_config
         self.images = []
+        self.image_uuids = []
 
     def create_parser(self, **_kwargs):
         return _MultiModalParser(self)
 
     def resolve_items(self):
         mm_data = {"image": self.images} if self.images else None
-        return mm_data, None
+        mm_uuids = {"image": self.image_uuids} if self.images else None
+        return mm_data, mm_uuids
 
 
 @pytest.fixture
@@ -76,10 +79,16 @@ def tokenizer():
 
 
 @pytest.fixture
-def processor(tokenizer):
+def processor(monkeypatch, tokenizer):
+    monkeypatch.setattr(chat_utils, "MultiModalItemTracker", _MultiModalTracker)
     processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
     processor.model_config = SimpleNamespace(
-        enable_prompt_embeds=False, max_model_len=16, encoder_config={}
+        enable_prompt_embeds=False,
+        max_model_len=16,
+        encoder_config={},
+        revision=None,
+        code_revision=None,
+        trust_remote_code=False,
     )
     processor.tokenizer = tokenizer
     processor.supports_score_template = False
@@ -87,7 +96,7 @@ def processor(tokenizer):
     processor.use_sep_token = True
     processor.sentence_transformers_config = SimpleNamespace(
         uses_message_format=True,
-        logit_score_config=None,
+        logit_score_token_ids=None,
     )
     processor.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=16),
@@ -95,6 +104,18 @@ def processor(tokenizer):
     )
     processor.is_multimodal_model = False
     processor.architecture = "BertModel"
+    return processor
+
+
+@pytest.fixture
+def logit_processor(processor):
+    processor.sentence_transformers_config = SimpleNamespace(
+        uses_message_format=True,
+        logit_score_token_ids=(7,),
+        chat_template_kwargs={"add_generation_prompt": True},
+        prompts={"default": "default instruction", "other": "other instruction"},
+        default_prompt_name="default",
+    )
     return processor
 
 
@@ -150,27 +171,22 @@ def _render_pair(processor, pair, tokenization_kwargs=None, chat_template_kwargs
     "kwargs,expected_prompt,expected_generation",
     [
         ({}, "default instruction", True),
+        ({"prompt_name": None}, "default instruction", True),
         ({"prompt_name": "other"}, "other instruction", True),
         ({"prompt": "override", "add_generation_prompt": False}, "override", False),
+        ({"prompt": "override", "prompt_name": "unknown"}, "override", True),
         ({"prompt": ""}, None, True),
     ],
 )
 def test_logit_score_preserves_saved_and_request_prompt_semantics(
-    processor,
+    logit_processor,
     tokenizer,
     kwargs,
     expected_prompt,
     expected_generation,
 ):
-    processor.sentence_transformers_config = SimpleNamespace(
-        uses_message_format=True,
-        logit_score_config={"true_token_id": 7},
-        chat_template_kwargs={"add_generation_prompt": True},
-        model_config={
-            "prompts": {"default": "default instruction", "other": "other instruction"},
-            "default_prompt_name": "default",
-        },
-    )
+    processor = logit_processor
+    original_kwargs = dict(kwargs)
     template = _CHAT_TEMPLATE + "{% if add_generation_prompt %}assistant:{% endif %}"
     full_prompt, engine_prompt = processor.get_score_prompt(
         "query",
@@ -202,6 +218,21 @@ def test_logit_score_preserves_saved_and_request_prompt_semantics(
     assert processor.sentence_transformers_config.chat_template_kwargs == {
         "add_generation_prompt": True
     }
+    assert kwargs == original_kwargs
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"prompt_name": "unknown"}, "Unknown saved CrossEncoder prompt"),
+        ({"prompt": 1}, "CrossEncoder prompt must be a string"),
+    ],
+)
+def test_logit_score_rejects_invalid_request_prompt(logit_processor, kwargs, error):
+    with pytest.raises(ValueError, match=error):
+        logit_processor.get_score_prompt(
+            "query", "document", {}, chat_template_kwargs=kwargs
+        )
 
 
 @pytest.mark.parametrize(
@@ -224,17 +255,11 @@ def test_logit_score_preserves_saved_and_request_prompt_semantics(
     ],
 )
 def test_structured_cross_encoder_matches_saved_pair_template(
-    monkeypatch,
     processor,
     tokenizer,
     data_2,
     expected_document_content,
 ):
-    monkeypatch.setattr(
-        scoring_utils,
-        "MultiModalItemTracker",
-        _MultiModalTracker,
-    )
     expected_messages = [
         {
             "role": "query",
@@ -274,21 +299,17 @@ def test_structured_cross_encoder_matches_saved_pair_template(
     assert engine_prompt["multi_modal_data"] == {"image": ["image.png"]}
 
 
-def test_structured_cross_encoder_truncates_text_parts(
-    monkeypatch,
-    processor,
-):
-    monkeypatch.setattr(
-        scoring_utils,
-        "MultiModalItemTracker",
-        _MultiModalTracker,
-    )
-
-    full_prompt, _ = processor.get_score_prompt(
-        data_1="query extra",
+def test_structured_pair_shares_text_limits_without_reordering_media(processor):
+    full_prompt, engine_prompt = processor.get_score_prompt(
+        data_1=[
+            {"type": "text", "text": "query"},
+            {"type": "image_url", "image_url": {"url": "query.png"}, "uuid": "q"},
+            {"type": "text", "text": "extra"},
+        ],
         data_2=[
-            {"type": "image_url", "image_url": {"url": "image.png"}},
-            {"type": "text", "text": "document extra words"},
+            {"type": "image_url", "image_url": {"url": "document.png"}, "uuid": "d"},
+            {"type": "text", "text": "document"},
+            {"type": "text", "text": "extra words"},
         ],
         encode_kwargs={},
         chat_template=_CHAT_TEMPLATE,
@@ -296,19 +317,13 @@ def test_structured_cross_encoder_truncates_text_parts(
         max_tokens_per_doc=1,
     )
 
-    assert full_prompt == "query:query;document:[IMG]document;"
+    assert full_prompt == "query:query[IMG];document:[IMG]document;"
+    assert engine_prompt["multi_modal_data"] == {"image": ["query.png", "document.png"]}
+    assert engine_prompt["multi_modal_uuids"] == {"image": ["q", "d"]}
 
 
-def test_text_pair_uses_saved_message_template(
-    monkeypatch,
-    processor,
-    tokenizer,
-):
-    monkeypatch.setattr(
-        scoring_utils,
-        "MultiModalItemTracker",
-        _MultiModalTracker,
-    )
+def test_text_pair_uses_saved_message_template(processor, tokenizer):
+    tokenizer.chat_template = _CHAT_TEMPLATE
     expected_messages = [
         {"role": "query", "content": [{"type": "text", "text": "query"}]},
         {
@@ -321,7 +336,6 @@ def test_text_pair_uses_saved_message_template(
         data_1="query",
         data_2="document",
         encode_kwargs={"add_special_tokens": True},
-        chat_template=_CHAT_TEMPLATE,
     )
 
     expected_token_ids = tokenizer.apply_chat_template(
@@ -335,7 +349,7 @@ def test_text_pair_uses_saved_message_template(
 
 
 def test_effective_left_padding_is_rejected():
-    config = SimpleNamespace(pooler_config={"seq_pooling_type": "CLS"})
+    config = SimpleNamespace(seq_pooling_type="CLS")
 
     with pytest.raises(ValueError, match="CLS pooling.*left-padded"):
         _validate_sentence_transformers_tokenizer(
@@ -361,10 +375,9 @@ def test_explicit_template_preserves_special_token_setting(processor, tokenizer)
 @pytest.mark.parametrize("document_tokens", [3, 4, 5])
 @pytest.mark.parametrize("truncation_side", ["left", "right"])
 def test_structured_truncation_matches_sentence_transformers(
-    monkeypatch, processor, st_transformer, document_tokens, truncation_side
+    processor, st_transformer, document_tokens, truncation_side
 ):
     """Both LAST and MEAN readouts must see the same boundary-length inputs."""
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     pair = ("query", " ".join(["document"] * document_tokens))
     st_transformer.tokenizer.truncation_side = truncation_side
     expected = st_transformer.preprocess(
@@ -387,10 +400,9 @@ def test_structured_truncation_matches_sentence_transformers(
     "chat_template_kwargs", [None, {"add_generation_prompt": False}]
 )
 def test_logit_score_truncation_preserves_saved_template_settings(
-    monkeypatch, processor, st_transformer, chat_template_kwargs
+    processor, st_transformer, chat_template_kwargs
 ):
     """Truncated LogitScore inputs retain the saved generation and system suffix."""
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     template = (
         _CHAT_TEMPLATE + "{% if messages[0]['role'] == 'system' %}[SEP]{% endif %}"
         "{% if add_generation_prompt %}assistant:{% endif %}"
@@ -402,9 +414,10 @@ def test_logit_score_truncation_preserves_saved_template_settings(
     }
     processor.sentence_transformers_config = SimpleNamespace(
         uses_message_format=True,
-        logit_score_config={"true_token_id": 7},
+        logit_score_token_ids=(7,),
         chat_template_kwargs={"add_generation_prompt": True},
-        model_config={"prompts": {"match": "match"}, "default_prompt_name": "match"},
+        prompts={"match": "match"},
+        default_prompt_name="match",
     )
     pair = ("query", " ".join(["document"] * 10))
     expected = st_transformer.preprocess(
@@ -426,8 +439,7 @@ def test_logit_score_truncation_preserves_saved_template_settings(
     assert result["prompts"]["prompt_token_ids"] == expected["input_ids"][0].tolist()
 
 
-def test_suffix_restore_preserves_padding(monkeypatch, processor, st_transformer):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
+def test_suffix_restore_preserves_padding(processor, st_transformer):
     pair = ("query", " ".join(["document"] * 10))
     expected = st_transformer.preprocess(
         [pair], processing_kwargs={"text": {"max_length": 12}}
@@ -441,8 +453,7 @@ def test_suffix_restore_preserves_padding(monkeypatch, processor, st_transformer
     assert result["params"].extra_kwargs["compressed_token_type_ids"] == 16
 
 
-def test_explicit_suffix_restore_opt_out(monkeypatch, processor, st_transformer):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
+def test_explicit_suffix_restore_opt_out(processor, st_transformer):
     pair = ("query", " ".join(["document"] * 10))
     chat_kwargs = {"restore_suffix": False}
     expected = st_transformer.preprocess(
@@ -457,8 +468,7 @@ def test_explicit_suffix_restore_opt_out(monkeypatch, processor, st_transformer)
     assert chat_kwargs == {"restore_suffix": False}
 
 
-def test_media_rows_do_not_restore_text_suffix(monkeypatch, processor, st_transformer):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
+def test_media_rows_do_not_restore_text_suffix(processor, st_transformer):
     text = " ".join(["document"] * 10)
     messages = [
         {"role": "query", "content": [{"type": "text", "text": "query"}]},
@@ -501,9 +511,8 @@ def test_media_rows_do_not_restore_text_suffix(monkeypatch, processor, st_transf
     ids=["no-fixed-suffix", "suffix-probe-fails"],
 )
 def test_unavailable_suffix_matches_sentence_transformers(
-    monkeypatch, processor, st_transformer, template
+    processor, st_transformer, template
 ):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     processor.tokenizer.chat_template = st_transformer.tokenizer.chat_template = (
         template
     )
@@ -526,9 +535,8 @@ def test_unavailable_suffix_matches_sentence_transformers(
     ],
 )
 def test_explicit_offline_truncation_opt_out(
-    monkeypatch, processor, st_transformer, tokenization_kwargs
+    processor, st_transformer, tokenization_kwargs
 ):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     pair = ("query", " ".join(["document"] * 21))
 
     with pytest.raises(VLLMValidationError, match="maximum context length"):
@@ -540,9 +548,8 @@ def test_explicit_offline_truncation_opt_out(
 
 @pytest.mark.parametrize("explicit_opt_out", [False, True])
 def test_online_default_preserves_explicit_truncation_opt_out(
-    monkeypatch, processor, st_transformer, explicit_opt_out
+    processor, st_transformer, explicit_opt_out
 ):
-    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     kwargs = {"truncate_prompt_tokens": None} if explicit_opt_out else {}
     request = ScoreQueriesDocumentsRequest(
         queries="query", documents=" ".join(["document"] * 21), **kwargs

@@ -5,11 +5,11 @@ import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from functools import cache, partial, wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
@@ -987,31 +987,27 @@ def get_config(
     return config
 
 
-class SentenceTransformersCrossEncoderConfig(NamedTuple):
-    """Metadata for the supported modular CrossEncoder layout."""
+@dataclass(frozen=True)
+class SentenceTransformersDenseConfig:
+    in_features: int
+    out_features: int
+    bias: bool
+    activation_function: str
+    folder: str = field(compare=False)
 
-    model_config: dict[str, Any]
-    pooler_config: dict[str, Any]
-    dense_config: dict[str, Any] | None
+
+@dataclass(frozen=True)
+class SentenceTransformersCrossEncoderConfig:
+    """Effective scoring semantics, independent of checkpoint artifact paths."""
+
+    activation_fn: str
+    seq_pooling_type: Literal["CLS", "MEAN", "LAST"]
     uses_message_format: bool
-    logit_score_config: dict[str, Any] | None = None
-    chat_template_kwargs: dict[str, Any] | None = None
-
-
-def _try_get_sentence_transformers_config(
-    model: str | Path,
-    revision: str | None = None,
-    hf_token: bool | str | None = None,
-) -> dict[str, Any] | None:
-    config_name = "config_sentence_transformers.json"
-    config = get_hf_file_to_dict(config_name, model, revision, token=hf_token)
-    if config is None:
-        return None
-    if not isinstance(config, dict):
-        raise ValueError(
-            "config_sentence_transformers.json must contain a JSON object."
-        )
-    return config
+    dense_config: SentenceTransformersDenseConfig | None = None
+    logit_score_token_ids: tuple[int, ...] | None = None
+    prompts: dict[str, str] = field(default_factory=dict)
+    default_prompt_name: str | None = None
+    chat_template_kwargs: dict[str, bool] = field(default_factory=dict)
 
 
 @cache
@@ -1330,12 +1326,14 @@ def try_get_tokenizer_config(
     pretrained_model_name_or_path: str | os.PathLike,
     trust_remote_code: bool,
     revision: str | None = None,
+    hf_token: bool | str | None = None,
 ) -> dict[str, Any] | None:
     try:
         return get_tokenizer_config(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            token=hf_token,
         )
     except Exception:
         return None
@@ -1376,7 +1374,6 @@ def try_get_dense_modules(
         return None
 
 
-@cache
 def get_sentence_transformers_cross_encoder_config(
     model: str | Path,
     revision: str | None = None,
@@ -1399,20 +1396,32 @@ def get_sentence_transformers_cross_encoder_config(
     Raises:
         ValueError: If a modular CrossEncoder uses unsupported semantics.
     """
-    model_config = _try_get_sentence_transformers_config(model, revision, hf_token)
-    if model_config is None or model_config.get("model_type") != "CrossEncoder":
+    model_config = get_hf_file_to_dict(
+        "config_sentence_transformers.json", model, revision, token=hf_token
+    )
+    if model_config is None:
+        return None
+    if not isinstance(model_config, dict):
+        raise ValueError(
+            "config_sentence_transformers.json must contain a JSON object."
+        )
+    if model_config.get("model_type") != "CrossEncoder":
         return None
 
+    def read_config(filename: str) -> dict[str, Any]:
+        config = get_hf_file_to_dict(filename, model, revision, token=hf_token)
+        if not isinstance(config, dict):
+            raise ValueError(f"Unable to load Sentence Transformers {filename}.")
+        return config
+
     modules = get_hf_file_to_dict("modules.json", model, revision, token=hf_token)
-    if not isinstance(modules, list):
+    if not isinstance(modules, list) or not modules:
         return None
     if not all(isinstance(module, dict) for module in modules):
         raise ValueError("Sentence Transformers modules.json must contain objects.")
 
-    contains_scoring_module = any(
-        module.get("type") in _ST_POOLING_MODULE_TYPES | _ST_LOGIT_SCORE_MODULE_TYPES
-        for module in modules
-    )
+    if len(modules) == 1 and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES:
+        return None
     is_logit_score = (
         len(modules) == 2
         and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
@@ -1425,12 +1434,10 @@ def get_sentence_transformers_cross_encoder_config(
         and modules[2].get("type") in _DENSE_MODULE_TYPES
     )
     if not is_supported_topology:
-        if contains_scoring_module:
-            raise ValueError(
-                "Unsupported modular CrossEncoder topology. vLLM supports "
-                "Transformer -> Pooling -> Dense or Transformer -> LogitScore."
-            )
-        return None
+        raise ValueError(
+            "Unsupported modular CrossEncoder topology. vLLM supports "
+            "Transformer -> Pooling -> Dense or Transformer -> LogitScore."
+        )
 
     if any(module.get("kwargs") for module in modules):
         raise ValueError(
@@ -1456,14 +1463,7 @@ def get_sentence_transformers_cross_encoder_config(
         raise ValueError(
             "The Transformer module must be stored at the checkpoint root."
         )
-    transformer_config = get_hf_file_to_dict(
-        "sentence_bert_config.json", model, revision, token=hf_token
-    )
-    if not isinstance(transformer_config, dict):
-        raise ValueError(
-            "Unable to load sentence_bert_config.json from this Sentence "
-            "Transformers CrossEncoder checkpoint."
-        )
+    transformer_config = read_config("sentence_bert_config.json")
     tasks = (
         {"text-generation", "any-to-any"} if is_logit_score else {"feature-extraction"}
     )
@@ -1477,7 +1477,7 @@ def get_sentence_transformers_cross_encoder_config(
             f"The Sentence Transformers Transformer must output {output_name}."
         )
     processing_kwargs = transformer_config.get("processing_kwargs") or {}
-    chat_template_kwargs = None
+    chat_template_kwargs = {}
     if is_logit_score:
         if not isinstance(processing_kwargs, dict) or set(processing_kwargs) - {
             "chat_template"
@@ -1524,6 +1524,8 @@ def get_sentence_transformers_cross_encoder_config(
                 )
             uses_message_format = True
 
+    prompts: dict[str, str] = {}
+    default_prompt_name = None
     if is_logit_score:
         prompts = model_config.get("prompts") or {}
         default_prompt_name = model_config.get("default_prompt_name")
@@ -1549,16 +1551,9 @@ def get_sentence_transformers_cross_encoder_config(
             revision=revision,
             token=hf_token,
         )
-        tokenizer_config = None
-        if file_or_path_exists(
-            model=model,
-            config_name="tokenizer_config.json",
-            revision=revision,
-            token=hf_token,
-        ):
-            tokenizer_config = get_hf_file_to_dict(
-                "tokenizer_config.json", model, revision, token=hf_token
-            )
+        tokenizer_config = get_hf_file_to_dict(
+            "tokenizer_config.json", model, revision, token=hf_token
+        )
         has_inline_template = isinstance(tokenizer_config, dict) and bool(
             tokenizer_config.get("chat_template")
         )
@@ -1572,13 +1567,7 @@ def get_sentence_transformers_cross_encoder_config(
         folder = modules[1].get("path", "")
         if not folder:
             raise ValueError("The LogitScore module must have its own config folder.")
-        logit_score_config = get_hf_file_to_dict(
-            f"{folder}/config.json", model, revision, token=hf_token
-        )
-        if not isinstance(logit_score_config, dict):
-            raise ValueError(
-                "Unable to load the Sentence Transformers LogitScore config."
-            )
+        logit_score_config = read_config(f"{folder}/config.json")
         true_id = logit_score_config.get("true_token_id")
         false_id = logit_score_config.get("false_token_id")
         if (
@@ -1593,11 +1582,14 @@ def get_sentence_transformers_cross_encoder_config(
         ):
             raise ValueError("The LogitScore module must read causal_logits.")
         return SentenceTransformersCrossEncoderConfig(
-            model_config=model_config,
-            pooler_config={"seq_pooling_type": "LAST"},
-            dense_config=None,
+            activation_fn=activation_fn,
+            seq_pooling_type="LAST",
             uses_message_format=uses_message_format,
-            logit_score_config=logit_score_config,
+            logit_score_token_ids=(true_id,)
+            if false_id is None
+            else (false_id, true_id),
+            prompts=prompts,
+            default_prompt_name=default_prompt_name,
             chat_template_kwargs=chat_template_kwargs,
         )
 
@@ -1606,11 +1598,7 @@ def get_sentence_transformers_cross_encoder_config(
     pooling_config_path = (
         f"{pooling_folder}/config.json" if pooling_folder else "config.json"
     )
-    pooling_config = get_hf_file_to_dict(
-        pooling_config_path, model, revision, token=hf_token
-    )
-    if not isinstance(pooling_config, dict):
-        raise ValueError("Unable to load the Sentence Transformers Pooling config.")
+    pooling_config = read_config(pooling_config_path)
 
     pooling_mode = pooling_config.get("pooling_mode")
     if isinstance(pooling_mode, list):
@@ -1620,18 +1608,17 @@ def get_sentence_transformers_cross_encoder_config(
                 "pooling mode."
             )
         pooling_mode = pooling_mode[0]
-    pooling_types = {"cls": "CLS", "mean": "MEAN", "lasttoken": "LAST"}
+    pooling_types: dict[str, Literal["CLS", "MEAN", "LAST"]] = {
+        "cls": "CLS",
+        "mean": "MEAN",
+        "lasttoken": "LAST",
+    }
     if pooling_mode not in pooling_types:
         raise ValueError(
             "The Sentence Transformers CrossEncoder pooling mode must be "
             "cls, mean, or lasttoken."
         )
-    if pooling_mode == "cls" and file_or_path_exists(
-        model=model,
-        config_name="tokenizer_config.json",
-        revision=revision,
-        token=hf_token,
-    ):
+    if pooling_mode == "cls":
         tokenizer_pooling_config = get_hf_file_to_dict(
             "tokenizer_config.json", model, revision, token=hf_token
         )
@@ -1647,18 +1634,11 @@ def get_sentence_transformers_cross_encoder_config(
         raise ValueError(
             "The Sentence Transformers CrossEncoder must use include_prompt=true."
         )
-    pooler_config = {"seq_pooling_type": pooling_types[pooling_mode]}
 
     dense_module = modules[2]
     dense_folder = dense_module.get("path", "")
     dense_config_path = f"{dense_folder}/config.json" if dense_folder else "config.json"
-    loaded_dense_config = get_hf_file_to_dict(
-        dense_config_path, model, revision, token=hf_token
-    )
-    if not isinstance(loaded_dense_config, dict):
-        raise ValueError("Unable to load the Sentence Transformers Dense config.")
-    dense_config = dict(loaded_dense_config)
-    dense_config["folder"] = dense_folder
+    dense_config = read_config(dense_config_path)
 
     if dense_config.get("use_residual", False):
         raise ValueError(
@@ -1683,9 +1663,15 @@ def get_sentence_transformers_cross_encoder_config(
         )
 
     return SentenceTransformersCrossEncoderConfig(
-        model_config=model_config,
-        pooler_config=pooler_config,
-        dense_config=dense_config,
+        activation_fn=activation_fn,
+        seq_pooling_type=pooling_types[pooling_mode],
+        dense_config=SentenceTransformersDenseConfig(
+            in_features=in_features,
+            out_features=out_features,
+            bias=dense_config.get("bias", True),
+            activation_function=dense_activation,
+            folder=dense_folder,
+        ),
         uses_message_format=uses_message_format,
     )
 
