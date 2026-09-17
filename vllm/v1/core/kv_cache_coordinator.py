@@ -357,7 +357,10 @@ class KVCacheCoordinator(ABC):
             )
 
     def emit_cached_block_events(
-        self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
+        self,
+        request: Request,
+        computed_blocks: tuple[list[KVCacheBlock], ...],
+        num_cached_tokens: int,
     ) -> None:
         for group_idx, group_blocks in enumerate(computed_blocks):
             if group_blocks:
@@ -368,6 +371,8 @@ class KVCacheCoordinator(ABC):
                     len(group_blocks),
                     group.kv_cache_spec.block_size,
                     group_idx,
+                    cached_blocks=group_blocks,
+                    num_cached_tokens=num_cached_tokens,
                 )
 
     def reset_prefix_cache(self) -> bool:
