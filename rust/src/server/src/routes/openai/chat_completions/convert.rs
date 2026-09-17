@@ -150,6 +150,7 @@ pub(super) fn prepare_chat_request(
         messages,
         sampling_params: SamplingParams {
             temperature: request.temperature,
+            watermarking: request.watermarking,
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
@@ -179,7 +180,7 @@ pub(super) fn prepare_chat_request(
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: request.chat_template,
-            reasoning_effort: request.reasoning_effort,
+            reasoning_effort: request.reasoning_effort.map(|effort| effort.as_str().into()),
             response_format,
             template_kwargs,
         },
@@ -437,7 +438,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
@@ -484,6 +485,50 @@ mod tests {
             }],
             stream: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_preserves_omission_none_and_kwargs() {
+        for effort in [None, Some(json!(null))].into_iter().chain(
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                .map(|name| Some(json!(name))),
+        ) {
+            let kwargs = json!({"reasoning_effort": 37, "thinking": true});
+            let mut value = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": kwargs,
+            });
+            if let Some(effort) = &effort {
+                value["reasoning_effort"] = effort.clone();
+            }
+            let request: ChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                request_context(&HeaderMap::new(), None),
+            )
+            .unwrap();
+            let options = prepared.chat_request.chat_options;
+            assert_eq!(
+                serde_json::to_value(options.reasoning_effort).unwrap(),
+                effort.unwrap_or(serde_json::Value::Null)
+            );
+            assert_eq!(
+                serde_json::to_value(options.template_kwargs).unwrap(),
+                kwargs
+            );
+        }
+    }
+
+    #[test]
+    fn chat_http_reasoning_effort_rejects_model_extensions_at_top_level() {
+        for effort in [json!(37), json!("custom")] {
+            let request = json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": effort,
+            });
+            assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
         }
     }
 
@@ -581,6 +626,61 @@ mod tests {
 
         assert_eq!(prepared.chat_request.sampling_params.min_tokens, Some(0));
         assert_eq!(prepared.chat_request.decode_options.min_tokens, 0);
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_empty_json_schema() {
+        let mut request = base_request();
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!("  "),
+                strict: None,
+            },
+        });
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("json cannot be an empty string")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_whitespace_only_structured_outputs_grammar() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "structured_outputs": {"grammar": " \t\n"},
+        }))
+        .expect("parse structured_outputs");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("grammar cannot be an empty string")
+        );
     }
 
     #[test]
@@ -691,7 +791,7 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
             .render(&prepared.chat_request)
             .expect("Kimi K3 rendering succeeds")
             .prompt;

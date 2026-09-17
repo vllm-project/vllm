@@ -8,13 +8,13 @@ import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.batch_serving import (
     OpenAIServingChatBatch,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # any model with a chat template defined in tokenizer_config should work here
@@ -259,7 +259,7 @@ async def _generator(prompt_idx: int, text: str) -> AsyncGenerator[RequestOutput
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_batched_echo_does_not_prepend_user_prompt() -> None:
-    """echo must only echo the assistant turn, never the user's prompt.
+    """Echo must only echo the assistant turn, never the user's prompt.
 
     With `add_generation_prompt` (the default) the response role is `assistant`
     while the last conversation message is the user's, so there is nothing to

@@ -49,16 +49,15 @@ logger = init_logger(__name__)
 # Copied from `accelerate`
 @contextmanager
 def init_on_device_without_buffers(device: torch.device):
-    """
-    A context manager under which models are initialized with all
+    """A context manager under which models are initialized with all
     parameters on the specified device. However buffers are not
     initialized on specified device.
 
     Args:
         device (`torch.device`):
             Device to initialize all parameters on.
-    """
 
+    """
     old_register_parameter = nn.Module.register_parameter
 
     def register_empty_parameter(module, name, param):
@@ -114,17 +113,18 @@ def replace_linear_class(
     *,
     prefix: str = "",
 ) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
-    """
-    Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+    """Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
         linear: `nn.Linear` to be replaced.
         style: Tensor parallel style of the new linear, e.g. "colwise".
         quant_config: Quantization config for the new linear.
+        prefix: Module prefix of the new linear, used for quantization lookup.
+
     Returns:
         The new linear.
-    """
 
+    """
     if not isinstance(style, str):
         raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
@@ -156,9 +156,11 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
 
     Args:
         conv: `nn.Conv2d` or `nn.Conv3d` to be replaced.
+
     Returns:
         The new `Conv2dLayer` or `Conv3dLayer`. If the conv module is not supported,
         returns the original conv module.
+
     """
     # vLLM does not handle non-zero padding modes
     if conv.padding_mode != "zeros":
@@ -217,48 +219,33 @@ def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbe
     Args:
         cls: The `nn.Embedding` subclass to rebase. Cached, so a given `cls` always
             maps to the same class.
+
     Returns:
         The new class, to assign to `__class__` of an instance of `cls`.
+
     """
     return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
 
 
 def replace_embedding_class(
-    embedding: nn.Module,
+    embedding: nn.Embedding,
     quant_config: "QuantizationConfig | None" = None,
     *,
     prefix: str = "",
 ) -> nn.Module:
-    """Replace the `nn.Embedding` in `embedding` with `VocabParallelEmbedding`.
+    """Replace `nn.Embedding` with `VocabParallelEmbedding`.
 
     Args:
-        embedding: The module returned by `model.get_input_embeddings()`.
+        embedding: The `nn.Embedding` holding a vocab table.
         quant_config: Quantization config for the new embedding.
         prefix: Qualname of `embedding`, used to look up its quantization method.
+
     Returns:
-        The module to install with `model.set_input_embeddings()`. Composing and
-        inheriting modules are mutated in place and returned as-is.
-    Raises:
-        ValueError: If `embedding` composes anything other than one `nn.Embedding`,
-            which would leave the input embedding weights ambiguous.
+        The module to install in `embedding`'s place.
+
     """
-    # If `embedding` composes its `nn.Embedding`, recurse into it
-    if not isinstance(embedding, nn.Embedding):
-        composed = [
-            (name, module)
-            for name, module in embedding.named_modules()
-            if isinstance(module, nn.Embedding)
-        ]
-        if len(composed) != 1:
-            raise ValueError(
-                f"Expected {type(embedding).__name__} to be an `nn.Embedding` or to "
-                f"compose exactly one, but found {len(composed)}."
-            )
-        name, module = composed[0]
-        new_embedding = replace_embedding_class(
-            module, quant_config, prefix=maybe_prefix(prefix, name)
-        )
-        attrsetter(name)(embedding, new_embedding)
+    # Tied tables are reached more than once, so don't rebase an already new embedding
+    if isinstance(embedding, VocabParallelEmbedding):
         return embedding
 
     kwargs = dict(
@@ -339,8 +326,7 @@ def get_feature_request_tip(
 
 
 def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
-    """
-    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
     Defaults to `True` but is disabled in the following situations:
 
