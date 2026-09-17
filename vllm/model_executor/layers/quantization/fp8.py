@@ -86,6 +86,7 @@ from vllm.utils.deep_gemm import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.reload.trace import ReloadState
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -371,6 +372,48 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+
+    def create_reload_state(self, layer: torch.nn.Module, key: str) -> "ReloadState":
+        """Build an opt-in state before observing checkpoint-format cold load."""
+        from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+            DeepGemmFp8BlockScaledMMKernel,
+        )
+        from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+            FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        )
+        from vllm.model_executor.model_loader.reload.fp8 import DeepGEMMReloadPolicy
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+
+        kernel = self.fp8_linear
+        if isinstance(kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel):
+            kernel = kernel.fallback
+        if (
+            not self.quant_config.is_checkpoint_fp8_serialized
+            or not self.block_quant
+            or not isinstance(kernel, DeepGemmFp8BlockScaledMMKernel)
+            or current_platform.is_fp8_fnuz()
+            or is_weights_pre_processed()
+        ):
+            raise NotImplementedError(
+                "FP8 linear reload tracing requires checkpoint-format DeepGEMM "
+                "block FP8 weights"
+            )
+        assert self.weight_block_size is not None
+        roles: tuple[str, ...] = ("weight", "weight_scale_inv")
+        if getattr(layer, "bias", None) is not None:
+            roles += ("bias",)
+        return ReloadState(
+            key=key,
+            module=layer,
+            roles=roles,
+            policy=DeepGEMMReloadPolicy(
+                pairs=(("weight", "weight_scale_inv"),),
+                block_shape=tuple(self.weight_block_size),
+                use_e8m0=kernel.use_deep_gemm_e8m0,
+                is_bmm=getattr(layer, "is_bmm", False),
+                bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
+            ),
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
@@ -694,6 +737,77 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+    def create_reload_state(self, layer: RoutedExperts, key: str) -> "ReloadState":
+        """Build an FP8 expert state with a per-round placement plan."""
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.model_executor.model_loader.reload.fp8 import (
+            CutlassMoEReloadPolicy,
+            DeepGEMMReloadPolicy,
+        )
+        from vllm.model_executor.model_loader.reload.moe import RoutedExpertsReloadPlan
+        from vllm.model_executor.model_loader.reload.trace import ReloadState
+        from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+        if (
+            not self.quant_config.is_checkpoint_fp8_serialized
+            or self.moe.has_bias
+            or layer.expert_map_manager.num_fused_shared_experts
+            or current_platform.is_fp8_fnuz()
+            or is_weights_pre_processed()
+            or self.weight_scale_refine is not None
+        ):
+            raise NotImplementedError(
+                "FP8 MoE reload tracing requires offline FP8, no bias or fused "
+                "shared experts, and an unrefined checkpoint block grid"
+            )
+        s13 = f"w13_{self.weight_scale_name}"
+        s2 = f"w2_{self.weight_scale_name}"
+        roles: tuple[str, ...] = ("w13_weight", "w2_weight", s13, s2)
+        policy: DeepGEMMReloadPolicy | CutlassMoEReloadPolicy
+        if self.fp8_backend in (
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        ):
+            if not self.block_quant or self.weight_block_size is None:
+                raise NotImplementedError("DeepGEMM reload requires block FP8")
+            policy = DeepGEMMReloadPolicy(
+                pairs=(("w13_weight", s13), ("w2_weight", s2)),
+                block_shape=tuple(self.weight_block_size),
+                use_e8m0=is_deep_gemm_e8m0_used(),
+            )
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
+            if not self.block_quant:
+                if self.quant_config.activation_scheme != "static":
+                    raise NotImplementedError(
+                        "CUTLASS per-tensor reload requires static input scales"
+                    )
+                if (
+                    self.moe.moe_parallel_config.enable_eplb
+                    and self.moe.moe_parallel_config.ep_size > 1
+                ):
+                    raise NotImplementedError(
+                        "Eager CUTLASS per-tensor EPLB reload requires single-rank "
+                        "EP until activation-scale collectives are coordinated"
+                    )
+                roles += ("w13_input_scale", "w2_input_scale")
+            policy = CutlassMoEReloadPolicy(
+                block_quant=self.block_quant,
+                is_act_and_mul=self.moe.is_act_and_mul,
+                shard_size=layer.intermediate_size_per_partition,
+                num_experts=layer.local_num_experts,
+            )
+        else:
+            raise NotImplementedError(
+                f"FP8 MoE reload tracing does not support {self.fp8_backend}"
+            )
+        return ReloadState(
+            key=key,
+            module=layer,
+            roles=roles,
+            policy=policy,
+            expert_plan=RoutedExpertsReloadPlan(),
+        )
 
     def _setup_kernel(
         self,

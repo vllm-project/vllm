@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
+from vllm.model_executor.model_loader.reload.trace import ModelReloadTracer
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -892,6 +893,266 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA FP8 kernels")
+@pytest.mark.parametrize(
+    "backend,moe,block,eplb",
+    [
+        ("deep_gemm", False, True, False),
+        ("deep_gemm", True, True, False),
+        ("flashinfer_cutlass", True, True, False),
+        ("flashinfer_cutlass", True, False, False),
+        ("deep_gemm", True, True, True),
+        ("flashinfer_cutlass", True, True, True),
+        ("flashinfer_cutlass", True, False, True),
+    ],
+)
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_matches_cold_load(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    backend,
+    moe,
+    block,
+    eplb,
+    preserve,
+    check_forward=True,
+):
+    """Real backend conversion must match cold load without replacing targets."""
+    from transformers import LlamaConfig
+
+    from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+        DeepGemmFp8BlockScaledMMKernel,
+    )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    if backend == "deep_gemm" and not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM is unavailable")
+    if backend == "flashinfer_cutlass" and not has_flashinfer_cutlass_fused_moe():
+        pytest.skip("FlashInfer CUTLASS is unavailable")
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=32,
+    ).save_pretrained(tmp_path)
+    default_vllm_config.model_config = ModelConfig(
+        model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+    )
+    default_vllm_config.kernel_config.moe_backend = backend
+    default_vllm_config.parallel_config.enable_eplb = eplb
+    config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic" if block else "static",
+        weight_block_size=[128, 128] if block else None,
+    )
+
+    layer_index = 0
+
+    def make_layer():
+        nonlocal layer_index
+        layer_index += 1
+        with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+            if moe:
+                layer = FusedMoEFactory(
+                    num_experts=2,
+                    top_k=1,
+                    hidden_size=256,
+                    intermediate_size=256 if block else 260,
+                    quant_config=config,
+                    prefix=f"trace_{layer_index}.experts",
+                    enable_eplb=eplb,
+                ).routed_experts
+                if eplb:
+                    layer.eplb_state.logical_to_physical_map = torch.tensor(
+                        [[0], [1]], device="cuda"
+                    )
+                method = layer.quant_method
+            else:
+                layer = torch.nn.Module()
+                method = Fp8LinearMethod(config)
+                method.create_weights(
+                    layer,
+                    256,
+                    [256],
+                    256,
+                    256,
+                    torch.bfloat16,
+                    weight_loader=default_weight_loader,
+                )
+                method.fp8_linear = DeepGemmFp8BlockScaledMMKernel(
+                    method.fp8_linear.config
+                )
+                layer.quant_method = method
+                layer.bias = torch.nn.Parameter(torch.zeros(256), requires_grad=False)
+                layer.bias.weight_loader = default_weight_loader
+        return layer, method
+
+    def load(layer, sources):
+        checkpoint = []
+        for name, source in sources.items():
+            param = getattr(layer, name)
+            if not moe:
+                param.weight_loader(param, source)
+                continue
+            for expert in range(2):
+                shards = ("w1", "w3") if name.startswith("w13_") else ("w2",)
+                pieces = (
+                    source[expert].chunk(2, dim=0)
+                    if len(shards) == 2 and source[expert].ndim > 0
+                    else (source[expert],) * len(shards)
+                )
+                for shard, piece in zip(shards, pieces):
+                    proj = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}[
+                        shard
+                    ]
+                    suffix = name.split("_", 1)[1]
+                    checkpoint.append((f"{expert}.{proj}.{suffix}", piece))
+        if moe:
+            assert list(layer.load_weights(checkpoint))
+
+    layer, method = make_layer()
+    trace = ModelReloadTracer()
+    trace.register_fp8("fp8", layer)
+    state = trace.states["fp8"]
+    source_a = {}
+    for role in state.roles:
+        param = getattr(layer, role)
+        value = torch.rand(param.shape, dtype=torch.float32, device="cuda")
+        source_a[role] = (
+            (value * 4 - 2).to(param.dtype)
+            if "scale" not in role
+            else (value * 0.1 + 0.01).to(param.dtype)
+        )
+        if backend == "flashinfer_cutlass" and block and "scale" in role:
+            source_a[role].view(-1)[0] = 1e-23
+    with trace.observe():
+        load(layer, source_a)
+    method.process_weights_after_loading(layer)
+    trace.bind_runtime()
+    identities = {
+        name: (target.tensor, target.tensor.data_ptr())
+        for name, target in state.targets.items()
+    }
+    kernel = method.moe_kernel if moe else method.fp8_linear
+    x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+    topk_ids = (torch.arange(128, device="cuda", dtype=torch.int32) % 2)[:, None]
+    topk_weights = torch.ones(128, 1, device="cuda")
+
+    def forward(method, layer):
+        if moe:
+            return method.apply(layer, x, topk_weights, topk_ids, None, None)
+        return method.apply(layer, x, layer.bias)
+
+    if check_forward:
+        for _ in range(3):
+            forward(method, layer)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = forward(method, layer)
+
+    for factor in (0.5, 1.5):
+        source_b = {
+            name: (value.float() * factor).to(value.dtype)
+            for name, value in source_a.items()
+        }
+        reference, reference_method = make_layer()
+        placement = [1, 0] if eplb and factor == 0.5 else [0, 1]
+        if eplb:
+            for target in (layer, reference):
+                target.eplb_state.logical_to_physical_map.copy_(
+                    torch.tensor(placement, device="cuda")[:, None]
+                )
+        load(reference, source_b)
+        reference_method.process_weights_after_loading(reference)
+        with trace.round(preserve_checkpoint=preserve):
+            load(layer, dict(reversed(list(source_b.items()))))
+            assert state.complete
+            assert bool(state.checkpoint) is preserve
+        assert (method.moe_kernel if moe else method.fp8_linear) is kernel
+        for name, target in state.targets.items():
+            original, pointer = identities[name]
+            assert target.resolve() is original
+            assert original.data_ptr() == pointer
+            expected = (
+                getattr(reference, name)
+                if name in state.roles
+                else getattr(reference_method.moe_quant_config, name)
+            )
+            torch.testing.assert_close(
+                target.tensor.reshape(-1).contiguous().view(torch.uint8),
+                expected.reshape(-1).contiguous().view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+        if check_forward:
+            graph.replay()
+            torch.testing.assert_close(
+                graph_output, forward(reference_method, reference), rtol=0, atol=0
+            )
+        if preserve:
+            for name, source in source_b.items():
+                torch.testing.assert_close(
+                    state.checkpoint[name].float(),
+                    source[placement].float() if moe else source.float(),
+                    rtol=0,
+                    atol=0,
+                )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_cutlass_conversion(
+    default_vllm_config, dist_init, workspace_init, tmp_path, block, eplb, preserve
+):
+    """Check real CUDA conversion/storage independently of CUTLASS forward JIT."""
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "flashinfer_cutlass",
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+    )
+
+
+def test_fp8_reload_trace_rejects_uncoordinated_eplb_collectives(monkeypatch):
+    """Local readiness cannot safely order per-tensor scale collectives across EP."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization import fp8
+
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: False)
+    monkeypatch.setattr(fp8, "is_weights_pre_processed", lambda: False)
+    method = SimpleNamespace(
+        quant_config=Fp8Config(True, "static"),
+        moe=SimpleNamespace(
+            has_bias=False,
+            moe_parallel_config=SimpleNamespace(enable_eplb=True, ep_size=2),
+        ),
+        weight_scale_refine=None,
+        weight_scale_name="weight_scale",
+        block_quant=False,
+        fp8_backend=Fp8MoeBackend.FLASHINFER_CUTLASS,
+    )
+    layer = SimpleNamespace(
+        expert_map_manager=SimpleNamespace(num_fused_shared_experts=0)
+    )
+    with pytest.raises(NotImplementedError, match="collectives are coordinated"):
+        Fp8MoEMethod.create_reload_state(method, layer, "experts")
 
 
 def test_kv_cache_scale_sync_to_host_copies():

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Layerwise weight reloading utilities for vLLM.
+Weight reloading utilities for vLLM.
 
-This module provides functionality to reload model weights layer-by-layer,
-which is useful for weight updates without full model reconstruction.
+ModelReloadTracer provides opt-in, fixed-scope checkpoint reload tracing.
+The existing layerwise helpers remain the worker's default reload path.
 
-Limitations:
+Limitations of the layerwise helpers:
 1. Composition with CPU offloading has not been implemented
 2. Tied parameters will only reflect processing from one of the parent layers (for
    example, only processing from embed_tokens will have an effect)
@@ -24,6 +24,9 @@ __all__ = [
     "finalize_layerwise_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
+    "ModelReloadTracer",
+    "ReloadState",
+    "ReloadError",
 ]
 
 from .layerwise import (
@@ -36,3 +39,4 @@ from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,
 )
+from .trace import ModelReloadTracer, ReloadError, ReloadState

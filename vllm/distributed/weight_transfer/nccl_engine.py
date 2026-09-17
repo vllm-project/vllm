@@ -159,20 +159,12 @@ class NCCLWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
+        """Prepare the configured checkpoint reload implementation."""
+        self._start_checkpoint_reload()
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
+        """Validate completion after all weights have been received."""
+        self._finish_checkpoint_reload()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
@@ -207,11 +199,28 @@ class NCCLWeightTransferEngine(
                         dtype = getattr(torch, dtype_name)
                         yield (name, (shape, dtype))
 
+                post_unpack = self.model.load_weights
+                if self.config.reload_mode == "trace":
+                    load_stream = torch.cuda.current_stream(self.device)
+
+                    def load_traced_weights(weights):
+                        receive_stream = torch.cuda.current_stream(self.device)
+                        # A layer's shards may span receive streams. Serialize
+                        # loading/conversion, and protect borrowed receive buffers.
+                        load_stream.wait_stream(receive_stream)
+                        try:
+                            with torch.cuda.stream(load_stream):
+                                self.model.load_weights(weights)
+                        finally:
+                            receive_stream.wait_stream(load_stream)
+
+                    post_unpack = load_traced_weights
+
                 packed_nccl_broadcast_consumer(
                     iterator=state_dict_info_iterator(),
                     group=self.model_update_group,
                     src=0,
-                    post_unpack_func=self.model.load_weights,
+                    post_unpack_func=post_unpack,
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
                     device=self.device,

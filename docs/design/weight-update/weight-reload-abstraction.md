@@ -1176,7 +1176,7 @@ with trace.observe():
 process_registered_weights_after_loading()
 trace.bind_runtime()
 
-# The caller must quiesce inference and coordinate participating ranks.
+# The caller must quiesce inference/EPLB and coordinate participating ranks.
 with trace.round(preserve_checkpoint=False):
     load_registered_checkpoint_weights()
 ```
@@ -1185,12 +1185,21 @@ with trace.round(preserve_checkpoint=False):
 未注册模块不受 trace 保护，不能把部分注册范围的成功视为全模型 reload
 成功。不得与 layerwise/online loader 同时使用。
 
-- cold-load observer 保存原 loader 的规范化参数、源 shape/dtype 和写入
-  元素数；每个 role、expert、shard 分别登记。非本 rank 的无写入调用
-  不成为 required slot。
-- 所有 required slot 到齐后，FINISH 用依赖完成通知驱动队列；一个 state
-  成功 finish 后才推进 dependent state。注册图在 runtime binding 时检查
-  未知依赖和环。
+- cold-load observer 只对非 RoutedExperts 层记录 loader 的 sharding
+  调用参数，不使用 `CopyCounter` 或写入元素数推断完成状态。loader
+  显式返回 `False` 的调用不成为 required slot；其它成功调用登记为
+  required slot。源张量的校验和 TP 切分由原 loader 负责。
+- RoutedExperts 在 observe 阶段只保存参数元信息和 loader，不记录
+  cold-load arrivals。每轮开始时根据 `get_expert_mapping()` 和当前
+  本地物理 expert 归属构建 required slots。EPLB 模式读取当前
+  `EplbLayerState.logical_to_physical_map`，不是初始 placement。
+  逻辑 checkpoint expert 的所有本地副本必须分别加载；fused 与
+  逐 expert 输入由 `RoutedExperts.load_weights()` 路由到同一批 slots。
+- 单层 required slots 到齐、且所有依赖完成时，立即调用该层
+  `Policy.finish()`。成功后标记完成、释放不需保留的暂存，并通知
+  dependent state。`ModelReloadTracer.finish()` 在权重流结束时检查
+  缺失项和未完成状态、恢复 loader，不再等待全模型收齐才执行转换。
+  注册图在 runtime binding 时检查未知依赖和环。
 - `preserve_checkpoint=False` 时，在表示兼容的情况下复用 runtime
   存储；不可兼容的 scale/layout 仍分配必要暂存。
 - `preserve_checkpoint=True` 时，本轮 source 使用独立存储，转换使用
@@ -1201,13 +1210,24 @@ with trace.round(preserve_checkpoint=False):
 - 失败会使 tracer 进入不可复用状态。调用方必须传播错误；若 runtime
   已修改，不能继续推理，需重启或 cold load 恢复。本 API 不自行停止服务。
 - 空 round 是 no-op；成功或空 round 的重复 FINISH 不再执行转换。
-- EPLB、在线量化、预处理 checkpoint、MoE bias、refined block grid 和
-  未接入的后端显式拒绝，不自动 fallback。
+- EPLB 可以在两轮之间改变 placement，但调用方必须在 reload 前等待
+  expert 搬迁和映射提交完成，并在整轮保持 EPLB 静默。逐次加载及
+  最终收尾会检查映射是否变化；检查不是锁，也不能替代外部静默。
+  直接调用参数 loader 时 `expert_id` 仍指全局物理 expert；不要复用
+  含初始逻辑映射的模型自定义 loader。支持动态路由的入口是
+  `RoutedExperts.load_weights()`。
+- 在线量化、预处理 checkpoint、MoE bias、fused shared experts、
+  refined block grid 和未接入的后端显式拒绝，不自动 fallback。
+  改变 runtime 张量形状或地址的 elastic EP 不在本次支持范围。
+- CUTLASS per-tensor 的 EPLB 激活 scale 需要跨 EP rank 取全局最大值。
+  在接入跨 rank 完成协调前，显式拒绝该组合的多 rank reload，避免
+  到达驱动的逐层 finish 产生 collective 错序或死锁。单 rank EPLB
+  沿用冷加载的 scale 处理；block-FP8 后处理不涉及这项归约。
 
 这仍是基础设施版本，不宣称满足前文的全模型 serving、显存峰值或跨 rank
 一致性验收；这些需要 worker 接入和模型级验证后再确认。
 
-### 11.1 验证记录（2026-09-15）
+### 11.1 首版验证记录（2026-09-15，逐层完成改动前）
 
 在 H200 上使用固定 vLLM 环境验证，提交任务返回 `status=ok rc=0`：
 
@@ -1230,3 +1250,210 @@ block scale clamp、per-tensor padding、alpha 和 reciprocal 刷新。
 这些是模块级验证，不是全模型精度评测、NCCL/IPC 传输验证或多 rank
 一致性验证。Blackwell、TP/EP 多卡、E8M0 checkpoint 输入和 batched
 DeepGEMM 路径尚未单独验证。
+
+### 11.2 逐层完成与动态映射验证（2026-09-15）
+
+当前版本已验证：
+
+```text
+tests/model_executor/model_loader/test_reload.py
+  -k 'not (test_reload_weights or test_kv_scale_reload
+           or test_online_quantize_reload or test_attention)'
+  52 passed, 25 deselected
+
+tests/kernels/moe/test_moe_weight_loading_padded.py
+  44 passed
+
+tests/quantization/test_fp8.py
+  -k 'reload_trace and
+      (deep_gemm or uncoordinated or cutlass_conversion)'
+  15 passed, 55 deselected
+```
+
+基础设施测试验证层级即时完成、暂存释放、依赖顺序、重复分片、
+完成后的 runtime 校验，以及真实 RoutedExperts loader 的 TP 切分、
+逻辑 expert 到多个物理副本的路由、两轮映射变化和轮内变更拒绝。
+MoE 的这些路由用例不依赖冷加载 arrivals。
+
+本轮最终任务在 H200 固定 vLLM 环境返回 `status=ok rc=0`。
+DeepGEMM 后端用例验证 linear/MoE 的冷加载数值一致性、runtime
+身份/地址及 CUDA graph 复用，也覆盖单 rank EPLB 映射换位。
+多 rank EPLB collective 拒绝条件有单独用例。
+
+CUTLASS 的 8 个 GPU 后处理用例验证 block/per-tensor、单 rank EPLB
+映射换位、两种 checkpoint 保留选项，以及两轮 reload 后权重、
+scale、alpha、reciprocal 与 cold load 的字节一致性和存储身份。
+这些用例不触发 CUTLASS 前向 JIT。
+
+CUTLASS 完整前向回归需要当前 FlashInfer 的首次大规模 JIT 编译；
+此前两次运行分别因提交客户端超时、远端连接中断而未完成，
+后续长编译任务已主动停止。完整前向/CUDA graph 测试保留，
+但本轮不声明该部分通过。
+这些仍是模块级测试，不是完整模型评测或多 rank EPLB 集成验收。
+
+### 11.3 NCCL / IPC 生产入口
+
+通过已有的 `weight_transfer_config` 显式选择 reload 实现：
+
+```bash
+--weight-transfer-config '{"backend":"nccl","reload_mode":"trace"}'
+--weight-transfer-config '{"backend":"ipc","reload_mode":"trace"}'
+```
+
+不指定 `reload_mode` 时仍为 `layerwise`，不改变旧路径。
+`preserve_checkpoint` 默认 `false`；设为 `true` 可保留各层本 rank 的
+checkpoint 暂存到下一轮开始。该选项仅用于 `trace`。
+
+- `BaseModelLoader.load_model` 在冷加载前注册 policy，围绕 checkpoint
+  load 执行 `observe`，在所有冷加载后处理结束后绑定 runtime targets。
+- NCCL、IPC 的 `start_weight_update` 调用绑定 tracer 的 `begin_round`。
+  packed / unpacked 接收仍使用原生传输并调用 `model.load_weights`，
+  不替换 wire protocol，也不在测试脚本中替换 worker 的 reload 接口。
+- packed NCCL 的不同 chunk 可来自不同 receive stream。trace 路径把
+  模型加载和逐层转换排到同一 load stream，先等待当前 receive stream，
+  再让 receive stream 等待加载完成；同时保证跨 chunk 的分片依赖和
+  借用的接收 buffer 生命周期，异常路径也执行反向等待。
+- 参数 loader 成功到达后立即推进层级完成和暂存释放；
+  `finish_weight_update` 检查完整性与 runtime / expert mapping，
+  不等到整个模型收齐才执行 policy 转换。
+- 接收或 metadata 解析失败会 abort tracer，恢复 loader、释放暂存；
+  这不是回滚。IPC 的 finish 无论成功与否都释放本轮 imported buffer。
+- 未经 trace 冷加载的 loader 或 draft target 在 START 时明确拒绝。
+  目前仅 NCCL、IPC 可选择 trace，不支持 sparse / runtime-format 传输。
+
+整模型自动注册支持已实现的 FP8 policy，以及无需后处理转换的普通参数。
+FlashInfer/DeepGEMM 动态 linear 的冷加载转换委托给 DeepGEMM，
+因此复用同一 policy。普通 Attention 仅支持非量化 KV cache；
+普通参数可由一个 owner 写入、其他共享同一 Parameter 的层依赖该 owner
+完成，并校验共享引用。MLA、量化 KV scale、模型级派生权重、
+不同 Parameter 共享 runtime storage，以及其他
+缺少 policy 的后处理路径明确拒绝，不能视为已完成适配。
+调用方仍需暂停推理并清理旧 KV/prefix cache，且保证 EPLB 静默。
+
+`examples/rl/run_reload_trace_day0.py` 使用该配置启动真实服务，
+NCCL 通过 day0-kit publisher，IPC 通过原生 HTTP IPC sender。
+验证包含 cold-A / warm-B 的对象身份与地址、warm-B / cold-B 的
+runtime 哈希和确定性生成输出，以及层级完成状态和暂存释放。
+IPC HTTP 验证按原生示例仅在本地服务中启用 insecure serialization。
+
+### 11.4 生产入口验证进度
+
+已完成的真实模型验证：
+
+| 模型 | 层数 | 路径 | 结果 |
+| --- | --- | --- | --- |
+| Qwen3-30B-A3B-FP8 | 2 | DeepGEMM + day0 NCCL + `reload_mode=trace` | PASS |
+
+该次运行的 19 个 state 全部完成且未保留暂存；warm-B 的 runtime
+对象、地址与 cold-A 相同，所有注册 target 的哈希与 cold-B 相同，
+三个固定 prompt 的生成文本和 logprobs 与 cold-B 精确一致。
+worker extension 会拒绝 reload 期间调用 quant method 的冷加载后处理。
+任务 `a8f882436e14` 返回 `status=ok rc=0`，证据目录为：
+
+```text
+/inspire/hdd/global_user/wangtongyu-25057/
+  day0-trace-qwen3-deep-nccl-20260915-02/
+    comparison.json
+    evidence.json
+    update.json
+    server-a.log
+    server-b.log
+    client.log
+```
+
+CUTLASS 首次 JIT 已完成。任务 `980efa1472f8` 实际退出并返回
+`status=ok rc=0`，固定 vLLM 环境执行以下回归：
+
+```text
+tests/quantization/test_fp8.py -k reload_trace -v --tb=short
+23 passed, 47 deselected, 17 warnings in 4945.19s
+```
+
+这包含 DeepGEMM / CUTLASS 的完整前向和 CUDA graph 回归、
+CUTLASS 转换测试及未协调 EPLB collective 的拒绝测试。日志位于：
+
+```text
+/inspire/hdd/global_user/wangtongyu-25057/vllm-reload-trace-20260915/reload-trace-test.log
+```
+
+共享机器独占窗口结束后，已同步 UPDATE 前 START 检查及 NCCL packed
+固定加载 stream 适配，并完成任务 `70f21a231150`，实际返回
+`status=ok rc=0`。固定环境为
+`/inspire/hdd/global_user/wangtongyu-25057/miniconda3/envs/vllm/bin/python`，
+复用原 FlashInfer JIT 缓存，没有修改环境依赖。
+
+| 两层模型 | MoE 后端 | 传输 | state / target 数 | 结果 |
+| --- | --- | --- | --- | --- |
+| Qwen3-30B-A3B-FP8 | DeepGEMM | IPC | 19 / 29 | PASS |
+| Qwen3-30B-A3B-FP8 | DeepGEMM | NCCL | 19 / 29 | PASS |
+| Qwen3-30B-A3B-FP8 | CUTLASS | IPC | 19 / 29 | PASS |
+| Qwen3-30B-A3B-FP8 | CUTLASS | NCCL | 19 / 29 | PASS |
+| Qwen2.5-7B-Instruct | 不适用，dense | NCCL | 15 / 17 | PASS |
+| Llama-3.2-1B-Instruct | 不适用，dense | NCCL | 15 / 15 | PASS |
+
+六组均使用 `reload_mode=trace`，覆盖全量 checkpoint。Qwen3 的 CUTLASS
+配置针对 MoE，FP8 linear 仍使用 DeepGEMM policy；dense 模型使用
+`CopyReloadPolicy`。Qwen2.5 和 Llama 的 B checkpoint 仅将两层
+`down_proj.weight` 乘以 0.5。每组均核查所有 state 完成、暂存释放、
+runtime 对象及地址不变、所有 target 哈希匹配 cold-B，且三个固定 prompt
+的生成文本和 logprobs 精确匹配 cold-B。Llama 覆盖共享 embedding/head。
+这些是单 rank、关闭 EPLB、eager 服务的 reload 一致性测试，
+不是完整模型任务精度或吞吐测试。
+
+NCCL 使用 day0-kit `152c2c0` 的 publisher 和本分支兼容适配器；
+IPC 使用同一 kit 的 checkpoint reader 和当前原生 IPC trainer。
+IPC 曾因遗漏 `rank` 参数失败；修正后任务 `f3360ba67cb1` 又发现
+`lm_head.weight` 为 1244659712 bytes，超过默认 1 GiB packed buffer。
+脚本现按 checkpoint 最大 tensor 大小设置 buffer，以上成功运行覆盖该修复，
+没有通过跳过 tensor 缩小测试范围。
+
+同批次定向回归：
+
+```text
+tests/model_executor/model_loader/test_reload.py
+tests/distributed/test_weight_transfer.py
+  -k 'reload_trace or checkpoint_transport or checkpoint_reload_config'
+49 passed, 136 deselected in 6.46s
+
+tests/quantization/test_fp8.py -k reload_trace
+23 passed, 47 deselected in 26.41s
+```
+
+证据目录均位于 `/inspire/hdd/global_user/wangtongyu-25057/`：
+
+```text
+day0-trace-qwen3-deep_gemm-ipc-resume-02/
+day0-trace-qwen3-deep_gemm-nccl-resume-02/
+day0-trace-qwen3-flashinfer_cutlass-ipc-resume-02/
+day0-trace-qwen3-flashinfer_cutlass-nccl-resume-02/
+day0-trace-Qwen2.5-7B-Instruct-2layer-nccl-resume-01/
+day0-trace-Llama-3.2-1B-Instruct-nccl-resume-01/
+```
+
+各目录保留 `comparison.json`、`evidence.json`、`update.json`、
+server A/B 与 client 日志。批次日志为
+`vllm-reload-trace-20260915/reload-serving-matrix.log`。
+任务退出后再次核查 GPU compute-apps 为空，无本方测试、服务、worker、
+nvcc/ninja 进程，并明确释放共享机器窗口。
+
+多 rank EPLB、完整模型任务精度、reload 显存峰值未由这些用例验证。
+
+### 11.5 完整 weight-transfer 回归
+
+任务 `1ac482afd019` 使用同一固定环境，在 GPU 0/1 上运行完整
+`tests/distributed/test_weight_transfer.py -v --tb=short`，没有 `-k`
+过滤。launcher 预先创建限制为 2 GPU、8 CPU 的本地 Ray 实例，
+并在 `finally` 中关闭该实例。
+
+结果为 `106 passed, 17 warnings in 67.66s`，作业实际
+`status=ok rc=0`，包含原生 NCCL 多进程传输、IPC Ray/HTTP 路径、
+默认 layerwise 路径和新增 trace 生命周期测试。
+退出时另有 CUDA IPC producer 早于所有共享 tensor 释放的警告；
+退出后核查 compute-apps 为空，本次 Ray/测试进程全部退出。
+此结果不等同于证明 IPC teardown 没有生命周期警告。
+
+完整日志：
+
+```text
+/inspire/hdd/global_user/wangtongyu-25057/vllm-reload-trace-20260915/reload-transfer-regression.log
+```

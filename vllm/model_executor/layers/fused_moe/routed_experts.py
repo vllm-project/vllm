@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
@@ -91,6 +91,7 @@ class RoutedExperts(PluggableLayer):
         self.ckpt_up_proj_name = ckpt_up_proj_name
         self.is_fused_checkpoint_transposed = is_fused_checkpoint_transposed
         self.expert_map_manager = expert_map_manager
+        self.eplb_state: EplbLayerState | None = None
         self.hidden_size = moe_config.hidden_dim
         self.global_num_experts = moe_config.num_experts
         self.local_num_experts = moe_config.num_local_experts
@@ -841,6 +842,7 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
+        physical_to_logical = None
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
@@ -871,6 +873,8 @@ class RoutedExperts(PluggableLayer):
                         f"for checkpoint weight {qual_name!r}"
                     )
                 if is_fused:
+                    if physical_to_logical is None:
+                        physical_to_logical = self.get_physical_to_logical_map()
                     quant_method = getattr(param, "quant_method", None)
                     # Block scales share the weight's two-dimensional layout.
                     # Other quantization metadata can use independent layouts.
@@ -905,7 +909,16 @@ class RoutedExperts(PluggableLayer):
 
                 # Unified loading logic for fused and non-fused experts
                 loaded_experts = experts_shard.unbind()
-                for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
+                expert_weights: Iterable[tuple[int, torch.Tensor]]
+                if is_fused:
+                    assert physical_to_logical is not None
+                    expert_weights = (
+                        (physical, loaded_experts[logical])
+                        for physical, logical in enumerate(physical_to_logical)
+                    )
+                else:
+                    expert_weights = enumerate(loaded_experts, start=start)
+                for expert_id, loaded_expert in expert_weights:
                     success = param.weight_loader(
                         param=param,
                         loaded_weight=loaded_expert,
@@ -923,6 +936,37 @@ class RoutedExperts(PluggableLayer):
                             self.layer_name,
                         )
                         yield param_name
+
+    def get_physical_to_logical_map(self) -> Sequence[int]:
+        """Return the current EPLB placement, or the initial cold-load placement."""
+        num_shared = self.expert_map_manager.num_fused_shared_experts
+        num_logical = self.moe_config.num_logical_experts + num_shared
+        num_physical = self.moe_config.num_experts + num_shared
+        state = self.eplb_state
+        if state is None or state.logical_to_physical_map is None:
+            return EplbState.build_initial_global_physical_to_logical_map(
+                num_logical, num_physical - num_logical
+            )
+        if num_shared:
+            raise NotImplementedError("Reload with EPLB and fused shared experts")
+        # EPLB updates these tensors in place. The caller must quiesce EPLB
+        # before taking a snapshot and keep it quiescent throughout loading.
+        logical_to_physical = state.logical_to_physical_map.cpu().tolist()
+        physical_to_logical = [-1] * num_physical
+        for logical, replicas in enumerate(logical_to_physical):
+            for physical in replicas:
+                if physical == -1:
+                    continue
+                if (
+                    logical >= num_logical
+                    or not 0 <= physical < num_physical
+                    or physical_to_logical[physical] != -1
+                ):
+                    raise ValueError("Invalid EPLB expert placement")
+                physical_to_logical[physical] = logical
+        if -1 in physical_to_logical:
+            raise ValueError("Incomplete EPLB expert placement")
+        return physical_to_logical
 
     def get_expert_mapping(
         self,
@@ -943,6 +987,7 @@ class RoutedExperts(PluggableLayer):
             routed_experts_prefix="",
             lora_base_layer_prefix=self.lora_base_layer_prefix,
             include_fused=include_fused,
+            physical_to_logical_map=self.get_physical_to_logical_map(),
         )
 
     @staticmethod
@@ -988,6 +1033,7 @@ class RoutedExperts(PluggableLayer):
         lora_base_layer_prefix: str = "",
         lora_base_layer_prefix_on_param_name: str = "",
         include_fused: bool = False,
+        physical_to_logical_map: Sequence[int] | None = None,
     ) -> list[tuple[str, str, int, str]]:
         """
         Create expert parameter mapping for weight loading with redundant experts.
@@ -1010,6 +1056,7 @@ class RoutedExperts(PluggableLayer):
                 ``make_expert_params_mapping`` indexes the model-wide
                 ``params_dict`` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
+            physical_to_logical_map: Current placement, or None for cold load.
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -1025,11 +1072,14 @@ class RoutedExperts(PluggableLayer):
         # - `expert_id` is the physical expert id
         # - `weight_name` contains the weight name of the logical expert
         # So that we should map the expert id to logical in `weight_name`
-        physical_to_logical_map = (
-            EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
+        if physical_to_logical_map is None:
+            physical_to_logical_map = (
+                EplbState.build_initial_global_physical_to_logical_map(
+                    num_experts, num_redundant_experts
+                )
             )
-        )
+        if len(physical_to_logical_map) != num_physical_experts:
+            raise ValueError("Expert placement size does not match physical experts")
 
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."

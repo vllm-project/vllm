@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -72,7 +73,16 @@ class BaseModelLoader(ABC):
                 )
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            transfer_config = vllm_config.weight_transfer_config
+            trace = None
+            if transfer_config is not None and transfer_config.reload_mode == "trace":
+                from vllm.model_executor.model_loader.reload.integration import (
+                    create_model_reload_tracer,
+                )
+
+                trace = create_model_reload_tracer(model)
+            with trace.observe() if trace is not None else nullcontext():
+                self.load_weights(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -89,6 +99,9 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+            if trace is not None:
+                trace.bind_runtime()
+                model._reload_tracer = trace
 
         return model.eval()
 

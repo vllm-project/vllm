@@ -402,6 +402,8 @@ def FusedMoEFactory(
         **routed_experts_args if routed_experts_args is not None else {},
     )
 
+    routed_experts.eplb_state = router.eplb_state
+
     if runner_cls is None:
         runner_cls = MoERunner
 

@@ -56,6 +56,11 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def clamp_fp8_moe_block_scale(scale: torch.Tensor) -> None:
+    """Avoid Hopper CUTLASS NaNs for near-zero scales of unused experts."""
+    scale.clamp_(min=1e-10)
+
+
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
@@ -523,15 +528,8 @@ def prepare_fp8_moe_layer_for_fi(
 
         rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(w13, w2, is_gated)
 
-    # Clamp block scales to avoid NaN from the FlashInfer CUTLASS kernel.
-    # Some FP8 models have near-zero block scales (~1e-23) for dead/unused
-    # experts. The CUTLASS kernel doesn't handle these correctly on Hopper
-    # (SM 9.0), producing NaN instead of near-zero output. Clamping to a
-    # small minimum prevents this without affecting model accuracy since
-    # these experts' effective weights are already zero.
     if block_quant:
-        _FI_CUTLASS_MIN_BLOCK_SCALE = 1e-10
-        w13_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
-        w2_scale.clamp_(min=_FI_CUTLASS_MIN_BLOCK_SCALE)
+        clamp_fp8_moe_block_scale(w13_scale)
+        clamp_fp8_moe_block_scale(w2_scale)
 
     return w13, w2, w13_scale, w2_scale

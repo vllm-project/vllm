@@ -15,8 +15,10 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -33,6 +35,12 @@ from vllm.model_executor.model_loader.reload.meta import (
     restore_layer_on_meta,
     to_meta_tensor,
 )
+from vllm.model_executor.model_loader.reload.moe import RoutedExpertsReloadPlan
+from vllm.model_executor.model_loader.reload.trace import (
+    ModelReloadTracer,
+    ReloadError,
+    ReloadState,
+)
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
@@ -40,6 +48,524 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
 )
 from vllm.platforms import current_platform
+
+
+def _trace_weight_loader(param, loaded_weight, shard_id=None):
+    if shard_id == "remote":
+        return False
+    target = param if shard_id is None else param.narrow(0, shard_id * 2, 2)
+    target.copy_(loaded_weight)
+
+
+class _TraceCopyPolicy:
+    def __init__(self, finished):
+        self.finished = finished
+
+    def bind(self, state):
+        pass
+
+    def validate(self, state):
+        pass
+
+    def destination(self, state, role, bound):
+        return state.source(role, alias_runtime=True)
+
+    def finish(self, state):
+        for role in state.roles:
+            state.copy_(role, state.work(role).mul_(2))
+        self.finished.append(state.key)
+
+
+def _make_reload_trace():
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
+    layer.weight.weight_loader = _trace_weight_loader
+    finished: list[str] = []
+    state = ReloadState("linear", layer, ("weight",), _TraceCopyPolicy(finished))
+    trace = ModelReloadTracer()
+    trace.register_state(state)
+    with trace.observe():
+        layer.weight.weight_loader(layer.weight, torch.ones(2, 3), 0)
+        layer.weight.weight_loader(layer.weight, torch.ones(2, 3), 1)
+        assert (
+            layer.weight.weight_loader(layer.weight, torch.ones(2, 3), "remote")
+            is False
+        )
+    trace.bind_runtime()
+    return layer, trace, state, finished
+
+
+def test_reload_trace_base_loader_captures_checkpoint_load(monkeypatch):
+    """The production opt-in must observe before processing and bind afterwards."""
+    from vllm.config.weight_transfer import WeightTransferConfig
+    from vllm.model_executor.model_loader import base_loader
+    from vllm.model_executor.model_loader.reload.integration import (
+        get_model_reload_tracer,
+    )
+
+    class Loader(base_loader.BaseModelLoader):
+        def download_model(self, model_config):
+            pass
+
+        def create_model(self, **kwargs):
+            model = torch.nn.Module()
+            model.weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+            model.weight.weight_loader = default_weight_loader
+            return model
+
+        def load_weights(self, model, model_config):
+            model.weight.weight_loader(model.weight, torch.ones(2))
+
+    def process(model, config, device):
+        assert not hasattr(model, "_reload_tracer")
+        assert model.weight.weight_loader is default_weight_loader
+        torch.testing.assert_close(model.weight, torch.ones(2))
+
+    monkeypatch.setattr(base_loader, "process_weights_after_loading", process)
+    monkeypatch.setattr(
+        base_loader,
+        "current_platform",
+        types.SimpleNamespace(is_cuda_alike=lambda: False, is_xpu=lambda: False),
+    )
+    config = types.SimpleNamespace(
+        weight_transfer_config=WeightTransferConfig(reload_mode="trace"),
+        device_config=types.SimpleNamespace(device="cpu"),
+        load_config=types.SimpleNamespace(device=None),
+    )
+    model_config = types.SimpleNamespace(dtype=torch.float32)
+    model = Loader(config.load_config).load_model(config, model_config)
+    trace = get_model_reload_tracer(model)
+    with trace.round():
+        model.weight.weight_loader(model.weight, torch.full((2,), 4.0))
+    torch.testing.assert_close(model.weight, torch.full((2,), 4.0))
+
+
+def test_reload_trace_tied_plain_parameters_have_one_owner():
+    """A tied embedding/head must complete once while both references stay valid."""
+    from vllm.model_executor.model_loader.reload.integration import (
+        create_model_reload_tracer,
+    )
+
+    model = torch.nn.Module()
+    model.embedding = torch.nn.Module()
+    model.head = torch.nn.Module()
+    weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+    weight.weight_loader = default_weight_loader
+    model.embedding.weight = model.head.weight = weight
+    trace = create_model_reload_tracer(model)
+    with trace.observe():
+        weight.weight_loader(weight, torch.ones(2))
+    trace.bind_runtime()
+    with trace.round():
+        weight.weight_loader(weight, torch.full((2,), 3.0))
+        assert all(state.complete for state in trace.states.values())
+    assert model.embedding.weight is model.head.weight is weight
+    torch.testing.assert_close(model.head.weight, torch.full((2,), 3.0))
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_repeated_rounds_keep_storage_and_checkpoint(preserve):
+    """Reload changes values, not runtime identity; preservation keeps raw input."""
+    layer, trace, state, finished = _make_reload_trace()
+    original = layer.weight
+    pointer = original.data_ptr()
+    for value in (3.0, 5.0):
+        with trace.round(preserve_checkpoint=preserve):
+            for shard in (1, 0):
+                source = torch.full((2, 3), value)
+                layer.weight.weight_loader(layer.weight, source, shard)
+                source.zero_()
+        assert layer.weight is original
+        assert layer.weight.data_ptr() == pointer
+        torch.testing.assert_close(layer.weight, torch.full((4, 3), 2 * value))
+        assert trace.finish() is True
+        assert state.complete
+        if preserve:
+            torch.testing.assert_close(
+                state.checkpoint["weight"], torch.full((4, 3), value)
+            )
+            assert state.checkpoint["weight"].data_ptr() != pointer
+        else:
+            assert not state.checkpoint
+    assert finished == ["linear", "linear"]
+    assert layer.weight.weight_loader is _trace_weight_loader
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_missing_shard_poisoned_without_finish(preserve):
+    layer, trace, state, finished = _make_reload_trace()
+    old = layer.weight.detach().clone()
+    with (
+        pytest.raises(ReloadError, match="Missing reload slots"),
+        trace.round(preserve_checkpoint=preserve),
+    ):
+        layer.weight.weight_loader(layer.weight, torch.full((2, 3), 9.0), 0)
+    assert not finished
+    assert not state.complete
+    assert trace.failed
+    assert trace.runtime_modified is (not preserve)
+    if preserve:
+        torch.testing.assert_close(layer.weight, old)
+    with pytest.raises(ReloadError, match="failed"):
+        trace.begin_round()
+
+
+@pytest.mark.parametrize("error", ["duplicate", "unknown"])
+def test_reload_trace_bad_arrival_rejected_before_its_write(error):
+    layer, trace, _, finished = _make_reload_trace()
+    trace.begin_round()
+    source, shard = torch.full((2, 3), 7.0), 0
+    if error == "duplicate":
+        layer.weight.weight_loader(layer.weight, source, shard)
+    else:
+        shard = 2
+    before = layer.weight.detach().clone()
+    with pytest.raises(ReloadError):
+        layer.weight.weight_loader(layer.weight, source, shard)
+    torch.testing.assert_close(layer.weight, before)
+    assert not finished
+    trace.abort()
+    assert layer.weight.weight_loader is _trace_weight_loader
+
+
+def test_reload_trace_empty_round_and_nonlocal_arrivals_are_noops():
+    layer, trace, state, finished = _make_reload_trace()
+    with trace.round():
+        assert (
+            layer.weight.weight_loader(layer.weight, torch.ones(2, 3), "remote")
+            is False
+        )
+    assert trace.finish() is False
+    assert not finished
+    assert not state.complete
+    assert not trace.runtime_modified
+
+
+def test_reload_trace_runtime_replacement_rejected_before_loading():
+    layer, trace, _, _ = _make_reload_trace()
+    layer.weight = torch.nn.Parameter(layer.weight.detach().clone())
+    with pytest.raises(ReloadError, match="identity"):
+        trace.begin_round()
+
+
+def test_reload_trace_duplicate_after_eager_finish_does_not_rewrite_runtime():
+    layer, trace, state, finished = _make_reload_trace()
+    with pytest.raises(ReloadError, match="Duplicate"), trace.round():
+        for shard in (0, 1):
+            layer.weight.weight_loader(layer.weight, torch.ones(2, 3), shard)
+        assert state.complete
+        assert finished == ["linear"]
+        before = layer.weight.detach().clone()
+        try:
+            layer.weight.weight_loader(layer.weight, torch.full((2, 3), 9.0), 0)
+        finally:
+            torch.testing.assert_close(layer.weight, before)
+
+
+def test_reload_trace_finish_revalidates_completed_layer_targets():
+    layer, trace, state, _ = _make_reload_trace()
+    with pytest.raises(ReloadError, match="identity"), trace.round():
+        for shard in (0, 1):
+            layer.weight.weight_loader(layer.weight, torch.ones(2, 3), shard)
+        assert state.complete
+        layer.weight = torch.nn.Parameter(layer.weight.detach().clone())
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_conversion_failure_does_not_complete_state(monkeypatch, preserve):
+    layer, trace, state, finished = _make_reload_trace()
+    old = layer.weight.detach().clone()
+
+    def fail(state):
+        raise RuntimeError("conversion failed")
+
+    monkeypatch.setattr(state.policy, "finish", fail)
+    with (
+        pytest.raises(RuntimeError, match="conversion failed"),
+        trace.round(preserve_checkpoint=preserve),
+    ):
+        for shard in (0, 1):
+            layer.weight.weight_loader(layer.weight, torch.full((2, 3), 7.0), shard)
+    assert trace.failed
+    assert not state.complete
+    assert not state.checkpoint
+    assert not finished
+    assert trace.runtime_modified is (not preserve)
+    if preserve:
+        torch.testing.assert_close(layer.weight, old)
+    assert layer.weight.weight_loader is _trace_weight_loader
+
+
+@pytest.mark.parametrize("empty_root", [False, True])
+def test_reload_trace_dependencies_finish_once_after_sources(empty_root):
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
+    layer.weight.weight_loader = _trace_weight_loader
+    finished: list[str] = []
+    trace = ModelReloadTracer()
+    graph = [
+        ("parent", ("left", "right"), ()),
+        ("right", ("left",), ()),
+        ("left", ("root",) if empty_root else (), ("weight",)),
+    ]
+    if empty_root:
+        graph.append(("root", (), ()))
+    for name, deps, roles in graph:
+        trace.register_state(
+            ReloadState(name, layer, roles, _TraceCopyPolicy(finished), deps)
+        )
+    with trace.observe():
+        layer.weight.weight_loader(layer.weight, torch.ones(4, 3))
+    trace.bind_runtime()
+    expected = (["root"] if empty_root else []) + ["left", "right", "parent"]
+    with trace.round():
+        layer.weight.weight_loader(layer.weight, torch.ones(4, 3))
+        assert finished == expected
+    assert finished == expected
+    trace.finish()
+    assert finished == expected
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_finishes_ready_layers_before_stream_ends(dependent, preserve):
+    """A ready layer releases staging without waiting for unrelated weights."""
+    trace = ModelReloadTracer()
+    finished: list[str] = []
+    layers = {}
+    for name in ("first", "second"):
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
+        layer.weight.weight_loader = _trace_weight_loader
+        layers[name] = layer
+        deps = ("second",) if dependent and name == "first" else ()
+        trace.register_state(
+            ReloadState(name, layer, ("weight",), _TraceCopyPolicy(finished), deps)
+        )
+    with trace.observe():
+        for layer in layers.values():
+            layer.weight.weight_loader(layer.weight, torch.ones(4, 3))
+    trace.bind_runtime()
+    with trace.round(preserve_checkpoint=preserve):
+        first, second = layers.values()
+        first.weight.weight_loader(first.weight, torch.ones(4, 3))
+        first_state = trace.states["first"]
+        assert first_state.complete is (not dependent)
+        assert bool(first_state.checkpoint) is (dependent or preserve)
+        assert not trace.states["second"].checkpoint
+        second.weight.weight_loader(second.weight, torch.ones(4, 3))
+        assert finished == (["second", "first"] if dependent else ["first", "second"])
+        assert all(state.complete for state in trace.states.values())
+        assert all(
+            bool(state.checkpoint) is preserve for state in trace.states.values()
+        )
+
+
+def test_reload_trace_observes_shards_without_counting_tensor_operations(monkeypatch):
+    def forbidden_counter():
+        pytest.fail("ReloadTrace must not use CopyCounter")
+
+    monkeypatch.setattr(reload_meta, "CopyCounter", forbidden_counter)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
+
+    def loader(param, loaded_weight):
+        param.zero_().add_(loaded_weight)
+
+    layer.weight.weight_loader = loader
+    trace = ModelReloadTracer()
+    state = ReloadState("linear", layer, ("weight",), _TraceCopyPolicy([]))
+    trace.register_state(state)
+    with trace.observe():
+        layer.weight.weight_loader(layer.weight, torch.ones(4, 3))
+    trace.bind_runtime()
+    with trace.round():
+        layer.weight.weight_loader(layer.weight, torch.full((4, 3), 3.0))
+        assert state.complete
+    torch.testing.assert_close(layer.weight, torch.full((4, 3), 6.0))
+
+
+def _make_expert_reload_trace():
+    """Use real expert loaders on CPU, with two local slots out of four."""
+    layer = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.mlp.experts"
+    layer.ckpt_gate_proj_name = "gate_proj"
+    layer.ckpt_down_proj_name = "down_proj"
+    layer.ckpt_up_proj_name = "up_proj"
+    layer.lora_base_layer_prefix = ""
+    layer.is_fused_checkpoint_transposed = False
+    layer.global_num_experts = 4
+    layer.local_num_experts = 2
+    layer.quant_config = None
+    layer.quant_method = types.SimpleNamespace()
+    layer.moe_config = types.SimpleNamespace(
+        num_experts=4,
+        num_logical_experts=3,
+        is_act_and_mul=True,
+        tp_rank=1,
+        moe_parallel_config=types.SimpleNamespace(tp_size=2, enable_eplb=True),
+    )
+    layer.expert_map_manager = types.SimpleNamespace(
+        num_fused_shared_experts=0,
+        map_global_to_local=lambda expert: (-1, 0, -1, 1)[expert],
+    )
+    layer.eplb_state = EplbLayerState(
+        logical_to_physical_map=torch.tensor([[0, 3], [1, -1], [2, -1]])
+    )
+    for name, shape in (("w13_weight", (2, 4, 3)), ("w2_weight", (2, 3, 2))):
+        param = torch.nn.Parameter(torch.zeros(shape), requires_grad=False)
+        param.weight_loader = layer.weight_loader
+        setattr(layer, name, param)
+    state = ReloadState(
+        "experts",
+        layer,
+        ("w13_weight", "w2_weight"),
+        _TraceCopyPolicy([]),
+        expert_plan=RoutedExpertsReloadPlan(),
+    )
+    trace = ModelReloadTracer()
+    trace.register_state(state)
+    with trace.observe():
+        # MoE metadata capture must neither wrap nor learn from cold arrivals.
+        assert layer.w13_weight.weight_loader == layer.weight_loader
+    assert not state.slots.expected
+    trace.bind_runtime()
+    return layer, trace, state
+
+
+def _expert_checkpoint():
+    return [
+        (
+            f"{expert}.{proj}.weight",
+            torch.arange(12, dtype=torch.float32).reshape(shape)
+            + expert * 100
+            + offset,
+        )
+        for expert in range(3)
+        for proj, shape, offset in (
+            ("gate_proj", (4, 3), 0),
+            ("up_proj", (4, 3), 20),
+            ("down_proj", (3, 4), 40),
+        )
+    ]
+
+
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_expert_plan_tracks_eplb_replicas_and_tp(fused, preserve):
+    """Each round routes logical weights to current physical replicas and TP slices."""
+    layer, trace, state = _make_expert_reload_trace()
+    checkpoint = dict(_expert_checkpoint())
+    weights = list(checkpoint.items())
+    if fused:
+        weights = [
+            (
+                "gate_up_proj",
+                torch.stack(
+                    [
+                        torch.cat(
+                            [
+                                checkpoint[f"{e}.gate_proj.weight"],
+                                checkpoint[f"{e}.up_proj.weight"],
+                            ]
+                        )
+                        for e in range(3)
+                    ]
+                ),
+            ),
+            (
+                "down_proj",
+                torch.stack([checkpoint[f"{e}.down_proj.weight"] for e in range(3)]),
+            ),
+        ]
+    runtime = layer.w13_weight
+    for placement, local_logical in (
+        ([[0, 3], [1, -1], [2, -1]], [1, 0]),
+        ([[2, -1], [0, -1], [1, 3]], [2, 2]),
+    ):
+        layer.eplb_state.logical_to_physical_map.copy_(torch.tensor(placement))
+        with trace.round(preserve_checkpoint=preserve):
+            assert len(state.slots.expected) == 6
+            list(layer.load_weights(weights))
+            assert state.complete
+            assert bool(state.checkpoint) is preserve
+        assert layer.w13_weight is runtime
+        for local, logical in enumerate(local_logical):
+            expected_w13 = torch.cat(
+                [
+                    checkpoint[f"{logical}.gate_proj.weight"][2:],
+                    checkpoint[f"{logical}.up_proj.weight"][2:],
+                ]
+            )
+            expected_w2 = checkpoint[f"{logical}.down_proj.weight"][:, 2:]
+            torch.testing.assert_close(layer.w13_weight[local], expected_w13 * 2)
+            torch.testing.assert_close(layer.w2_weight[local], expected_w2 * 2)
+
+
+def test_reload_trace_expert_plan_rejects_missing_new_local_expert():
+    layer, trace, state = _make_expert_reload_trace()
+    layer.eplb_state.logical_to_physical_map.copy_(
+        torch.tensor([[2, -1], [0, -1], [1, 3]])
+    )
+    with pytest.raises(ReloadError, match="Missing reload slots"), trace.round():
+        list(layer.load_weights(_expert_checkpoint()[:-1]))
+    assert not state.complete
+
+
+def test_reload_trace_expert_plan_refreshes_rank_ownership():
+    layer, trace, state = _make_expert_reload_trace()
+    with trace.round():
+        list(layer.load_weights(_expert_checkpoint()))
+    layer.expert_map_manager.map_global_to_local = lambda expert: (0, -1, 1, -1)[expert]
+    with trace.round():
+        list(layer.load_weights(_expert_checkpoint()))
+        assert state.complete
+    checkpoint = dict(_expert_checkpoint())
+    for local, logical in enumerate((0, 2)):
+        torch.testing.assert_close(
+            layer.w2_weight[local], checkpoint[f"{logical}.down_proj.weight"][:, 2:] * 2
+        )
+
+
+def test_reload_trace_expert_plan_requires_initialized_eplb_state():
+    layer, trace, _ = _make_expert_reload_trace()
+    layer.eplb_state.logical_to_physical_map = None
+    with pytest.raises(ReloadError, match="initialized"):
+        trace.begin_round()
+    assert not trace.active
+    assert not trace.runtime_modified
+
+
+@pytest.mark.parametrize("after_complete", [False, True])
+def test_reload_trace_expert_plan_rejects_mid_round_mapping_change(after_complete):
+    layer, trace, state = _make_expert_reload_trace()
+    with pytest.raises(ReloadError, match="mapping changed"), trace.round():
+        if after_complete:
+            list(layer.load_weights(_expert_checkpoint()))
+            assert state.complete
+        layer.eplb_state.logical_to_physical_map.copy_(
+            torch.tensor([[2, -1], [0, -1], [1, 3]])
+        )
+        if not after_complete:
+            before = layer.w13_weight.detach().clone()
+            try:
+                list(layer.load_weights(_expert_checkpoint()))
+            finally:
+                torch.testing.assert_close(layer.w13_weight, before)
+    assert trace.failed
+
+
+@pytest.mark.parametrize("dependency", ["missing", "self"])
+def test_reload_trace_invalid_dependency_graph_rejected(dependency):
+    trace = ModelReloadTracer()
+    trace.register_state(
+        ReloadState("self", torch.nn.Module(), (), _TraceCopyPolicy([]), (dependency,))
+    )
+    with trace.observe():
+        pass
+    with pytest.raises(ReloadError, match="dependency|cycle"):
+        trace.bind_runtime()
 
 
 def _fp8_reload_unsupported() -> bool:
