@@ -190,6 +190,36 @@ def test_embedded_publish_makes_object_visible_atomically():
     scheduler.close()
 
 
+def test_embedded_scheduler_clear_removes_published_objects():
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig("embedded", {"backend": "memory"})
+    )
+    topology = RankTopology()
+    layout = KVLayoutDescriptor(
+        regions=(KVRegion("layer0", 0, 16, 16, 0),),
+        topology=topology,
+    )
+    scheduler = runtime.create_scheduler_handle("clear", topology, layout)
+    worker = runtime.create_worker_handle("clear", topology, layout)
+    source = torch.arange(16, dtype=torch.uint8)
+    worker.register_buffers({"layer0": source})
+    plan = BlockTransferPlan(
+        "clear-key",
+        0,
+        ranges=(
+            KVRange("layer0", 0, 0, source.data_ptr(), 16, 16, 0),
+        ),
+    )
+    job = worker.wait(worker.store([plan]))
+    worker.publish(job)
+
+    assert scheduler.lookup(["clear-key"]) == [True]
+    assert scheduler.clear()
+    assert scheduler.lookup(["clear-key"]) == [False]
+    worker.close()
+    scheduler.close()
+
+
 def test_embedded_partial_tail_round_trip():
     topology = RankTopology()
     descriptor = KVLayoutDescriptor(

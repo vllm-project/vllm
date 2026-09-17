@@ -60,6 +60,11 @@ class _EmbeddedStore:
         with self._lock:
             return self._objects.get(key)
 
+    def clear(self) -> None:
+        with self._lock:
+            self._objects.clear()
+            self._staged.clear()
+
 
 class EmbeddedSchedulerHandle(UMBPSchedulerHandle):
     def __init__(self, store: _EmbeddedStore) -> None:
@@ -67,6 +72,10 @@ class EmbeddedSchedulerHandle(UMBPSchedulerHandle):
 
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         return [self._store.contains(key) for key in keys]
+
+    def clear(self) -> bool:
+        self._store.clear()
+        return True
 
     def close(self) -> None:
         return
@@ -275,8 +284,13 @@ class _MoriLookupServer:
                         if not chunk:
                             break
                         request += chunk
-                    keys = json.loads(request.decode())
-                    result = self.client.batch_exists(keys)
+                    payload = json.loads(request.decode())
+                    if isinstance(payload, dict) and payload.get("op") == "clear":
+                        connection.sendall(
+                            (json.dumps(bool(self.client.clear())) + "\n").encode()
+                        )
+                        continue
+                    result = self.client.batch_exists(payload)
                     connection.sendall(
                         (json.dumps([bool(value) for value in result]) + "\n").encode()
                     )
@@ -331,6 +345,27 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
 
     def close(self) -> None:
         return
+
+    def clear(self) -> bool:
+        success = True
+        contacted = False
+        for path in self._paths:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(2.0)
+                    sock.connect(path)
+                    sock.sendall(b'{"op":"clear"}\n')
+                    response = b""
+                    while not response.endswith(b"\n"):
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+                    contacted = True
+                    success = success and bool(json.loads(response.decode()))
+            except (OSError, ValueError):
+                success = False
+        return contacted and success
 
 
 class _MoriWorkerHandle(UMBPWorkerHandle):
@@ -406,6 +441,14 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                     self._published_keys.remove(key)
                     self._evicted_keys.add(key)
         return result
+
+    def clear(self) -> bool:
+        success = bool(self.client.clear())
+        if success:
+            with self._key_lock:
+                self._published_keys.clear()
+                self._evicted_keys.clear()
+        return success
 
     @staticmethod
     def _range_args(plans: Sequence[BlockTransferPlan]):
