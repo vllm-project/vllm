@@ -35,7 +35,6 @@ from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
@@ -45,7 +44,10 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .mm_serde import decode_mm_kwargs_item
+from .mm_features import (
+    mm_kwargs_from_features,
+    placeholder_ranges_from_engine_input,
+)
 from .protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -177,17 +179,9 @@ class ServingTokens(GenerateBaseServing):
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            mm_kwargs = mm_kwargs_from_features(features)
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
@@ -203,6 +197,14 @@ class ServingTokens(GenerateBaseServing):
                 prompt_embeds=None,
                 skip_mm_cache=True,
             )
+
+        # Offsets are relative to the decoder prompt, so they are not
+        # meaningful for encoder-decoder models.
+        request._response_mm_placeholders = (
+            placeholder_ranges_from_engine_input(engine_input)
+            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            else None
+        )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
@@ -368,6 +370,10 @@ class ServingTokens(GenerateBaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -404,6 +410,7 @@ class ServingTokens(GenerateBaseServing):
         num_prompt_tokens = 0
         num_generated_tokens: list[int] = []
         first_iteration = True
+        prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
 
@@ -416,6 +423,8 @@ class ServingTokens(GenerateBaseServing):
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
+                        if request.return_token_ids:
+                            prompt_token_ids = res.prompt_token_ids
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
@@ -430,7 +439,11 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids:
+                    # Still emit a terminal empty chunk while prompt metadata
+                    # is pending, so zero-token completions deliver it.
+                    if not delta_token_ids and (
+                        finish_reason is None or prompt_token_ids is None
+                    ):
                         continue
 
                     if sampling_params.logprobs is not None:
@@ -462,6 +475,10 @@ class ServingTokens(GenerateBaseServing):
                             )
                         ],
                     )
+                    if prompt_token_ids is not None:
+                        chunk.prompt_token_ids = prompt_token_ids
+                        chunk.mm_placeholders = request._response_mm_placeholders
+                        prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
@@ -469,7 +486,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    # Omit absent prompt metadata (Rust skips None fields).
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(

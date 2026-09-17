@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -27,6 +27,10 @@ except ImportError:
 
 
 logger = init_logger(__name__)
+
+DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
+"""Decoded video frames: a host ``np.ndarray``, or a device ``torch.Tensor``
+when a GPU decoding codec is used (e.g. torchcodec with ``device="cuda"``)."""
 
 
 class VideoLoaderRegistry(ExtensionManager):
@@ -141,13 +145,36 @@ class VideoLoader:
         return source
 
     @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
+
+        return OpenCVVideoBackendMixin.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+
+    @classmethod
     @abstractmethod
     def load_bytes(
         cls,
         data: bytes,
         **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """Load video frames from bytes and return (frames_array, metadata_dict)."""
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
+        """Load video frames from bytes and return (frames, metadata_dict).
+
+        ``frames`` is a CPU ``np.ndarray`` unless a GPU decoding codec is
+        used (e.g. torchcodec with ``device="cuda"``), in which case it is
+        a ``torch.Tensor`` living on that device.
+        """
         raise NotImplementedError
 
     @classmethod
@@ -221,7 +248,7 @@ class VideoBackend(VideoLoader):
         *,
         backend: VideoDecoderBackend = "opencv",
         **kwargs: Any,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
 
         Args:
@@ -247,6 +274,11 @@ class VideoBackend(VideoLoader):
                   creation at the cost of relying on the file's metadata. See
                   https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                   for details.
+                - ``device`` (TorchCodec): ``"cpu"`` (default) decodes on the
+                  host and returns a ``np.ndarray``; ``"cuda"`` decodes with
+                  NVDEC and returns the frames as a CUDA ``torch.Tensor``,
+                  which a device-side HF video processor can consume without
+                  a host round-trip.
                 - ``hw_decoders`` (PyNvVideoCodec): maximum number of
                   concurrent decoder slots. Defaults to 2 and must be a
                   positive integer.
@@ -254,7 +286,9 @@ class VideoBackend(VideoLoader):
                   size and pool acquisition timeout in seconds.
 
         Returns:
-            Tuple of ``(frames_array, metadata_dict)``.
+            Tuple of ``(frames, metadata_dict)``, where ``frames`` is a
+            CPU ``np.ndarray`` unless TorchCodec decodes on ``device="cuda"``.
+
         """
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
@@ -324,6 +358,9 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
     video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
 )
 class Qwen3VLVideoBackend(VideoBackend):
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -333,10 +370,10 @@ class Qwen3VLVideoBackend(VideoBackend):
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
-        fps = target.fps
+        fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
@@ -387,6 +424,9 @@ class Qwen2VLVideoBackend(VideoBackend):
     clip); it is clamped to the last valid frame.
     """
 
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -400,7 +440,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         original_fps = source.original_fps
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # vLLM reports original_fps == 0 for clips with unknown/variable fps
         # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
@@ -414,7 +454,7 @@ class Qwen2VLVideoBackend(VideoBackend):
             math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
             * temporal_patch_size
         )
-        n = total_frames_num / original_fps * target.fps
+        n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
         n = min(max(n, min_frames), max_frames, total_frames_num)
         n = math.floor(n / temporal_patch_size) * temporal_patch_size
 
@@ -665,10 +705,107 @@ class GLM46VVideoBackend(VideoBackend):
 
 
 @VIDEO_LOADER_REGISTRY.register(
+    "glm5next",
+    # Both spellings: the borrowed-config type string (``Glm5Next...``) and
+    # the dedicated transformers classes landing with the new checkpoint
+    # (``Glm5nextVideoProcessor``, matching ``Glm5nextImageProcessor``).
+    video_processor=("Glm5NextVideoProcessor", "Glm5nextVideoProcessor"),
+)
+class Glm5NextVideoBackend(VideoBackend):
+    """GLM-5.3-Flash fps-interval video backend.
+
+    Selects frames with the same ``glm_sample_frame_indices`` sampler the
+    processor falls back to, so only the sampled frames are
+    materialized. ``fps_interval`` semantics (default 2.0) with a
+    temporal-patch-scaled greedy walk, frame count capped at 2048, temporal
+    pairs kept even. Request overrides: ``fps`` -> fps interval,
+    ``max_frames`` -> frame cap, ``temporal_patch_size`` (default 2).
+    """
+
+    _SEEK_GAP_THRESHOLD: ClassVar[int] = 64
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Lazy import: the processor module sits behind the
+        # transformers_utils package init, which multimodal must not pull in.
+        from vllm.transformers_utils.processors.glm5next import (
+            glm_sample_frame_indices,
+        )
+
+        return glm_sample_frame_indices(
+            source.total_frames_num,
+            source.original_fps,
+            source.duration or 0,
+            target_fps=target.fps if target.fps > 0 else None,
+            max_frame_count=kwargs.get("max_frames"),
+            temporal_patch_size=kwargs.get("temporal_patch_size", 2),
+        )
+
+    @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        if frame_recovery:
+            return super().read_frames(
+                cap, frame_idx, total_frames_num, frame_recovery=frame_recovery
+            )
+
+        wanted = sorted(set(frame_idx))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(wanted), height, width, 3), dtype=np.uint8)
+        valid_frame_indices: list[int] = []
+        current: int | None = None
+        for target in wanted:
+            gap = target - current if current is not None else None
+            if gap is not None and 2 <= gap <= cls._SEEK_GAP_THRESHOLD:
+                for _ in range(gap - 1):
+                    if not cap.grab():
+                        current = None
+                        break
+                else:
+                    current = target - 1
+            if current != target - 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                current = target - 1
+            ok, frame = cap.read()
+            if ok:
+                frames[len(valid_frame_indices)] = cv2.cvtColor(
+                    frame, cv2.COLOR_BGR2RGB
+                )
+                valid_frame_indices.append(target)
+                current = target
+            else:
+                current = None
+
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < len(wanted):
+            logger.warning(
+                "GLM video loading expected %d sampled frames but only loaded %d.",
+                len(wanted),
+                valid_num_frames,
+            )
+        return frames[:valid_num_frames], valid_frame_indices
+
+
+@VIDEO_LOADER_REGISTRY.register(
     "glmga",
     video_processor="GlmgaVideoProcessor",
 )
 class GLMGAVideoBackend(VideoBackend):
+    _MAX_FRAMES: ClassVar[int] = 640
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
         # Estimate duration from frame count and fps when the container
@@ -694,14 +831,14 @@ class GLMGAVideoBackend(VideoBackend):
         total_frames_num = source.total_frames_num
         duration = source.duration
         original_fps = source.original_fps
-        target_fps = target.fps
+        target_fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
-        max_frames = kwargs.get("max_frames", 640)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         duration = duration or round(max_frame_idx / original_fps) + 1
 
         extract_t = int(duration * target_fps)
-        extract_t = min(extract_t, max_frames)
+        extract_t = min(extract_t, max_frames, total_frames_num)
 
         duration_per_frame = 1 / original_fps
 
@@ -779,8 +916,7 @@ class Molmo2VideoBackend(VideoLoader):
         sampling_fps: float,
         max_fps: float = 8.0,
     ) -> list[float]:
-        """
-        Return the subset of `video_fps` factors that remain multiples
+        """Return the subset of `video_fps` factors that remain multiples
         of `sampling_fps`.
 
         Examples:
@@ -795,13 +931,15 @@ class Molmo2VideoBackend(VideoLoader):
                 ...
             ValueError: sampling_fps=2 must divide video_fps=5 to produce
                 consistent frame steps.
+
         """
+        if sampling_fps is None:
+            raise ValueError("sampling_fps must be provided")
+
         video_fps = int(video_fps)
         sampling_fps = int(sampling_fps)
         max_fps = int(max_fps)
 
-        if sampling_fps is None:
-            raise ValueError("sampling_fps must be provided")
         if video_fps <= 0 or sampling_fps <= 0:
             raise ValueError(
                 "video_fps and sampling_fps must be positive "
@@ -830,8 +968,8 @@ class Molmo2VideoBackend(VideoLoader):
         frame_sample_mode: str,
         candidate_target_fps: list[float],
     ) -> float | None:
-        """
-        Get the target fps that best spans the videoand has the most frames sampled
+        """Get the target fps that best spans the video and samples the most
+        frames.
         """
         num_frames_sampled = 0
         selected_target_fps = None
@@ -1135,8 +1273,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """
-        Load video frames with dynamic sampling based on duration.
+        """Load video frames with dynamic sampling based on duration.
 
         Args:
             data: Raw video bytes
@@ -1147,6 +1284,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
 
         Returns:
             Tuple of (frames_array, metadata_dict)
+
         """
         # recompute source metadata with adjusted duration to ensure correct
         # sampling indices computation

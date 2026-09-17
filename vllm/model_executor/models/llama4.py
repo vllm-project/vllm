@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
@@ -406,8 +406,7 @@ class Llama4Model(LlamaModel):
         expert_params_mapping: list[tuple[str, str, int, str]],
         fused: bool = True,
     ) -> bool:
-        """
-        Load MoE expert weights.
+        """Load MoE expert weights.
 
         Args:
             name: The name of the weight to load.
@@ -427,8 +426,8 @@ class Llama4Model(LlamaModel):
         Returns:
             True if loaded_weight is one of MoE weights and the MoE expert
             weights are loaded successfully, False otherwise.
-        """
 
+        """
         # Whether the MoE expert weights are loaded successfully.
         expert_param_loaded = False
 
@@ -576,6 +575,7 @@ class Llama4Model(LlamaModel):
         params_dict = dict(self.named_parameters())
         # The module parameters that have been loaded.
         loaded_params: set[str] = set()
+        weight_loader: Callable[..., object]
 
         # Iterate over all the weights and load them into module parameters.
         for name, loaded_weight in weights:
@@ -612,9 +612,10 @@ class Llama4Model(LlamaModel):
                 # quant config's `get_cache_scale_mapper` does not cover
                 # (idempotent for names already renamed by the mapper).
                 if name.endswith("scale"):
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                 # Load the weight into the module parameter with corresponding
                 # shard id and exit the for loop and the else block.

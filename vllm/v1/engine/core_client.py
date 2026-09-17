@@ -26,6 +26,7 @@ from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
@@ -76,8 +77,7 @@ EngineIdentity = bytes
 
 
 class EngineCoreClient(ABC):
-    """
-    EngineCoreClient: subclasses handle different methods for pushing
+    """EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -93,7 +93,15 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        renderer: BaseRenderer | None = None,
     ) -> "EngineCoreClient":
+        # renderer is passed through to the multiprocess clients, which start
+        # the frontend MM warmup (renderer.start_mm_warmup_in_background) once
+        # the engine-core processes have been forked, so warmup overlaps
+        # engine-core load without a live thread at fork() time. In-process
+        # clients do not take a renderer: the engine core is built in this
+        # process, so there is no other process to overlap with and the MM
+        # warmup runs synchronously inside renderer.warmup() instead.
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
             raise NotImplementedError(
@@ -103,11 +111,19 @@ class EngineCoreClient(ABC):
 
         if multiprocess_mode and asyncio_mode:
             return EngineCoreClient.make_async_mp_client(
-                vllm_config, executor_class, log_stats
+                vllm_config,
+                executor_class,
+                log_stats,
+                renderer=renderer,
             )
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class, log_stats)
+            return SyncMPClient(
+                vllm_config,
+                executor_class,
+                log_stats,
+                renderer=renderer,
+            )
 
         return InprocClient(vllm_config, executor_class, log_stats)
 
@@ -120,6 +136,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        renderer: BaseRenderer | None = None,
     ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -133,10 +150,19 @@ class EngineCoreClient(ABC):
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
-                return DPAsyncMPClient(*client_args)
+                return DPAsyncMPClient(
+                    *client_args,
+                    renderer=renderer,
+                )
             # Internal load balancer - client balances to all DP ranks.
-            return DPLBAsyncMPClient(*client_args)
-        return AsyncMPClient(*client_args)
+            return DPLBAsyncMPClient(
+                *client_args,
+                renderer=renderer,
+            )
+        return AsyncMPClient(
+            *client_args,
+            renderer=renderer,
+        )
 
     @abstractmethod
     def shutdown(self, timeout: float | None = None) -> None: ...
@@ -304,8 +330,7 @@ class EngineCoreClient(ABC):
 
 
 class InprocClient(EngineCoreClient):
-    """
-    InprocClient: client for in-process EngineCore. Intended
+    """InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -313,8 +338,23 @@ class InprocClient(EngineCoreClient):
         * pulls EngineCoreOutputs by stepping the EngineCore
     """
 
-    def __init__(self, *args, **kwargs):
-        self.engine_core = EngineCore(*args, **kwargs)
+    # Takes no renderer: this class has no _start_mm_warmup (only MPClient
+    # does), so a renderer would never be used here. EngineCore is built in
+    # this process and MM warmup runs synchronously inside renderer.warmup().
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        *,
+        executor_fail_callback: Callable | None = None,
+    ):
+        self.engine_core = EngineCore(
+            vllm_config,
+            executor_class,
+            log_stats,
+            executor_fail_callback=executor_fail_callback,
+        )
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
@@ -427,7 +467,6 @@ class BackgroundResources:
 
     def __call__(self):
         """Clean up background resources."""
-
         logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
@@ -501,16 +540,15 @@ class ElasticScalingCache:
 
 
 class MPClient(EngineCoreClient):
-    """
-    MPClient: base client for multi-proc EngineCore.
-        EngineCore runs in a background process busy loop, getting
-        new EngineCoreRequests and returning EngineCoreOutputs
+    """MPClient: base client for multi-proc EngineCore.
+    EngineCore runs in a background process busy loop, getting
+    new EngineCoreRequests and returning EngineCoreOutputs
 
-        * pushes EngineCoreRequests via input_socket
-        * pulls EngineCoreOutputs via output_socket
+    * pushes EngineCoreRequests via input_socket
+    * pulls EngineCoreOutputs via output_socket
 
-        * AsyncMPClient subclass for AsyncLLM usage
-        * SyncMPClient subclass for LLM usage
+    * AsyncMPClient subclass for AsyncLLM usage
+    * SyncMPClient subclass for LLM usage
     """
 
     def __init__(
@@ -520,8 +558,11 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: dict[str, Any] | None = None,
+        renderer: BaseRenderer | None = None,
     ):
         self.vllm_config = vllm_config
+        self._renderer: BaseRenderer | None = renderer
+        self._effective_attention_block_sizes: set[int | None] = set()
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -583,6 +624,9 @@ class MPClient(EngineCoreClient):
                         )
                     finally:
                         actual_address_pipe.close()
+                # Engines are managed externally: this process does not fork
+                # them, so there is no fork race; start the MM warmup now.
+                self._start_mm_warmup()
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
@@ -614,6 +658,14 @@ class MPClient(EngineCoreClient):
                     coordinator = engine_launch.coordinator
                     addresses = engine_launch.addresses
                     tensor_queue = engine_launch.tensor_queue
+                    # Engine-core processes have now all been forked/started
+                    # (CoreEngineProcManager.proc.start()). It is now safe to
+                    # launch the frontend background MM warmup: it must not
+                    # run while fork() is in flight (a live thread holding a
+                    # lock would deadlock the forked child), but the
+                    # engine-core model load (minutes) that follows is exactly
+                    # what the warmup should overlap with.
+                    self._start_mm_warmup()
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:
@@ -708,6 +760,14 @@ class MPClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return self.engines_running
 
+    def _start_mm_warmup(self) -> None:
+        # Called once the engine-core process(es) have been created (forked or
+        # externally managed). Overlap the frontend MM warmup with the
+        # engine-core model load. This is a no-op when no renderer was passed
+        # (e.g. text-only serving or tests).
+        if self._renderer is not None:
+            self._renderer.start_mm_warmup_in_background()
+
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
@@ -740,10 +800,21 @@ class MPClient(EngineCoreClient):
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
-        if not payload:
-            return
         vllm_config = self.vllm_config
-        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        response = (
+            msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+            if payload
+            else None
+        )
+        self._effective_attention_block_sizes.add(
+            response.effective_attention_block_size if response is not None else None
+        )
+        sizes = self._effective_attention_block_sizes
+        vllm_config.cache_config.effective_attention_block_size = (
+            next(iter(sizes)) if len(sizes) == 1 else None
+        )
+        if response is None:
+            return
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -808,13 +879,18 @@ class SyncMPClient(MPClient):
 
     @instrument(span_name="SyncMPClient init")
     def __init__(
-        self, vllm_config: VllmConfig, executor_class: type[Executor], log_stats: bool
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        renderer: BaseRenderer | None = None,
     ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=log_stats,
+            renderer=renderer,
         )
 
         self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
@@ -987,6 +1063,7 @@ class AsyncMPClient(MPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        renderer: BaseRenderer | None = None,
     ):
         super().__init__(
             asyncio_mode=True,
@@ -994,6 +1071,7 @@ class AsyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
             client_addresses=client_addresses,
+            renderer=renderer,
         )
 
         self.client_count = client_count
@@ -1262,6 +1340,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        renderer: BaseRenderer | None = None,
     ):
         self.current_wave = 0
 
@@ -1272,6 +1351,7 @@ class DPAsyncMPClient(AsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            renderer,
         )
 
         # List of [waiting, running, kv_cache_usage] per engine.
@@ -1444,6 +1524,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        renderer: BaseRenderer | None = None,
     ):
         self.client_count = client_count
 
@@ -1460,6 +1541,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            renderer,
         )
 
         assert len(self.core_engines) > 1
@@ -1637,6 +1719,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "Only ray DP backend supports scaling elastic EP"
         )
         parallel_config = self.vllm_config.parallel_config
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
         num_experts = self.vllm_config.model_config.get_num_experts()
         num_physical_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts
@@ -1662,8 +1750,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._prepared_elastic_ep = new_data_parallel_size, num_redundant_experts
 
     def _eep_wait_for_setup_switch_complete(self) -> asyncio.Future:
-        """
-        Wait for core engines to switch to the new setup.
+        """Wait for core engines to switch to the new setup.
 
         In eep_process_engine_core_notification(), a dummy UtilityOutput with
         EEP_NOTIFICATION_CALL_ID will be set when RECONFIGURE_FINISHED
@@ -1840,6 +1927,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # NOTE(yongji): Immediately stop sending requests to the removing engines.
         self.core_engines = old_core_engines[:new_data_parallel_size]
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
+        # Pending coordinator snapshots must use the surviving ranks too.
+        self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [

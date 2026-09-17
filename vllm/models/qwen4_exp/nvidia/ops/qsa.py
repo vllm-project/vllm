@@ -1,195 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernels for the Qwen4Exp weight-free QSA path."""
+"""Triton kernels for Qwen4Exp QSA sparse attention and cache updates."""
 
 from __future__ import annotations
 
-import math
+from functools import lru_cache
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-_LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
-_TOPK_WORKSPACE_BYTES = 1024 * 1024
+
+@lru_cache(maxsize=1)
+def _is_sm120() -> bool:
+    """True on sm_120 (RTX PRO 6000 Blackwell): selects the sm_120 tuning table."""
+    return current_platform.get_device_capability() == (12, 0)
 
 
-@triton.jit
-def _qsa_mqa_paged_kernel(
-    q_ptr,
-    k_cache_ptr,
-    page_table_ptr,
-    token_to_req_ptr,
-    query_positions_ptr,
-    sequence_lengths_ptr,
-    visible_blocks_ptr,
-    logits_ptr,
-    stride_q_row,
-    stride_q_head,
-    stride_q_dim,
-    stride_cache_block,
-    stride_cache_token,
-    stride_cache_dim,
-    stride_table_req,
-    stride_table_page,
-    stride_logits_row,
-    num_rows,
-    num_columns,
-    num_pages,
-    num_requests,
-    score_divisor,
-    PAGE_SIZE: tl.constexpr,
-    PAGE_TABLE_WIDTH: tl.constexpr,
-    NUM_HEADS: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    TILES_PER_PROG: tl.constexpr,
-    STAGES: tl.constexpr,
-    MAX_N: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-) -> None:
-    row = tl.program_id(0)
-    dims = tl.arange(0, BLOCK_D)
-    heads = tl.arange(0, MAX_N)
-    request = tl.load(token_to_req_ptr + row)
-    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
-    query_position = tl.load(query_positions_ptr + row)
-    sequence_length = tl.load(
-        sequence_lengths_ptr + safe_request,
-        mask=(request >= 0) & (request < num_requests),
-        other=0,
-    )
-    visible = tl.minimum(
-        (query_position + 1) // COMPRESS_RATIO,
-        sequence_length // COMPRESS_RATIO,
-    )
-    if tl.program_id(1) == 0:
-        tl.store(visible_blocks_ptr + row, visible)
-    tile_start = tl.program_id(1) * TILES_PER_PROG
-    # Top-k is bounded by visible_blocks, so columns beyond it need no value.
-    if tile_start * BLOCK_N >= visible:
-        return
-    tile_end = tl.minimum(tile_start + TILES_PER_PROG, tl.cdiv(visible, BLOCK_N))
-    tile_end = tl.minimum(tile_end, tl.cdiv(num_columns, BLOCK_N))
-
-    # Pad the small head axis to a tensor-core-compatible N dimension.
-    query = tl.load(
-        q_ptr
-        + row * stride_q_row
-        + heads[None, :] * stride_q_head
-        + dims[:, None] * stride_q_dim,
-        mask=(heads[None, :] < NUM_HEADS) & (dims[:, None] < HEAD_DIM),
-        other=0.0,
-    )
-    column_offsets = tl.arange(0, BLOCK_N)
-    for tile in tl.range(tile_start, tile_end, num_stages=STAGES):
-        columns = tile * BLOCK_N + column_offsets
-        live = columns < visible
-        logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
-        page_offset = columns % PAGE_SIZE
-        physical_page = tl.load(
-            page_table_ptr
-            + safe_request * stride_table_req
-            + logical_page * stride_table_page,
-            mask=live,
-            other=-1,
-        )
-        page_valid = live & (physical_page >= 0) & (physical_page < num_pages)
-        # physical_page * block stride can overflow int32 for large caches.
-        safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
-            k_cache_ptr
-            + safe_physical_page[:, None] * stride_cache_block
-            + page_offset[:, None] * stride_cache_token
-            + dims[None, :] * stride_cache_dim,
-            mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
-            other=0.0,
-            eviction_policy="evict_first",
-        )
-        scores = tl.dot(keys, query, out_dtype=tl.float32)
-        scores = tl.where(heads[None, :] < NUM_HEADS, tl.maximum(scores, 0.0), 0.0)
-        score = tl.sum(scores, axis=1) / score_divisor
-        tl.store(
-            logits_ptr + row * stride_logits_row + columns,
-            tl.where(page_valid, score, -float("inf")),
-            mask=live & (columns < num_columns),
-        )
+@lru_cache(maxsize=1)
+def _is_sm90() -> bool:
+    """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
+    return current_platform.get_device_capability() == (9, 0)
 
 
-@triton.jit
-def _expand_qsa_indices_kernel(
-    block_indices_ptr,
-    query_positions_ptr,
-    sequence_lengths_ptr,
-    token_to_req_ptr,
-    output_ptr,
-    stride_blocks_row,
-    stride_blocks_column,
-    stride_output_row,
-    stride_output_column,
-    rows,
-    num_requests,
-    BLOCK_TOPK: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    TOKEN_TOPK: tl.constexpr,
-    OUTPUT_WIDTH: tl.constexpr,
-    COLUMN_BLOCK: tl.constexpr,
-) -> None:
-    row = tl.program_id(0)
-    columns = tl.program_id(1) * COLUMN_BLOCK + tl.arange(0, COLUMN_BLOCK)
-    query_position = tl.load(query_positions_ptr + row)
-    request = tl.load(token_to_req_ptr + row)
-    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
-    sequence_length = tl.load(
-        sequence_lengths_ptr + safe_request,
-        mask=(request >= 0) & (request < num_requests),
-        other=0,
-    )
-    complete_blocks = tl.minimum(
-        tl.minimum(
-            (query_position + 1) // COMPRESS_RATIO,
-            sequence_length // COMPRESS_RATIO,
-        ),
-        BLOCK_TOPK,
-    )
-    expanded_count = complete_blocks * COMPRESS_RATIO
-    tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
-    tail_count = (query_position + 1) - tail_start
-
-    is_expanded = columns < expanded_count
-    block_rank = columns // COMPRESS_RATIO
-    offset = columns % COMPRESS_RATIO
-    safe_rank = tl.minimum(block_rank, BLOCK_TOPK - 1)
-    block = tl.load(
-        block_indices_ptr + row * stride_blocks_row + safe_rank * stride_blocks_column,
-        mask=(row < rows) & is_expanded,
-        other=-1,
-    )
-    expanded = block * COMPRESS_RATIO + offset
-    tail_offset = columns - expanded_count
-    is_tail = (
-        (columns >= expanded_count)
-        & (tail_offset < tail_count)
-        & (tail_offset < COMPRESS_RATIO - 1)
-    )
-    token = tl.where(is_expanded, expanded, tail_start + tail_offset)
-    valid = (
-        (row < rows)
-        & (columns < OUTPUT_WIDTH)
-        & (is_expanded | is_tail)
-        & (token >= 0)
-        & (token < sequence_length)
-    )
-    tl.store(
-        output_ptr + row * stride_output_row + columns * stride_output_column,
-        tl.where(valid, token, -1),
-        mask=(row < rows) & (columns < OUTPUT_WIDTH),
-    )
-
-
-@triton.jit
+@triton.jit(do_not_specialize=["num_rows", "num_requests"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
     k_cache_ptr,
@@ -200,6 +39,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
+    softmax_scale,
+    output_scale,
+    output_gate_ptr,
     stride_q_row,
     stride_q_head,
     stride_k_block,
@@ -212,6 +54,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     stride_table_req,
     stride_output_row,
     stride_output_head,
+    stride_output_gate_row,
+    stride_output_gate_head,
     num_rows,
     num_cache_blocks,
     num_requests,
@@ -225,12 +69,19 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    IS_FP8: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
     split_id = tl.program_id(2)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+
+    # The packed selection buffer carries one TRAILING COUNT COLUMN per row
+    # (column TOPK of a TOPK+1-wide buffer): the row's valid-entry count,
+    # written by the expand kernel. It is never a token index — the tile loop
+    # and the index load below only ever cover columns [0, TOPK).
+    valid_count = tl.load(indices_ptr + row * stride_indices_row + TOPK)
 
     head_offsets = tl.arange(0, BLOCK_M)
     dim_offsets = tl.arange(0, HEAD_DIM)
@@ -248,12 +99,14 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
-    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
+    # softmax_scale is the host-side attention scale (1/sqrt(head_dim), with the
+    # fp8 K dequant scale already pre-multiplied in); convert to log2 units once
+    # here for the exp2-based online softmax.
+    score_scale = softmax_scale * 1.4426950408889634
 
-    # Dynamic bounds avoid padded main-loop iterations for uneven splits.
-    split_tile_start = split_id * NUM_TILES // NUM_SPLITS
-    split_tile_end = (split_id + 1) * NUM_TILES // NUM_SPLITS
-    for tile in range(split_tile_start, split_tile_end):
+    tile_end = tl.minimum(NUM_TILES, tl.cdiv(tl.minimum(valid_count, TOPK), BLOCK_N))
+
+    for tile in range(split_id, tile_end, NUM_SPLITS):
         columns = tile * BLOCK_N + column_offsets
         logical_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
@@ -297,15 +150,26 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
+        if IS_FP8:
+            # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
+            # measured slower here and less accurate).
+            keys = keys.to(query.dtype)
         scores = tl.dot(query, keys)
-        # Scaling scores avoids re-quantizing a scaled query to BF16.
-        scores *= softmax_scale_log2
+        # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
+        # caches the K dequant scale is already folded into softmax_scale on the
+        # host.
+        scores *= score_scale
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
         alpha = tl.math.exp2(max_value - next_max)
         probabilities = tl.where(
             valid[None, :], tl.math.exp2(scores - next_max[:, None]), 0.0
         )
+        if IS_FP8:
+            # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
+            # softmax) so fp16 has the range, its wider mantissa is more
+            # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
+            values = values.to(tl.float16)
         accumulator = tl.dot(
             probabilities.to(values.dtype),
             values,
@@ -315,13 +179,30 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         max_value = next_max
 
     has_values = normalizer > 0
+    # Fold the fp8 V dequant scale (output_scale, 1.0 for bf16) into a per-row
+    # reciprocal normalizer, so the output is a per-row multiply rather than a
+    # HEAD_DIM-wide scale. The split-K LSE below keeps the unscaled normalizer,
+    # so the merge stays correct.
+    inv_normalizer = output_scale / tl.maximum(normalizer, 1.0e-20)
     normalized_output = tl.where(
         has_values[:, None],
-        accumulator / tl.maximum(normalizer[:, None], 1.0e-20),
+        accumulator * inv_normalizer[:, None],
         0.0,
     )
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
+        # Preserve the unfused path's BF16 attention-output rounding before
+        # applying the gate in FP32.
+        normalized_output = normalized_output.to(output_ptr.dtype.element_ty)
+        output_gate = tl.load(
+            output_gate_ptr
+            + row * stride_output_gate_row
+            + (first_head + head_offsets[:, None]) * stride_output_gate_head
+            + dim_offsets[None, :],
+            mask=output_mask,
+            other=0.0,
+        ).to(tl.float32)
+        normalized_output = normalized_output.to(tl.float32) * tl.sigmoid(output_gate)
         tl.store(
             output_ptr
             + row * stride_output_row
@@ -336,35 +217,32 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             max_value + tl.math.log2(tl.maximum(normalizer, 1.0e-20)),
             -float("inf"),
         )
+        partial_row = (split_id * num_rows + row).to(tl.int64)
         tl.store(
             partial_output_ptr
-            + (
-                (split_id * num_rows + row) * NUM_QUERY_HEADS
-                + first_head
-                + head_offsets[:, None]
-            )
+            + (partial_row * NUM_QUERY_HEADS + first_head + head_offsets[:, None])
             * HEAD_DIM
             + dim_offsets[None, :],
             normalized_output,
             mask=output_mask,
         )
         tl.store(
-            partial_lse_ptr
-            + (split_id * num_rows + row) * NUM_QUERY_HEADS
-            + first_head
-            + head_offsets,
+            partial_lse_ptr + partial_row * NUM_QUERY_HEADS + first_head + head_offsets,
             partial_lse,
             mask=head_offsets < GROUP_SIZE,
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_rows"])
 def _qsa_merge_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
+    output_gate_ptr,
     stride_output_row,
     stride_output_head,
+    stride_output_gate_row,
+    stride_output_gate_head,
     num_rows,
     HEAD_DIM: tl.constexpr,
     NUM_QUERY_HEADS: tl.constexpr,
@@ -386,16 +264,26 @@ def _qsa_merge_splitk_kernel(
     shifted = tl.where(split_mask & has_values, lse - lse_max, -float("inf"))
     weights = tl.math.exp2(shifted)
     denominator = tl.sum(weights, axis=0)
+    split_rows = split_offsets.to(tl.int64) * num_rows + row
     partial_output = tl.load(
         partial_output_ptr
-        + ((split_offsets[:, None] * num_rows + row) * NUM_QUERY_HEADS + head)
-        * HEAD_DIM
+        + (split_rows[:, None] * NUM_QUERY_HEADS + head) * HEAD_DIM
         + dim_offsets[None, :],
         mask=split_mask[:, None],
         other=0.0,
     )
     merged = tl.sum(partial_output * weights[:, None], axis=0)
     merged = tl.where(denominator > 0, merged / denominator, 0.0)
+    # Preserve the unfused path's BF16 attention-output rounding before
+    # applying the gate in FP32.
+    merged = merged.to(output_ptr.dtype.element_ty)
+    output_gate = tl.load(
+        output_gate_ptr
+        + row * stride_output_gate_row
+        + head * stride_output_gate_head
+        + dim_offsets
+    ).to(tl.float32)
+    merged = merged.to(tl.float32) * tl.sigmoid(output_gate)
     tl.store(
         output_ptr + row * stride_output_row + head * stride_output_head + dim_offsets,
         merged,
@@ -588,225 +476,118 @@ def _compress_qsa_groups_kernel(
     )
 
 
-def _validate_mqa(q: torch.Tensor) -> None:
-    if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
-        raise ValueError("QSA query must be [rows, heads, head_dim]")
+def _select_sm120_config(
+    base_programs: int, use_prefill_config: bool, is_fp8: bool
+) -> tuple[int, int, int]:
+    """(block_n, target_splits, num_warps) retuned on sm_120 (RTX PRO 6000
+    Blackwell), split by cache dtype: bf16 and fp8 favour different configs on
+    sm_120, most visibly on the large-prefill region. Each entry is the fastest
+    config that stays correct on its own path; the main win is more warps."""
+    if is_fp8:
+        if base_programs > 2048:
+            return (32, 2, 1) if use_prefill_config else (64, 1, 2)
+        if base_programs <= 24:
+            return 64, 64, 8
+        if base_programs <= 32:
+            return 128, 8, 4
+        if base_programs <= 64:
+            return 64, 8, 4
+        if base_programs <= 128:
+            return 32, 4, 4
+        if base_programs <= 256:
+            return 128, 4, 4
+        if base_programs <= 512:
+            return 64, 4, 4
+        return 32, 2, 1
+    # bf16 K/V cache.
+    if base_programs > 2048:
+        return 64, 2, 2
+    if base_programs <= 24:
+        return 64, 64, 8
+    if base_programs <= 64:
+        return 64, 8, 8
+    if base_programs <= 128:
+        return 32, 8, 8
+    if base_programs <= 256:
+        return 32, 8, 1
+    if base_programs <= 512:
+        return 64, 4, 2
+    return 32, 4, 1
 
 
-def qsa_mqa_paged(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
-    compress_ratio: int,
-    num_columns: int | None = None,
-    score_scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute QSA scores directly from a paged compressed-key cache."""
-
-    _validate_mqa(q)
-    if not q.is_cuda or not HAS_TRITON:
-        raise RuntimeError("paged QSA scoring requires CUDA and Triton")
-    if k_cache.ndim != 4 or k_cache.shape[2] != 1:
-        raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
-    if k_cache.shape[3] != q.shape[2]:
-        raise ValueError("QSA query and cache dimensions must match")
-    if page_table.ndim != 2:
-        raise ValueError("QSA page table must be two-dimensional")
-    if q.shape[0] and (not all(k_cache.shape[:2]) or not all(page_table.shape)):
-        raise ValueError("QSA paged scoring cache and page table must be nonempty")
-    if token_to_req.shape != (q.shape[0],):
-        raise ValueError("QSA request mapping must match query rows")
-    if query_positions.shape != (q.shape[0],):
-        raise ValueError("QSA query positions must match query rows")
-    if sequence_lengths.shape != (page_table.shape[0],):
-        raise ValueError("QSA sequence lengths must match page-table requests")
-    if compress_ratio <= 0:
-        raise ValueError("QSA compression ratio must be positive")
-    score_divisor = math.sqrt(q.shape[2]) if score_scale is None else score_scale
-    if score_divisor <= 0:
-        raise ValueError("QSA score scale must be positive")
-
-    capacity = page_table.shape[1] * k_cache.shape[1]
-    columns = capacity if num_columns is None else num_columns
-    if columns < 0:
-        raise ValueError("QSA score width must be non-negative")
-    logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
-    visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
-    if not q.shape[0] or not columns:
-        return logits, visible_blocks
-    BLOCK_N = 64
-    BLOCK_D = max(16, triton.next_power_of_2(q.shape[2]))
-    MAX_N = max(16, triton.next_power_of_2(q.shape[1]))
-    # Tuned on GB300: larger row batches provide enough parallelism to reuse Q.
-    tiles_per_program = 1 if q.shape[0] <= 32 else 8
-    _qsa_mqa_paged_kernel[
-        (q.shape[0], triton.cdiv(columns, BLOCK_N * tiles_per_program))
-    ](
-        q,
-        k_cache,
-        page_table,
-        token_to_req,
-        query_positions,
-        sequence_lengths,
-        visible_blocks,
-        logits,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        k_cache.stride(3),
-        page_table.stride(0),
-        page_table.stride(1),
-        logits.stride(0),
-        q.shape[0],
-        columns,
-        k_cache.shape[0],
-        page_table.shape[0],
-        float(score_divisor),
-        PAGE_SIZE=k_cache.shape[1],
-        PAGE_TABLE_WIDTH=page_table.shape[1],
-        NUM_HEADS=q.shape[1],
-        HEAD_DIM=q.shape[2],
-        BLOCK_N=BLOCK_N,
-        BLOCK_D=BLOCK_D,
-        TILES_PER_PROG=tiles_per_program,
-        STAGES=2,
-        MAX_N=MAX_N,
-        COMPRESS_RATIO=compress_ratio,
-        num_warps=2,
-    )
-    return logits, visible_blocks
+def _select_sm90_config(
+    base_programs: int, use_prefill_config: bool, is_fp8: bool
+) -> tuple[int, int, int]:
+    """(block_n, target_splits, num_warps) tuned on sm_90 (H20)."""
+    if base_programs > 2048:
+        return (32, 1, 1) if use_prefill_config else (64, 1, 2)
+    if is_fp8:
+        if base_programs <= 24:
+            return 64, 64, 2
+        if base_programs <= 32:
+            return 32, 16, 1
+        if base_programs <= 64:
+            return 32, 8, 1
+        if base_programs <= 128:
+            return 32, 4, 1
+        if base_programs <= 256:
+            return 32, 8, 1
+        return 32, 4, 1
+    if base_programs <= 32:
+        return 64, 64, 2
+    if base_programs <= 64:
+        return 32, 16, 1
+    if base_programs <= 256:
+        return 32, 8, 1
+    return 32, 4, 1
 
 
-def expand_qsa_block_indices_cuda(
-    block_indices: torch.Tensor,
-    query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
-    token_to_req: torch.Tensor,
-    compress_ratio: int,
-    token_topk: int,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Expand compressed blocks and compact the causal tail of the open group."""
+def _select_config(
+    num_rows: int,
+    num_kv_heads: int,
+    use_prefill_config: bool,
+    num_columns: int,
+    is_fp8: bool = False,
+) -> tuple[int, int, int, int]:
+    """Select (block_n, num_warps, num_tiles, num_splits) for the kernel.
 
-    if not block_indices.is_cuda or not HAS_TRITON:
-        raise RuntimeError("QSA CUDA expansion requires Triton")
-    if token_topk % compress_ratio:
-        raise ValueError("QSA token top-k must be divisible by compression ratio")
-    block_topk = token_topk // compress_ratio
-    output_width = token_topk + compress_ratio - 1
-    if block_indices.shape != (query_positions.numel(), block_topk):
-        raise ValueError("QSA compressed top-k has an invalid shape")
-    if token_to_req.shape != query_positions.shape:
-        raise ValueError("QSA request mapping must match query positions")
-    if sequence_lengths.ndim != 1 or not sequence_lengths.shape[0]:
-        raise ValueError("QSA request sequence lengths must be nonempty")
-    if out is None:
-        out = torch.empty(
-            (block_indices.shape[0], output_width),
-            dtype=torch.int32,
-            device=block_indices.device,
+    Keyed on base_programs = num_rows * num_kv_heads. The bp > 2048 region splits
+    on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
+    the uniform decode/verify length). This default table was tuned on GB300;
+    sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
+    and sm_90 (Hopper) to _select_sm90_config.
+    """
+    base_programs = num_rows * num_kv_heads
+    if _is_sm120():
+        BLOCK_N, target_splits, num_warps = _select_sm120_config(
+            base_programs, use_prefill_config, is_fp8
         )
-    elif out.shape != (block_indices.shape[0], output_width):
-        raise ValueError("QSA expansion output has an invalid shape")
-    if not block_indices.shape[0]:
-        return out
-    column_block = 256
-    _expand_qsa_indices_kernel[
-        (block_indices.shape[0], triton.cdiv(output_width, column_block))
-    ](
-        block_indices,
-        query_positions,
-        sequence_lengths,
-        token_to_req,
-        out,
-        block_indices.stride(0),
-        block_indices.stride(1),
-        out.stride(0),
-        out.stride(1),
-        block_indices.shape[0],
-        sequence_lengths.shape[0],
-        BLOCK_TOPK=block_topk,
-        COMPRESS_RATIO=compress_ratio,
-        TOKEN_TOPK=token_topk,
-        OUTPUT_WIDTH=output_width,
-        COLUMN_BLOCK=column_block,
-        num_warps=4,
-    )
-    return out
-
-
-def qsa_select_paged_tokens(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
-    token_topk: int,
-    compress_ratio: int,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
-
-    rows = q.shape[0]
-    output_width = token_topk + compress_ratio - 1
-    if out is None:
-        out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
-    if out.shape != (rows, output_width):
-        raise ValueError("QSA selection output has an invalid shape")
-    if not rows:
-        return out
-
-    columns = page_table.shape[1] * k_cache.shape[1]
-    block_topk = token_topk // compress_ratio
-    rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
-    chunk_rows = min(rows, rows_per_chunk)
-    blocks_buffer = torch.empty(
-        (chunk_rows, block_topk), dtype=torch.int32, device=q.device
-    )
-    topk_workspace = torch.empty(
-        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
-    )
-    for row_start in range(0, rows, rows_per_chunk):
-        row_end = min(row_start + rows_per_chunk, rows)
-        row_slice = slice(row_start, row_end)
-        logits, visible_blocks = qsa_mqa_paged(
-            q[row_slice],
-            k_cache,
-            page_table,
-            token_to_req[row_slice],
-            query_positions[row_slice],
-            sequence_lengths,
-            compress_ratio,
+    elif _is_sm90():
+        BLOCK_N, target_splits, num_warps = _select_sm90_config(
+            base_programs, use_prefill_config, is_fp8
         )
-        blocks = blocks_buffer[: row_end - row_start]
-        use_cooperative_topk = (
-            blocks.shape[0] <= 32
-            and logits.stride(0) % 4 == 0
-            and current_platform.has_device_capability(90)
-            and not current_platform.is_device_capability_family(120)
+    elif base_programs > 2048:
+        BLOCK_N, target_splits, num_warps = (
+            (32, 1, 1) if use_prefill_config else (64, 1, 2)
         )
-        topk_op = (
-            torch.ops._C.cooperative_topk
-            if use_cooperative_topk
-            else torch.ops._C.persistent_topk
-        )
-        topk_op(logits, visible_blocks, blocks, topk_workspace, block_topk, columns)
-        expand_qsa_block_indices_cuda(
-            blocks,
-            query_positions[row_slice],
-            sequence_lengths,
-            token_to_req[row_slice],
-            compress_ratio,
-            token_topk,
-            out[row_slice],
-        )
-    return out
+    elif base_programs <= 24:
+        BLOCK_N, target_splits, num_warps = 32, 64, 4
+    elif base_programs <= 32:
+        BLOCK_N, target_splits, num_warps = 32, 16, 1
+    elif base_programs <= 64:
+        BLOCK_N, target_splits, num_warps = 32, 8, 1
+    elif base_programs <= 128:
+        BLOCK_N, target_splits, num_warps = 32, 4, 1
+    elif base_programs <= 256:
+        BLOCK_N, target_splits, num_warps = 32, 8, 1
+    elif base_programs <= 512:
+        BLOCK_N, target_splits, num_warps = 64, 4, 2
+    else:
+        BLOCK_N, target_splits, num_warps = 64, 1, 2
+    num_tiles = triton.cdiv(num_columns, BLOCK_N)
+    # Never more splits than tiles, never empty.
+    num_splits = min(target_splits, num_tiles)
+    return BLOCK_N, num_warps, num_tiles, num_splits
 
 
 def qsa_sparse_paged_attention(
@@ -816,12 +597,26 @@ def qsa_sparse_paged_attention(
     logical_indices: torch.Tensor,
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
+    use_prefill_config: bool,
     out: torch.Tensor | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    *,
+    output_gate: torch.Tensor,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches."""
+    """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
-    if not q.is_cuda or not HAS_TRITON:
-        raise RuntimeError("paged QSA sparse attention requires CUDA and Triton")
+    With fp8 caches, k_scale/v_scale are the layer's per-tensor dequant scales
+    as host floats (e.g. layer._k_scale_float/_v_scale_float): k_scale is
+    pre-multiplied into the softmax scale and v_scale becomes the kernel's
+    output scale, so the kernel needs no device scale buffers.
+
+    logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
+    with the trailing column holding each row's valid-entry count (written by
+    the expand kernel; never a token index). The kernel reads it as the
+    tile-loop bound. use_prefill_config only steers the top of the config table; see
+    _select_config.
+    """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
     if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
@@ -830,13 +625,27 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention metadata has invalid shapes")
     if not all(k_cache.shape[:3]) or not all(block_table.shape):
         raise ValueError("QSA sparse attention cache and block table must be nonempty")
-    if logical_indices.shape[1] <= 0:
-        raise ValueError("QSA sparse attention requires a positive selection width")
+    if logical_indices.shape[1] < 2:
+        raise ValueError(
+            "QSA packed indices need selection columns plus the count column"
+        )
     if q.shape[2] != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+    assert q.dtype == torch.bfloat16
+    assert k_cache.dtype == v_cache.dtype
+    is_fp8 = k_cache.dtype == torch.float8_e4m3fn
+    if is_fp8:
+        assert k_scale is not None and v_scale is not None
+        # Host pre-multiply: fold the K dequant scale into the attention scale
+        # and pass V's dequant scale as the kernel's output scale.
+        softmax_scale = (head_dim**-0.5) * float(k_scale)
+        output_scale = float(v_scale)
+    else:
+        assert k_cache.dtype == torch.bfloat16
+        softmax_scale = head_dim**-0.5
+        output_scale = 1.0
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -845,37 +654,24 @@ def qsa_sparse_paged_attention(
     assert q.stride(2) == k_cache.stride(3) == v_cache.stride(3) == 1
     assert logical_indices.stride(1) == block_table.stride(1) == 1
     assert token_to_req.stride(0) == 1
+
     if out is None:
         out = torch.empty_like(q)
     if out.shape != q.shape:
         raise ValueError("QSA sparse output must match its query")
     assert out.dtype == q.dtype and out.device == q.device
     assert out.stride(2) == 1
+    assert output_gate.is_contiguous()
+    output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
         return out
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
-    base_programs = q.shape[0] * k_cache.shape[2]
-    small_profile_limit = 8 if block_m <= 8 else 4
-
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
-        block_n, target_splits, partial_warps = 16, 64, 4
-    elif base_programs < 32:
-        block_n, target_splits, partial_warps = 16, 32, 4
-    elif base_programs <= 256:
-        block_n, target_splits, partial_warps = 64, 8, 2
-    elif base_programs <= 512:
-        block_n, target_splits, partial_warps = 64, 4, 2
-    else:
-        block_n, target_splits, partial_warps = 64, 1, 2
-
-    num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
-    # Avoid empty splits when the selection width is smaller than the profile.
-    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-    num_splits = min(max_useful_splits, target_splits)
+    selection_width = logical_indices.shape[1] - 1  # trailing column is the count
+    block_n, partial_warps, num_tiles, num_splits = _select_config(
+        q.shape[0], k_cache.shape[2], use_prefill_config, selection_width, is_fp8
+    )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
     if num_splits == 1:
@@ -904,6 +700,9 @@ def qsa_sparse_paged_attention(
         partial_output,
         partial_lse,
         out,
+        softmax_scale,
+        output_scale,
+        output_gate_view,
         q.stride(0),
         q.stride(1),
         k_cache.stride(0),
@@ -916,10 +715,12 @@ def qsa_sparse_paged_attention(
         block_table.stride(0),
         out.stride(0),
         out.stride(1),
+        output_gate_view.stride(0),
+        output_gate_view.stride(1),
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
-        TOPK=logical_indices.shape[1],
+        TOPK=selection_width,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=block_table.shape[1],
         GROUP_SIZE=group_size,
@@ -929,6 +730,7 @@ def qsa_sparse_paged_attention(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        IS_FP8=is_fp8,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -939,8 +741,11 @@ def qsa_sparse_paged_attention(
         partial_output,
         partial_lse,
         out,
+        output_gate_view,
         out.stride(0),
         out.stride(1),
+        output_gate_view.stride(0),
+        output_gate_view.stride(1),
         q.shape[0],
         HEAD_DIM=q.shape[2],
         NUM_QUERY_HEADS=q.shape[1],
@@ -952,13 +757,156 @@ def qsa_sparse_paged_attention(
     return out
 
 
+def warmup_qsa_sparse_paged_attention(
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    num_query_heads: int,
+    selection_width: int,
+) -> tuple[tuple[int, int, int], ...]:
+    """Compile every production-reachable split-K/merge specialization."""
+    head_dim = kv_cache.shape[-1] // 2
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
+    # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
+    is_fp8 = kv_cache.dtype == torch.uint8
+    cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
+    num_kv_heads = key_cache.shape[2]
+    group_size = num_query_heads // num_kv_heads
+    block_m = triton.next_power_of_2(group_size)
+
+    # Every config the dispatch can pick for this group size.
+    profiles = {
+        _select_config(
+            num_rows, num_kv_heads, use_prefill_config, selection_width, is_fp8
+        )
+        for num_rows in range(1, 8193)
+        for use_prefill_config in (False, True)
+    }
+
+    # Scalars constant per deployment get their real values (their divisibility
+    # specialization is wanted); the batch-varying ones are do_not_specialize'd
+    # on the kernels, so any value here compiles the only variant.
+    num_rows = 16
+    num_requests = 16
+    q_ptr = TritonWarmupTensor(
+        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+    )
+    k_cache_ptr = TritonWarmupTensor(
+        cache_dtype,
+        shape=tuple(key_cache.shape),
+        strides=tuple(key_cache.stride()),
+    )
+    v_cache_ptr = TritonWarmupTensor(
+        cache_dtype,
+        shape=tuple(value_cache.shape),
+        strides=tuple(value_cache.stride()),
+    )
+    # +1: the packed buffer's trailing count column.
+    indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
+    block_table_ptr = TritonWarmupTensor(
+        block_table.dtype,
+        shape=tuple(block_table.shape),
+        strides=tuple(block_table.stride()),
+    )
+    token_to_req_ptr = TritonWarmupTensor(torch.int32)
+    output_ptr = TritonWarmupTensor(
+        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+    )
+    # The output gate is mandatory at runtime; warm the gated specialization.
+    output_gate_ptr = TritonWarmupTensor(
+        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+    )
+    head_stride = head_dim
+    row_stride = num_query_heads * head_dim
+    num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
+
+    warmed = []
+    for block_n, warps, num_tiles, num_splits in sorted(profiles):
+        if num_splits == 1:
+            partial_output_ptr = output_ptr
+            partial_lse_ptr = output_ptr
+        else:
+            partial_output_ptr = TritonWarmupTensor(
+                torch.float32,
+                shape=(num_splits, num_rows, num_query_heads, head_dim),
+            )
+            partial_lse_ptr = TritonWarmupTensor(
+                torch.float32, shape=(num_splits, num_rows, num_query_heads)
+            )
+        _qsa_sparse_paged_gqa_splitk_kernel.warmup(
+            q_ptr,
+            k_cache_ptr,
+            v_cache_ptr,
+            indices_ptr,
+            block_table_ptr,
+            token_to_req_ptr,
+            partial_output_ptr,
+            partial_lse_ptr,
+            output_ptr,
+            1.0,
+            1.0,
+            output_gate_ptr,
+            row_stride,
+            head_stride,
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            selection_width + 1,
+            block_table.stride(0),
+            row_stride,
+            head_stride,
+            row_stride,
+            head_stride,
+            num_rows,
+            num_cache_blocks,
+            num_requests,
+            TOPK=selection_width,
+            PAGE_SIZE=key_cache.shape[1],
+            PAGE_TABLE_WIDTH=block_table.shape[1],
+            GROUP_SIZE=group_size,
+            HEAD_DIM=head_dim,
+            NUM_QUERY_HEADS=num_query_heads,
+            NUM_SPLITS=num_splits,
+            NUM_TILES=num_tiles,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            IS_FP8=is_fp8,
+            num_warps=warps,
+            num_stages=2,
+            grid=(num_rows, num_kv_heads, num_splits),
+        )
+        if num_splits > 1:
+            _qsa_merge_splitk_kernel.warmup(
+                partial_output_ptr,
+                partial_lse_ptr,
+                output_ptr,
+                output_gate_ptr,
+                row_stride,
+                head_stride,
+                row_stride,
+                head_stride,
+                num_rows,
+                HEAD_DIM=head_dim,
+                NUM_QUERY_HEADS=num_query_heads,
+                NUM_SPLITS=num_splits,
+                BLOCK_SPLITS=triton.next_power_of_2(num_splits),
+                num_warps=2,
+                num_stages=1,
+                grid=(num_rows, num_query_heads),
+            )
+        warmed.append((block_n, num_splits, warps))
+    return tuple(warmed)
+
+
 def qsa_store_cache_rows(
     cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     rows: torch.Tensor,
 ) -> None:
     """Store fixed-width rows in a QSA cache without boolean indexing."""
-
     if not cache.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA cache stores require Triton")
     if cache.ndim != 4 or cache.shape[2] != 1:
@@ -1004,7 +952,6 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-
     if not raw_keys.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA compression requires Triton")
     rows = token_to_req.numel()
@@ -1106,10 +1053,8 @@ def qsa_compress_groups_with_ratio(
 
 
 __all__ = [
-    "expand_qsa_block_indices_cuda",
     "qsa_compress_groups_with_ratio",
-    "qsa_mqa_paged",
-    "qsa_select_paged_tokens",
     "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
+    "warmup_qsa_sparse_paged_attention",
 ]

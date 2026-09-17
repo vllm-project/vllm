@@ -135,8 +135,7 @@ def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("backend", ["triton", "aiter", "xpu", "quark"])
 def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
-    """
-    Tests that the different implementations of mxfp4_quantize
+    """Tests that the different implementations of mxfp4_quantize
     in mxfp4_utils.py all match.
     """
     skip_reason = _skip_reason_if_unavailable(backend, dtype)
@@ -290,8 +289,7 @@ def test_online_mxfp4_moe_matches_quark(
     dist_init,
     monkeypatch,
 ):
-    """
-    Ensures `Mxfp4OnlineMoEMethod` (online quantization)
+    """Ensures `Mxfp4OnlineMoEMethod` (online quantization)
     and `QuarkOCP_MX_MoEMethod` (AMD Quark checkpoints) produce the same weights,
     with same MOE backend used.
 
@@ -354,7 +352,7 @@ def test_online_mxfp4_moe_matches_quark(
             weight_quant_key=kMxfp4Static,
             activation_quant_key=kMxfp4Dynamic,
         )
-        online_method = Mxfp4OnlineMoEMethod(layer=online_layer)
+        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
 
         # `RoutedExperts.__init__` applies this round-up in production; these
         # layers are built without a quant config, so it is applied explicitly.
@@ -495,8 +493,7 @@ def test_online_mxfp4_moe_matches_quark(
 def test_online_mxfp4_dense_matches_quark(
     linear_backend: str, default_vllm_config, dist_init, monkeypatch
 ):
-    """
-    Ensures `Mxfp4OnlineLinearMethod` (online quantization)
+    """Ensures `Mxfp4OnlineLinearMethod` (online quantization)
     and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
     with same linear backend used.
     """

@@ -10,10 +10,13 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
     overlay_modality_mm_kwargs,
 )
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
@@ -965,8 +968,7 @@ def test_hf_processor_call_kwargs(
 
 
 def test_apply_matches_no_match_exits_quickly():
-    """
-    Test that _apply_matches exits quickly when no matches are found.
+    """Test that _apply_matches exits quickly when no matches are found.
 
     Previously, _apply_matches had O(n²) behavior when no match was found
     because it would increment start_idx by 1 each iteration while
@@ -1024,8 +1026,7 @@ def test_iter_token_matches_rejects_negative_start_idx():
 
 
 def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
-    """
-    Test that placeholder scanning stays linear under adversarial candidates.
+    """Test that placeholder scanning stays linear under adversarial candidates.
 
     The fast-forward scan must not rescan the prompt tail per position when
     one candidate's first token never occurs (forcing a full search) while
@@ -1058,8 +1059,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     ],
 )
 def test_find_mm_placeholders_stops_at_missing_item(prompt):
-    """
-    Test that the scan returns no placeholders once it fails to find
+    """Test that the scan returns no placeholders once it fails to find
     an item's placeholder, leaving later items unresolved.
     """
     result = find_mm_placeholders(
@@ -1076,8 +1076,7 @@ def test_find_mm_placeholders_stops_at_missing_item(prompt):
 
 
 class _FakeTokenizer:
-    """
-    Character-level tokenizer where "foo" merges into one token differently
+    """Character-level tokenizer where "foo" merges into one token differently
     depending on whether it is followed by "d", like BPE merging "foo" in
     "food" across the search-text boundary.
     """
@@ -1142,8 +1141,7 @@ def _text_fallback_processor() -> BaseMultiModalProcessor:
 
 
 def test_apply_prompt_updates_falls_back_to_text_matching():
-    """
-    Test that the fallback in `_apply_prompt_updates` finds targets that
+    """Test that the fallback in `_apply_prompt_updates` finds targets that
     tokenize differently inside the prompt ("foo" in "food").
     """
     processor = _text_fallback_processor()
@@ -1163,8 +1161,7 @@ def test_apply_prompt_updates_falls_back_to_text_matching():
 
 
 def test_apply_prompt_updates_falls_back_with_prefix_target():
-    """
-    Test that `PromptIndexTargets.prefix` targets are resolved against the
+    """Test that `PromptIndexTargets.prefix` targets are resolved against the
     decoded text in the fallback path of `_apply_prompt_updates`.
     """
     processor = _text_fallback_processor()
@@ -1189,8 +1186,7 @@ def test_apply_prompt_updates_falls_back_with_prefix_target():
 
 
 def test_apply_prompt_updates_falls_back_with_index_targets():
-    """
-    Test that the text resolvers of `PromptIndexTargets.start`/`end`
+    """Test that the text resolvers of `PromptIndexTargets.start`/`end`
     match against the decoded text when another item forces the
     fallback in `_apply_prompt_updates`.
     """
@@ -1262,3 +1258,69 @@ def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
     assert overlay_modality_mm_kwargs(merged, "video")["size"] == size
     assert "size" not in overlay_modality_mm_kwargs(merged, "image")
     assert "size" not in overlay_modality_mm_kwargs(merged, None)
+
+
+def test_processor_inputs_hashes_partial_uuids():
+    rng = np.random.RandomState(0)
+    images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": images}),
+        mm_uuid_items={"image": ["image-uuid", None]},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": [
+            "image-uuid",
+            MultiModalHasher.hash_kwargs(
+                "blake3", model_id="test-model", image=images[1]
+            ),
+        ]
+    }
+
+
+def test_processor_inputs_hashes_scope_kwargs_by_modality():
+    """Changing one modality's options must not invalidate another item."""
+    rng = np.random.RandomState(0)
+    mm_data_items = MultiModalDataParser().parse_mm_data(
+        {
+            "image": [random_image(rng, min_wh=8, max_wh=9)],
+            "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
+        }
+    )
+    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+
+    def get_hashes(video_frames: int, image_size: int, video_size: int):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
+            media_io_kwargs={"video": {"num_frames": video_frames}},
+            hf_processor_mm_kwargs={
+                "images_kwargs": {"size": {"longest_edge": image_size}},
+                "videos_kwargs": {"size": {"longest_edge": video_size}},
+            },
+        ).get_mm_hashes("test-model", "blake3")
+
+    base = get_hashes(video_frames=4, image_size=224, video_size=224)
+    changed_video = get_hashes(video_frames=16, image_size=224, video_size=448)
+    changed_image = get_hashes(video_frames=4, image_size=448, video_size=224)
+
+    assert changed_video["image"] == base["image"]
+    assert changed_video["video"] != base["video"]
+    assert changed_image["image"] != base["image"]
+    assert changed_image["video"] == base["video"]
+
+
+def test_processor_inputs_hashes_ignore_unrelated_kwargs():
+    """An image-only request ignores video-only processing configuration."""
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": [image]}),
+        mm_uuid_items={"image": ["image-uuid"]},
+        media_io_kwargs={"video": {"num_frames": 16}},
+        hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}

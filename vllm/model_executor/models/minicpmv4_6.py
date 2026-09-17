@@ -98,7 +98,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         ds = mm_kwargs.get("downsample_mode")
         if ds is not None:
             return str(ds)
-        return self.info._get_downsample_mode()
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info._get_downsample_mode()
 
     def get_image_prompt_texts(
         self,
@@ -106,7 +108,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_idx: int = 0,
         downsample_mode: str | None = None,
     ) -> str:
-        return self.info.get_slice_image_placeholder(
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
             downsample_mode=downsample_mode,
@@ -128,6 +132,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # which one is used. Using image_token for video silently produces
         # garbage descriptions.
         info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
         grids, source_tokens, patch_tokens = info._compute_visual_tokens(
             image_size,
             max_slice_nums=info.get_video_max_slice_num(),
@@ -537,19 +542,22 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
     def _compute_visual_tokens(
         self,
-        image_size,
+        image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
     ) -> tuple[list[int], int, int]:
         """Compute grid, source_image_visual_tokens and patch_visual_tokens.
 
         Args:
+            image_size: Size of the source image.
+            max_slice_nums: Maximum number of slices, or None for the default.
             downsample_mode: ``"16x"`` (default, full merge) or ``"4x"``
                 (skip vit_merger, 4x more visual tokens).
 
         Returns:
             (grids, source_image_visual_tokens, patch_visual_tokens)
             grids is [0, 0] when no slicing occurs.
+
         """
         image_processor = self.get_image_processor()
         if max_slice_nums is None:
@@ -669,14 +677,6 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_stacked={
-            ".q_proj": (".qkv_proj", "q"),
-            ".k_proj": (".qkv_proj", "k"),
-            ".v_proj": (".qkv_proj", "v"),
-        }
-    )
-
     def __init__(
         self,
         config,
@@ -723,10 +723,6 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         attn_out = self.attn(q, k, v)
         out, _ = self.out_proj(attn_out)
         return out
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -913,10 +909,10 @@ class MiniCPMV4_6Merger(nn.Module):
         hidden_states: torch.Tensor,
         tgt_sizes: torch.Tensor,
     ) -> list[torch.Tensor]:
-        """
-        Args:
-            hidden_states: (B, max_patches, D) padded batch.
-            tgt_sizes: (B, 2) actual (H, W) per sample.
+        """Args:
+        hidden_states: (B, max_patches, D) padded batch.
+        tgt_sizes: (B, 2) actual (H, W) per sample.
+
         """
         m1, m2 = self.merge_kernel_size
         results = []
@@ -966,6 +962,11 @@ class MiniCPMV4_6ForConditionalGeneration(
     supports_encoder_tp_data = True
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
         orig_to_new_prefix={
             # transformers v5.7+ uses `vision_tower` and nests `vit_merger`
             # inside it. Order matters: more specific prefix must come first.
@@ -977,7 +978,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "mtp.": None,
-        }
+        },
     )
 
     packed_modules_mapping = {
@@ -1016,6 +1017,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         config: MiniCPMV4_6Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -1078,6 +1080,7 @@ class MiniCPMV4_6ForConditionalGeneration(
                 image_embeds=image_embeds,
             )
 
+        assert isinstance(pixel_values, torch.Tensor | list)
         tgt_sizes = kwargs.pop("tgt_sizes")
         num_slices_flat = torch.tensor([len(ps) for ps in pixel_values])
         pixel_values_flat = flatten_bn(pixel_values)
