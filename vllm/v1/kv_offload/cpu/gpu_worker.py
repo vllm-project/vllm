@@ -80,8 +80,7 @@ def compute_sub_block_ptrs(
     tensor: torch.Tensor,
     skip_count: int = 0,
 ):
-    """
-    Compute byte pointers for sub-blocks of the given block IDs.
+    """Compute byte pointers for sub-blocks of the given block IDs.
 
     Each block in block_ids contains blocks_per_chunk sub-blocks.
     The pointer for sub-block j of block b is:
@@ -98,6 +97,7 @@ def compute_sub_block_ptrs(
         output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
+
     """
     assert skip_count < blocks_per_chunk
 
@@ -234,8 +234,7 @@ def _new_descriptor_buffers(
 
 
 class SingleDirectionOffloadingHandler:
-    """
-    Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
+    """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
     Each transfer uses a unique CUDA stream, and its stream will start
     executing only after the streams of previous transfers have finished.
@@ -250,8 +249,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
     ):
-        """
-        Initialize a SingleDirectionOffloadingHandler.
+        """Initialize a SingleDirectionOffloadingHandler.
 
         Args:
             gpu_tensors: list of GPU KV cache tensors.
@@ -259,10 +257,12 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_chunks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
+            blocks_per_chunk: number of blocks transferred per chunk.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
+
         """
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
