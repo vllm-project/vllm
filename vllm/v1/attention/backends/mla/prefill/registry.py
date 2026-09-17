@@ -52,6 +52,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.aiter_flash_attn."
         "AiterFlashAttnPrefillBackend"
     )
+    CPU = "vllm.v1.attention.backends.mla.prefill.cpu_sdpa.CPUSDPAMLAPrefillBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
@@ -64,6 +65,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _MLA_PREFILL_OVERRIDES.get(self, self.value)
         if not path:
@@ -84,6 +86,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -129,6 +132,7 @@ def register_mla_prefill_backend(
             MLAPrefillBackendEnum.CUSTOM,
             "my.module.MyCustomPrefillBackend"
         )
+
     """
 
     def decorator(cls: type) -> type:

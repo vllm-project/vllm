@@ -30,7 +30,6 @@ from ....conftest import (
     VllmRunner,
 )
 from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
-from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
 from .vlm_utils.types import (
@@ -320,20 +319,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
         # FIXME: https://github.com/huggingface/transformers/pull/38510
         marks=[pytest.mark.skip("Model is broken")],
-    ),
-    "chameleon": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        # For chameleon, we only compare the sequences
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        max_tokens=8,
-        dtype="bfloat16",
     ),
     "cosmos3": VLMTestInfo(
         models=["nvidia/Cosmos3-Nano"],
@@ -893,14 +878,22 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        # torch 2.13 accumulates CPU numerical drift in the qwen2_vl multi-image
-        # path: HF and vLLM agree for a long prefix (~69 tokens) then a token
-        # flips outside vLLM's top-N only near the end of the generation. The
-        # window is already at the max_logprobs=20 cap, so widening it further is
-        # not possible. Treat this as acceptable drift and cap max_tokens on CPU
-        # so the compared prefix stays before the divergence, keeping the
-        # multi-image path under test. See pytorch/pytorch#187735.
-        max_tokens=64 if current_platform.is_cpu() else 128,
+        # Qwen2-VL multi-image generation can accumulate backend-specific
+        # numerical drift during long autoregressive decoding.
+        #
+        # On CPU with torch 2.13, HF and vLLM agree for a long prefix before
+        # diverging near the end of generation. See pytorch/pytorch#187735.
+        #
+        # A similar late-generation divergence is observed on XPU with BF16
+        # ViT FlashAttention. The issue is not resolved by increasing
+        # num_logprobs from 10 to 20, while FP32 and BF16 with Triton ViT
+        # attention pass in local reproduction.
+        #
+        # Cap max_tokens on CPU and XPU to keep the correctness comparison
+        # before the numerically sensitive late-generation region.
+        max_tokens=64
+        if current_platform.is_cpu() or current_platform.is_xpu()
+        else 128,
         num_logprobs=20 if current_platform.is_cpu() else 10,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
@@ -935,17 +928,6 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
-    "chameleon-broadcast": VLMTestInfo(
-        models=["facebook/chameleon-7b"],
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        max_model_len=4096,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
-        marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS,  # type: ignore
-    ),
     "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",

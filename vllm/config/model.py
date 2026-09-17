@@ -30,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
     get_hf_text_config,
@@ -37,11 +38,11 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
+    mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
     uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -151,6 +152,7 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
@@ -185,6 +187,10 @@ class ModelConfig:
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
+    """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
+    contains an `lm_head` of its own. The two may still turn out to be identical, in
+    which case they are re-tied once the weights have been loaded."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -237,7 +243,10 @@ class ModelConfig:
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
-    flexibility."""
+    flexibility.
+
+    NOTE: This disables both `torch.compile` and CUDA graphs, and is
+    equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     return_sampling_mask: bool = False
@@ -262,6 +271,12 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    enable_trace_replay: bool = False
+    """Whether to allow requests to set
+    `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
+    predetermined token sequence while still computing real logprobs. Reserved
+    for debugging and RL workflows: enabling it reserves a per-request trace
+    buffer, so it is off by default."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -332,6 +347,10 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    enable_nccl_comm_suspend: bool = False
+    """Enable releasing NCCL communicator memory during sleep mode
+    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (the default) sleep still releases weights/KV-cache memory as before."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -399,8 +418,7 @@ class ModelConfig:
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -424,6 +442,7 @@ class ModelConfig:
             "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
+            "enable_trace_replay",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
@@ -681,8 +700,13 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
-            elif arch == "DeepseekV4ForCausalLM":
+            elif arch in (
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "DeepseekV41ForCausalLM":
+                self.tokenizer_mode = "deepseek_v41"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
 
@@ -913,7 +937,7 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        """Called after __post_init__"""
+        """Called after __post_init__."""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "
@@ -1058,8 +1082,8 @@ class ModelConfig:
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
-        """
 
+        """
         # Skip if model_weights is already set (model already pulled)
         if self.model_weights:
             return
@@ -1101,6 +1125,34 @@ class ModelConfig:
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+
+    def maybe_untie_word_embeddings(self) -> None:
+        """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
+
+        A config may claim the word embeddings are tied while the checkpoint
+        ships an `lm_head` of its own. Tying regardless would silently discard
+        that tensor, so build the `lm_head` as if untied and let it load. The
+        two are compared once loaded, and re-tied if they turn out to match, by
+        [maybe_retie_word_embeddings][vllm.model_executor.model_loader.weight_tying.maybe_retie_word_embeddings].
+
+        Transformers makes the same decision in `PreTrainedModel.tie_weights`,
+        where it can compare the two tensors directly.
+        """
+        if not getattr(self.hf_config, "tie_word_embeddings", False):
+            return
+        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+            return
+
+        logger.debug(
+            "The config for %s says the word embeddings are tied, but the checkpoint "
+            "contains an lm_head. Loading it to find out whether they really are tied.",
+            self.model,
+        )
+        # Both levels must be updated: `VllmConfig.with_hf_config` reads the top
+        # level, and the text config is what the language model itself sees.
+        self.hf_config.tie_word_embeddings = False
+        self.hf_config.get_text_config().tie_word_embeddings = False
+        self.word_embeddings_untied_by_checkpoint = True
 
     def _get_default_runner_type(
         self,
@@ -1609,9 +1661,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """
-        Returns the mamba chunk size if it exists
-        """
+        """Returns the mamba chunk size if it exists."""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
@@ -1626,11 +1676,11 @@ class ModelConfig:
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
-        """
-        Get the multimodal configuration of the model.
+        """Get the multimodal configuration of the model.
 
         Raises:
             ValueError: If the model is not multimodal.
+
         """
         if self.multimodal_config is None:
             raise ValueError("The model is not multimodal.")
@@ -1638,8 +1688,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        """
-        This method attempts to retrieve the non-default values of the
+        """This method attempts to retrieve the non-default values of the
         generation config for this model.
 
         The generation config can contain information about special tokens, as
@@ -1648,6 +1697,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default generation config.
+
         """
         if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
@@ -1673,8 +1723,7 @@ class ModelConfig:
         return config.to_diff_dict()
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
-        """
-        This method returns a dictionary containing the non-default sampling
+        """This method returns a dictionary containing the non-default sampling
         parameters with `override_generation_config` applied.
 
         The default sampling parameters are:
@@ -1686,6 +1735,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default sampling parameters.
+
         """
         src = self.generation_config
 
@@ -1800,8 +1850,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
+    def mrope_num_dims(self) -> int:
+        return mrope_num_dims(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1817,8 +1867,7 @@ class ModelConfig:
 
     @property
     def score_type(self) -> ScoreType:
-        """
-        Scoring API handles score/rerank for:
+        """Scoring API handles score/rerank for:
 
         - "classify" task (score_type: cross-encoder models)
         - "embed" task (score_type: bi-encoder models)
@@ -1850,7 +1899,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
@@ -1877,6 +1926,12 @@ class ModelConfig:
             # kv_lora_rank indicates that a Transformers model implementation uses MLA
             return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         # Manually maintained list of model types for vLLM model implementations
+
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         return self.is_deepseek_mla
 
     @property
@@ -1905,8 +1960,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """
-        "head" refers to the last Linear layer(s) of an LLM,
+        """The "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
@@ -1917,7 +1971,6 @@ class ModelConfig:
           fp32, which is required for RL training-inference consistency
           (the trainer computes logits in fp32).
         """
-
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
@@ -2115,8 +2168,7 @@ class ModelConfig:
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
-    """
-    If the input is a non-empty list, the first model_name in
+    """If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
     If the input is a non-empty string, it is used directly.
     For cases where the input is either an empty string or an
@@ -2389,6 +2441,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
@@ -2399,13 +2458,20 @@ def _get_and_verify_max_len(
             # loading HF config
             rope_type = rp["rope_type"]
 
-            if rope_type not in ("su", "longrope", "llama3"):
+            # YaRN variants leave max_position_embeddings already scaled, as
+            # Transformers' _compute_yarn_parameters assumes, so `factor` must
+            # not be applied to it again.
+            if rope_type not in (
+                "su",
+                "longrope",
+                "llama3",
+                "yarn",
+                "deepseek_yarn",
+                "deepseek_llama_scaling",
+            ):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
         if scaling_factor is None:
             # Fallback the factor to 1.0 if a user assigned `null`
             logger.warning_once(

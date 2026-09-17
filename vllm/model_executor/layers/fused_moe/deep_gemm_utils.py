@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
+"""Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
 and updated to fit vllm needs and terminology.
 """
 
@@ -525,7 +524,9 @@ def deepgemm_moe_permute(
     expert_num_tokens = None
     if expert_tokens_meta is not None:
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
-    else:
+    if expert_num_tokens is None:
+        # A cudagraph-decode carrier may hold only psum_recv_per_rank and leave
+        # expert_num_tokens None; count locally as in the meta-absent case.
         expert_num_tokens = count_expert_num_tokens(
             topk_ids, local_num_experts, expert_map
         )

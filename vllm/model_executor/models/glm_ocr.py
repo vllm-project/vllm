@@ -70,6 +70,7 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vVisionTransformer,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .utils import (
     maybe_prefix,
@@ -326,7 +327,9 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        del encoder_metadata
         if isinstance(grid_thw, list):
             grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
 
@@ -342,8 +345,11 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        # cat straight into a pinned buffer so the H2D copy stays non-blocking.
+        cu_seqlens = torch.cat(
+            [cu_seqlens.new_zeros(1), cu_seqlens],
+            out=cu_seqlens.new_empty(cu_seqlens.numel() + 1, pin_memory=PIN_MEMORY),
+        ).to(self.device, non_blocking=True)
 
         # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)

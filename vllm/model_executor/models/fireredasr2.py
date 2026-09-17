@@ -12,7 +12,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
@@ -38,6 +38,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
@@ -63,11 +64,10 @@ logger = init_logger(__name__)
 
 
 class FireRedASR2AudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -216,6 +216,7 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         ret = {
             "audio": self._get_dummy_audios(
@@ -228,29 +229,23 @@ class FireRedASR2DummyInputsBuilder(BaseDummyInputsBuilder[FireRedASR2Processing
 class FireRedASR2MultiModalProcessor(
     BaseMultiModalProcessor[FireRedASR2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
-            mm_kwargs = dict(
-                **mm_kwargs,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
-        if "labels" in processed_outputs:
-            processed_outputs["input_ids"] = processed_outputs.pop("labels")
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -260,7 +255,7 @@ class FireRedASR2MultiModalProcessor(
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             speech_lengths=MultiModalFieldConfig.batched("audio"),
-            fake_token_lengths=MultiModalFieldConfig.batched("audio"),
+            fake_token_lengths=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -332,7 +327,10 @@ class FireRedASR2ForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={
+            "model.encoder.audio_encoder.positional_encoding.pe": None,
+        },
     )
 
     supports_transcription_only = True
@@ -477,8 +475,6 @@ class FireRedASR2ForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["model.encoder.audio_encoder.positional_encoding.pe"]
-        )
+        loader = AutoWeightsLoader(self)
 
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

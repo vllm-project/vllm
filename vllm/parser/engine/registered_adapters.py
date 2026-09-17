@@ -9,6 +9,7 @@ names so that :class:`ReasoningParserManager` and
 
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.parser.deepseek_v32 import DeepSeekV32Parser
+from vllm.parser.deepseek_v41 import DeepSeekV41Parser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
@@ -29,6 +30,11 @@ from vllm.parser.seed_oss import SeedOssParser
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
 ) = make_adapters(DeepSeekV4Parser)
+
+(
+    DeepSeekV41ParserReasoningAdapter,
+    DeepSeekV41ParserToolAdapter,
+) = make_adapters(DeepSeekV41Parser)
 
 (
     MinimaxM2ParserReasoningAdapter,
