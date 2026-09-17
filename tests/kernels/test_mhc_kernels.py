@@ -132,6 +132,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
+        use_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
@@ -452,7 +453,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -536,7 +537,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
