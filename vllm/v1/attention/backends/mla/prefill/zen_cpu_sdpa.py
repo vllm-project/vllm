@@ -12,6 +12,7 @@ gates this backend once at selection time rather than per attention call.
 
 import torch
 
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import CPUSDPAMLAPrefillBackend
 
 
@@ -24,8 +25,6 @@ class ZenCPUSDPAMLAPrefillBackend(CPUSDPAMLAPrefillBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
-
         return has_zentorch_op(["zentorch_sdpa"])
 
     @staticmethod
