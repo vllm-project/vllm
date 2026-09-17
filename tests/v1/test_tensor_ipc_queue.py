@@ -3,11 +3,13 @@
 
 """Tests for tensor IPC queue functionality."""
 
-import contextlib
 import multiprocessing as mp
+import time
 from dataclasses import dataclass
+from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Barrier as BarrierType
 from multiprocessing.synchronize import Event as EventType
+from queue import Empty
 from typing import Any
 
 import pytest
@@ -23,15 +25,62 @@ from vllm.v1.engine.tensor_ipc import (
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 DEVICE_TYPE = current_platform.device_type
+_MP_CTX = torch_mp.get_context("spawn")
+_PROCESS_RESULT_TIMEOUT = 60.0
+_PROCESS_CLEANUP_TIMEOUT = 10.0
 
 
-@pytest.fixture(scope="module", autouse=True)
-def setup_multiprocessing():
-    """Set multiprocessing start method to 'spawn' for compatibility."""
-    with contextlib.suppress(RuntimeError):
-        # Already set, which is fine
-        torch_mp.set_start_method("spawn", force=True)
-    yield
+def _collect_process_results(
+    result_queue: mp.Queue,
+    count: int,
+    processes: list[BaseProcess],
+) -> list[dict[str, Any]]:
+    """Collect worker results within one shared startup deadline."""
+    deadline = time.monotonic() + _PROCESS_RESULT_TIMEOUT
+    results = []
+    for _ in range(count):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            states = ", ".join(
+                f"{p.name}(pid={p.pid}, alive={p.is_alive()}, exit={p.exitcode})"
+                for p in processes
+            )
+            raise TimeoutError(f"Timed out waiting for worker results: {states}")
+        try:
+            results.append(result_queue.get(timeout=remaining))
+        except Empty as exc:
+            states = ", ".join(
+                f"{p.name}(pid={p.pid}, alive={p.is_alive()}, exit={p.exitcode})"
+                for p in processes
+            )
+            raise TimeoutError(
+                f"Timed out waiting for worker results: {states}"
+            ) from exc
+    return results
+
+
+def _cleanup_processes(processes: list[BaseProcess]) -> list[str]:
+    """Join workers, then force-clean only those that miss the deadline."""
+    started = [process for process in processes if process.pid is not None]
+    deadline = time.monotonic() + _PROCESS_CLEANUP_TIMEOUT
+    for process in started:
+        process.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    failures = [
+        f"{p.name}(pid={p.pid}, alive={p.is_alive()}, exit={p.exitcode})"
+        for p in started
+        if p.is_alive() or p.exitcode != 0
+    ]
+    alive = [p for p in started if p.is_alive()]
+    for process in alive:
+        process.terminate()
+    for process in alive:
+        process.join(timeout=5.0)
+    for process in alive:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5.0)
+    return failures
 
 
 @dataclass
@@ -73,20 +122,26 @@ def encoder_process(
 
         result_queue.put(
             {
+                "role": "encoder",
                 "success": True,
                 "encoded_length": len(encoded),
                 "device": str(device),
                 "tensor_shape": tuple(tensor.shape),
             }
         )
-        retrieval_done.wait(timeout=30.0)
+        retrieval_done.wait(timeout=_PROCESS_RESULT_TIMEOUT)
     except Exception as e:
         import traceback
 
         ready_event.set()
         retrieval_done.set()
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "encoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
 
 
@@ -100,7 +155,7 @@ def decoder_process(
 ):
     """Process that msgpack-decodes tensors received via IPC."""
     try:
-        if not encoder_ready.wait(timeout=10.0):
+        if not encoder_ready.wait(timeout=_PROCESS_RESULT_TIMEOUT):
             raise TimeoutError("Encoder did not signal ready")
 
         encoded = payload_queue.get(timeout=5.0)
@@ -110,6 +165,7 @@ def decoder_process(
 
         result_queue.put(
             {
+                "role": "decoder",
                 "success": True,
                 "tensor_shape": tuple(decoded.tensor.shape),
                 "device": str(decoded.tensor.device),
@@ -122,7 +178,12 @@ def decoder_process(
 
         retrieval_done.set()
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "decoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
     else:
         retrieval_done.set()
@@ -131,16 +192,17 @@ def decoder_process(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_tensor_queue_basic():
     """Test CUDA tensor IPC through the msgpack encoder/decoder path."""
-    tensor_queue = torch_mp.Queue()
-    payload_queue: mp.Queue = mp.Queue()
-    result_queue: mp.Queue = mp.Queue()
-    encoder_ready = mp.Event()
-    retrieval_done = mp.Event()
+    tensor_queue = _MP_CTX.Queue()
+    payload_queue: mp.Queue = _MP_CTX.Queue()
+    result_queue: mp.Queue = _MP_CTX.Queue()
+    encoder_ready = _MP_CTX.Event()
+    retrieval_done = _MP_CTX.Event()
 
     tensor_shape = (4, 8, 16)
     tensor_dtype = torch.float32
 
-    encoder_proc = mp.Process(
+    encoder_proc = _MP_CTX.Process(
+        name="tensor-ipc-encoder",
         target=encoder_process,
         args=(
             tensor_queue,
@@ -151,9 +213,8 @@ def test_cuda_tensor_queue_basic():
             retrieval_done,
         ),
     )
-    encoder_proc.start()
-
-    decoder_proc = mp.Process(
+    decoder_proc = _MP_CTX.Process(
+        name="tensor-ipc-decoder",
         target=decoder_process,
         args=(
             tensor_queue,
@@ -164,13 +225,21 @@ def test_cuda_tensor_queue_basic():
             retrieval_done,
         ),
     )
-    decoder_proc.start()
+    processes = [encoder_proc, decoder_proc]
+    try:
+        for process in processes:
+            process.start()
+        results = {
+            result["role"]: result
+            for result in _collect_process_results(result_queue, 2, processes)
+        }
+    finally:
+        retrieval_done.set()
+        process_failures = _cleanup_processes(processes)
 
-    encoder_result = result_queue.get(timeout=10.0)
-    decoder_result = result_queue.get(timeout=10.0)
-
-    encoder_proc.join(timeout=5.0)
-    decoder_proc.join(timeout=5.0)
+    assert not process_failures, f"Worker cleanup failures: {process_failures}"
+    encoder_result = results["encoder"]
+    decoder_result = results["decoder"]
 
     # Verify results
     assert encoder_result["success"], (
@@ -206,7 +275,7 @@ def test_cpu_tensor_fallback():
 
 def test_msgpack_encoder_decoder_with_ipc():
     """Test the full msgpack + tensor IPC path in one process."""
-    tensor_queue = torch_mp.Queue()
+    tensor_queue = _MP_CTX.Queue()
     sender = TensorIpcSender(tensor_queue)
     encoder = MsgpackEncoder(oob_tensor_consumer=sender)
     receiver = TensorIpcReceiver(tensor_queue)
@@ -228,7 +297,7 @@ def test_msgpack_encoder_decoder_with_ipc():
 
 def test_decoder_buffer_management():
     """Test receiver's tensor buffer management when draining queue."""
-    tensor_queue = torch_mp.Queue()
+    tensor_queue = _MP_CTX.Queue()
 
     sender_id = "test_sender"
     message_id = 1
@@ -289,7 +358,7 @@ def api_server_worker(
         sender_id = f"server_{server_id}"
 
         # Wait for all servers to be ready
-        barrier.wait()
+        barrier.wait(timeout=_PROCESS_RESULT_TIMEOUT)
 
         # Send tensor using TensorIpcData
         ipc_data = TensorIpcData(
@@ -304,7 +373,7 @@ def api_server_worker(
 
         # Keep process alive until main process has retrieved all tensors
         # This prevents shared memory handles from being invalidated
-        retrieval_done.wait(timeout=30.0)
+        retrieval_done.wait(timeout=_PROCESS_RESULT_TIMEOUT)
     except Exception as e:
         import traceback
 
@@ -321,57 +390,49 @@ def api_server_worker(
 def test_multiple_api_servers_to_engine():
     """Test multiple API servers sending to one engine core via multiprocessing."""
     num_api_servers = 3
-    tensor_queue = torch_mp.Queue()
-    result_queue: mp.Queue = mp.Queue()
-    barrier = mp.Barrier(num_api_servers)
-    retrieval_done = mp.Event()
+    tensor_queue = _MP_CTX.Queue()
+    result_queue: mp.Queue = _MP_CTX.Queue()
+    barrier = _MP_CTX.Barrier(num_api_servers)
+    retrieval_done = _MP_CTX.Event()
 
     # Start multiple API server processes
-    processes = []
+    processes: list[BaseProcess] = []
     for server_id in range(num_api_servers):
-        proc = mp.Process(
+        proc = _MP_CTX.Process(
+            name=f"api-server-{server_id}",
             target=api_server_worker,
             args=(server_id, tensor_queue, result_queue, barrier, retrieval_done),
         )
-        proc.start()
         processes.append(proc)
 
-    # Collect results from all servers
-    results = []
-    for _ in range(num_api_servers):
-        result = result_queue.get(timeout=10.0)
-        results.append(result)
+    try:
+        for process in processes:
+            process.start()
 
-    # Verify all servers succeeded
-    for result in results:
-        assert result["success"], (
-            f"Server {result['server_id']} failed: {result.get('error')}"
-        )
+        results = _collect_process_results(result_queue, num_api_servers, processes)
+        for result in results:
+            assert result["success"], (
+                f"Server {result['server_id']} failed: {result.get('error')}"
+            )
 
-    # Verify all tensors are in queue
-    received_tensors = []
-    for _ in range(num_api_servers):
-        ipc_data = tensor_queue.get(timeout=1.0)
-        received_tensors.append((ipc_data.sender_id, ipc_data.tensor))
+        received_tensors = []
+        for _ in range(num_api_servers):
+            ipc_data = tensor_queue.get(timeout=10.0)
+            received_tensors.append((ipc_data.sender_id, ipc_data.tensor))
 
-    assert len(received_tensors) == num_api_servers
+        tensor_by_sender = {sid: tensor for sid, tensor in received_tensors}
+        for server_id in range(num_api_servers):
+            expected_id = f"server_{server_id}"
+            assert expected_id in tensor_by_sender, (
+                f"Missing tensor from server {server_id}"
+            )
+            expected_tensor = torch.ones(server_id + 1, server_id + 2) * server_id
+            assert torch.allclose(tensor_by_sender[expected_id], expected_tensor)
+    finally:
+        retrieval_done.set()
+        process_failures = _cleanup_processes(processes)
 
-    # Verify tensor content (order may vary with multiprocessing)
-    tensor_by_sender = {sid: t for sid, t in received_tensors}
-    for server_id in range(num_api_servers):
-        expected_id = f"server_{server_id}"
-        assert expected_id in tensor_by_sender, (
-            f"Missing tensor from server {server_id}"
-        )
-        expected_tensor = torch.ones(server_id + 1, server_id + 2) * server_id
-        assert torch.allclose(tensor_by_sender[expected_id], expected_tensor)
-
-    # Signal workers that retrieval is complete
-    retrieval_done.set()
-
-    # Wait for all processes to complete
-    for proc in processes:
-        proc.join(timeout=5.0)
+    assert not process_failures, f"Worker cleanup failures: {process_failures}"
 
 
 def mixed_tensor_encoder_process(
@@ -402,16 +463,21 @@ def mixed_tensor_encoder_process(
 
         ready_event.set()
 
-        result_queue.put({"success": True, "sent_cuda": True})
+        result_queue.put({"role": "encoder", "success": True, "sent_cuda": True})
 
         # Keep process alive until decoder has retrieved the tensor
-        retrieval_done.wait(timeout=30.0)
+        retrieval_done.wait(timeout=_PROCESS_RESULT_TIMEOUT)
     except Exception as e:
         import traceback
 
         ready_event.set()
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "encoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
 
 
@@ -424,7 +490,7 @@ def mixed_tensor_decoder_process(
     """Process that retrieves mixed tensors from queue."""
     try:
         # Wait for encoder to finish
-        if not encoder_ready.wait(timeout=10.0):
+        if not encoder_ready.wait(timeout=_PROCESS_RESULT_TIMEOUT):
             raise TimeoutError("Encoder did not signal ready")
 
         # Try to get CUDA tensor from queue
@@ -432,6 +498,7 @@ def mixed_tensor_decoder_process(
 
         result_queue.put(
             {
+                "role": "decoder",
                 "success": True,
                 "is_cuda": ipc_data.tensor.is_cuda,
                 "shape": tuple(ipc_data.tensor.shape),
@@ -445,38 +512,49 @@ def mixed_tensor_decoder_process(
 
         retrieval_done.set()  # Signal even on failure
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "decoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_mixed_cpu_cuda_tensors():
     """Test encoding with mixed CPU and CUDA tensors using multiprocessing."""
-    tensor_queue = torch_mp.Queue()
-    result_queue: mp.Queue = mp.Queue()
-    encoder_ready = mp.Event()
-    retrieval_done = mp.Event()
+    tensor_queue = _MP_CTX.Queue()
+    result_queue: mp.Queue = _MP_CTX.Queue()
+    encoder_ready = _MP_CTX.Event()
+    retrieval_done = _MP_CTX.Event()
 
     # Start encoder process
-    encoder_proc = mp.Process(
+    encoder_proc = _MP_CTX.Process(
+        name="mixed-tensor-encoder",
         target=mixed_tensor_encoder_process,
         args=(tensor_queue, result_queue, encoder_ready, retrieval_done),
     )
-    encoder_proc.start()
-
-    # Start decoder process
-    decoder_proc = mp.Process(
+    decoder_proc = _MP_CTX.Process(
+        name="mixed-tensor-decoder",
         target=mixed_tensor_decoder_process,
         args=(tensor_queue, result_queue, encoder_ready, retrieval_done),
     )
-    decoder_proc.start()
+    processes = [encoder_proc, decoder_proc]
+    try:
+        for process in processes:
+            process.start()
+        results = {
+            result["role"]: result
+            for result in _collect_process_results(result_queue, 2, processes)
+        }
+    finally:
+        retrieval_done.set()
+        process_failures = _cleanup_processes(processes)
 
-    # Get results
-    encoder_result = result_queue.get(timeout=10.0)
-    decoder_result = result_queue.get(timeout=10.0)
-
-    encoder_proc.join(timeout=5.0)
-    decoder_proc.join(timeout=5.0)
+    assert not process_failures, f"Worker cleanup failures: {process_failures}"
+    encoder_result = results["encoder"]
+    decoder_result = results["decoder"]
 
     # Verify encoder succeeded
     assert encoder_result["success"], (
@@ -519,6 +597,7 @@ def cpu_tensor_ipc_encoder_process(
 
         result_queue.put(
             {
+                "role": "encoder",
                 "success": True,
                 "encoded_length": len(encoded),
                 "device": str(tensor.device),
@@ -528,13 +607,18 @@ def cpu_tensor_ipc_encoder_process(
 
         # Keep process alive until decoder has retrieved the tensor
         # This is necessary for CPU tensor shared memory to remain valid
-        retrieval_done.wait(timeout=30.0)
+        retrieval_done.wait(timeout=_PROCESS_RESULT_TIMEOUT)
     except Exception as e:
         import traceback
 
         ready_event.set()
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "encoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
 
 
@@ -548,7 +632,7 @@ def cpu_tensor_ipc_decoder_process(
     """Process that decodes and receives CPU tensors from IPC queue."""
     try:
         # Wait for encoder to finish sending
-        if not encoder_ready.wait(timeout=10.0):
+        if not encoder_ready.wait(timeout=_PROCESS_RESULT_TIMEOUT):
             raise TimeoutError("Encoder did not signal ready")
 
         # Get tensor from queue
@@ -556,6 +640,7 @@ def cpu_tensor_ipc_decoder_process(
 
         result_queue.put(
             {
+                "role": "decoder",
                 "success": True,
                 "tensor_id": ipc_data.tensor_id,
                 "tensor_shape": tuple(ipc_data.tensor.shape),
@@ -572,22 +657,28 @@ def cpu_tensor_ipc_decoder_process(
 
         retrieval_done.set()  # Signal even on failure
         result_queue.put(
-            {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+            {
+                "role": "decoder",
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
         )
 
 
 def test_cpu_tensor_ipc():
     """Test CPU tensor sharing via IPC queue when mm_tensor_ipc is enabled."""
     # Set up single queue and synchronization
-    tensor_queue = torch_mp.Queue()
-    result_queue: mp.Queue = mp.Queue()
-    encoder_ready = mp.Event()
-    retrieval_done = mp.Event()
+    tensor_queue = _MP_CTX.Queue()
+    result_queue: mp.Queue = _MP_CTX.Queue()
+    encoder_ready = _MP_CTX.Event()
+    retrieval_done = _MP_CTX.Event()
 
     tensor_shape = (3, 5, 7)
 
     # Start encoder process
-    encoder_proc = mp.Process(
+    encoder_proc = _MP_CTX.Process(
+        name="cpu-tensor-encoder",
         target=cpu_tensor_ipc_encoder_process,
         args=(
             tensor_queue,
@@ -597,10 +688,8 @@ def test_cpu_tensor_ipc():
             retrieval_done,
         ),
     )
-    encoder_proc.start()
-
-    # Start decoder process
-    decoder_proc = mp.Process(
+    decoder_proc = _MP_CTX.Process(
+        name="cpu-tensor-decoder",
         target=cpu_tensor_ipc_decoder_process,
         args=(
             tensor_queue,
@@ -610,14 +699,21 @@ def test_cpu_tensor_ipc():
             retrieval_done,
         ),
     )
-    decoder_proc.start()
+    processes = [encoder_proc, decoder_proc]
+    try:
+        for process in processes:
+            process.start()
+        results = {
+            result["role"]: result
+            for result in _collect_process_results(result_queue, 2, processes)
+        }
+    finally:
+        retrieval_done.set()
+        process_failures = _cleanup_processes(processes)
 
-    # Wait for processes and collect results
-    encoder_result = result_queue.get(timeout=10.0)
-    decoder_result = result_queue.get(timeout=10.0)
-
-    encoder_proc.join(timeout=5.0)
-    decoder_proc.join(timeout=5.0)
+    assert not process_failures, f"Worker cleanup failures: {process_failures}"
+    encoder_result = results["encoder"]
+    decoder_result = results["decoder"]
 
     # Verify results
     assert encoder_result["success"], (
@@ -634,7 +730,7 @@ def test_cpu_tensor_ipc():
 
 def test_ipc_disabled_mode():
     """Test that IPC is disabled when no sender is provided."""
-    tensor_queues = [torch_mp.Queue()]
+    tensor_queues = [_MP_CTX.Queue()]
 
     # Create encoder without IPC sender (IPC disabled)
     encoder = MsgpackEncoder()
@@ -686,7 +782,7 @@ def concurrent_sender_process(
         encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
         # Wait for all senders to be ready before sending
-        barrier.wait(timeout=10.0)
+        barrier.wait(timeout=_PROCESS_RESULT_TIMEOUT)
 
         encoded_payloads = []
         for msg_idx in range(num_messages):
@@ -717,7 +813,7 @@ def concurrent_sender_process(
         )
 
         # Keep alive so shared-memory handles remain valid
-        retrieval_done.wait(timeout=30.0)
+        retrieval_done.wait(timeout=_PROCESS_RESULT_TIMEOUT)
     except Exception as e:
         import traceback
 
@@ -742,16 +838,17 @@ def test_concurrent_senders_single_receiver():
     """
     num_senders = 4
     num_messages_per_sender = 3
-    tensor_queue = torch_mp.Queue()
-    payload_queue: mp.Queue = mp.Queue()
-    result_queue: mp.Queue = mp.Queue()
-    barrier = mp.Barrier(num_senders)
-    retrieval_done = mp.Event()
+    tensor_queue = _MP_CTX.Queue()
+    payload_queue: mp.Queue = _MP_CTX.Queue()
+    result_queue: mp.Queue = _MP_CTX.Queue()
+    barrier = _MP_CTX.Barrier(num_senders)
+    retrieval_done = _MP_CTX.Event()
 
     # Launch sender processes
-    processes = []
+    processes: list[BaseProcess] = []
     for i in range(num_senders):
-        proc = mp.Process(
+        proc = _MP_CTX.Process(
+            name=f"tensor-ipc-sender-{i}",
             target=concurrent_sender_process,
             args=(
                 tensor_queue,
@@ -763,63 +860,61 @@ def test_concurrent_senders_single_receiver():
                 retrieval_done,
             ),
         )
-        proc.start()
         processes.append(proc)
 
-    # Collect send confirmations
-    send_results = []
-    for _ in range(num_senders):
-        send_results.append(result_queue.get(timeout=15.0))
-    for r in send_results:
-        assert r["success"], (
-            f"Sender {r['sender_index']} failed: {r.get('error')}\n"
-            f"{r.get('traceback', '')}"
+    try:
+        for process in processes:
+            process.start()
+
+        send_results = _collect_process_results(result_queue, num_senders, processes)
+        for result in send_results:
+            assert result["success"], (
+                f"Sender {result['sender_index']} failed: {result.get('error')}\n"
+                f"{result.get('traceback', '')}"
+            )
+
+        receiver = TensorIpcReceiver(tensor_queue)
+        decoder = MsgpackDecoder(MultiTensorMessage, oob_tensor_provider=receiver)
+
+        decoded_messages: list[MultiTensorMessage] = []
+        total = num_senders * num_messages_per_sender
+        for _ in range(total):
+            encoded = payload_queue.get(timeout=10.0)
+            decoded = decoder.decode(encoded)
+            assert isinstance(decoded, MultiTensorMessage)
+            decoded_messages.append(decoded)
+
+        by_sender: dict[int, list[MultiTensorMessage]] = {}
+        for message in decoded_messages:
+            # label format: "sender_{i}_msg_{j}"
+            sender_idx = int(message.sender_label.split("_")[1])
+            by_sender.setdefault(sender_idx, []).append(message)
+
+        assert len(by_sender) == num_senders, (
+            f"Expected {num_senders} senders, got {len(by_sender)}"
         )
 
-    # Now decode all messages from the main process using a single receiver
-    receiver = TensorIpcReceiver(tensor_queue)
-    decoder = MsgpackDecoder(MultiTensorMessage, oob_tensor_provider=receiver)
+        for sender_idx in range(num_senders):
+            messages = sorted(by_sender[sender_idx], key=lambda m: m.sender_label)
+            assert len(messages) == num_messages_per_sender, (
+                f"Sender {sender_idx}: expected {num_messages_per_sender} "
+                f"messages, got {len(messages)}"
+            )
+            for msg_idx, message in enumerate(messages):
+                assert message.sender_label == f"sender_{sender_idx}_msg_{msg_idx}"
+                assert message.t1.shape == (sender_idx + 1, 3)
+                assert message.t2.shape == (2, sender_idx + 2)
+                assert torch.allclose(
+                    message.t1, torch.full_like(message.t1, float(msg_idx))
+                )
+                assert torch.allclose(
+                    message.t2, torch.full_like(message.t2, float(msg_idx + 100))
+                )
+    finally:
+        retrieval_done.set()
+        process_failures = _cleanup_processes(processes)
 
-    decoded_messages: list[MultiTensorMessage] = []
-    total = num_senders * num_messages_per_sender
-    for _ in range(total):
-        encoded = payload_queue.get(timeout=10.0)
-        decoded = decoder.decode(encoded)
-        assert isinstance(decoded, MultiTensorMessage)
-        decoded_messages.append(decoded)
-
-    # Signal senders they can exit
-    retrieval_done.set()
-
-    # Group by sender_label prefix to verify all messages arrived
-    by_sender: dict[int, list[MultiTensorMessage]] = {}
-    for msg in decoded_messages:
-        # label format: "sender_{i}_msg_{j}"
-        parts = msg.sender_label.split("_")
-        sender_idx = int(parts[1])
-        by_sender.setdefault(sender_idx, []).append(msg)
-
-    assert len(by_sender) == num_senders, (
-        f"Expected {num_senders} senders, got {len(by_sender)}"
-    )
-
-    for sender_idx in range(num_senders):
-        msgs = sorted(by_sender[sender_idx], key=lambda m: m.sender_label)
-        assert len(msgs) == num_messages_per_sender, (
-            f"Sender {sender_idx}: expected {num_messages_per_sender} "
-            f"messages, got {len(msgs)}"
-        )
-        for msg_idx, msg in enumerate(msgs):
-            assert msg.sender_label == f"sender_{sender_idx}_msg_{msg_idx}"
-            # Verify tensor shapes match what the sender created
-            assert msg.t1.shape == (sender_idx + 1, 3)
-            assert msg.t2.shape == (2, sender_idx + 2)
-            # Verify tensor values
-            assert torch.allclose(msg.t1, torch.full_like(msg.t1, float(msg_idx)))
-            assert torch.allclose(msg.t2, torch.full_like(msg.t2, float(msg_idx + 100)))
-
-    for proc in processes:
-        proc.join(timeout=5.0)
+    assert not process_failures, f"Worker cleanup failures: {process_failures}"
 
 
 def test_concurrent_senders_interleaved_buffer():
@@ -829,7 +924,7 @@ def test_concurrent_senders_interleaved_buffer():
     and verify the receiver correctly buffers and retrieves each tensor by
     its (sender_id, message_id, tensor_id) handle.
     """
-    tensor_queue = torch_mp.Queue()
+    tensor_queue = _MP_CTX.Queue()
 
     # Sender A: 2 tensors for message 1
     a_t0 = torch.randn(2, 3)
@@ -886,7 +981,7 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    tensor_queue = torch_mp.Queue()
+    tensor_queue = _MP_CTX.Queue()
 
     # Create sender and encoder with IPC enabled
     sender = TensorIpcSender(tensor_queue)
@@ -903,7 +998,7 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
 def test_tensor_cleanup_after_decode():
     """Test that tensors are removed from tracking after successful decode."""
     # Create a tensor queue
-    tensor_queue = torch_mp.Queue()
+    tensor_queue = _MP_CTX.Queue()
 
     # Create and encode a tensor
     tensor = torch.randn(5, 5)

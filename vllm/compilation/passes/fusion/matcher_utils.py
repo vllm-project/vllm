@@ -79,7 +79,7 @@ class MatcherCustomOp(ABC):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
 
     def inputs(self) -> list[torch.Tensor]:
-        """Utility for inputs to the pattern"""
+        """Utility for inputs to the pattern."""
         raise NotImplementedError
 
 
@@ -192,7 +192,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         z: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fla.ops.layernorm_guard import (
+        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
             rmsnorm_fn,
         )
 

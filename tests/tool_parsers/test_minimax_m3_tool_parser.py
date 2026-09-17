@@ -6,13 +6,17 @@ from typing import Any
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.minimax_m3_tool_parser import MinimaxM3ToolParser
+
+# MinimaxM3ToolParser extends RustToolParser; skip when the PyO3 extension
+# is absent (mirrors the guard in test_rust_tool_parser.py).
+pytest.importorskip("vllm._rust_tool_parser")
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 

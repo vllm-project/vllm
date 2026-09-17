@@ -18,8 +18,12 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 DEVICE = current_platform.device_type
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
-    reason="causal_conv1d Triton kernels require CUDA-alike or XPU",
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_xpu()
+        or current_platform.is_cpu()
+    ),
+    reason="causal_conv1d Triton kernels require CUDA-alike, XPU, or CPU",
 )
 
 
@@ -32,8 +36,7 @@ def causal_conv1d_ref(
     final_states_out: torch.Tensor | None = None,
     activation: str | None = "silu",
 ):
-    """
-    x: (batch, dim, seqlen)
+    """x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
     initial_states: (batch, dim, width - 1)
@@ -68,8 +71,7 @@ def causal_conv1d_ref(
 def causal_conv1d_update_ref(
     x, conv_state, weight, bias=None, activation=None, cache_seqlens=None
 ):
-    """
-    x: (batch, dim) or (batch, dim, seqlen)
+    """x: (batch, dim) or (batch, dim, seqlen)
     conv_state: (batch, dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
@@ -132,8 +134,7 @@ def causal_conv1d_opcheck_fn(
     activation: str | None = "silu",
     null_block_id: int = NULL_BLOCK_ID,
 ):
-    """
-    x: (batch, dim, seqlen)
+    """x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
     seq_idx: (batch, seqlen)
@@ -284,7 +285,8 @@ def test_causal_conv1d_varlen(
     batch, with_padding, dim, seqlen, width, has_bias, silu_activation, itype
 ):
     device = DEVICE
-    torch.accelerator.empty_cache()
+    if not current_platform.is_cpu():
+        torch.accelerator.empty_cache()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2

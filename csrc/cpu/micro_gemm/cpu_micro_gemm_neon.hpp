@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #ifndef CPU_MICRO_GEMM_NEON_HPP
 #define CPU_MICRO_GEMM_NEON_HPP
 
@@ -16,9 +19,6 @@ namespace {
 constexpr int32_t K = 4;
 constexpr int32_t Cols = 2;
 constexpr int32_t TileSize = K * Cols;
-constexpr int32_t Mr = 8;
-constexpr int32_t Nr = 8;
-constexpr int32_t Nr_gemv = 16;
 
 // a = [a0, a1, a2, a3], b = [b0, b1, b2, b3] -> [a0, a1, b0, b1]
 FORCE_INLINE float32x4_t zip1_f32x4(const float32x4_t a, const float32x4_t b) {
@@ -132,7 +132,7 @@ FORCE_INLINE void gemm_micro_bfmmla_8x8_packed_a(
     acc6767 = vbfmmlaq_f32(acc6767, a_tile67, b_tile67);
 
     a_tile += 4 * TileSize;
-    b_tile += Nr * K;
+    b_tile += 4 * TileSize;
   }
 
   store_acc_rowpair(acc0101, acc0123, acc0145, acc0167, c_ptr, ldc,
@@ -205,8 +205,8 @@ FORCE_INLINE void gemm_micro_bfmmla_4x16_packed_a(
     acc231415 = vbfmmlaq_f32(acc231415, a_tile23, b_tile1415);
 
     a_tile += 2 * TileSize;
-    b_tile0 += Nr * K;
-    b_tile1 += Nr * K;
+    b_tile0 += 4 * TileSize;
+    b_tile1 += 4 * TileSize;
   }
 
   store_acc_rowpair(acc0101, acc0123, acc0145, acc0167, c_ptr, ldc, m_rows_01);
@@ -223,6 +223,9 @@ FORCE_INLINE void gemm_micro_bfmmla_4x16_packed_a(
 template <typename scalar_t>
 class MicroGemm<cpu_utils::ISA::NEON, scalar_t> {
  public:
+  static constexpr int32_t Mr = 8;
+  static constexpr int32_t Nr = 8;
+  static constexpr int32_t NrGemv = 16;
   static constexpr int32_t MaxMSize = 8;
   static constexpr int32_t NSize = 32;
   static constexpr int32_t WeightOCGroupSize = Nr;
@@ -246,6 +249,9 @@ class MicroGemm<cpu_utils::ISA::NEON, c10::BFloat16> {
  public:
   using scalar_t = c10::BFloat16;
 
+  static constexpr int32_t Mr = 8;
+  static constexpr int32_t Nr = 8;
+  static constexpr int32_t NrGemv = 16;
   static constexpr int32_t MaxMSize = 8;
   static constexpr int32_t NSize = 32;
   static constexpr int32_t WeightOCGroupSize = Nr;
@@ -253,7 +259,7 @@ class MicroGemm<cpu_utils::ISA::NEON, c10::BFloat16> {
 
  public:
   // physical layout [
-  //  M / 8; Mr is 8
+  //  M / (8 or 4); Mr is 8 or 4
   //  K / 4; K for bfmmla is 4
   //  4,   ; 4 row-pairs for each 8 rows
   //  2,   ; row-pair is 2 rows
@@ -439,7 +445,7 @@ class MicroGemm<cpu_utils::ISA::NEON, c10::BFloat16> {
     (void)lda;  // A is packed, so lda is not needed
     TORCH_CHECK_EQ(k % K, 0);
 
-    for (int32_t n_idx = 0; n_idx < NSize; n_idx += Nr_gemv) {
+    for (int32_t n_idx = 0; n_idx < NSize; n_idx += NrGemv) {
       const bfloat16_t* __restrict__ b_panel =
           reinterpret_cast<const bfloat16_t*>(b_ptr) + n_idx * k;
 

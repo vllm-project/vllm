@@ -31,6 +31,9 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.model_executor.layers.fusion.quant_activation import (
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -56,14 +59,26 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 
-pytestmark = pytest.mark.skipif(
-    not (
-        current_platform.is_cuda_alike()
-        or current_platform.is_cpu()
-        or current_platform.is_xpu()
+
+def test_lora_linear_requires_unquantized_input() -> None:
+    layer = RowParallelLinearWithLoRA.__new__(RowParallelLinearWithLoRA)
+    layer._input_quant_key = object()
+    assert get_input_quant_key(layer) is None
+
+
+pytestmark = [
+    pytest.mark.skipif(
+        not (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ),
+        reason="Backend not supported",
     ),
-    reason="Backend not supported",
-)
+    # Tests here either take dist_init, which tears the distributed environment
+    # down itself, or never build one, so the global cleanup only repeats it.
+    pytest.mark.skip_global_cleanup,
+]
 
 DEVICE_TYPE = current_platform.device_type
 DEVICES = (
@@ -83,6 +98,21 @@ NUM_RANDOM_SEEDS = 2
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 2
 
 
+def test_base_layer_with_lora_delegates_load_weights():
+    class BaseLayer(torch.nn.Module):
+        def load_weights(self, weights):
+            self.loaded_weights = list(weights)
+            return {"weight"}
+
+    base_layer = BaseLayer()
+    layer = BaseLayerWithLoRA()
+    layer.base_layer = base_layer
+    weights = [("weight", torch.ones(1))]
+
+    assert layer.load_weights(weights) == {"weight"}
+    assert base_layer.loaded_weights == weights
+
+
 @pytest.fixture(autouse=True)
 def clean_cache_reset_device(reset_default_device):
     # Release any memory we might be holding on to. CI runs OOMs otherwise.
@@ -96,8 +126,7 @@ def clean_cache_reset_device(reset_default_device):
 
 @pytest.fixture(autouse=True)
 def skip_cuda_with_stage_false(request):
-    """
-    On cuda-like platforms, we use the same kernels for prefill and decode
+    """On cuda-like platforms, we use the same kernels for prefill and decode
     stage, and 'stage' is generally ignored, so we only need to test once.
     """
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -123,8 +152,8 @@ def get_random_id_to_index(
         num_slots: The number of slots in the mapping. Must be larger
             than num_loras.
         log: Whether to log the output.
-    """
 
+    """
     if num_loras > num_slots:
         raise ValueError(
             f"num_loras is higher than num_slots: {num_loras} > {num_slots}. "
@@ -160,8 +189,8 @@ def populate_loras(
         repeats: must only be set for column parallel packed
             layers. Indicates the number of loras to compose
             together to create a single lora layer.
-    """
 
+    """
     # Dictionary that maps the lora ID to the
     # corresponding lora weights.
     lora_dict: dict[int, LoRALayerWeights] = dict()
@@ -216,8 +245,8 @@ def create_random_inputs(
         input_range: the range of values to include in the input.
             input_range[0] <= possible input values < input_range[1]
         input_type: the type of values in the input.
-    """
 
+    """
     low, high = input_range
 
     inputs: list[torch.Tensor] = []
@@ -368,8 +397,9 @@ def test_embeddings(
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [64000, 256512, 258048])
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("head_dtype", [None, torch.float32])
 def test_lm_head_logits_processor(
-    default_vllm_config, dist_init, num_loras, device, vocab_size, stage
+    default_vllm_config, dist_init, num_loras, device, vocab_size, stage, head_dtype
 ) -> None:
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
@@ -391,6 +421,8 @@ def test_lm_head_logits_processor(
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, vocab_size:] = 0
         logits_processor = LogitsProcessor(vocab_size)
+        # Exercise an fp32 lm_head (head_dtype) on the LoRA path.
+        logits_processor.head_dtype = head_dtype
         lora_logits_processor = LogitsProcessorWithLoRA(
             logits_processor, 1024, linear.weight.dtype, linear.weight.device, None
         )
@@ -504,6 +536,38 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 
     with pytest.raises(ValueError, match="vocab size must be <= 258048"):
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_lm_head_reset_sharded_to_full_mapping(
+    default_vllm_config, dist_init, device
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    max_loras = 8
+    vocab_size = 1024
+    lora_config = LoRAConfig(
+        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
+    )
+
+    logits_processor = LogitsProcessor(vocab_size)
+    sharded_to_full_mapping = list(reversed(range(vocab_size)))
+    lora_logits_processor = LogitsProcessorWithLoRA(
+        logits_processor, 1024, torch.float16, device, sharded_to_full_mapping
+    )
+    lora_logits_processor.create_lora_weights(max_loras, lora_config)
+
+    lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
+
+    lora_logits_processor.reset_sharded_to_full_mapping()
+
+    torch.testing.assert_close(
+        lora_logits_processor.sharded_to_full_mapping_gpu,
+        torch.tensor(sharded_to_full_mapping, dtype=torch.long),
+    )
 
 
 @torch.inference_mode()

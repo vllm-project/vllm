@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Integration tests for MultiprocExecutor at the executor level.
+"""Integration tests for MultiprocExecutor at the executor level.
 This test directly tests the executor without going through the LLM interface,
 focusing on executor initialization, RPC calls, and distributed execution.
 """
@@ -11,13 +10,60 @@ import multiprocessing
 import os
 import socket
 
+import pytest
+
 from tests.utils import multi_gpu_test
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.executor import multiproc_executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
 MODEL = "facebook/opt-125m"
+
+
+@pytest.mark.parametrize(
+    ("local_world_size", "data_parallel_size_local", "expected_num_local_procs"),
+    [(1, 4, 4), (4, 1, 4), (2, 0, 2)],
+)
+def test_multiproc_executor_counts_all_local_dp_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    local_world_size: int,
+    data_parallel_size_local: int,
+    expected_num_local_procs: int,
+):
+    """All colocated DP workers share the node's startup CPU budget."""
+    executor = object.__new__(MultiprocExecutor)
+    executor.world_size = local_world_size
+    executor.local_world_size = local_world_size
+    executor.parallel_config = type(
+        "ParallelConfig",
+        (),
+        {"data_parallel_size_local": data_parallel_size_local},
+    )()
+
+    monkeypatch.setattr(
+        executor,
+        "_get_parallel_sizes",
+        lambda: (local_world_size, 1, 1),
+    )
+
+    class StopExecutorInit(Exception):
+        pass
+
+    def capture_num_local_procs(num_local_procs: int):
+        assert num_local_procs == expected_num_local_procs
+        raise StopExecutorInit
+
+    monkeypatch.setattr(
+        multiproc_executor,
+        "set_multiprocessing_worker_envs",
+        capture_num_local_procs,
+    )
+
+    with pytest.raises(StopExecutorInit):
+        executor._init_executor()
+    executor._finalizer.detach()
 
 
 def create_vllm_config(
@@ -254,8 +300,8 @@ def test_multiproc_executor_shutdown_cleanup():
     for worker in executor.workers:
         assert not worker.proc.is_alive(), "Worker processes should be terminated"
 
-    # Verify shutdown event is set
-    assert executor.shutdown_event.is_set(), "Shutdown event should be set"
+    # Verify shutdown flag is set
+    assert executor.shutting_down, "Shutdown flag should be set"
 
     # Multiple shutdowns should be safe (idempotent)
     executor.shutdown()
@@ -292,7 +338,6 @@ def test_multiproc_executor_pipeline_parallel():
             "Max concurrent batches should follow the configured PP/async "
             "scheduling policy"
         )
-
     finally:
         # Clean up
         executor.shutdown()
@@ -331,13 +376,16 @@ def test_multiproc_executor_properties():
 
 @multi_gpu_test(num_gpus=4)
 def test_multiproc_executor_multi_node():
-    """
-    Test MultiprocExecutor with multi-node configuration.
+    """Test MultiprocExecutor with multi-node configuration.
     This simulates 2 nodes with TP=4:
     - Node 0 (rank 0): Uses GPUs 0,1 (CUDA_VISIBLE_DEVICES=0,1) with TP=2
     - Node 1 (rank 1): Uses GPUs 2,3 (CUDA_VISIBLE_DEVICES=2,3) with TP=2
     Total world_size = 4, nnodes = 2
     """
+    # Python 3.14+ changed default multiprocessing start method to 'forkserver'
+    # which cannot pickle nested functions. Use 'fork' for this test.
+    mp_ctx = multiprocessing.get_context("fork")
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         port = s.getsockname()[1]
@@ -405,12 +453,12 @@ def test_multiproc_executor_multi_node():
                 executor.shutdown()
 
     # Create a queue to collect results from both processes
-    result_queue: multiprocessing.Queue[dict[str, int | bool]] = multiprocessing.Queue()
+    result_queue: multiprocessing.Queue[dict[str, int | bool]] = mp_ctx.Queue()
 
     # Start both node processes
     processes = []
     for node_rank in range(2):
-        p = multiprocessing.Process(
+        p = mp_ctx.Process(
             target=run_node,
             args=(node_rank, result_queue, port),
             name=f"Node{node_rank}",
