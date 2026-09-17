@@ -297,14 +297,16 @@ fn parameter(key: &str, schema: &Value, options: &StructuralTagOptions) -> Forma
 /// Value grammar for one parameter, by JSON-schema type. Strings, objects,
 /// arrays, and unknown schemas stay free-form (the template renders objects
 /// and arrays as JSON text); the other scalars reuse xgrammar's JSON grammar
-/// over the parameter schema, whose single `type` is already the narrowing,
-/// so facets such as `minimum` keep applying.
+/// over the compilable subset of the parameter schema, so facets such as
+/// `minimum` keep applying.
 fn parameter_value(schema: &Value, options: &StructuralTagOptions) -> Format {
     if let Some(alternation) = scalar_enum(schema) {
         return alternation;
     }
     match schema.get("type").and_then(Value::as_str) {
-        Some("integer" | "number" | "boolean" | "null") => json_schema(schema.clone(), options),
+        Some(ty @ ("integer" | "number" | "boolean" | "null")) => {
+            json_schema(scalar_schema(schema, ty), options)
+        }
         // Framing markers and the invoke close stay excluded: the streaming
         // parser cuts the invoke body at the first `</atem:invoke>` and treats
         // quoted framing as a channel boundary, so the grammar must never
@@ -340,6 +342,47 @@ fn scalar_enum(schema: &Value) -> Option<Format> {
         [literal] => Format::const_string(literal.clone()),
         _ => Format::or(literals.into_iter().map(Format::const_string).collect()),
     })
+}
+
+/// The facets of a scalar parameter schema that xgrammar 0.2.x compiles:
+/// `type`, a scalar `const`, and for numeric types the bounds as numbers
+/// (whole and within i64 for `integer`). Anything else (draft-4 boolean
+/// exclusives, bounds beyond i64, `$ref`, `multipleOf`, an empty `enum`) is
+/// dropped, widening the value to its bare type instead of failing grammar
+/// compilation in the engine after the request was accepted.
+fn scalar_schema(schema: &Value, ty: &str) -> Value {
+    let mut narrowed = Map::new();
+    narrowed.insert("type".to_string(), Value::String(ty.to_string()));
+    if let Some(constant) = schema
+        .get("const")
+        .filter(|constant| matches!(constant, Value::Number(_) | Value::Bool(_) | Value::Null))
+    {
+        narrowed.insert("const".to_string(), constant.clone());
+    }
+    if matches!(ty, "integer" | "number") {
+        for facet in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+            if let Some(bound) =
+                schema.get(facet).filter(|bound| compilable_bound(bound, ty == "integer"))
+            {
+                narrowed.insert(facet.to_string(), bound.clone());
+            }
+        }
+    }
+    Value::Object(narrowed)
+}
+
+/// Whether xgrammar compiles `bound`: a number, and for `integer` a whole one
+/// strictly inside i64 when written as a float (a float literal at the i64
+/// boundary itself is rejected for precision loss).
+fn compilable_bound(bound: &Value, integer: bool) -> bool {
+    let Value::Number(number) = bound else {
+        return false;
+    };
+    !integer
+        || number.is_i64()
+        || number.as_f64().is_some_and(|float| {
+            float.fract() == 0.0 && float > i64::MIN as f64 && float < i64::MAX as f64
+        })
 }
 
 /// A JSON body honoring the request's key-order and whitespace options.
@@ -683,6 +726,32 @@ mod tests {
                 "any_order": false,
                 "max_whitespace_cnt": null
             })
+        );
+    }
+
+    #[test]
+    fn boolean_exclusive_bound_is_dropped_from_scalar_schema() {
+        let format = super::parameter_value(
+            &json!({"type": "integer", "minimum": 0, "exclusiveMinimum": true}),
+            &StructuralTagOptions::default(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(format).unwrap()["json_schema"],
+            json!({"type": "integer", "minimum": 0})
+        );
+    }
+
+    #[test]
+    fn bound_beyond_i64_is_dropped_from_scalar_schema() {
+        let format = super::parameter_value(
+            &json!({"type": "integer", "minimum": 0, "maximum": 18446744073709551615u64}),
+            &StructuralTagOptions::default(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(format).unwrap()["json_schema"],
+            json!({"type": "integer", "minimum": 0})
         );
     }
 }
