@@ -39,10 +39,11 @@ this rank's own physical blocks.
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_rows"])
 def _qsa_localize_dcp_kernel(
     src_ptr,
     dst_ptr,
@@ -178,3 +179,33 @@ def qsa_neutralize_empty_owner_lse_(
         raise ValueError("empty_rows must have one entry per row of lse")
     mask = empty_rows.to(device=lse.device)
     lse.masked_fill_(mask.view(-1, *([1] * (lse.ndim - 1))), float("-inf"))
+
+
+def warmup_qsa_localize_dcp_indices(
+    *,
+    selection_width: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_kv_cache_interleave_size: int,
+) -> None:
+    """Compile the localization kernel before the first request needs it.
+
+    Only reachable under DCP, so the rest of the warmup never sees it. The row
+    count is do_not_specialize'd; the constexprs below are what it specializes
+    on, and they are fixed for a deployment.
+    """
+    if dcp_world_size <= 1:
+        return
+    _qsa_localize_dcp_kernel.warmup(
+        TritonWarmupTensor(torch.int32, shape=(16, selection_width + 1)),
+        TritonWarmupTensor(torch.int32, shape=(16, selection_width + 1)),
+        selection_width + 1,
+        selection_width + 1,
+        16,
+        WORLD=dcp_world_size,
+        RANK=dcp_rank,
+        INTERLEAVE=cp_kv_cache_interleave_size,
+        SELECTION_WIDTH=selection_width,
+        BLOCK_W=triton.next_power_of_2(max(selection_width, 1)),
+        grid=(16,),
+    )

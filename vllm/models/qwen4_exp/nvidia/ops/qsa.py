@@ -670,12 +670,24 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
+    dcp_world_size: int = 1,
 ) -> tuple[tuple[int, int, int], ...]:
-    """Compile every production-reachable split-K/merge specialization."""
+    """Compile every production-reachable split-K/merge specialization.
+
+    Under decode context parallelism the reachable set is a different one, not
+    a superset: the query arrives all-gathered, so the kernel sees
+    ``num_query_heads * dcp_world_size`` heads and a group size to match, and
+    the gate moves out of the merge because the caller applies it after the
+    cross-rank combine. Warming the single-rank set instead would leave every
+    DCP launch to compile on the first request.
+    """
 
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     num_kv_heads = key_cache.shape[2]
+    # The cache shards over tokens, not heads, so only the query grows.
+    num_query_heads = num_query_heads * dcp_world_size
+    return_lse = dcp_world_size > 1
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
 
@@ -719,13 +731,20 @@ def warmup_qsa_sparse_paged_attention(
     output_gate_ptr = TritonWarmupTensor(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )
+    # None on the gated path, and Triton specializes on that, so it has to
+    # match what the runtime hands the kernel.
+    out_lse_ptr = (
+        TritonWarmupTensor(torch.float32, shape=(num_rows, num_query_heads))
+        if return_lse
+        else None
+    )
     head_stride = head_dim
     row_stride = num_query_heads * head_dim
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
 
     warmed = []
     for block_n, warps, num_tiles, num_splits in sorted(profiles):
-        if num_splits == 1:
+        if num_splits == 1 and not return_lse:
             partial_output_ptr = output_ptr
             partial_lse_ptr = output_ptr
         else:
@@ -771,7 +790,7 @@ def warmup_qsa_sparse_paged_attention(
             HEAD_DIM=head_dim,
             NUM_QUERY_HEADS=num_query_heads,
             NUM_SPLITS=num_splits,
-            RETURN_LSE=False,
+            RETURN_LSE=return_lse,
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
@@ -779,7 +798,7 @@ def warmup_qsa_sparse_paged_attention(
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
         )
-        if num_splits > 1:
+        if num_splits > 1 or return_lse:
             _qsa_merge_splitk_kernel.warmup(
                 partial_output_ptr,
                 partial_lse_ptr,
@@ -790,10 +809,12 @@ def warmup_qsa_sparse_paged_attention(
                 row_stride,
                 head_stride,
                 num_rows,
+                out_lse_ptr,
                 HEAD_DIM=head_dim,
                 NUM_QUERY_HEADS=num_query_heads,
                 NUM_SPLITS=num_splits,
                 BLOCK_SPLITS=triton.next_power_of_2(num_splits),
+                APPLY_GATE=not return_lse,
                 num_warps=2,
                 num_stages=1,
                 grid=(num_rows, num_query_heads),
