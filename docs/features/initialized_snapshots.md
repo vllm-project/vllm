@@ -17,6 +17,28 @@ the artifact as one to restore in another container or on another host, and
 `vllm snapshot restore` requires `--portable` to match what the manifest
 recorded, so neither mode can be mistaken for the other.
 
+A portable create also keeps the run's control files and logs outside the
+artifact, in a work directory: one named by `--work-dir`, or otherwise a fresh
+random temporary directory. That path is recorded in the manifest and frozen
+into the captured process arguments, so every host restoring the artifact
+sees the same path while each one holds its own private copy. A work
+directory belongs to one running instance, not to the artifact: instances
+restoring the same artifact concurrently would collide in a directory on
+shared storage such as NFS, and the artifact may be mounted read-only by
+the containers that restore it, so create refuses a `--work-dir` inside
+the snapshot directory and the artifact itself is never written into; it
+can sit on shared, read-only storage. A directory named with `--work-dir`
+is kept after create and restore finish, so its logs and control files
+remain available for inspection, while a temporary one is removed when the
+run that owns it ends, on the create host and on every restore host alike
+— the restored tree keeps writing through its open log file, whose bytes
+then live on as unlinked inodes. Restore takes the path from the manifest
+alone, recreates the directory when it is missing, and clears the control
+files an earlier run left behind, so a named work directory is reusable
+once its previous restored tree stops. An in-place checkpoint instead
+keeps the same state laid out flat inside the artifact, and its restore
+reuses and resets those files.
+
 ## Requirements
 
 Snapshots currently require:

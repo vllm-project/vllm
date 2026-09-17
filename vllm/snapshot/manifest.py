@@ -57,6 +57,11 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     created_at: str
     artifact_bytes: Annotated[int, Field(ge=0)]
     portable: Literal[True, False] = False
+    work_dir: StrictStr
+    # True if work_dir is removed when its owning run ends.
+    # Always False for in-place artifacts because work_dir is also
+    # the artifact directory.
+    cleanup_work_dir: Literal[True, False]
     model: str
     served_model_name: str
     model_revision: str
@@ -93,6 +98,14 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
             raise ValueError("cuda_holders contains duplicate PIDs")
         if not set(self.cuda_holders).issubset(self.process_tree):
             raise ValueError("cuda_holders must be a subset of process_tree")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_work_dir(self) -> Self:
+        if not self.portable and self.cleanup_work_dir:
+            raise ValueError("an in-place artifact's work dir is the artifact itself")
+        if not os.path.isabs(self.work_dir):
+            raise ValueError("work_dir must be an absolute path")
         return self
 
 
