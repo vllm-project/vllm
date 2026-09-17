@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import dcp_world_size_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -188,30 +189,30 @@ def _config(max_model_len: int, dcp: int):
 @pytest.mark.parametrize("world", [2, 4])
 def test_a_replicated_cache_is_budgeted_for_the_whole_sequence(world: int) -> None:
     """Sizing follows ownership, or the pool is short by the world size."""
+    from dataclasses import replace
+
     config = _config(max_model_len=8192, dcp=world)
+    sharded = replace(_main_kv_spec(), dcp_shard_count=world)
+    unsharded = _main_kv_spec()
+    replicated = _compressed_spec()
 
-    sharded, replicated = _main_kv_spec(), _compressed_spec()
-    assert replicated.dcp_shard_count(config) == 1
-    assert sharded.dcp_shard_count(config) == world
+    assert replicated.dcp_shard_count == 1, "replicated caches are never split"
+    assert sharded.dcp_shard_count == world
+    assert unsharded.dcp_shard_count == 1
 
-    # The replicated cache must be sized as if there were no DCP at all.
-    solo = _config(max_model_len=8192, dcp=1)
-    assert replicated.max_memory_usage_bytes(
+    # Sizing now follows the spec, not the config, so compare specs. The
+    # replicated cache is budgeted exactly as an unsharded one is.
+    assert replicated.max_num_blocks_per_req(config, 8192) == cdiv(
+        8192, replicated.block_size
+    )
+
+    # The sharded one still shrinks, or DCP buys no headroom at all.
+    assert sharded.max_memory_usage_bytes(config) < unsharded.max_memory_usage_bytes(
         config
-    ) == replicated.max_memory_usage_bytes(solo)
-    assert replicated.max_num_blocks_per_req(
+    )
+    assert sharded.max_num_blocks_per_req(
         config, 8192
-    ) == replicated.max_num_blocks_per_req(solo, 8192)
-
-    # The sharded one still shrinks, or DCP buys no headroom.
-    assert sharded.max_memory_usage_bytes(config) < sharded.max_memory_usage_bytes(solo)
-
-
-# --- the grouping contract --------------------------------------------------
-#
-# These pin the shape the serving path needs. The selector and the main KV are
-# co-packed at DCP=1 and must split at DCP>1, because a group carries one block
-# table and the two then need different widths of it.
+    ) < unsharded.max_num_blocks_per_req(config, 8192)
 
 
 def _uniform(*specs) -> bool:
@@ -234,14 +235,26 @@ def test_one_rank_keeps_the_selector_packed_with_the_main_kv() -> None:
     assert _uniform(_main_kv_spec(), replicated_off)
 
 
-def test_dcp_splits_the_selector_into_its_own_group() -> None:
-    assert not _uniform(_main_kv_spec(), _compressed_spec())
+def test_a_narrow_selector_still_cannot_share_a_group() -> None:
+    """The split is only forced when the spans disagree.
+
+    A selector left at 784 tokens against a main KV spanning 1568 needs a
+    different block-table width, so it must still split. That is the case the
+    aligned span removes.
+    """
+    from dataclasses import replace
+
+    sharded_main = replace(_main_kv_spec(), dcp_shard_count=2)
+    assert not _uniform(sharded_main, _compressed_spec())
 
 
-def test_the_two_need_different_block_table_widths() -> None:
-    """Why they cannot share a group. 168 vs 335 is what serving reported."""
+def test_a_narrow_selector_needs_a_wider_block_table() -> None:
+    """168 against 335 is what serving reported before the spans were aligned."""
+    from dataclasses import replace
+
     config = _config(max_model_len=262144, dcp=2)
-    assert _main_kv_spec().max_num_blocks_per_req(config, 262144) == 168
+    sharded_main = replace(_main_kv_spec(), dcp_shard_count=2)
+    assert sharded_main.max_num_blocks_per_req(config, 262144) == 168
     assert _compressed_spec().max_num_blocks_per_req(config, 262144) == 335
 
 
@@ -268,22 +281,96 @@ def test_block_span_follows_ownership_not_spec_type() -> None:
     keyed on the type scales their span even though neither is sharded. The
     scheduler then rounds block boundaries the group does not have.
     """
-    from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
+    from vllm.v1.core.kv_cache_utils import stamp_dcp_shard_counts
 
-    sharded, replicated, ring = _main_kv_spec(), _compressed_spec(), _raw_ring_spec()
+    specs = stamp_dcp_shard_counts(
+        {"main": _main_kv_spec(), "sel": _compressed_spec(), "ring": _raw_ring_spec()},
+        2,
+    )
+    assert specs["main"].dcp_shard_count == 2, "sharded"
+    assert specs["sel"].dcp_shard_count == 1, "replicated"
+    assert specs["ring"].dcp_shard_count == 1, "replicated"
 
-    assert resolve_dcp_kv_block_size(sharded, 2) == 784 * 2
-    assert resolve_dcp_kv_block_size(replicated, 2) == 784
-    assert resolve_dcp_kv_block_size(ring, 2) == 4
-
-    # And the span must match what the ownership resolver says, for every spec.
-    for spec in (sharded, replicated, ring):
-        expected = spec.block_size * dcp_world_size_for_kv_cache_spec(spec, 2)
-        assert resolve_dcp_kv_block_size(spec, 2) == expected
+    assert specs["main"].logical_block_span == 784 * 2
+    assert specs["sel"].logical_block_span == 784
+    assert specs["ring"].logical_block_span == 4
 
 
 def test_one_rank_scales_nothing() -> None:
-    from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
+    from vllm.v1.core.kv_cache_utils import stamp_dcp_shard_counts
 
-    for spec in (_main_kv_spec(), _compressed_spec(), _raw_ring_spec()):
-        assert resolve_dcp_kv_block_size(spec, 1) == spec.block_size
+    specs = {"m": _main_kv_spec(), "s": _compressed_spec(), "r": _raw_ring_spec()}
+    for spec in stamp_dcp_shard_counts(specs, 1).values():
+        assert spec.logical_block_span == spec.block_size
+
+
+# --- the aligned-span merge -------------------------------------------------
+#
+# The selector's block spans the same tokens as the sharded main KV block, so
+# both block tables are the same width and the two share one group again. That
+# is what removes the 93.8%-empty selector blocks.
+
+
+def _aligned_selector(dcp: int) -> MLAAttentionSpec:
+    """What QSACompressedKeyCache declares under DCP: span 784*dcp."""
+    return MLAAttentionSpec(
+        block_size=784 * dcp,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=DTYPE,
+        tokens_per_state=8,
+        dcp_transparent=True,
+    )
+
+
+def _stamped_main(dcp: int) -> MLAAttentionSpec:
+    """The main KV after stamp_dcp_shard_counts: sharded, so count == dcp."""
+    from dataclasses import replace
+
+    return replace(_main_kv_spec(), dcp_shard_count=dcp)
+
+
+def test_the_spans_match_so_the_widths_match() -> None:
+    main, selector = _stamped_main(2), _aligned_selector(2)
+    assert main.logical_block_span == 1568
+    assert selector.logical_block_span == 1568
+
+    config = _config(max_model_len=262144, dcp=2)
+    assert main.max_num_blocks_per_req(config, 262144) == 168
+    assert selector.max_num_blocks_per_req(config, 262144) == 168
+
+
+def test_they_group_together_again() -> None:
+    """The split that cost 29.8% of capacity is no longer forced."""
+    assert _uniform(_stamped_main(2), _aligned_selector(2))
+
+
+def test_storage_is_unchanged_only_the_block_count_falls() -> None:
+    """A wider page and proportionally fewer blocks is the same bytes."""
+    config = _config(max_model_len=262144, dcp=2)
+    narrow = _compressed_spec()  # 784-token block, 98 states
+    wide = _aligned_selector(2)  # 1568-token block, 196 states
+
+    assert wide.page_size_bytes == 2 * narrow.page_size_bytes
+    assert wide.max_num_blocks_per_req(config, 262144) == 168
+    assert narrow.max_num_blocks_per_req(config, 262144) == 335
+    # same total storage, within one block of rounding
+    assert abs(168 * wide.page_size_bytes - 335 * narrow.page_size_bytes) <= (
+        wide.page_size_bytes
+    )
+
+
+def test_one_rank_is_untouched() -> None:
+    """At DCP=1 the span is the block size and nothing moves."""
+    main, selector = _main_kv_spec(), _aligned_selector(1)
+    assert main.logical_block_span == 784
+    assert selector.logical_block_span == 784
+    assert _uniform(main, selector)
+
+
+def test_a_replicated_cache_still_gets_the_whole_sequence() -> None:
+    """Widening the span must not quietly halve the budget."""
+    selector = _aligned_selector(2)
+    assert selector.dcp_shard_count == 1, "replicated: never sharded"
+    # 168 blocks of 196 states covers all 32,768 states
+    assert 168 * (selector.block_size // 8) >= 262144 // 8

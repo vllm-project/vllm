@@ -873,7 +873,6 @@ class QSACompressedKeyCache(_QSAStateCache):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(
-            block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
@@ -885,13 +884,18 @@ class QSACompressedKeyCache(_QSAStateCache):
             # sequence: a sharded rank would choose from its own slice only,
             # which changes the selection rather than distributing it.
             #
-            # Only under DCP. The flag also splits this cache out of the main
-            # KV's group, because a group carries one block table and the two
-            # then need different widths. Setting it unconditionally would
-            # change the layout of every single-rank run for no reason.
-            dcp_transparent=(
-                vllm_config.parallel_config.decode_context_parallel_size > 1
-            ),
+            dcp_transparent=True,
+            # NOT aligned to the sharded main KV block yet. Widening this to
+            # 784*W matches the block-table widths and would merge the groups,
+            # which is worth about 1.8x the DCP=1 capacity. It does not work on
+            # its own: the group's block size is applied as each member's
+            # KERNEL block, and `compute_layer_kv_cache_shape_bytes` requires a
+            # kernel block to DIVIDE the member's own block. A 1568 group
+            # against this model's 784-slot main KV fails that.
+            #
+            # Aligning needs the main KV spec to express its span too, with its
+            # 784 slots as the kernel block inside it. See DCP-FIX-PLAN-REV3.md.
+            block_size=self.cache_config.block_size,
         )
 
 

@@ -679,11 +679,11 @@ def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     puts the scheduler's block accounting on boundaries the group does not
     have.
     """
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+    attention_specs = [
+        s for s in iter_layer_specs(spec) if isinstance(s, AttentionSpec)
+    ]
+    if attention_specs and len(attention_specs) == len(iter_layer_specs(spec)):
+        return max(s.logical_block_span for s in attention_specs)
     return spec.block_size
 
 
@@ -702,6 +702,26 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
             },
         )
     return replace(spec, block_size=block_size)
+
+
+def stamp_dcp_shard_counts(
+    kv_cache_specs: dict[str, KVCacheSpec], dcp_world_size: int
+) -> dict[str, KVCacheSpec]:
+    """Resolve each spec's DCP ownership into a field, once, before grouping.
+
+    Grouping has to compare the token span a block-table entry covers, and it
+    has no ``VllmConfig`` in scope. Carrying the resolved count on the spec
+    keeps that comparison local and leaves every call site unchanged.
+    """
+    if dcp_world_size <= 1:
+        return kv_cache_specs
+    stamped: dict[str, KVCacheSpec] = {}
+    for name, spec in kv_cache_specs.items():
+        count = dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+        if isinstance(spec, AttentionSpec) and spec.dcp_shard_count != count:
+            spec = replace(spec, dcp_shard_count=count)
+        stamped[name] = spec
+    return stamped
 
 
 def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
@@ -724,7 +744,13 @@ def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> 
         return 1
     inner = spec
     if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
+        # A group can hold members with opposite ownership once their spans
+        # agree, so sampling the first entry would answer by dict order. The
+        # sharded member decides the group's block geometry.
+        members = spec.kv_cache_specs.values()
+        if any(not getattr(m, "dcp_transparent", False) for m in members):
+            return dcp_world_size
+        inner = next(iter(members))
     if getattr(inner, "dcp_transparent", False):
         # Replicated on every rank. The spec type alone cannot decide this: a
         # selector cache and the KV it selects from can share a spec type and
@@ -2295,6 +2321,10 @@ def get_kv_cache_groups(
     """
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    kv_cache_spec = stamp_dcp_shard_counts(
+        kv_cache_spec, vllm_config.parallel_config.decode_context_parallel_size
+    )
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns an empty list to allow for the KVCacheManager to handle

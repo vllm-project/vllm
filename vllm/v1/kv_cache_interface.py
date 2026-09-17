@@ -529,21 +529,30 @@ class AttentionSpec(KVCacheSpec):
         """
         return self.unpadded_page_size_bytes
 
-    def dcp_shard_count(self, vllm_config: VllmConfig) -> int:
-        """How many ways DCP splits this cache.
+    dcp_shard_count: int = 1
+    """How many ways DCP splits this cache. Resolved once, before grouping, by
+    ``stamp_dcp_shard_counts``.
 
-        A replicated cache stays 1 however large the DCP group is. Every rank
-        holds the whole sequence, so it has to be budgeted for the whole
-        sequence; dividing by the world size under-provisions the pool and the
-        block table, and the failure looks like a capacity problem rather than
-        a sharding one.
+    A replicated cache stays 1 however large the DCP group is. Every rank holds
+    the whole sequence, so it must be budgeted for the whole sequence.
+
+    Carried as a field rather than computed from the config, because grouping
+    needs the token span of a block and has no config in scope."""
+
+    @property
+    def logical_block_span(self) -> int:
+        """Token positions one block-table entry covers.
+
+        A sharded block holds ``block_size`` slots drawn from ``block_size *
+        shard count`` positions. A replicated one covers ``block_size``. Two
+        caches can share a block table only when these agree, whatever their
+        ownership.
         """
-        if getattr(self, "dcp_transparent", False):
-            return 1
-        return vllm_config.parallel_config.decode_context_parallel_size
+        return self.block_size * self.dcp_shard_count
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return cdiv(max_len, self.block_size * self.dcp_shard_count(vllm_config))
+        del vllm_config
+        return cdiv(max_len, self.logical_block_span)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -573,11 +582,12 @@ class FullAttentionSpec(AttentionSpec):
     """
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        dcp_world_size = self.dcp_shard_count(vllm_config)
-        if dcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size)
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        return (
+            self.max_num_blocks_per_req(
+                vllm_config, vllm_config.model_config.max_model_len
+            )
+            * self.page_size_bytes
+        )
 
     @classmethod
     def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
@@ -1284,17 +1294,16 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
         """
-        block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
-        if len(block_sizes) > 1:
-            # Different block sizes, not uniform.
-            return False
-        ownership = {
-            getattr(spec, "dcp_transparent", False) for spec in kv_cache_specs.values()
+        # Compare the token span, not the raw block size. A group carries one
+        # block table, and what has to match is how many positions an entry
+        # covers. Ownership may differ: a sharded cache holding half the slots
+        # of a wider span tiles the same range as a replicated cache holding
+        # all of a narrower one.
+        spans = {
+            getattr(spec, "logical_block_span", spec.block_size)
+            for spec in kv_cache_specs.values()
         }
-        if len(ownership) > 1:
-            # A group carries one block table. A cache every rank holds whole
-            # and a cache split across ranks need different widths of it, so
-            # they cannot share one however alike their specs look.
+        if len(spans) > 1:
             return False
         first_spec = next(iter(kv_cache_specs.values()))
         return first_spec.is_uniform_with_collection(kv_cache_specs)
@@ -1306,8 +1315,19 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
-            block_size = next(iter(kv_cache_specs.values())).block_size
-            return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
+            # This is the manager block size, which is handed down as each
+            # member's kernel block size. It is NOT the logical span: a sharded
+            # member's span is wider than the block it actually stores, and
+            # using the span here gives its own layers a kernel block that
+            # cannot divide theirs.
+            #
+            # Assert the members agree rather than sampling whichever comes
+            # first in the dict.
+            block_sizes = {spec.block_size for spec in kv_cache_specs.values()}
+            assert len(block_sizes) == 1, (
+                f"A KV cache group stores one block size, got {sorted(block_sizes)}."
+            )
+            return cls(block_size=block_sizes.pop(), kv_cache_specs=kv_cache_specs)
         else:
             return None
 
