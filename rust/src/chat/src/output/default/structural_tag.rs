@@ -27,19 +27,13 @@ use crate::{Error, Result as ChatResult};
 ///
 /// A [`ScopedStructuralTagBuilder`] covers the whole generation and folds the
 /// caller's response schema into the answer channel, while a legacy
-/// [`StructuralTagBuilder`] constrains tool channels only. A caller-supplied
-/// structural tag is never wrapped in a parser-built one.
+/// [`StructuralTagBuilder`] constrains tool channels only and, as it always
+/// has, overwrites any caller constraint once the tool choice triggers a tag.
 pub(super) fn apply_structural_tag_constraint(
     request: &mut ChatRequest,
     builder: Option<&dyn StructuralTagBuilder>,
     scoped_builder: Option<&dyn ScopedStructuralTagBuilder>,
 ) -> ChatResult<()> {
-    if let Some(params) = &request.sampling_params.structured_outputs
-        && params.constraint.is_structural_tag()
-    {
-        return Ok(());
-    }
-
     if let Some(scoped_builder) = scoped_builder {
         return apply_scoped_structural_tag_constraint(request, scoped_builder);
     }
@@ -95,6 +89,12 @@ fn apply_scoped_structural_tag_constraint(
     // where the grammar would force a spurious header. Leave the request
     // unconstrained (the parser still handles the prefilled channel).
     if request.chat_options.continue_final_message() {
+        return Ok(());
+    }
+    // A caller-supplied structural tag is never wrapped in a parser-built one.
+    if let Some(params) = &request.sampling_params.structured_outputs
+        && params.constraint.is_structural_tag()
+    {
         return Ok(());
     }
 
@@ -707,6 +707,23 @@ mod tests {
             Some(caller_tag)
         );
         assert!(builder.calls().is_empty());
+    }
+
+    #[test]
+    fn legacy_builder_still_overwrites_caller_structural_tag() {
+        let caller_tag = r#"{"type":"structural_tag","format":{"type":"any_text","excludes":[]}}"#;
+        let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
+        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
+            backend: StructuredOutputBackend::Xgrammar,
+            ..StructuredOutputsParams::structural_tag(caller_tag)
+        });
+        let parser = qwen3_coder_parser(request.tools());
+
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder(), None)
+            .expect("structural tag should build");
+
+        // Legacy parsers keep their pre-scoped behavior: `required` wins.
+        assert!(structural_tag_value(&request).to_string().contains("search"));
     }
 
     #[test]
