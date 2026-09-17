@@ -28,6 +28,7 @@ def _fake_vllm_config(model_type: str) -> SimpleNamespace:
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(model_type=model_type, index_topk=2048),
         ),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
 
@@ -76,6 +77,11 @@ def _make_sm120_impl(
     num_heads: int = 8,
 ) -> FlashInferMLASparseSM120Impl:
     monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.attention.sparse_mla_attention."
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
     topk = torch.zeros((4, 2048), dtype=torch.int32)
     with set_current_vllm_config(_fake_vllm_config(model_type)):
         return FlashInferMLASparseSM120Impl(
@@ -90,9 +96,13 @@ def _make_sm120_impl(
             attn_type=AttentionType.DECODER,
             kv_sharing_target_layer_name=None,
             indexer=None,
+            q_lora_rank=None,
             kv_lora_rank=512,
             qk_nope_head_dim=192,
             qk_rope_head_dim=64,
+            qk_head_dim=256,
+            v_head_dim=512,
+            kv_b_proj=None,
             topk_indices_buffer=topk,
         )
 
