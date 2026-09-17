@@ -485,6 +485,7 @@ _K3_CLOSE = "<|close|>"
 _K3_SEP = "<|sep|>"
 _K3_RESPONSE_OPEN = f"{_K3_OPEN}response{_K3_SEP}"
 _K3_RESPONSE_CLOSE = f"{_K3_CLOSE}response{_K3_SEP}"
+_K3_THINK_CLOSE = f"{_K3_CLOSE}think{_K3_SEP}"
 _K3_TOOLS_OPEN = f"{_K3_OPEN}tools{_K3_SEP}"
 _K3_TOOLS_CLOSE = f"{_K3_CLOSE}tools{_K3_SEP}"
 _K3_CALL_CLOSE = f"{_K3_CLOSE}call{_K3_SEP}"
@@ -708,13 +709,21 @@ def get_kimi_k3_structural_tag(
     reasoning: bool,
     token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning, token_suffix
+    del builtin_tools, token_suffix
 
     trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
+    # In thinking mode the prompt prefix ends at <|open|>think<|sep|>, so the
+    # FSM must first consume free-form reasoning up to the think-close marker
+    # before the response channel opens (same pattern as the HYV4 tag below).
+    reasoning_prefix: list[Any] = (
+        [AnyTextFormat(), ConstStringFormat(value=_K3_THINK_CLOSE)] if reasoning else []
+    )
 
     if not tools:
         return StructuralTag(
-            format=SequenceFormat(elements=[*_k3_response_prefix(), trailer])
+            format=SequenceFormat(
+                elements=[*reasoning_prefix, *_k3_response_prefix(), trailer]
+            )
         )
 
     if tool_choice == "auto":
@@ -727,7 +736,14 @@ def get_kimi_k3_structural_tag(
         tools_part = _k3_tools_channel(tools)
 
     return StructuralTag(
-        format=SequenceFormat(elements=[*_k3_response_prefix(), tools_part, trailer])
+        format=SequenceFormat(
+            elements=[
+                *reasoning_prefix,
+                *_k3_response_prefix(),
+                tools_part,
+                trailer,
+            ]
+        )
     )
 
 
