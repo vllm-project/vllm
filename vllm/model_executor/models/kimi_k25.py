@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Kimi-K2.5 Model Implementation for vLLM.
+"""Kimi-K2.5 Model Implementation for vLLM.
 
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
@@ -90,8 +89,7 @@ class MaxImageTokenMeta:
 
 
 class KimiK25MediaPixelInputs(TensorSchema):
-    """
-    Media input schema for K2-VL model.
+    """Media input schema for K2-VL model.
 
     Dimensions:
         - np: Number of patches (flattened from all media items)
@@ -594,6 +592,7 @@ class KimiK25ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
 

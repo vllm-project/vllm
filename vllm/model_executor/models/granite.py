@@ -84,6 +84,7 @@ def granite_layer_attn_params(
     Returns:
         Sliding window size (`None` for full attention), RoPE base theta (`0`
         for NoPE), and attention sink presence/absence.
+
     """
     layer_types = getattr(config, "layer_types", None)
     sliding_window = (
@@ -395,7 +396,7 @@ class GraniteModel(nn.Module):
 class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
     # LoRA specific attributes
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }

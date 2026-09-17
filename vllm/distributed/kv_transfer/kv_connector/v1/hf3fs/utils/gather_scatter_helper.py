@@ -4,6 +4,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
 @triton.jit
@@ -127,6 +128,7 @@ def scatter_kv_caches(
         num_heads: Size of the H axis
         content_size: Size of the C axis
         kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+
     """
     num_layers = len(kv_caches_ptrs)
     num_tokens_in_block = len(token_indices)
@@ -140,9 +142,9 @@ def scatter_kv_caches(
     assert len(kv_cache_strides) == 4
 
     device = src_tensor.device
-    token_indices_tensor = torch.tensor(
-        token_indices, dtype=torch.int32, device="cpu"
-    ).to(device, non_blocking=True)
+    token_indices_tensor = async_tensor_h2d(
+        token_indices, device=device, dtype=torch.int32
+    )
 
     grid = (num_layers, num_tokens_in_block)
     BLOCK_SIZE = 128
@@ -183,6 +185,7 @@ def gather_kv_caches(
         num_heads: Size of the H axis
         content_size: Size of the C axis
         kv_cache_strides: Element strides of each ``[B, H, N, C]`` layer view
+
     """
     num_layers = kv_caches_ptrs.shape[0]
     num_tokens_in_block = len(token_indices)
@@ -196,9 +199,9 @@ def gather_kv_caches(
     assert len(kv_cache_strides) == 4
 
     device = dst_tensor.device
-    token_indices_tensor = torch.tensor(
-        token_indices, dtype=torch.int32, device="cpu"
-    ).to(device, non_blocking=True)
+    token_indices_tensor = async_tensor_h2d(
+        token_indices, device=device, dtype=torch.int32
+    )
 
     grid = (num_layers, num_tokens_in_block)
     BLOCK_SIZE = 128
