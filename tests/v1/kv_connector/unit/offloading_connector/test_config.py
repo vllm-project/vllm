@@ -588,35 +588,126 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
     )
 
 
+_SWA_MLA_PAGE = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=512,
+    dtype=torch.float32,
+    sliding_window=128,
+).page_size_bytes
+
+
+def _make_swa_mla_kv_cache_config(
+    num_blocks: int = 4,
+) -> KVCacheConfig:
+    """Single SlidingWindowMLASpec group — DSV4 sliding-window layers."""
+    spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=_SWA_MLA_PAGE * num_blocks,
+                layers=["layer"],
+                layer_stride=_SWA_MLA_PAGE * num_blocks,
+                block_stride=_SWA_MLA_PAGE,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+
+def _make_dsv4_style_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
+    """Multi-group config with both MLAAttentionSpec and SlidingWindowMLASpec
+    groups, mirroring the DSV4 layout (regular MLA + sliding-window MLA)."""
+    mla_spec = _mla_spec()
+    swa_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    mla_layers = ["mla_0", "mla_1"]
+    swa_layers = ["swa_0", "swa_1"]
+    mla_bytes = mla_spec.page_size_bytes * len(mla_layers)
+    swa_bytes = swa_spec.page_size_bytes * len(swa_layers)
+    total_bytes = mla_bytes + swa_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=total_bytes * num_blocks,
+                layers=mla_layers,
+                layer_stride=mla_spec.page_size_bytes * num_blocks,
+                block_stride=total_bytes,
+            ),
+            KVCacheTensor(
+                size=total_bytes * num_blocks,
+                layers=swa_layers,
+                layer_stride=swa_spec.page_size_bytes * num_blocks,
+                block_stride=total_bytes,
+                offset=mla_bytes * num_blocks,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(mla_layers, mla_spec),
+            KVCacheGroupSpec(swa_layers, swa_spec),
+        ],
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_replicated_layout_enabled_for_swa_mla(world_size: int):
+    """SlidingWindowMLASpec groups are also replicated and qualify."""
+    assert _replicated_layout(
+        _make_swa_mla_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_replicated_layout_enabled_for_dsv4_style_multi_group(world_size: int):
+    """DSV4-style config: MLAAttentionSpec + SlidingWindowMLASpec groups."""
+    assert _replicated_layout(
+        _make_dsv4_style_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+def test_replicated_layout_enabled_for_uniform_wrapper_mla():
+    """UniformTypeKVCacheSpecs wrapping MLA layers of different sizes qualifies:
+    each layer is replicated and the page accounting sums correctly."""
+    mla_layers = ["layer0", "layer1"]
+    spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer0": _mla_spec(), "layer1": _mla_spec(head_size=256)},
+    )
+    total_page = spec.page_size_bytes
+    num_blocks = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=total_page * num_blocks,
+                layers=mla_layers,
+                layer_stride=total_page * num_blocks,
+                block_stride=total_page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(mla_layers, spec)],
+    )
+    assert _replicated_layout(kv_cache_config)
+
+
 @pytest.mark.parametrize(
     ("kv_cache_config", "case"),
     [
-        (
-            KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=_MLA_PAGE * 4,
-                        layers=["layer"],
-                        layer_stride=_MLA_PAGE * 4,
-                        block_stride=_MLA_PAGE,
-                    )
-                ],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer"],
-                        SlidingWindowMLASpec(
-                            block_size=16,
-                            num_kv_heads=1,
-                            head_size=512,
-                            dtype=torch.float32,
-                            sliding_window=128,
-                        ),
-                    )
-                ],
-            ),
-            "sliding-window-mla",
-        ),
         (
             KVCacheConfig(
                 num_blocks=4,
@@ -641,40 +732,6 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
                 ],
             ),
             "hidden-state",
-        ),
-        (
-            # One group, two page sizes: layer1's run starts past layer0's region.
-            KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
-                        layers=["layer0"],
-                        layer_stride=_MLA_PAGE * 4,
-                        block_stride=_MLA_PAGE,
-                    ),
-                    KVCacheTensor(
-                        size=(_MLA_PAGE + _HALF_MLA_PAGE) * 4,
-                        layers=["layer1"],
-                        layer_stride=_HALF_MLA_PAGE * 4,
-                        block_stride=_HALF_MLA_PAGE,
-                        offset=_MLA_PAGE * 4,
-                    ),
-                ],
-                kv_cache_groups=[
-                    KVCacheGroupSpec(
-                        ["layer0", "layer1"],
-                        UniformTypeKVCacheSpecs(
-                            block_size=16,
-                            kv_cache_specs={
-                                "layer0": _mla_spec(),
-                                "layer1": _mla_spec(head_size=256),
-                            },
-                        ),
-                    )
-                ],
-            ),
-            "uniform-wrapper",
         ),
         (
             # Overlaid groups with different page sizes: a block is a window of
@@ -747,9 +804,7 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
         ),
     ],
     ids=[
-        "sliding-window-mla",
         "hidden-state",
-        "uniform-wrapper",
         "mla-full-hybrid",
         "mla-mamba-hybrid",
         "multi-group-mla",
