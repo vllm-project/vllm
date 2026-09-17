@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 import pytest
 import torch
 
+from tests.utils import multi_gpu_marks
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.transformers_utils.repo_utils import hf_api
@@ -83,7 +84,13 @@ def _run_generate(input_dir, queue: mp.Queue, **kwargs):
 
 
 @pytest.mark.parametrize("enable_lora", [False, True])
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        pytest.param(1),
+        pytest.param(2, marks=multi_gpu_marks(num_gpus=2)),
+    ],
+)
 def test_sharded_state_loader(
     enable_lora, tp_size, num_gpus_available, llama_3p2_1b_files
 ):

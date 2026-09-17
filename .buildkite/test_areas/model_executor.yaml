@@ -2,19 +2,20 @@ group: Model Executor
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 35GB) Model Executor"
+- label: ":nvidia: (H200 MIG 35GB) Model Executor Shard %N"
   device: h200_35gb
   key: model-executor
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
+  parallelism: 4
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
   - vllm/model_executor/warmup
   - tests/model_executor
-  - tests/model_executor/test_jit_warmup.py
-  - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
-  - tests/model_executor/test_jit_warmup_triton_launcher.py
+  - tests/model_executor/warmup/test_jit_warmup.py
+  - tests/model_executor/warmup/test_jit_warmup_cutedsl_launcher.py
+  - tests/model_executor/warmup/test_jit_warmup_triton_launcher.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
@@ -26,11 +27,27 @@ steps:
     # init) fails fast with a traceback instead of running until the global
     # build timeout. The `thread` method also handles hangs inside C/CUDA
     # calls that the signal method cannot interrupt.
-    - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
-    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+    # Each branch runs whole coverage units without partition filters.
+    - |
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0)
+          pytest -v -s model_executor/model_loader/tensorizer_loader --timeout=900 --timeout-method=thread
+          pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+          ;;
+        1)
+          pytest -v -s model_executor/model_loader/test_sharded_state_loader.py model_executor/model_loader/weights model_executor/model_loader/registry --timeout=900 --timeout-method=thread
+          ;;
+        2)
+          pytest -v -s model_executor/model_loader/test_reload.py --timeout=900 --timeout-method=thread
+          ;;
+        3)
+          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops model_executor/warmup model_executor/quantization model_executor/test_routed_experts_capture.py model_executor/offloader model_executor/test_sleep_mode_tensor_ownership.py model_executor/model_loader/test_model_load_with_params.py model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread
+          ;;
+        *) exit 2 ;;
+      esac
   mirror:
     amd:
-      label: ":amd: (MI300) Model Executor"
+      label: ":amd: (MI300) Model Executor Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
@@ -42,9 +59,9 @@ steps:
       - vllm/model_executor
       - vllm/model_executor/warmup
       - tests/model_executor
-      - tests/model_executor/test_jit_warmup.py
-      - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
-      - tests/model_executor/test_jit_warmup_triton_launcher.py
+      - tests/model_executor/warmup/test_jit_warmup.py
+      - tests/model_executor/warmup/test_jit_warmup_cutedsl_launcher.py
+      - tests/model_executor/warmup/test_jit_warmup_triton_launcher.py
       - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
