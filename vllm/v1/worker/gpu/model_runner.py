@@ -47,6 +47,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -191,6 +192,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
+        # Set in load_model(). Kept alive (rather than discarded once the
+        # model is constructed) so Worker.sleep/wake_up can notify it of
+        # GPU-memory-validity transitions via the optional
+        # on_sleep/on_wake_up hooks.
+        self.model_loader: BaseModelLoader | None = None
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
@@ -384,6 +390,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
+            self.model_loader = model_loader
             logger.info_once("Loading model from scratch...")
 
             # Capture warmup providers selected while constructing the model.

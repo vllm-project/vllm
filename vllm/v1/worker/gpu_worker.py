@@ -244,6 +244,10 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
+        loader = self.model_runner.model_loader
+        if loader is not None:
+            loader.on_sleep(level)
+
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -303,6 +307,10 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+        loader = self.model_runner.model_loader
+        if loader is not None:
+            loader.on_wake_up(tags)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()

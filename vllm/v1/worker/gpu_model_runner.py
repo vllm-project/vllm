@@ -71,6 +71,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -509,6 +510,11 @@ class GPUModelRunner(
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
+        # Set in load_model(). Kept alive (rather than discarded once the
+        # model is constructed) so Worker.sleep/wake_up can notify it of
+        # GPU-memory-validity transitions via the optional
+        # on_sleep/on_wake_up hooks.
+        self.model_loader: BaseModelLoader | None = None
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
@@ -5325,6 +5331,7 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
+                self.model_loader = model_loader
                 # Capture warmup providers selected while constructing the model.
                 with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                     self.model = model_loader.load_model(
