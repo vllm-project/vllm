@@ -43,9 +43,12 @@ _FP8_DTYPES = (
 
 
 # ---------------------------------------------------------------------------
-# Scalar-query GQA block-sparse attention (paged). This remains the default
-# until the query-tiled path has broader workload and hardware coverage.
+# GQA block-sparse attention (paged). Main heads attend only to the selected
+# blocks. BLOCK_SIZE_K == 128 so each selected block is one page.
 # ---------------------------------------------------------------------------
+# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
+# might lose pointer alignment, which trigger Triton recompiles. we don't actually
+# need pointer alignment for those tensors anyway because we do scalar load.
 @triton.heuristics(
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
@@ -56,68 +59,64 @@ _FP8_DTYPES = (
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
-    q_ptr,
-    kv_cache_ptr,
+    q_ptr,  # [total_q, num_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     k_scale_ptr,
     v_scale_ptr,
-    t_ptr,
-    o_ptr,
-    block_table_ptr,
+    t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
+    o_ptr,  # [total_q, num_heads, head_dim]
+    block_table_ptr,  # [num_reqs, max_blocks]
     cu_seqlens_q,
+    cu_seqblocks_q,
     seq_lens,
     prefix_lens,
-    gqa_group_size: tl.constexpr,
-    head_dim: tl.constexpr,
-    max_topk: tl.constexpr,
+    num_kv_heads,
+    gqa_group_size,
+    head_dim,
+    max_topk,
+    num_q_loop,
     sm_scale,
-    stride_qn: tl.constexpr,
-    stride_qh: tl.constexpr,
-    stride_qd: tl.constexpr,
-    stride_kv_blk: tl.constexpr,
-    stride_kv_h: tl.constexpr,
-    stride_kv_pos: tl.constexpr,
-    stride_kv_d: tl.constexpr,
-    stride_ks_h: tl.constexpr,
-    stride_ks_t: tl.constexpr,
-    stride_vs_h: tl.constexpr,
-    stride_vs_t: tl.constexpr,
-    stride_th: tl.constexpr,
-    stride_tn: tl.constexpr,
-    stride_tk: tl.constexpr,
-    stride_on: tl.constexpr,
-    stride_oh: tl.constexpr,
-    stride_od: tl.constexpr,
-    stride_bt_b: tl.constexpr,
+    stride_qn,
+    stride_qh,
+    stride_qd,
+    stride_kv_blk,
+    stride_kv_h,
+    stride_kv_pos,
+    stride_kv_d,
+    stride_ks_h,
+    stride_ks_t,
+    stride_vs_h,
+    stride_vs_t,
+    stride_th,
+    stride_tn,
+    stride_tk,
+    stride_on,
+    stride_oh,
+    stride_od,
+    stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
-    USE_FP8: tl.constexpr,
-    KV_SCALE_MODE: tl.constexpr,
+    USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
 ):
+    sm_scale_log2e = sm_scale * 1.4426950409
     pid_q = tl.program_id(0)
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)
+    pid_h = pid_kh * gqa_group_size
     q_start = tl.load(cu_seqlens_q + pid_b)
     q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
-    if pid_q >= q_len:
-        return
+    q_block_start = tl.load(cu_seqblocks_q + pid_b)
+    q_block_len = tl.load(cu_seqblocks_q + pid_b + 1) - q_block_start
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
-    q_abs = prefix_len + pid_q
-    real_topk = tl.minimum(max_topk, (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K)
-    topk_ptr = t_ptr + pid_kh * stride_th + (q_start + pid_q) * stride_tn
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + q_start * stride_qn + pid_kh * gqa_group_size * stride_qh,
-        shape=(q_len, gqa_group_size, head_dim),
-        strides=(stride_qn, stride_qh, stride_qd),
-        offsets=(pid_q, 0, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(2, 1, 0),
-    )
-    q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
-    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
+    if pid_q * num_q_loop >= q_block_len:
+        return
+    real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
+    bt_row = block_table_ptr + pid_b * stride_bt_b
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     off_h = tl.arange(0, BLOCK_SIZE_H)
@@ -584,58 +583,97 @@ def minimax_m3_sparse_attn(
         )
     )
     use_tiled = _PREFILL_TILE_Q > 1
-    tile_q = _PREFILL_TILE_Q if use_tiled else 1
-    kernel = _gqa_sparse_fwd_tiled_kernel if use_tiled else _gqa_sparse_fwd_kernel
-    # Spread the larger Q/accumulator tiles over more threads to limit spilling.
-    launch_options = (
-        {
+    if use_tiled:
+        tile_q = _PREFILL_TILE_Q
+        # Spread the larger Q/accumulator tiles over more threads to limit spilling.
+        launch_options = {
             "num_warps": min(
                 16, max(4, tile_q * triton.next_power_of_2(gqa_group_size) // 16)
             )
         }
-        if use_tiled
-        else {}
-    )
-    grid = (triton.cdiv(max_query_len, tile_q), num_kv_heads, batch)
-    kernel[grid](
-        q,
-        kv_cache,
-        k_scale_arg,
-        v_scale_arg,
-        topk_idx,
-        output,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        prefix_lens,
-        gqa_group_size,
-        head_dim,
-        topk,
-        sm_scale,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        kv_cache.stride(0),
-        kv_cache.stride(1),
-        kv_cache.stride(2),
-        kv_cache.stride(3),
-        stride_ks_h,
-        stride_ks_t,
-        stride_vs_h,
-        stride_vs_t,
-        topk_idx.stride(0),
-        topk_idx.stride(1),
-        topk_idx.stride(2),
-        output.stride(0),
-        output.stride(1),
-        output.stride(2),
-        block_table.stride(0),
-        BLOCK_SIZE_Q=tile_q,
-        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
-        USE_FP8=use_fp8,
-        KV_SCALE_MODE=kv_scale_mode,
-        **launch_options,
-    )
+        grid = (triton.cdiv(max_query_len, tile_q), num_kv_heads, batch)
+        _gqa_sparse_fwd_tiled_kernel[grid](
+            q,
+            kv_cache,
+            k_scale_arg,
+            v_scale_arg,
+            topk_idx,
+            output,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            prefix_lens,
+            gqa_group_size,
+            head_dim,
+            topk,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            kv_cache.stride(3),
+            stride_ks_h,
+            stride_ks_t,
+            stride_vs_h,
+            stride_vs_t,
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_idx.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            block_table.stride(0),
+            BLOCK_SIZE_Q=tile_q,
+            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+            USE_FP8=use_fp8,
+            KV_SCALE_MODE=kv_scale_mode,
+            **launch_options,
+        )
+    else:
+        grid = (max_query_len, num_kv_heads, batch)
+        _gqa_sparse_fwd_kernel[grid](
+            q,
+            kv_cache,
+            k_scale_arg,
+            v_scale_arg,
+            topk_idx,
+            output,
+            block_table,
+            cu_seqlens_q,
+            cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
+            seq_lens,
+            prefix_lens,
+            num_kv_heads,
+            gqa_group_size,
+            head_dim,
+            topk,
+            1,  # num_q_loop
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            kv_cache.stride(3),
+            stride_ks_h,
+            stride_ks_t,
+            stride_vs_h,
+            stride_vs_t,
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_idx.stride(2),
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            block_table.stride(0),
+            BLOCK_SIZE_Q=1,
+            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+            USE_FP8=use_fp8,
+            KV_SCALE_MODE=kv_scale_mode,
+        )
 
 
 @torch.no_grad()
