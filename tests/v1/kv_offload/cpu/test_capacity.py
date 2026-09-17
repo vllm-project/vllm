@@ -4,13 +4,13 @@
 
 The estimate answers one question: how many KV tokens does a full tier serve
 at the best request length up to max_model_len? Both functions under test take
-plain arguments, so these tests need no spec and no engine.
+plain arguments, so these tests need no manager and no engine.
 """
 
 import pytest
 
 from vllm.v1.kv_offload.config import OffloadingGroupConfig
-from vllm.v1.kv_offload.cpu.spec import (
+from vllm.v1.kv_offload.cpu.manager import (
     _capacity_tokens_at_max_len,
     _chunks_per_request,
 )
