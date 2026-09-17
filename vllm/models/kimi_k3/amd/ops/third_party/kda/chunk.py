@@ -33,8 +33,6 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 # 4-stage pipeline over it emits a third, consumer-less async copy into LDS that
 # the `w` loop then reuses; at num_warps=4 that races on gfx950 and `u` comes
 # back with non-deterministic O(1e38) garbage once a batch reaches 4096 tokens.
-
-# gfx1250: num_stages 1 needed for now on gfx1250 otherwise accuracy goes to 0
 _RECOMPUTE_W_U_NUM_STAGES = [1] if _on_gfx1250() else [2, 3]
 
 
