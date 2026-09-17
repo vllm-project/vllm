@@ -162,6 +162,13 @@ _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
+# Model types whose checkpoints carry shared RoPE parameters alongside the
+# per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
+# top-level value of such a dict as a layer's parameters and raises on the
+# shared ones. `laguna` gets them injected by `convert_rope_params_to_dict`;
+# `gemma4_text` ships them in the checkpoint itself.
+_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna", "gemma4_text"}
+
 # Model types whose checkpoints declare `layer_types` entries that upstream
 # transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
 # validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
@@ -374,7 +381,8 @@ class HFConfigParser(ConfigParserBase):
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
 
-        _patch_hf_transformers_nested_rope_validation()
+        if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
+            _patch_hf_transformers_nested_rope_validation()
 
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
