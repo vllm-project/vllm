@@ -11,8 +11,8 @@ against precomputed indices. Span assembly (IMAGE_START/IMAGE_NEW_LINE/
 IMAGE_END delimiters) stays eager in ``postprocess_encoder_output`` but is
 batched over all items of the packed batch.
 
-Enabled via ``-O.cudagraph_mm_encoder=true``; the manager
-(``vllm/v1/worker/encoder_cudagraph.py``) handles budget packing, DP
+Enabled via ``--compilation-config '{"cudagraph_mm_encoder": true}'``; the
+manager (``vllm/v1/worker/encoder_cudagraph.py``) handles budget packing, DP
 sharding and eager fallback.
 """
 
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         DeepseekV4Aligner,
         DeepseekV4ViT,
     )
+    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 
 class DeepseekV4VLEncoderCudaGraphMixin:
@@ -51,14 +52,14 @@ class DeepseekV4VLEncoderCudaGraphMixin:
     ``image_end`` parameters from the host model.
     """
 
-    if TYPE_CHECKING:
-        vision: DeepseekV4ViT
-        aligner: DeepseekV4Aligner
-        config: Any
-        multimodal_config: "MultiModalConfig | None"
-        image_start: torch.nn.Parameter
-        image_end: torch.nn.Parameter
-        image_newline: torch.nn.Parameter
+    # Provided by the host model; declared here so mixin methods type-check.
+    vision: "DeepseekV4ViT"
+    aligner: "DeepseekV4Aligner"
+    config: "DeepseekV41Config"
+    multimodal_config: "MultiModalConfig | None"
+    image_start: torch.nn.Parameter
+    image_end: torch.nn.Parameter
+    image_newline: torch.nn.Parameter
 
     # -- helpers shared with the eager multimodal path --
 
@@ -92,14 +93,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             grid = grid.tolist()
         return [[int(v) for v in row] for row in grid]
 
-    @property
-    def _encoder_cg_pad_totals(self) -> dict[int, int]:
-        """Row count of each captured buffer set, keyed by cu_seqlens ptr."""
-        totals = self.__dict__.get("_encoder_cg_pad_totals")
-        if totals is None:
-            totals = {}
-            self.__dict__["_encoder_cg_pad_totals"] = totals
-        return totals
+    _encoder_cg_pad_totals: dict[int, int] = {}
 
     # -- SupportsEncoderCudaGraph protocol --
 
@@ -138,9 +132,15 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             # trailing padding sequence; declaring fewer rows than the buffer
             # holds is undefined behaviour and returns NaN on FlashAttn.
             total = pad_totals.get(dst.data_ptr())
+            if total is None:
+                raise RuntimeError(
+                    "cu_seqlens replay buffer was not registered at capture "
+                    "time; the manager must replay into the capture-time "
+                    "buffers."
+                )
             n = min(src.shape[0], dst.shape[0])
             dst[:n].copy_(src[:n])
-            dst[n:] = total if total is not None else src[-1]
+            dst[n:] = total
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
