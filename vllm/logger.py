@@ -29,7 +29,7 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 def _use_color() -> bool:
     if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
         return False
-    if envs.VLLM_LOGGING_COLOR == "1":
+    if envs.VLLM_LOGGING_COLOR == "1" or envs.FORCE_COLOR:
         return True
     if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":  # stdout
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
