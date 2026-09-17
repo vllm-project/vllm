@@ -366,14 +366,17 @@ class Worker(WorkerBase):
     def reset_weights(self) -> None:
         """Randomize exactly the tensors covered by compute_weight_checksums."""
         for _, tensor in _iter_checksum_targets(self.model_runner.model):
+            # Chunk so the float32 staging buffer stays bounded for large weights.
             if tensor.numel() == 0:
                 continue
-            # Chunk so the float32 staging buffer stays bounded for large weights.
             if tensor.is_contiguous():
-                chunks = tensor.view(-1).split(64 * 1024 * 1024)
+                chunks = tensor.data.view(-1).split(64 * 1024 * 1024)
+            elif tensor.ndim == 0:
+                chunks = (tensor.data,)
             else:
-                rows_per_chunk = max(1, (64 * 1024 * 1024) // tensor[0].numel())
-                chunks = tensor.split(rows_per_chunk, dim=0)
+                row_numel = tensor[0].numel()
+                rows_per_chunk = max(1, (64 * 1024 * 1024) // row_numel)
+                chunks = tensor.data.split(rows_per_chunk, dim=0)
             for chunk in chunks:
                 _fill_random_inplace_(chunk)
 
