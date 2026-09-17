@@ -171,7 +171,7 @@ enum MuseGlimmerEvent {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum MuseGlimmerMode {
     /// Between channels (also the turn start): waiting for the next header.
     /// Text without any framing falls through as visible content, so
@@ -201,9 +201,12 @@ pub struct MuseGlimmerUnifiedParser {
     invoke_scan: MarkerScanState,
     /// Number of tool calls emitted in the current response.
     emitted_call_count: usize,
-    /// Number of `to=self` blocks opened in the current response; later blocks
-    /// are separated from earlier reasoning by `"\n"`.
-    reasoning_block_count: usize,
+    /// Whether any reasoning bytes were emitted in the current response.
+    reasoning_emitted: bool,
+    /// Whether the next reasoning text opens a later `to=self` block and must
+    /// first be separated from earlier reasoning by `"\n"`. Set lazily at
+    /// channel open so a block that receives no text emits no separator.
+    pending_reasoning_sep: bool,
     /// Channel of a prompt tail `assistant to=RECIPIENT` prefilled without its
     /// `<|message|>`: the turn's first bare untagged header completes that
     /// header, so it opens this kind instead of untagged content. A framed
@@ -247,7 +250,8 @@ impl MuseGlimmerUnifiedParser {
             mode: MuseGlimmerMode::default(),
             invoke_scan: MarkerScanState::default(),
             emitted_call_count: 0,
-            reasoning_block_count: 0,
+            reasoning_emitted: false,
+            pending_reasoning_sep: false,
             prefilled_kind: None,
             registered_names: tools.iter().map(|tool| tool.name.clone()).collect(),
             bare_header_anchor: BareHeaderAnchor::Structural,
@@ -319,12 +323,7 @@ impl MuseGlimmerUnifiedParser {
             Some(_) => BareHeaderAnchor::None,
         };
         self.mode = match classify_recipient(recipient.as_deref()) {
-            ChannelKind::Reasoning => {
-                // The prefilled block counts, so the next `to=self` block is
-                // separated from it by "\n".
-                self.reasoning_block_count = 1;
-                MuseGlimmerMode::Reasoning
-            }
+            ChannelKind::Reasoning => MuseGlimmerMode::Reasoning,
             ChannelKind::Content { reclassify } => MuseGlimmerMode::Content { reclassify },
             ChannelKind::Tool => MuseGlimmerMode::Tool { strict: true },
         };
@@ -353,7 +352,7 @@ impl MuseGlimmerUnifiedParser {
         }
         match event {
             MuseGlimmerEvent::Text => output.push_text(piece.text),
-            MuseGlimmerEvent::Reasoning => output.push_reasoning(piece),
+            MuseGlimmerEvent::Reasoning => self.push_reasoning_text(piece, output),
             // Marker and noise spans are drained and dropped with their tokens.
             MuseGlimmerEvent::Skip => {}
             MuseGlimmerEvent::ChannelOpen(kind) => {
@@ -366,7 +365,7 @@ impl MuseGlimmerUnifiedParser {
                     }
                     (_, kind) => kind,
                 };
-                self.open_channel(kind, output);
+                self.open_channel(kind);
             }
             MuseGlimmerEvent::ChannelClose => self.mode = MuseGlimmerMode::Idle,
             MuseGlimmerEvent::TurnEnd => self.mode = MuseGlimmerMode::Done,
@@ -381,19 +380,34 @@ impl MuseGlimmerUnifiedParser {
         Ok(())
     }
 
-    /// Open a channel, separating repeated `to=self` blocks with `"\n"`.
-    fn open_channel(&mut self, kind: ChannelKind, output: &mut UnifiedParserOutput) {
+    /// Open a channel, arming the lazy `"\n"` separator between repeated
+    /// `to=self` blocks: the separator is emitted only when the block's first
+    /// reasoning text arrives, so a block that receives no text (e.g. an
+    /// abandoned reasoning prefill) emits nothing.
+    fn open_channel(&mut self, kind: ChannelKind) {
         self.mode = match kind {
             ChannelKind::Reasoning => {
-                if self.reasoning_block_count > 0 {
-                    output.push_reasoning(DecodedText::unattributed("\n"));
-                }
-                self.reasoning_block_count += 1;
+                self.pending_reasoning_sep = self.reasoning_emitted;
                 MuseGlimmerMode::Reasoning
             }
             ChannelKind::Content { reclassify } => MuseGlimmerMode::Content { reclassify },
             ChannelKind::Tool => MuseGlimmerMode::Tool { strict: true },
         };
+    }
+
+    /// Push reasoning body text, separating a later `to=self` block's first
+    /// text from earlier reasoning by `"\n"`.
+    fn push_reasoning_text(&mut self, piece: DecodedText, output: &mut UnifiedParserOutput) {
+        if piece.text.is_empty() {
+            output.push_reasoning(piece);
+            return;
+        }
+        if self.pending_reasoning_sep {
+            output.push_reasoning(DecodedText::unattributed("\n"));
+            self.pending_reasoning_sep = false;
+        }
+        self.reasoning_emitted = true;
+        output.push_reasoning(piece);
     }
 
     /// Emit one completed invoke as a tool call.
@@ -421,7 +435,8 @@ impl MuseGlimmerUnifiedParser {
         self.mode = MuseGlimmerMode::Idle;
         self.invoke_scan.reset();
         self.emitted_call_count = 0;
-        self.reasoning_block_count = 0;
+        self.reasoning_emitted = false;
+        self.pending_reasoning_sep = false;
         self.prefilled_kind = None;
         self.bare_header_anchor = BareHeaderAnchor::Structural;
         self.buffer.take().text
@@ -440,7 +455,8 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         self.buffer.clear();
         self.invoke_scan.reset();
         self.emitted_call_count = 0;
-        self.reasoning_block_count = 0;
+        self.reasoning_emitted = false;
+        self.pending_reasoning_sep = false;
         self.initialize_mode(prompt_token_ids);
         Ok(())
     }
@@ -486,7 +502,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
         let mut output = UnifiedParserOutput::default();
 
-        match &self.mode {
+        match self.mode {
             MuseGlimmerMode::Idle | MuseGlimmerMode::Content { .. } => {
                 // The stream ended: a trailing ` to=…` fragment can no longer
                 // grow into a header, so it is flushed; only trailing
@@ -507,7 +523,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
                 .len();
                 let piece = self.buffer.drain_prefix(len);
                 self.buffer.clear();
-                output.push_reasoning(piece);
+                self.push_reasoning_text(piece, &mut output);
             }
             // A tool channel truncated between complete calls loses only its
             // closing markers — possibly cut mid-marker; keep the calls
@@ -1610,6 +1626,57 @@ mod tests {
 
         assert_eq!(output.normal_text(), "the answer");
         assert!(output.reasoning_text().is_empty());
+    }
+
+    #[test]
+    fn muse_glimmer_abandoned_reasoning_prefill_emits_no_leading_separator() {
+        // The prefilled reasoning block produced no reasoning bytes, so a
+        // framed `to=self` header that abandons it must not emit a leading
+        // "\n".
+        let mut parser = test_parser();
+        let prompt = tokenizer()
+            .encode(
+                "<|start|>user<|message|>hi<|eom|><|start|>assistant to=self<|message|>Prior.",
+                false,
+            )
+            .unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        let output = parser
+            .parse_complete(
+                "<|start|>assistant to=self<|message|>more<|eom|>\
+                 <|start|>assistant to=user<|message|>done<|eot|>",
+            )
+            .unwrap();
+
+        assert_eq!(output.reasoning_text(), "more");
+        assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_empty_reasoning_block_emits_no_separator() {
+        let output = assert_chunking_invariant(
+            " to=self<|message|>a<|eom|><|start|>assistant to=self<|message|><|eom|>\
+             <|start|>assistant to=self<|message|>b<|eom|>\
+             <|start|>assistant to=user<|message|>done<|eot|>",
+        );
+
+        assert_eq!(output.reasoning_text(), "a\nb");
+        assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_many_reasoning_blocks_get_lazy_separators() {
+        let mut text = String::new();
+        for i in 0..1000 {
+            text.push_str(&format!(" to=self<|message|>block{i}<|eom|>"));
+        }
+        text.push_str("<|start|>assistant to=user<|message|>done<|eot|>");
+        let output = assert_chunking_invariant(&text);
+
+        let expected: Vec<String> = (0..1000).map(|i| format!("block{i}")).collect();
+        assert_eq!(output.reasoning_text(), expected.join("\n"));
+        assert_eq!(output.normal_text(), "done");
     }
 
     #[test]
