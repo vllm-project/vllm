@@ -570,6 +570,40 @@ async def test_stream_omits_prompt_metadata_by_default():
 
 
 @pytest.mark.asyncio
+async def test_stream_chunks_omit_absent_fields():
+    """Absent optional fields are omitted from stream chunks, like Rust."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=2),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert len(data_chunks) == 2
+    for chunk in data_chunks:
+        assert "usage" not in chunk
+        assert "prompt_token_ids" not in chunk
+        assert "mm_placeholders" not in chunk
+        assert "logprobs" not in chunk["choices"][0]
+    assert "finish_reason" not in data_chunks[0]["choices"][0]
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
 async def test_stream_text_only_prompt_omits_mm_placeholders_key():
     engine = _mock_engine()
 
