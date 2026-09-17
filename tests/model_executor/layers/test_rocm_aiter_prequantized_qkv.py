@@ -7,15 +7,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.v1.attention.backend import PrequantizedQKV
 from vllm.v1.attention.backends import rocm_aiter_fa
 
 
-def _make_tensors():
+def _make_tensors(num_kv_heads: int = 1):
     query = torch.randn(2, 4, 8)
-    key = torch.randn(2, 1, 8)
-    value = torch.randn(2, 1, 8)
+    key = torch.randn(2, num_kv_heads, 8)
+    value = torch.randn(2, num_kv_heads, 8)
     return query, key, value
 
 
@@ -31,6 +32,43 @@ def _call_aiter_flash_attention(**kwargs):
         max_seqlen_k=2,
         **kwargs,
     )
+
+
+def test_slice_prequantized_qkv_uses_mixed_batch_offsets():
+    num_tokens = 7
+    num_kv_heads = 2
+    query = torch.arange(num_tokens * 4 * 8).reshape(num_tokens, 4, 8)
+    key = torch.arange(num_tokens * num_kv_heads * 8).reshape(
+        num_tokens, num_kv_heads, 8
+    )
+    value = key + 1000
+    query_descale = torch.arange(3 * num_kv_heads).reshape(3, num_kv_heads)
+    key_descale = query_descale + 10
+    value_descale = query_descale + 20
+    prequantized = PrequantizedQKV(
+        query,
+        key,
+        value,
+        query_descale,
+        key_descale,
+        value_descale,
+    )
+
+    extend = rocm_aiter_fa._slice_prequantized_qkv(
+        prequantized,
+        slice(1, 3),
+        slice(1, 2),
+    )
+    prefill = rocm_aiter_fa._slice_prequantized_qkv(
+        prequantized,
+        slice(3, 7),
+        slice(2, 3),
+    )
+
+    torch.testing.assert_close(extend.query, query[1:3])
+    torch.testing.assert_close(extend.key_descale, key_descale[1:2])
+    torch.testing.assert_close(prefill.value, value[3:7])
+    torch.testing.assert_close(prefill.value_descale, value_descale[2:3])
 
 
 def test_aiter_flash_attention_omits_unused_descales(monkeypatch):
@@ -101,6 +139,7 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
     impl.alibi_slopes = None
     impl.sinks = None
     impl.logits_soft_cap = 0.0
+    impl.kv_sharing_target_layer_name = None
 
     query, key, value = _make_tensors()
     prequantized = PrequantizedQKV(
@@ -177,6 +216,87 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
     )
 
 
+def test_aiter_backend_ignores_prequantized_qkv_for_pure_decode(monkeypatch):
+    impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
+    impl.head_size = 64
+    impl.num_heads = 4
+    impl.num_kv_heads = 1
+    impl.kv_cache_dtype = "auto"
+    impl.scale = 1.0
+    impl.sliding_window = (-1, -1)
+    impl.alibi_slopes = None
+    impl.sinks = None
+    impl.logits_soft_cap = 0.0
+    impl.kv_sharing_target_layer_name = None
+
+    query = torch.randn(1, 4, 64)
+    key = torch.randn(1, 1, 64)
+    value = torch.randn_like(key)
+    prequantized = PrequantizedQKV(
+        query=torch.full_like(query, float("nan")),
+        key=torch.full_like(key, float("nan")),
+        value=torch.full_like(value, float("nan")),
+        query_descale=torch.full((1, 1), float("nan")),
+        key_descale=torch.full((1, 1), float("nan")),
+        value_descale=torch.full((1, 1), float("nan")),
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        max_seq_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        causal=True,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_extends=0,
+        num_extend_tokens=0,
+        decode_metadata=SimpleNamespace(max_query_len=1, uniform_query_len=1),
+        prefill_metadata=None,
+        extend_metadata=None,
+        use_cascade=False,
+        k_scale=None,
+        v_scale=None,
+        kv_sharing_metadata=None,
+    )
+    recorded_query = None
+
+    def fake_paged_attention(*args, **kwargs):
+        nonlocal recorded_query
+        recorded_query = args[2]
+
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        torch.ops.aiter,
+        "paged_attention_v1",
+        fake_paged_attention,
+        raising=False,
+    )
+
+    impl._forward(
+        SimpleNamespace(_k_scale=torch.ones(1), _v_scale=torch.ones(1)),
+        query,
+        key,
+        value,
+        torch.empty((1, 1, 1, 128)),
+        metadata,
+        torch.empty_like(query),
+        output_scale=None,
+        output_block_scale=None,
+        prequantized_qkv=prequantized,
+    )
+
+    assert recorded_query is not None
+    assert recorded_query.data_ptr() == query.data_ptr()
+    assert torch.isfinite(recorded_query).all()
+
+
 @pytest.mark.parametrize(
     ("kv_cache_dtype", "cache_dtype", "expected_quantize"),
     [
@@ -184,31 +304,33 @@ def test_aiter_backend_uses_prequantized_qkv_for_prefill(monkeypatch):
         ("auto", torch.bfloat16, True),
     ],
 )
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
 def test_aiter_backend_gathers_context_for_fp8_attention(
     monkeypatch,
     kv_cache_dtype,
     cache_dtype,
     expected_quantize,
+    num_kv_heads,
 ):
     impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
-    impl.num_kv_heads = 1
+    impl.num_kv_heads = num_kv_heads
     impl.kv_cache_dtype = kv_cache_dtype
     impl.scale = 1.0
     impl.sliding_window = (-1, -1)
     impl.alibi_slopes = None
     impl.sinks = None
 
-    query, key, value = _make_tensors()
+    query, key, value = _make_tensors(num_kv_heads)
     fp8_dtype = torch.float8_e4m3fn
     prequantized = PrequantizedQKV(
         query=query.to(fp8_dtype),
         key=key.to(fp8_dtype),
         value=value.to(fp8_dtype),
-        query_descale=torch.randn(1, 1),
-        key_descale=torch.randn(1, 1),
-        value_descale=torch.randn(1, 1),
+        query_descale=torch.randn(1, num_kv_heads),
+        key_descale=torch.randn(1, num_kv_heads),
+        value_descale=torch.randn(1, num_kv_heads),
     )
-    workspace = torch.empty((2, 4, 1, 8), dtype=fp8_dtype)
+    workspace = torch.empty((2, 4, num_kv_heads, 8), dtype=fp8_dtype)
     chunk_metadata = rocm_aiter_fa.AiterChunkContextMetadata(
         workspace=workspace,
         cu_seq_lens_chunk=torch.tensor([[0, 3]], dtype=torch.int32),
@@ -256,15 +378,15 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
         lambda: fp8_dtype,
     )
 
-    k_scale = torch.tensor([0.25])
-    v_scale = torch.tensor([0.5])
+    k_scale = torch.arange(1, num_kv_heads + 1, dtype=torch.float32) * 0.25
+    v_scale = torch.arange(1, num_kv_heads + 1, dtype=torch.float32) * 0.5
     impl.extend_forward(
         attn_metadata=metadata,
         query=query,
         key=key,
         value=value,
-        key_cache=torch.empty((1, 1, 1, 16), dtype=cache_dtype),
-        value_cache=torch.empty((1, 1, 1, 16), dtype=cache_dtype),
+        key_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=cache_dtype),
+        value_cache=torch.empty((1, 1, num_kv_heads, 16), dtype=cache_dtype),
         output=torch.empty_like(query),
         cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
         max_seqlen_q=2,
@@ -286,8 +408,12 @@ def test_aiter_backend_gathers_context_for_fp8_attention(
     assert context_call["k"].data_ptr() == workspace[0].data_ptr()
     assert context_call["v"].data_ptr() == workspace[1].data_ptr()
     assert context_call["q_descale"] is prequantized.query_descale
-    torch.testing.assert_close(context_call["k_descale"], k_scale.reshape(1, 1))
-    torch.testing.assert_close(context_call["v_descale"], v_scale.reshape(1, 1))
+    torch.testing.assert_close(
+        context_call["k_descale"], k_scale.reshape(1, num_kv_heads)
+    )
+    torch.testing.assert_close(
+        context_call["v_descale"], v_scale.reshape(1, num_kv_heads)
+    )
 
 
 @pytest.mark.parametrize(
@@ -314,10 +440,11 @@ def test_aiter_backend_prequantized_qkv_cache_support(
         SimpleNamespace(on_gfx950=lambda: True),
     )
     monkeypatch.setattr(torch, "get_default_dtype", lambda: model_dtype)
-    if direct_context_gather:
-        monkeypatch.setenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", "1")
-    else:
-        monkeypatch.delenv("VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER", raising=False)
+    monkeypatch.setattr(
+        envs,
+        "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
+        direct_context_gather,
+    )
 
     impl = rocm_aiter_fa.AiterFlashAttentionImpl(
         num_heads=16,

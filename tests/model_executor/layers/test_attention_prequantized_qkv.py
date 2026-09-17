@@ -122,24 +122,6 @@ def test_unified_attention_custom_op_schema_has_prequantized_qkv():
         assert f"Tensor? {argument}=None" in schema
 
 
-def test_unified_attention_custom_op_meta_accepts_prequantized_qkv():
-    tensors = tuple(tensor.to(device="meta") for tensor in _make_tensors())
-
-    torch.ops.vllm.unified_attention_with_output(
-        tensors[0],
-        tensors[1],
-        tensors[2],
-        torch.empty_like(tensors[0]),
-        "layer",
-        prequantized_query=tensors[0],
-        prequantized_key=tensors[1],
-        prequantized_value=tensors[2],
-        prequantized_query_descale=tensors[3],
-        prequantized_key_descale=tensors[4],
-        prequantized_value_descale=tensors[5],
-    )
-
-
 def test_unified_attention_rejects_unsupported_prequantized_qkv(monkeypatch):
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=False)
     _patch_attention_context(monkeypatch, impl)

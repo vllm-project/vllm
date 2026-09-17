@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     VllmConfig,
@@ -75,16 +75,25 @@ _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 
-def _fp8_context_gather_enabled() -> bool:
-    return os.environ.get(
-        "VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER",
-        "0",
-    ).lower() in ("1", "true", "auto")
-
-
 def _uses_bf16_kv_cache(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype == "bfloat16" or (
         kv_cache_dtype == "auto" and torch.get_default_dtype() == torch.bfloat16
+    )
+
+
+def _slice_prequantized_qkv(
+    prequantized_qkv: PrequantizedQKV,
+    token_slice: slice,
+    sequence_slice: slice,
+) -> PrequantizedQKV:
+    """Select matching token and sequence ranges for one attention phase."""
+    return PrequantizedQKV(
+        query=prequantized_qkv.query[token_slice],
+        key=prequantized_qkv.key[token_slice],
+        value=prequantized_qkv.value[token_slice],
+        query_descale=prequantized_qkv.query_descale[sequence_slice],
+        key_descale=prequantized_qkv.key_descale[sequence_slice],
+        value_descale=prequantized_qkv.value_descale[sequence_slice],
     )
 
 
@@ -559,7 +568,7 @@ class AiterFlashAttentionMetadataBuilder(
         self.direct_fp8_context_gather = (
             found_layer
             and supports_prequantized_qkv
-            and _fp8_context_gather_enabled()
+            and envs.VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER
             and (
                 is_quantized_kv_cache(self.cache_config.cache_dtype)
                 or kv_cache_spec.dtype == torch.bfloat16
@@ -1068,7 +1077,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 or (
                     _uses_bf16_kv_cache(self.kv_cache_dtype)
-                    and _fp8_context_gather_enabled()
+                    and envs.VLLM_ROCM_FP8_DIRECT_CONTEXT_GATHER
                 )
             )
         )
@@ -1410,6 +1419,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 by this backend.
             output_block_scale: Block scale for fused output quantization;
                 not supported by this backend.
+            prequantized_qkv: Optional model-provided FP8 Q/K/V tensors and
+                descales. Only prefill and extend slices are consumed; decode
+                always uses the floating-point query and KV cache.
 
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1505,20 +1517,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 prefill_value = value[prefill_token_start:]
                 q_descale = k_descale = v_descale = None
                 if prequantized_qkv is not None:
-                    prefill_query = prequantized_qkv.query[prefill_token_start:]
-                    prefill_key = prequantized_qkv.key[prefill_token_start:]
-                    prefill_value = prequantized_qkv.value[prefill_token_start:]
                     prefill_sequence_start = num_decodes + num_extends
                     prefill_sequence_end = prefill_sequence_start + num_prefills
-                    q_descale = prequantized_qkv.query_descale[
-                        prefill_sequence_start:prefill_sequence_end
-                    ]
-                    k_descale = prequantized_qkv.key_descale[
-                        prefill_sequence_start:prefill_sequence_end
-                    ]
-                    v_descale = prequantized_qkv.value_descale[
-                        prefill_sequence_start:prefill_sequence_end
-                    ]
+                    prefill_prequantized_qkv = _slice_prequantized_qkv(
+                        prequantized_qkv,
+                        slice(prefill_token_start, None),
+                        slice(prefill_sequence_start, prefill_sequence_end),
+                    )
+                    prefill_query = prefill_prequantized_qkv.query
+                    prefill_key = prefill_prequantized_qkv.key
+                    prefill_value = prefill_prequantized_qkv.value
+                    q_descale = prefill_prequantized_qkv.query_descale
+                    k_descale = prefill_prequantized_qkv.key_descale
+                    v_descale = prefill_prequantized_qkv.value_descale
 
                 rocm_aiter_ops.flash_attn_varlen_func(
                     q=prefill_query,
@@ -1562,17 +1573,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     extend_sequence_slice = slice(
                         num_decodes, num_decodes + num_extends
                     )
-                    extend_prequantized_qkv = PrequantizedQKV(
-                        query=prequantized_qkv.query[extend_tokens_slice],
-                        key=prequantized_qkv.key[extend_tokens_slice],
-                        value=prequantized_qkv.value[extend_tokens_slice],
-                        query_descale=prequantized_qkv.query_descale[
-                            extend_sequence_slice
-                        ],
-                        key_descale=prequantized_qkv.key_descale[extend_sequence_slice],
-                        value_descale=prequantized_qkv.value_descale[
-                            extend_sequence_slice
-                        ],
+                    extend_prequantized_qkv = _slice_prequantized_qkv(
+                        prequantized_qkv,
+                        extend_tokens_slice,
+                        extend_sequence_slice,
                     )
                 self.extend_forward(
                     attn_metadata=attn_metadata,

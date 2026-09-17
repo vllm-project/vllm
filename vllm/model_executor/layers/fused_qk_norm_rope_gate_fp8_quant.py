@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM integration wrapper for AITER Qwen3 Next FP8 QKV preparation."""
+"""vLLM integration for fused Q/K norm, RoPE, gate, and FP8 quantization."""
 
 import torch
 
@@ -18,7 +18,7 @@ from vllm.utils.torch_utils import (
 
 MAX_PREQUANTIZED_SEQUENCES = 256
 
-Qwen3NextFp8PrepOutputs = tuple[
+FusedQKNormRopeGateFp8QuantOutputs = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -29,6 +29,13 @@ Qwen3NextFp8PrepOutputs = tuple[
     torch.Tensor,
     torch.Tensor,
 ]
+
+
+def supports_prequantized_scheduler(
+    max_num_seqs: int | None,
+) -> bool:
+    """Whether configured scheduler bounds fit the AITER output workspaces."""
+    return max_num_seqs is not None and max_num_seqs <= MAX_PREQUANTIZED_SEQUENCES
 
 
 def _allocate_prequantized_outputs(
@@ -87,7 +94,7 @@ def _allocate_outputs(
     num_query_heads: int,
     num_kv_heads: int,
     head_dim: int,
-) -> Qwen3NextFp8PrepOutputs:
+) -> FusedQKNormRopeGateFp8QuantOutputs:
     total_tokens = q_gate.shape[0]
     query = torch.empty(
         (total_tokens, num_query_heads * head_dim),
@@ -115,7 +122,7 @@ def _allocate_outputs(
     )
 
 
-def _qwen3_next_fp8_qkv_prep_impl(
+def _fused_qk_norm_rope_gate_fp8_quant_impl(
     q_gate: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -184,7 +191,7 @@ def _qwen3_next_fp8_qkv_prep_impl(
         )
         return
 
-    rocm_aiter_ops.qwen3_next_fp8_qkv_prep(
+    rocm_aiter_ops.fused_qk_norm_rope_gate_fp8_quant(
         q_gate,
         key,
         value,
@@ -213,7 +220,7 @@ def _qwen3_next_fp8_qkv_prep_impl(
     )
 
 
-def _qwen3_next_fp8_qkv_prep_fake(
+def _fused_qk_norm_rope_gate_fp8_quant_fake(
     q_gate: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -244,9 +251,9 @@ def _qwen3_next_fp8_qkv_prep_fake(
 # Keep it outside piecewise CUDA graphs so capture-time decode/prefill offsets
 # are not replayed against a different runtime batch.
 direct_register_custom_op(
-    op_name="qwen3_next_fp8_qkv_prep",
-    op_func=_qwen3_next_fp8_qkv_prep_impl,
-    fake_impl=_qwen3_next_fp8_qkv_prep_fake,
+    op_name="fused_qk_norm_rope_gate_fp8_quant",
+    op_func=_fused_qk_norm_rope_gate_fp8_quant_impl,
+    fake_impl=_fused_qk_norm_rope_gate_fp8_quant_fake,
     mutates_args=[
         "query_out",
         "key_out",
@@ -262,7 +269,7 @@ direct_register_custom_op(
 )
 
 
-def qwen3_next_fp8_qkv_prep(
+def fused_qk_norm_rope_gate_fp8_quant(
     q_gate: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -276,7 +283,7 @@ def qwen3_next_fp8_qkv_prep(
     num_kv_heads: int,
     head_dim: int,
     rotary_dim: int,
-) -> Qwen3NextFp8PrepOutputs:
+) -> FusedQKNormRopeGateFp8QuantOutputs:
     outputs = _allocate_outputs(
         q_gate,
         key,
@@ -285,7 +292,7 @@ def qwen3_next_fp8_qkv_prep(
         num_kv_heads,
         head_dim,
     )
-    torch.ops.vllm.qwen3_next_fp8_qkv_prep(
+    torch.ops.vllm.fused_qk_norm_rope_gate_fp8_quant(
         q_gate,
         key,
         value,

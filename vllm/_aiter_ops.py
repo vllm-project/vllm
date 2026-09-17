@@ -2083,12 +2083,12 @@ class rocm_aiter_ops:
 
     @classmethod
     @functools.cache
-    def qwen3_next_fp8_qkv_prep_available(cls) -> bool:
+    def fused_qk_norm_rope_gate_fp8_quant_available(cls) -> bool:
         if not is_aiter_found_and_supported():
             return False
         try:
-            from aiter.ops.triton.rope.qwen3_next_fp8_qkv import (  # noqa: F401
-                qwen3_next_fp8_qkv_prep,
+            from aiter.ops.triton.rope.fused_qk_norm_rope_gate_fp8_quant import (  # noqa: F401
+                fused_qk_norm_rope_gate_fp8_quant,
             )
         except (ImportError, ModuleNotFoundError):
             return False
@@ -3508,7 +3508,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def qwen3_next_fp8_qkv_prep(
+    def fused_qk_norm_rope_gate_fp8_quant(
         q_gate: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -3536,11 +3536,11 @@ class rocm_aiter_ops:
         key_descale_out: torch.Tensor | None = None,
         value_descale_out: torch.Tensor | None = None,
     ):
-        from aiter.ops.triton.rope.qwen3_next_fp8_qkv import (
-            qwen3_next_fp8_qkv_prep,
+        from aiter.ops.triton.rope.fused_qk_norm_rope_gate_fp8_quant import (
+            fused_qk_norm_rope_gate_fp8_quant,
         )
 
-        return qwen3_next_fp8_qkv_prep(
+        return fused_qk_norm_rope_gate_fp8_quant(
             q_gate,
             key,
             value,
