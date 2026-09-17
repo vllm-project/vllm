@@ -53,6 +53,13 @@ USE_PRECOMPILED_RUST_FRONTEND = (
     envs.VLLM_USE_PRECOMPILED or envs.VLLM_USE_PRECOMPILED_RUST
 )
 
+# The repository also contains proto-v* tags. Restrict the direct
+# setuptools-scm call below to vLLM release tags so a nearer proto tag cannot
+# become the Python package's version base.
+VLLM_GIT_DESCRIBE_COMMAND = (
+    "git describe --dirty --tags --long --abbrev=40 --match 'v[0-9]*'"
+)
+
 
 def should_require_rust_frontend() -> bool:
     value = os.getenv("VLLM_REQUIRE_RUST_FRONTEND", "")
@@ -1249,9 +1256,15 @@ def get_vllm_version() -> str:
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
         print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="vllm/_version.py")
+        return get_version(
+            write_to="vllm/_version.py",
+            git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+        )
 
-    version = get_version(write_to="vllm/_version.py")
+    version = get_version(
+        write_to="vllm/_version.py",
+        git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+    )
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if not envs.VLLM_SKIP_VERSION_SUFFIX:
