@@ -530,6 +530,16 @@ class SamplingParams(
 
         self._verify_args()
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.temperature >= _SAMPLING_EPS
+            and self.seed is None
+        ):
+            logger.warning_once(
+                "Random sampling without an explicit seed may not be batch "
+                "invariant. Set seed in SamplingParams or use temperature=0."
+            )
+
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
