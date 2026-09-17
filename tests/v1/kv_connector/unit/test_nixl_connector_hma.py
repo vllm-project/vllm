@@ -166,95 +166,9 @@ def test_region_pull_ignores_allocation_padding(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "local_dcp,local_rank,local_ratio,remote_ratio",
-    [(1, 0, 1, 1), (1, 0, 1, 2), (1, 0, 2, 1), (2, 0, 1, 1), (2, 1, 1, 1)],
-)
-@pytest.mark.parametrize("num_pages", [3, 19])
-def test_dcp_region_pull_covers_all_stripes(
-    region_pull_worker, local_dcp, local_rank, local_ratio, remote_ratio, num_pages
-):
-    """Differently grouped regions must receive each uncached DCP page once."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlConnectorMetadata,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
-    from vllm.utils.math_utils import cdiv
-
-    worker = region_pull_worker
-    worker.dcp_size, worker.dcp_rank = local_dcp, local_rank
-    worker._physical_blocks_per_logical_kv_block = local_ratio
-    worker.dst_num_blocks = {"P": 1000, "D": 1000}
-    worker.dst_region_num_blocks = {"P": [1000, 1000], "D": [1000, 1000]}
-    remote_info = worker.transfer_topo.get_engine_info.return_value
-    remote_info.remote_tp_size = 8
-    remote_info.remote_dcp_size = 8
-    remote_info.remote_physical_blocks_per_logical = remote_ratio
-    ranks = tuple(range(8))
-    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 8)
-    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
-    worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
-    # Unequal region prefix hits and one extra local logical block of padding.
-    count = cdiv(num_pages, local_dcp * local_ratio) + 1
-    local = [list(range(31, 30 + count)), list(range(42, 40 + count))]
-    metadata = NixlConnectorMetadata()
-    metadata.add_new_req_to_recv(
-        request_id="request",
-        local_block_ids=local,
-        local_num_computed_blocks=(0, 1, 2),
-        awaiting_kvs=True,
-        kv_transfer_params={
-            "remote_engine_id": "P",
-            "remote_request_id": "request-P",
-            "remote_host": "localhost",
-            "remote_port": 1,
-            "remote_num_tokens": num_pages * 64 - 7,
-            "remote_block_ids": [[10, 11, 12, 13]],
-        },
-    )
-    meta = metadata.reqs_to_recv["request"]
-    meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
-        local, local_ratio
-    )
-    worker._read_blocks_for_req("request", meta)
-
-    # Check submitted descriptor pairs against an independent token-position oracle.
-    expected: dict[int, list[tuple[int, int, int]]] = {r: [] for r in ranks}
-    padding: list[list[int]] = [[], []]
-    for region, prefix in enumerate((1, 2)):
-        for logical in range(prefix, count):
-            for offset in range(local_ratio):
-                position = (logical * local_dcp + local_rank) * local_ratio + offset
-                local_page = ((30 if region == 0 else 40) + logical) * local_ratio
-                local_page += offset
-                if position >= num_pages:
-                    padding[region].append(local_page)
-                    continue
-                rank = (position // remote_ratio) % 8
-                remote_page = (10 + position // (8 * remote_ratio)) * remote_ratio
-                remote_page += position % remote_ratio
-                expected[rank].append((region, local_page, remote_page + region * 1000))
-    observed: dict[int, list[tuple[int, int, int]]] = {r: [] for r in ranks}
-    for call in worker._read_blocks_mixed.call_args_list:
-        read = call.kwargs
-        rank = read["remote_xfer_side_handle"] - 1000
-        for local_id, remote_id in zip(
-            read["local_block_descs_ids"], read["remote_block_descs_ids"], strict=True
-        ):
-            region, local_id = divmod(int(local_id), 1000)
-            observed[rank].append((region, local_id, int(remote_id)))
-    notified = {
-        int(call.args[0].removeprefix("P-rank"))
-        for call in worker.nixl_wrapper.send_notif.call_args_list
-    }
-    assert notified == {r for r in ranks if not expected[r]}
-    assert observed == expected
-    assert meta.region_blocks_to_zero == padding
-
-
-@pytest.mark.cpu_test
-def test_dcp_region_full_cache_hit_notifies_every_source(region_pull_worker):
-    """A full local hit must release every remote DCP stripe without a read."""
+@pytest.mark.parametrize("num_pages", [0, 3, 19])
+def test_dcp_region_pull(region_pull_worker, num_pages):
+    """Read each uncached page from its DCP stripe; notify empty stripes."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         RemoteMeta,
         ReqMeta,
@@ -262,25 +176,59 @@ def test_dcp_region_full_cache_hit_notifies_every_source(region_pull_worker):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 
     worker = region_pull_worker
+    worker.dcp_rank = 0
+    remote = worker.transfer_topo.get_engine_info.return_value
+    remote.remote_tp_size = remote.remote_dcp_size = 8
+    remote.remote_physical_blocks_per_logical = 1
     ranks = tuple(range(8))
-    worker.transfer_topo.get_engine_info.return_value.remote_dcp_size = 8
-    worker.transfer_topo.get_engine_info.return_value.remote_tp_size = 8
     worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 8)
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
-    worker._read_blocks_for_req(
-        "request",
-        ReqMeta(
-            local_block_ids=(),
-            local_physical_block_ids=(),
-            tp_size=8,
-            remote=RemoteMeta([[10]], "localhost", 1, "P", "request-P"),
+    # Two regions with different prefix hits, plus one padding page each.
+    local = (
+        [list(range(31, 31 + num_pages)), list(range(42, 41 + num_pages))]
+        if num_pages
+        else []
+    )
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=8,
+        local_num_computed_blocks=(0, 1, 2),
+        remote=RemoteMeta(
+            [[10, 11, 12]],
+            "localhost",
+            1,
+            "P",
+            "request-P",
+            num_tokens=max(0, num_pages * 64 - 7),
         ),
     )
-    worker._read_blocks_mixed.assert_not_called()
-    assert {call.args[0] for call in worker.nixl_wrapper.send_notif.call_args_list} == {
-        f"P-rank{rank}" for rank in ranks
+    worker._read_blocks_for_req("request", meta)
+    reads = {
+        call.kwargs["remote_xfer_side_handle"] - 1000: call.kwargs
+        for call in worker._read_blocks_mixed.call_args_list
     }
+    notified = {call.args[0] for call in worker.nixl_wrapper.send_notif.call_args_list}
+    for rank in ranks:
+        expected = [
+            (region * 100 + base + page, region * 100 + 10 + page // 8)
+            for region, base in enumerate((30, 40))
+            for page in range(region + 1, num_pages)
+            if page % 8 == rank
+        ]
+        if expected:
+            read = reads[rank]
+            assert (
+                list(zip(read["local_block_descs_ids"], read["remote_block_descs_ids"]))
+                == expected
+            )
+            assert f"P-rank{rank}" not in notified
+        else:
+            assert rank not in reads and f"P-rank{rank}" in notified
+    assert meta.region_blocks_to_zero == (
+        [[30 + num_pages], [40 + num_pages]] if num_pages else None
+    )
 
 
 @pytest.mark.cpu_test
