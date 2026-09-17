@@ -38,6 +38,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -80,6 +81,20 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    config = vllm_config.model_config.hf_text_config
+    parallel_config = vllm_config.parallel_config
+    # Multimodal subclasses have their own model boundaries and deepstack inputs.
+    return (
+        parallel_config.use_sequence_parallel_moe
+        and parallel_config.pipeline_parallel_size == 1
+        and not vllm_config.model_config.is_multimodal_model
+        and getattr(config, "num_experts", 0) > 0
+        and not getattr(config, "mlp_only_layers", [])
+        and getattr(config, "decoder_sparse_step", 1) == 1
+    )
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -212,7 +227,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         )
@@ -220,14 +239,14 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.is_sequence_parallel:
+        if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=hidden_states
         )
 
-        if self.is_sequence_parallel:
+        if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
@@ -252,6 +271,7 @@ class Qwen3MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -291,6 +311,7 @@ class Qwen3MoeAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -341,6 +362,9 @@ class Qwen3MoeAttention(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
+    # Subclasses that replace __init__ retain the replicated layout by default.
+    use_attn_reduce_scatter_for_moe: bool = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -353,6 +377,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        self.use_attn_reduce_scatter_for_moe = _should_use_sequence_parallel(
+            vllm_config
+        )
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         dual_chunk_attention_config = getattr(
@@ -371,6 +398,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            reduce_results=not self.use_attn_reduce_scatter_for_moe,
         )
 
         # `mlp_only_layers` in the config.
@@ -405,20 +433,33 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        full_num_tokens = positions.shape[-1]
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if self.use_attn_reduce_scatter_for_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
+        if self.use_attn_reduce_scatter_for_moe:
+            tp_size = get_tensor_model_parallel_world_size()
+            sp_pad = (-hidden_states.shape[0]) % tp_size
+            hidden_states = F.pad(hidden_states, (0, 0, 0, sp_pad))
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if self.use_attn_reduce_scatter_for_moe:
+            hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -475,6 +516,10 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    @property
+    def use_sequence_parallel(self) -> bool:
+        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -493,6 +538,11 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        full_num_tokens = positions.shape[-1]
+        if self.use_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+
         aux_hidden_states = self._maybe_add_hidden_state(
             [], self.start_layer, hidden_states, residual
         )
@@ -510,6 +560,19 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if self.use_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = hidden_states.split(
+                    hidden_size, dim=-1
+                )
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
 
         # Return auxiliary hidden states if collected
         if len(aux_hidden_states) > 0:
