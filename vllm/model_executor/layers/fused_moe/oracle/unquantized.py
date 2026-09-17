@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -349,6 +350,17 @@ def select_unquantized_moe_backend(
     )
 
 
+def unquantized_round_up_hidden_size_and_intermediate_size(
+    backend: UnquantizedMoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round up dimensions before allocation to satisfy the selected kernel."""
+    if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        intermediate_size = round_up(intermediate_size, 128)
+    return hidden_size, intermediate_size
+
+
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     moe_config: FusedMoEConfig,
@@ -377,13 +389,26 @@ def convert_to_unquantized_kernel_format(
         )
         moe_config.intermediate_size_per_partition = padded_intermediate
 
+        # Reloads only overwrite checkpoint slices. An earlier in-place
+        # permutation can leave nonzero values in the raw padding slots.
+        unpadded = moe_config.intermediate_size_per_partition_unpadded
+        assert unpadded is not None
+        if padded_intermediate > unpadded:
+            w13_weight[:, unpadded:padded_intermediate].zero_()
+            if is_act_and_mul:
+                w13_weight[:, padded_intermediate + unpadded :].zero_()
+            w2_weight[:, :, unpadded:].zero_()
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
             is_gated_act_gemm=is_act_and_mul,
         )
+        # Keep checkpoint-shaped parameters for reload/IPC. The experts create
+        # BlockMajorK views at dispatch without changing the underlying storage.
+        return w13_weight, w2_weight
 
     if (
         unquantized_backend == UnquantizedMoeBackend.TRITON
