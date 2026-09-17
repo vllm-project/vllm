@@ -129,7 +129,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             return self._global_hyperparameters
 
         from vllm.model_executor.layers.attention.mla_attention import (
-            MLACommonImpl,
+            MLACommonBaseImpl,
         )
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -138,19 +138,26 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         # Match any layer with an MLA impl, not just the MLAAttention wrapper:
         # fused MLA modules (Kimi-K3's MultiHeadLatentAttention) register a
         # different layer type. Keying on impl also excludes linear/KDA layers.
+        #
+        # Filter on MLACommonBaseImpl, not MLACommonImpl: sparse-MLA models
+        # (DSA indexer -- GLM-5.3, GLM-5.3-Flash, DeepSeek-V3.2) use
+        # SparseMLACommonImpl, which is a *sibling* of MLACommonImpl under
+        # MLACommonBaseImpl rather than a subclass. Filtering on the subclass
+        # matched zero layers for them and tripped the "No attention layers
+        # found in the model." assertion below.
         forward_context = self.vllm_config.compilation_config.static_forward_context
         layer_names = [
             name
             for name, layer in forward_context.items()
             if isinstance(layer, AttentionLayerBase)
-            and isinstance(getattr(layer, "impl", None), MLACommonImpl)
+            and isinstance(getattr(layer, "impl", None), MLACommonBaseImpl)
         ]
 
         self._global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(
                 self.vllm_config,
                 layer_names,
-                MLACommonImpl,  # type: ignore[type-abstract]
+                MLACommonBaseImpl,  # type: ignore[type-abstract]
             )
         )
         return self._global_hyperparameters
