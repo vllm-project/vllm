@@ -121,7 +121,7 @@ def _throughput_worker(
     from vllm.platforms import current_platform
 
     pu.is_pin_memory_available.cache_clear()
-    pu.is_uva_available.cache_clear()
+    pu._uva_alias_is_coherent.cache_clear()
     type(current_platform).is_pin_memory_available = classmethod(lambda cls: pin)
     if v2_mode:
         pu.is_uva_available = lambda: True
@@ -195,7 +195,7 @@ def _latency_worker(
     from vllm.platforms import current_platform
 
     pu.is_pin_memory_available.cache_clear()
-    pu.is_uva_available.cache_clear()
+    pu._uva_alias_is_coherent.cache_clear()
     type(current_platform).is_pin_memory_available = classmethod(lambda cls: pin)
     if v2_mode:
         pu.is_uva_available = lambda: True
