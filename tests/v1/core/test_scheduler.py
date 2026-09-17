@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
@@ -24,6 +25,11 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    TierBlocksCleared,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -1610,6 +1616,161 @@ def test_kv_cache_release_rejects_nonresident_memory(sleeping_tags):
     core._reset_caches.assert_not_called()
     core.model_executor.collective_rpc.assert_not_called()
     assert core.model_executor.sleeping_tags == sleeping_tags
+
+
+def _create_kv_events_scheduler(tier_scoped_clear_events: bool = True) -> Scheduler:
+    """Prefix caching + KV events on a null publisher (tests swap in a Mock)."""
+    return create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(
+            enable_kv_cache_events=True,
+            publisher="null",
+            tier_scoped_clear_events=tier_scoped_clear_events,
+        ),
+    )
+
+
+def test_idle_reset_publishes_scoped_clear_without_scheduler_step():
+    """An idle control-plane reset must invalidate router state immediately."""
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(
+        side_effect=[[TierBlocksCleared(medium="GPU")], None]
+    )
+
+    assert scheduler.reset_prefix_cache()
+
+    scheduler.kv_event_publisher.publish.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [TierBlocksCleared(medium="GPU")]
+    scheduler._publish_kv_cache_events()
+    scheduler.kv_event_publisher.publish.assert_called_once()
+
+
+def test_idle_reset_with_connector_publishes_all_tier_clear():
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[TierBlocksCleared(medium="GPU")]
+    )
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.connector.take_events.return_value = []
+    scheduler.connector_prefix_cache_stats = Mock()
+
+    assert scheduler.reset_prefix_cache(reset_connector=True)
+
+    scheduler.kv_event_publisher.publish.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [AllBlocksCleared()]
+
+
+def test_idle_reset_connector_failure_only_publishes_gpu_clear():
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[TierBlocksCleared(medium="GPU")]
+    )
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = False
+    scheduler.connector.take_events.return_value = []
+
+    assert not scheduler.reset_prefix_cache(reset_connector=True)
+
+    scheduler.kv_event_publisher.publish.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [TierBlocksCleared(medium="GPU")]
+
+
+def test_failed_local_reset_does_not_publish():
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache = Mock(return_value=False)
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[TierBlocksCleared(medium="GPU")]
+    )
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.connector_prefix_cache_stats = Mock()
+
+    assert not scheduler.reset_prefix_cache(reset_connector=True)
+    scheduler.connector.reset_cache.assert_not_called()
+    scheduler.kv_event_publisher.publish.assert_not_called()
+
+
+def test_idle_reset_without_a_connector_publishes_only_the_gpu_clear():
+    """The common deployment: no KV connector, but the default cascade in
+    ``EngineCore._reset_caches()`` hardcodes ``reset_connector=True``.
+
+    ``reset_connector_cache()`` reports no-op success there, which must not be
+    read as "every tier was cleared" -- publishing ``AllBlocksCleared`` would
+    make the router discard host and storage records that nothing reset.
+    """
+    scheduler = _create_kv_events_scheduler()
+    assert scheduler.connector is None
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[TierBlocksCleared(medium="GPU")]
+    )
+
+    assert scheduler.reset_prefix_cache(reset_connector=True)
+
+    scheduler.kv_event_publisher.publish.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [TierBlocksCleared(medium="GPU")]
+
+
+def test_idle_reset_with_an_unimplemented_connector_reset_does_not_widen():
+    """``KVConnectorBase_V1.reset_cache`` returns ``None`` when a connector does
+    not implement it. ``None`` is not ``False``, so the call counts as success --
+    but nothing was cleared, so the invalidation must stay GPU-scoped."""
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[TierBlocksCleared(medium="GPU")]
+    )
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = None
+    scheduler.connector.take_events.return_value = []
+    scheduler.connector_prefix_cache_stats = Mock()
+
+    assert scheduler.reset_prefix_cache(reset_connector=True)
+
+    scheduler.connector.reset_cache.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [TierBlocksCleared(medium="GPU")]
+
+
+def test_connector_reset_is_attempted_exactly_once_per_reset():
+    """The widening decision and the return value come from one reset call."""
+    scheduler = _create_kv_events_scheduler()
+    scheduler.kv_event_publisher = Mock()
+    scheduler.kv_cache_manager.take_events = Mock(return_value=[])
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.connector.take_events.return_value = []
+    scheduler.connector_prefix_cache_stats = Mock()
+
+    assert scheduler.reset_prefix_cache(reset_connector=True)
+    scheduler.connector.reset_cache.assert_called_once()
+
+
+def test_scoped_clear_is_widened_to_legacy_all_clear_by_default():
+    """``tier_scoped_clear_events`` defaults off: subscribers that predate
+    ``TierBlocksCleared`` keep receiving ``AllBlocksCleared``, batched with the
+    surrounding events exactly as before, until they are upgraded."""
+    scheduler = _create_kv_events_scheduler(tier_scoped_clear_events=False)
+    scheduler.kv_event_publisher = Mock()
+    removed = BlockRemoved(block_hashes=[b"\xab" * 32], medium="GPU")
+    scheduler.kv_cache_manager.take_events = Mock(
+        return_value=[removed, TierBlocksCleared(medium="GPU")]
+    )
+
+    assert scheduler.reset_prefix_cache()
+
+    scheduler.kv_event_publisher.publish.assert_called_once()
+    batch = scheduler.kv_event_publisher.publish.call_args.args[0]
+    assert batch.events == [removed, AllBlocksCleared()]
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():

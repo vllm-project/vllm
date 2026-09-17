@@ -47,6 +47,16 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    tier_scoped_clear_events: bool = False
+    """If True, a prefix-cache reset that clears only the GPU block pool is
+    published as `TierBlocksCleared(medium="GPU")` instead of `AllBlocksCleared`,
+    so consumers tracking several tiers keep records for blocks still resident
+    in a KV connector. Every subscriber must decode the `TierBlocksCleared` tag
+    before this is enabled: a batch decodes as one unit, so an unknown tag drops
+    the whole batch. `AllBlocksCleared` is still published when an attached
+    connector reports that it cleared every tier.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"

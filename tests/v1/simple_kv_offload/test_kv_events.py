@@ -35,6 +35,7 @@ from vllm.distributed.kv_events import (
     MEDIUM_STORAGE,
     BlockRemoved,
     BlockStored,
+    TierBlocksCleared,
 )
 from vllm.lora.request import LoRARequest
 from vllm.utils.hashing import sha256
@@ -503,6 +504,19 @@ def test_block_removed_relabeled_medium_cpu() -> None:
         )
     stored = [e for e in events if isinstance(e, BlockStored)]
     assert len(stored) == 2
+
+
+def test_reset_clear_relabeled_medium_cpu() -> None:
+    """The CPU pool is a default-medium BlockPool, so its reset clear is emitted
+    as GPU and must be relabeled like BlockRemoved is."""
+    fix = make_events_scheduler(num_cpu_blocks=5, num_gpu_blocks=16)
+    sched = fix.scheduler
+    _do_eager_store(fix, num_blocks=2)
+    list(sched.take_events())
+
+    assert sched.reset()
+
+    assert list(sched.take_events()) == [TierBlocksCleared(medium=MEDIUM_CPU)]
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    TierBlocksCleared,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.logger import init_logger
@@ -1327,6 +1328,8 @@ class SimpleCPUOffloadScheduler:
             if isinstance(event, BlockRemoved):
                 event.medium = self.kv_event_medium
                 event.locality = "LOCAL"
+            elif isinstance(event, TierBlocksCleared):
+                event.medium = self.kv_event_medium
         return events
 
     def reset(self) -> bool:
