@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class LogitsBatchState:
-    """The persistent batch state visible to logits processors.
+class LogitsProcessorRequestState:
+    """State associated with active requests, shared with logits processors.
 
     Wraps the model runner's per-slot buffers, which are mutated in place,
     so reads always see current values. Processors must treat every field
@@ -29,13 +29,18 @@ class LogitsBatchState:
     vocab_size: int
     # [max_num_reqs, max_model_len] committed token ids per request slot.
     all_token_ids: StagedWriteTensor
-    # [max_num_reqs] per-slot lengths; see RequestState for their meanings.
+    # [max_num_reqs] tokens in the user-provided prompt.
     prompt_len: UvaBackedTensor
+    # [max_num_reqs] tokens fed at the latest (re)fill: the prompt plus any
+    # partial output on resumption after preemption.
     prefill_len: UvaBackedTensor
+    # [max_num_reqs] prompt_len + output_len; grows as the request progresses.
     total_len: StagedWriteTensor
 
     @classmethod
-    def from_request_state(cls, req_states: RequestState) -> "LogitsBatchState":
+    def from_request_state(
+        cls, req_states: RequestState
+    ) -> "LogitsProcessorRequestState":
         return cls(
             device=req_states.device,
             max_num_reqs=req_states.max_num_reqs,
@@ -90,11 +95,11 @@ class LogitsProcessor(ABC):
     """
 
     def __init__(  # noqa: B027
-        self, vllm_config: "VllmConfig", state: LogitsBatchState
+        self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState
     ):
         """Capture what stays constant for the processor's lifetime.
 
-        ``state`` exposes the on-device token history and batch constants a
+        ``req_state`` exposes the on-device token history and batch constants a
         processor may read. Treat it as read-only.
         """
 
@@ -104,15 +109,12 @@ class LogitsProcessor(ABC):
         The slot may hold a previous occupant's state; overwrite or
         neutralize all of it here.
 
-        Returns whether this processor modifies logits for the request; the
-        sampler ORs the returns into a per-request flag and skips the whole
-        pipeline when no request needs it. Returning False gates admission
-        only: when the pipeline runs, ``apply()`` still sees every row.
+        Returns whether this processor modifies logits for the request.
         """
         return True
 
     def apply_staged_writes(self) -> None:  # noqa: B027
-        """Flush host-side writes staged by ``add_request()`` to the device.
+        """Flush any host-side writes staged by ``add_request()`` to the device.
 
         Called once per step before the forward pass, after the model runner
         has flushed ``req_states``, so a processor that stages writes here can
@@ -121,7 +123,8 @@ class LogitsProcessor(ABC):
 
     @abstractmethod
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
-        """Modify logits in place or return a new tensor.
+        """Modify logits in place or return a new tensor. In-place modification
+        is preferred for efficiency.
 
         ``apply()`` is called once for the whole batch, including rows of
         requests this processor declined in ``add_request()``, so filter rows

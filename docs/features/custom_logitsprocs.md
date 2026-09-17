@@ -24,9 +24,9 @@ In vLLM, logits processors operate at batch granularity. During a given engine s
 
 Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
 
-* `__init__(self, vllm_config: VllmConfig, state: LogitsBatchState)`:
+* `__init__(self, vllm_config: VllmConfig, req_state: LogitsProcessorRequestState)`:
     * `vllm_config`: engine configuration data structure
-    * `state`: a narrow, read-only view of the persistent batch, exposing the on-device token history (`all_token_ids`, `prompt_len`, `prefill_len`, `total_len`) plus `device`, `max_num_reqs` and `vocab_size`
+    * `req_state`: a narrow, read-only view of the persistent batch, exposing the on-device token history (`all_token_ids`, `prompt_len`, `prefill_len`, `total_len`) plus `device`, `max_num_reqs` and `vocab_size`
 
 * `add_request(self, req_idx, sampling_params) -> bool`:
     * Initialize per-slot state for a request entering the batch. Slots are recycled through a free list, so per-slot state must be fully (re)initialized here; there is no removal hook, since freed slots are never read
@@ -55,7 +55,7 @@ The contrived example below implements a custom logits processor which masks out
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
     from vllm.v1.worker.gpu.sample.logits_processor import (
-        LogitsBatchState,
+        LogitsProcessorRequestState,
         LogitsContext,
         LogitsProcessor,
     )
@@ -65,14 +65,14 @@ The contrived example below implements a custom logits processor which masks out
         """Masks out all tokens except `target_token` (a per-request custom
         argument); requests without it are left alone."""
 
-        def __init__(self, vllm_config: "VllmConfig", state: LogitsBatchState):
+        def __init__(self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState):
             # Per-slot target; -1 means disabled. Staged on the host and
             # flushed to the device once per step in apply_staged_writes().
             self.target_token = torch.full(
-                (state.max_num_reqs,), -1, dtype=torch.int64
+                (req_state.max_num_reqs,), -1, dtype=torch.int64
             )
             self.target_token_dev = torch.full(
-                (state.max_num_reqs,), -1, dtype=torch.int64, device=state.device
+                (req_state.max_num_reqs,), -1, dtype=torch.int64, device=req_state.device
             )
 
         def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:

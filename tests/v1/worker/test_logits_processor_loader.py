@@ -26,8 +26,8 @@ from vllm.v1.worker.gpu.sample.logits_processor import (
 class DummyV2Processor(LogitsProcessor):
     """Records its constructor args so tests can assert how it was built."""
 
-    def __init__(self, vllm_config: Any, req_states: Any):
-        self.ctor_args = (vllm_config, req_states)
+    def __init__(self, vllm_config: Any, req_state: Any):
+        self.ctor_args = (vllm_config, req_state)
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
         return logits
@@ -96,10 +96,10 @@ def test_loads_v2_processors(monkeypatch: pytest.MonkeyPatch, source: ProcSource
         assert [type(p) for p in procs] == [DummyV2Processor, AltV2Processor]
     else:
         assert [type(p) for p in procs] == [DummyV2Processor]
-    vllm_config, state = procs[0].ctor_args
+    vllm_config, req_state = procs[0].ctor_args
     assert vllm_config is None
-    assert isinstance(state, loader.LogitsBatchState)
-    assert state.max_num_reqs == 4
+    assert isinstance(req_state, loader.LogitsProcessorRequestState)
+    assert req_state.max_num_reqs == 4
 
 
 @pytest.mark.parametrize(

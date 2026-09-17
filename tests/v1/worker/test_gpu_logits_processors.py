@@ -40,7 +40,7 @@ class MockReasoningConfig:
 class RecordingProcessor(LogitsProcessor):
     """Adds BOOST to TARGET_TOKEN and records every lifecycle callback."""
 
-    def __init__(self, vllm_config: Any, req_states: Any):
+    def __init__(self, vllm_config: Any, req_state: Any):
         self.events: list[str] = []
         self.seen_logits: torch.Tensor | None = None
 
@@ -73,7 +73,7 @@ def _make_sampler(processor: RecordingProcessor) -> Sampler:
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        custom_logitsprocs=[processor],
+        custom_logits_processors=[processor],
     )
 
 

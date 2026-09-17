@@ -9,9 +9,9 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor import STR_POOLING_REJECTS_LOGITSPROCS
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
-    LogitsBatchState,
     LogitsContext,
     LogitsProcessor,
+    LogitsProcessorRequestState,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-__all__ = ["LogitsBatchState", "LogitsContext", "LogitsProcessor", "build_logitsprocs"]
+__all__ = [
+    "LogitsProcessorRequestState",
+    "LogitsContext",
+    "LogitsProcessor",
+    "build_logitsprocs",
+]
 
 
 def _load_v2_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
@@ -150,8 +155,6 @@ def build_logitsprocs(
         )
         return []
 
-    # The V2 rejection sampler reuses the main sampler's apply_sampling_params
-    # path, so unlike V1, custom processors stay active under spec decoding.
     custom_logitsprocs_classes = _load_v2_logitsprocs(custom_logitsprocs)
-    state = LogitsBatchState.from_request_state(req_states)
-    return [ctor(vllm_config, state) for ctor in custom_logitsprocs_classes]
+    lp_req_state = LogitsProcessorRequestState.from_request_state(req_states)
+    return [ctor(vllm_config, lp_req_state) for ctor in custom_logitsprocs_classes]

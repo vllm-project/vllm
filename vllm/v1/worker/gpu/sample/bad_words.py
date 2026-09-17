@@ -9,9 +9,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
-    LogitsBatchState,
     LogitsContext,
     LogitsProcessor,
+    LogitsProcessorRequestState,
 )
 
 if TYPE_CHECKING:
@@ -19,27 +19,27 @@ if TYPE_CHECKING:
 
 
 class BadWordsState(LogitsProcessor):
-    def __init__(self, vllm_config: "VllmConfig", state: LogitsBatchState):
-        self.state = state
+    def __init__(
+        self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState
+    ):
+        self.req_state = req_state
 
-        max_num_reqs = state.max_num_reqs
-        device = state.device
         max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
         max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
         # flattened bad word tokens: [max_num_reqs, VLLM_MAX_BAD_WORDS_TOTAL_TOKENS]
         self.bad_word_token_ids = StagedWriteTensor(
-            (max_num_reqs, max_total_tokens),
+            (req_state.max_num_reqs, max_total_tokens),
             dtype=torch.int32,
-            device=device,
+            device=req_state.device,
         )
         # cumulative offsets of bad words: [max_num_reqs, VLLM_MAX_NUM_BAD_WORDS + 1]
         self.bad_word_offsets = StagedWriteTensor(
-            (max_num_reqs, max_num_bad_words + 1),
+            (req_state.max_num_reqs, max_num_bad_words + 1),
             dtype=torch.int32,
-            device=device,
+            device=req_state.device,
         )
         # number of bad words per request
-        self.num_bad_words = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.num_bad_words = UvaBackedTensor(req_state.max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         bad_words_token_ids = sampling_params.bad_words_token_ids
@@ -92,9 +92,9 @@ class BadWordsState(LogitsProcessor):
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
-            self.state.all_token_ids.gpu,
-            self.state.prompt_len.gpu,
-            self.state.total_len.gpu,
+            self.req_state.all_token_ids.gpu,
+            self.req_state.prompt_len.gpu,
+            self.req_state.total_len.gpu,
             ctx.input_ids,
             ctx.expanded_local_pos,
             max_num_bad_words,

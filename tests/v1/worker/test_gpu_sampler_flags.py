@@ -30,7 +30,7 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logitsprocs: Sequence[LogitsProcessor] = ()) -> Sampler:
+def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -45,7 +45,7 @@ def _make_sampler(custom_logitsprocs: Sequence[LogitsProcessor] = ()) -> Sampler
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        custom_logitsprocs=custom_logitsprocs,
+        custom_logits_processors=custom_logits_processors,
     )
 
 
@@ -103,7 +103,7 @@ class _GateProcessor(LogitsProcessor):
 def test_custom_processor_add_request_gates_pipeline_flag(admitted: bool):
     """A custom processor's add_request() return value is OR-ed into the
     per-request needs_logits_processing flag."""
-    sampler = _make_sampler(custom_logitsprocs=[_GateProcessor(admitted)])
+    sampler = _make_sampler(custom_logits_processors=[_GateProcessor(admitted)])
     sampler.add_request(3, SamplingParams())
 
     assert sampler.needs_logits_processing[3] == admitted

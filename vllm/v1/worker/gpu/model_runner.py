@@ -449,9 +449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Initialize samplers. Model states may override via custom_sampler().
-        # Built unconditionally so pooling models reject custom logits
-        # processors instead of silently ignoring the config.
-        logitsprocs = build_logitsprocs(
+        custom_logits_processors = build_logitsprocs(
             self.vllm_config,
             self.req_states,
             self.is_pooling_model,
@@ -469,7 +467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
                 "enable_trace_replay": self.model_config.enable_trace_replay,
                 "return_sampling_mask": self.model_config.return_sampling_mask,
-                "custom_logitsprocs": logitsprocs,
+                "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)

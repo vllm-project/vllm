@@ -63,11 +63,13 @@ class SamplingStates:
         # Mirrors the early-outs in apply_temperature(), apply_min_p() and
         # get_top_k_top_p().
         temperature = self.temperature.np[req_idx]
+        min_p = self.min_p.np[req_idx]
+        top_p = self.top_p.np[req_idx]
         return bool(
             (temperature != 0.0 and temperature != 1.0)
-            or self.min_p.np[req_idx] != 0.0
+            or min_p != 0.0
             or top_k != self.vocab_size
-            or self.top_p.np[req_idx] != 1.0
+            or top_p != 1.0
         )
 
     def apply_staged_writes(self) -> None:

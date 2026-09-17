@@ -21,9 +21,9 @@ from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
-    LogitsBatchState,
     LogitsContext,
     LogitsProcessor,
+    LogitsProcessorRequestState,
 )
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
@@ -50,7 +50,7 @@ class Sampler:
         use_fp64_gumbel: bool = False,
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
-        custom_logitsprocs: Sequence[LogitsProcessor] = (),
+        custom_logits_processors: Sequence[LogitsProcessor] = (),
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -59,15 +59,16 @@ class Sampler:
         self.req_states = req_states
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         # List order is pipeline order: bias adds, penalties scale, so the
-        # two do not commute. penalties_state stays an attribute: the model
-        # runner reads output_bin_counts off it for penalty bookkeeping.
-        logits_batch_state = LogitsBatchState.from_request_state(req_states)
-        self.penalties_state = PenaltiesState(vllm_config, logits_batch_state)
-        self.logitsprocs: list[LogitsProcessor] = [
-            LogitBiasState(vllm_config, logits_batch_state),
+        # two do not commute.
+        lp_req_state = LogitsProcessorRequestState.from_request_state(req_states)
+        # Assigned as a field since model runner reads output_bin_counts off
+        # it for penalty bookkeeping.
+        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
+        self.logits_processors: list[LogitsProcessor] = [
+            LogitBiasState(vllm_config, lp_req_state),
             self.penalties_state,
-            BadWordsState(vllm_config, logits_batch_state),
-            *custom_logitsprocs,
+            BadWordsState(vllm_config, lp_req_state),
+            *custom_logits_processors,
         ]
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(
@@ -88,7 +89,7 @@ class Sampler:
         needs_processing |= self.thinking_budget_state.add_request(
             req_idx, sampling_params
         )
-        for processor in self.logitsprocs:
+        for processor in self.logits_processors:
             needs_processing |= processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = needs_processing
 
@@ -98,7 +99,7 @@ class Sampler:
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
-        for processor in self.logitsprocs:
+        for processor in self.logits_processors:
             processor.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
@@ -233,10 +234,10 @@ class Sampler:
             input_ids=input_ids,
             pos=pos,
         )
-        for processor in self.logitsprocs:
+        for processor in self.logits_processors:
             logits = processor.apply(logits, ctx)
-        # Not on the LogitsProcessor interface yet; forcing runs last so no
-        # stage can overwrite the forced end marker or weaken it by scaling.
+        # Forcing runs last so no stage can overwrite the forced end marker
+        # or weaken it by scaling.
         self.thinking_budget_state.apply(
             logits,
             expanded_idx_mapping,
