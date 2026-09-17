@@ -77,7 +77,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -441,25 +441,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        kv_b_proj_weight = get_and_maybe_dequant_weights(
-            self.kv_b_proj, out_dtype=act_dtype
-        ).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim),
-        ), f"{kv_b_proj_weight.shape=}"
-        kv_b_proj_weight = kv_b_proj_weight.view(
-            self.kv_lora_rank,
-            self.num_local_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-        # (L, N, V) -> (N, L, V)
-        replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
-        # (L, N, P) -> (N, P, L)
-        replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+        # The weight cache daemon exports the absorbed weights; recomputing
+        # them here would write into its shared allocations.
+        if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
+            self._absorb_kv_b_proj(act_dtype)
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
@@ -479,6 +464,27 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.register_buffer(
             "_k_scale_inv", self._k_scale.reciprocal().reshape(1), persistent=False
         )
+
+    def _absorb_kv_b_proj(self, act_dtype: torch.dtype) -> None:
+        kv_b_proj_weight = get_and_maybe_dequant_weights(
+            self.kv_b_proj, out_dtype=act_dtype
+        ).T
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_local_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), f"{kv_b_proj_weight.shape=}"
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_local_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        W_UK, W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        # (L, N, V) -> (N, L, V)
+        replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+        # (L, N, P) -> (N, P, L)
+        replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor) -> None:
         """Project latent attention output back to ``v`` via ``W_UV`` (bmm)."""
