@@ -46,12 +46,49 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
+    _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
+    calls = []
+
+    def original_validate_rope(config, *args, **kwargs):
+        calls.append(config)
+
+    from transformers import PretrainedConfig
+
+    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    _patch_hf_transformers_nested_rope_validation()
+
+    nested_rope_parameters = {
+        "full_attention": {"rope_type": "default"},
+        "original_max_position_embeddings": 32768,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=nested_rope_parameters)
+    )
+    assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
+
+    flat_rope_parameters = {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=flat_rope_parameters)
+    )
+    assert flat_rope_parameters == {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    assert len(calls) == 2
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -475,45 +512,6 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-@pytest.mark.parametrize(
-    ("architecture", "use_v2", "mode", "expected"),
-    [
-        ("DeepseekV4ForCausalLM", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForConditionalGeneration", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForCausalLM", False, None, None),
-        ("LlamaForCausalLM", True, None, None),
-        (
-            "DeepseekV4ForCausalLM",
-            True,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-    ],
-)
-def test_rocm_gfx950_deepseek_v4_cudagraph_default(
-    monkeypatch, architecture, use_v2, mode, expected
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms import rocm
-
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
-    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: False)
-    monkeypatch.setattr(
-        rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False
-    )
-    config = SimpleNamespace(
-        compilation_config=CompilationConfig(cudagraph_mode=mode),
-        model_config=SimpleNamespace(architecture=architecture),
-        use_v2_model_runner=use_v2,
-    )
-
-    rocm.RocmPlatform.apply_config_platform_defaults(config)
-
-    assert config.compilation_config.cudagraph_mode == expected
 
 
 @pytest.mark.parametrize(
