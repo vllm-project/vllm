@@ -1040,6 +1040,8 @@ fn atem_name_attr(attrs: &str) -> Option<String> {
 fn parameter_pair(input: &mut &str) -> ModalResult<(String, Value)> {
     let (attrs, raw) = seq!(
         _: literal(PARAMETER_OPEN),
+        // `\b` after `parameter`: the tag name must not run into an identifier.
+        _: peek(not(take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_'))),
         take_until(0.., ">"),
         _: literal(">"),
         take_until(0.., PARAMETER_CLOSE),
@@ -1515,6 +1517,22 @@ mod tests {
             parser.parse_chunk(" to=self<|message|>thinking xto=calc<|message|>").unwrap();
         output.append(parser.finish().unwrap());
         assert_eq!(output.reasoning_text(), "thinking xto=calc<|message|>");
+    }
+
+    #[test]
+    fn muse_glimmer_parameter_tag_word_boundary() {
+        // `<atem:parameterx …>` is not a parameter tag (the same `\b` guard
+        // the invoke opener has).
+        let text = format!(
+            "<|start|>assistant to=calc<|message|>\
+             <atem:function_calls>\n<atem:invoke name=\"calc\">\n{}{}</atem:invoke>\n\
+             </atem:function_calls><|eot|>",
+            "<atem:parameterx name=\"bad\">1</atem:parameter>\n",
+            param("x", "1"),
+        );
+        let output = assert_chunking_invariant(&text);
+
+        assert_eq!(first_call(&output).arguments, r#"{"x":1}"#);
     }
 
     #[test]
