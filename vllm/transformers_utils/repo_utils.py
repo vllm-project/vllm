@@ -351,7 +351,11 @@ def get_hf_file_bytes(
 
 
 def try_get_local_file(
-    model: str | Path, file_name: str, revision: str | None = "main"
+    model: str | Path,
+    file_name: str,
+    revision: str | None = "main",
+    *,
+    cache_dir: str | Path | None = None,
 ) -> Path | Any | None:
     """
     Try to get a local file from the HuggingFace repository.
@@ -372,7 +376,10 @@ def try_get_local_file(
     else:
         try:
             cached_filepath = try_to_load_from_cache(
-                repo_id=model, filename=file_name, revision=revision
+                repo_id=model,
+                filename=file_name,
+                revision=revision,
+                cache_dir=cache_dir,
             )
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
