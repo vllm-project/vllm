@@ -576,7 +576,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled():
+            if rocm_aiter_ops.is_fused_moe_situv2_enabled():
                 # AITER keeps bf16 activations below this token count, which
                 # would not match the fp8 a8w4 kernels the interleaved SiTU
                 # path is tuned for. The a16w4 path never reads it.

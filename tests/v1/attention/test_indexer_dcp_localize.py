@@ -307,6 +307,23 @@ def test_get_dcp_local_seq_lens_preserves_mtp_bounds_shape():
     torch.testing.assert_close(actual, expected)
 
 
+def test_get_dcp_local_seq_lens_reuses_device_rank_tensor(monkeypatch):
+    seq_lens = torch.tensor([0, 1, 7, 8, 17], dtype=torch.int32)
+    world = 4
+    rank = 2
+    rank_tensor = torch.tensor(rank, dtype=torch.int32)
+    expected = get_dcp_local_seq_lens(seq_lens, world, rank, 2)
+
+    def fail_tensor_construction(*args, **kwargs):
+        raise AssertionError("rank tensor must be reused")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "tensor", fail_tensor_construction)
+        actual = get_dcp_local_seq_lens(seq_lens, world, rank_tensor, 2)
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_get_dcp_local_seq_lens_must_run_after_decode_expansion():
     world = 2
     rank = 1
@@ -979,7 +996,7 @@ def test_pcp_plan_deinterleave_restores_global_order(
 
     monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
     monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.indexer.async_copy_to_gpu",
+        "vllm.v1.attention.backends.mla.indexer.async_tensor_h2d",
         lambda x, device: x.to(device),
     )
     scheduled = np.array(req_lens, dtype=np.int64)

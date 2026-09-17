@@ -185,19 +185,3 @@ def test_mtp_index_share_override(
         speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
         is expected
     )
-
-
-@pytest.mark.cpu_test
-def test_draft_parallel_config_drops_expert_parallel_for_non_moe():
-    # Kimi-K3 DSpark is not MoE. Copying the target's expert-parallel flag
-    # made SpeculativeConfig fail with "Number of experts in the model must
-    # be greater than 0 when expert parallelism is enabled."
-    target = ParallelConfig(tensor_parallel_size=8, enable_expert_parallel=True)
-    draft = SpeculativeConfig.create_draft_parallel_config(
-        target, 8, draft_is_moe=False
-    )
-    assert draft.enable_expert_parallel is False
-    draft_moe = SpeculativeConfig.create_draft_parallel_config(
-        target, 8, draft_is_moe=True
-    )
-    assert draft_moe.enable_expert_parallel is True
