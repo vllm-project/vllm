@@ -361,6 +361,48 @@ class _WorkerHandle:
         pass
 
 
+class _LayerRecordingWorkerHandle(_WorkerHandle):
+    def __init__(self):
+        self.load_calls = []
+        self.wait_calls = []
+
+    def load(self, plans):
+        self.load_calls.append(list(plans))
+        return super().load(plans)
+
+    def wait(self, job):
+        self.wait_calls.append(job)
+        return super().wait(job)
+
+
+def test_worker_waits_for_layers_independently():
+    handle = _LayerRecordingWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle)
+    plan = BlockTransferPlan(
+        key="layered",
+        block_id=1,
+        ranges=(
+            KVRange("layer1", 0, 1, 1000, 16, 16, 0),
+            KVRange("layer2", 0, 1, 2000, 16, 16, 16),
+        ),
+    )
+    worker.start_load_kv(
+        None,
+        UMBPConnectorMetadata(
+            load_plans=[plan],
+            load_requests={"req": [plan]},
+        ),
+    )
+
+    assert len(handle.load_calls) == 2
+    worker.wait_for_layer_load("layer1")
+    assert len(handle.wait_calls) == 1
+    assert worker.get_finished({"req"}) == (None, None)
+    worker.wait_for_layer_load("layer2")
+    assert len(handle.wait_calls) == 2
+    assert worker.get_finished({"req"}) == (None, {"req"})
+
+
 class _EmbeddedSchedulerHandle:
     def __init__(self, store):
         self.store = store
