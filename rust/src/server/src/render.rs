@@ -13,6 +13,7 @@ use vllm_chat::{
     ParserSelection, RendererSelection, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
+use vllm_text::backend::hf::HfOverrides;
 
 use crate::{
     HttpListenerMode, TlsConfig,
@@ -24,6 +25,8 @@ use crate::{
 #[derive(Debug)]
 pub struct RenderConfig {
     pub model: String,
+    pub revision: Option<String>,
+    pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     pub host: String,
     pub port: u16,
@@ -33,7 +36,7 @@ pub struct RenderConfig {
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    pub max_model_len: u32,
+    pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
     pub tls: Option<TlsConfig>,
 }
@@ -56,6 +59,9 @@ impl RenderConfig {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
+    /// Unlike `text.max_model_len()` this stays `None` when unset,
+    /// so model cards advertise `null` instead of the `u32::MAX`.
+    pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -64,6 +70,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
@@ -77,7 +85,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .context("failed to load renderer/tokenizer backends")?;
     let served_model_names =
         crate::effective_served_model_names(&config.model, &config.served_model_name);
-    let text = TextRequestProcessor::new(loaded.text_backend, config.max_model_len)
+    let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
+    let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
         config.tool_call_parser.clone(),
@@ -86,6 +95,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
+        max_model_len: config.max_model_len,
         text,
         chat,
     }))
@@ -145,6 +155,8 @@ mod tests {
         let error = serve_render(
             RenderConfig {
                 model: "test-model".to_string(),
+                revision: None,
+                hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),
                 port: 8000,
@@ -154,7 +166,7 @@ mod tests {
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: 128,
+                max_model_len: Some(128),
                 max_logprobs: None,
                 tls: None,
             },

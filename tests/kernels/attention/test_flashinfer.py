@@ -96,6 +96,7 @@ def _make_paged_kv_metadata(
         kv_indices         – CUDA int32, shape [total_blocks]
         kv_last_page_lens  – CPU int32, shape [num_seqs]
         block_tables       – CUDA int32, shape [num_seqs, max_blocks_per_seq]
+
     """
     num_seqs = len(kv_lens)
     max_blocks = (max(kv_lens) + block_size - 1) // block_size

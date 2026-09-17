@@ -270,6 +270,10 @@ class KDACheckpointMetadata:
 
 @dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
+    flashinfer_prefill_query_start_loc: torch.Tensor | None = None
+    flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
@@ -318,6 +322,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        additional_config = vllm_config.additional_config
+        self.use_flashinfer_prefill = (
+            isinstance(additional_config, dict)
+            and additional_config.get("kda_prefill_backend") == "flashinfer"
+        )
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
@@ -415,11 +424,36 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        spec_token_start = None
+        non_spec_token_start = None
         if num_spec_decodes == 0:
-            # The runner orders ordinary decodes before prefills.
-            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+            # V2 already excludes prefills from full decode graphs via has_prefill.
+            # Classify first chunks as prefills to mask recycled state;
+            # resumed one-token chunks can still use the decode kernels.
+            assert m.seq_lens_cpu_upper_bound is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            no_prior_state = (query_lens_cpu > 0) & (
+                m.seq_lens_cpu_upper_bound <= query_lens_cpu
             )
+            # Capture batches also have seq_len == query_len, but are not prefills.
+            if m.is_prefilling is not None:
+                no_prior_state &= m.is_prefilling
+            else:
+                no_prior_state = torch.zeros_like(no_prior_state)
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    m.replace(is_prefilling=no_prior_state),
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
+            )
+            # Exclude trailing padding from both prefill counts.
+            if num_prefills:
+                num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
+                num_prefill_tokens = (
+                    int(query_start_loc_cpu[num_decodes + num_prefills])
+                    - num_decode_tokens
+                )
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
@@ -510,6 +544,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
+
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                # check if spec / non spec tokens are continuous
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item() == 1:
+                    spec_first = active_spec_mask[0].item()
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
 
                 # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
@@ -721,6 +762,20 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 align=align,
             )
 
+        flashinfer_prefill_query_start_loc = None
+        flashinfer_prefill_seq_order = None
+        if self.use_flashinfer_prefill and num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
+                torch.int64
+            )
+            num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
+            num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+            if num_non_spec_tokens > num_non_spec_requests:
+                flashinfer_prefill_seq_order = torch.argsort(
+                    flashinfer_prefill_query_start_loc.diff(), descending=True
+                ).to(torch.int32)
+
         return KimiK3KDAMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -738,6 +793,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
+            flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
+            flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
             recoverssm_commit=recoverssm_commit,
             recoverssm_context=(
                 self._get_recoverssm_context()
