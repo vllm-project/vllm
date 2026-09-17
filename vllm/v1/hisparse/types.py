@@ -9,9 +9,10 @@ class SparseKVPageTransfer:
     """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
-    destination_block_id: int
-    source_block_ids: tuple[int, ...]
+    host_block_id: int
+    resident_block_ids: tuple[int, ...]
     after_forward: bool
+    restore: bool = False
 
 
 @dataclass(frozen=True)
