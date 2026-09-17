@@ -5941,7 +5941,7 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-types",
