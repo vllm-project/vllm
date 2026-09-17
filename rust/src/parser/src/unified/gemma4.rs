@@ -518,6 +518,7 @@ mod tests {
         UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
     };
     use crate::tool::Tool;
+    use crate::unified::test_utils::UnifiedParserTestExt;
     use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
     use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
@@ -530,25 +531,6 @@ mod tests {
             .with_special_token(CHANNEL_START, CHANNEL_START_ID)
             .with_special_token(CHANNEL_END, CHANNEL_END_ID)
             .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
-    }
-
-    trait UnifiedParserTestExt {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput>;
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput>;
-    }
-
-    impl UnifiedParserTestExt for Gemma4UnifiedParser {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = UnifiedParserOutput::default();
-            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
-            Ok(output)
-        }
-
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = self.parse_chunk(text)?;
-            output.append(self.finish()?);
-            Ok(output)
-        }
     }
 
     trait UnifiedOutputTestExt {

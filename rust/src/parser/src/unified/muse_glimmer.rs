@@ -900,15 +900,15 @@ mod tests {
 
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
-    use vllm_tokenizer::DecodedText;
     use vllm_tokenizer::Tokenizer as _;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::{ATEM_PREFIX, EOT, MuseGlimmerUnifiedParser, START};
-    use crate::tool::{Tool, ToolCallDelta};
-    use crate::unified::{
-        UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
+    use crate::tool::Tool;
+    use crate::unified::test_utils::{
+        UnifiedOutputTestExt, UnifiedParserTestExt, char_chunks, collect_stream, first_call,
     };
+    use crate::unified::{UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 
     // The real Muse Glimmer tokenizer ids for the framing tokens.
     const START_ID: u32 = 200022;
@@ -922,63 +922,6 @@ mod tests {
             .with_special_token("<|message|>", MESSAGE_ID)
             .with_special_token("<|eom|>", EOM_ID)
             .with_special_token(EOT, EOT_ID)
-    }
-
-    trait UnifiedParserTestExt {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput>;
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput>;
-    }
-
-    impl UnifiedParserTestExt for MuseGlimmerUnifiedParser {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = UnifiedParserOutput::default();
-            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
-            Ok(output)
-        }
-
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = self.parse_chunk(text)?;
-            output.append(self.finish()?);
-            Ok(output)
-        }
-    }
-
-    trait UnifiedOutputTestExt {
-        fn normal_text(&self) -> String;
-        fn reasoning_text(&self) -> String;
-        fn calls(&self) -> Vec<ToolCallDelta>;
-    }
-
-    impl UnifiedOutputTestExt for UnifiedParserOutput {
-        fn normal_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn reasoning_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn calls(&self) -> Vec<ToolCallDelta> {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
     }
 
     fn test_parser() -> MuseGlimmerUnifiedParser {
@@ -996,24 +939,6 @@ mod tests {
             })
             .collect();
         MuseGlimmerUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap()
-    }
-
-    fn collect_stream(
-        parser: &mut MuseGlimmerUnifiedParser,
-        chunks: &[&str],
-    ) -> UnifiedParserOutput {
-        let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            output.append(parser.parse_chunk(chunk).unwrap());
-        }
-        output.append(parser.finish().unwrap());
-        output
-    }
-
-    /// Split `text` into small chunks to stress marker-split handling.
-    fn char_chunks(text: &str, size: usize) -> Vec<String> {
-        let chars: Vec<char> = text.chars().collect();
-        chars.chunks(size).map(|chunk| chunk.iter().collect()).collect()
     }
 
     /// Concatenated events must be identical whether the turn arrives whole or
@@ -1043,10 +968,6 @@ mod tests {
             "<|start|>assistant to={name}<|message|><atem:function_calls>\n{}</atem:function_calls>{close}",
             invoke(name, params)
         )
-    }
-
-    fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
-        output.calls().first().expect("expected one tool call").clone()
     }
 
     #[test]

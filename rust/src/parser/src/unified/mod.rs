@@ -9,6 +9,8 @@ mod hy;
 mod inkling;
 mod kimi_k3;
 mod muse_glimmer;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
