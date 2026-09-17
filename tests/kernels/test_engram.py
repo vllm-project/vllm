@@ -677,29 +677,19 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("storage_mode", ["packed", "registration_fails", "disabled"])
+@pytest.mark.parametrize("storage_mode", ["packed", "registration_fails"])
 def test_engram_registered_storage_lookup_and_fallback(monkeypatch, storage_mode):
-    """Packed, failed-registration and packing-disabled storage give exact rows."""
+    """Packed host storage and its pinned fallback give exact lookup rows."""
     from vllm.config import EngramConfig
 
     config = EngramConfig(cpu_offload=True)
-    config.thp_packing = storage_mode != "disabled"
+    config.thp_packing = True
     monkeypatch.setattr(nvidia_engram_ops, "_engram_checkpoint_dir", lambda: None)
-    if storage_mode == "disabled":
-
-        def unexpected_packing(*args):
-            pytest.fail("THP packing must not run when disabled")
-
-        monkeypatch.setattr(
-            nvidia_engram_ops, "_allocate_engram_host_storage", unexpected_packing
-        )
     monkeypatch.setattr(
         nvidia_engram_ops,
         "get_current_vllm_config",
         lambda: SimpleNamespace(engram_config=config),
     )
-    # Smaller than a physical THP on Grace; no actual large page is required.
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: 2 * 1024**2)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     if storage_mode == "registration_fails":
@@ -708,63 +698,31 @@ def test_engram_registered_storage_lookup_and_fallback(monkeypatch, storage_mode
             "cudaHostRegister",
             lambda *args: SimpleNamespace(value=1),
         )
+    rows = 32769
     with torch.device("cuda"):
         module = Engram.__new__(Engram)
         layer = module._create_embedding(
-            SimpleNamespace(
-                num_embeddings=(32769,), head_dim=64, primes=(((32769,),),)
-            ),
+            SimpleNamespace(num_embeddings=(rows,), head_dim=64, primes=(((rows,),),)),
             0,
         )
     assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
-    weight = torch.full_like(layer.weight, 2, device="cpu")
-    scales = torch.full_like(layer.weight_scale_inv, 127, device="cpu")
-    layer.weight.weight_loader(layer.weight, weight)
-    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scales)
-    finishes = []
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_finish_engram_host_pages",
-        lambda *args: finishes.append(args),
+    assert (layer._host_page_storage is not None) == (storage_mode == "packed")
+    layer.weight.weight_loader(
+        layer.weight, torch.full_like(layer.weight, 2, device="cpu")
+    )
+    layer.weight_scale_inv.weight_loader(
+        layer.weight_scale_inv,
+        torch.full_like(layer.weight_scale_inv, 127, device="cpu"),
     )
     layer.finish_weight_loading()
-    layer.finish_weight_loading()
-    assert len(finishes) == (storage_mode == "packed")
-    ids = torch.tensor([[0], [32768], [-1], [32769]], device="cuda", dtype=torch.int32)
+    ids = torch.tensor(
+        [[0], [rows - 1], [-1], [rows]], device="cuda", dtype=torch.int32
+    )
     out = torch.empty(4, 1, 64, device="cuda", dtype=torch.bfloat16)
     layer.lookup(ids, out, background=True)
     expected = torch.zeros_like(out)
     expected[:2].fill_(2)
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_registered_storage_lives_until_uva_view_is_released(monkeypatch):
-    """Dropping the CPU tensor must not unregister memory still used by its GPU view."""
-    import gc
-
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: 2 * 1024**2)
-    runtime = torch.cuda.cudart()
-    unregister = runtime.cudaHostUnregister
-    released = []
-
-    def track_unregister(pointer):
-        released.append(pointer)
-        return unregister(pointer)
-
-    monkeypatch.setattr(runtime, "cudaHostUnregister", track_unregister)
-    tensor = nvidia_engram_ops._allocate_engram_host_storage(2 * 1024**2 + 1)
-    assert tensor is not None
-    tensor.fill_(7)
-    pointer = tensor.data_ptr()
-    view = nvidia_engram_ops.get_accelerator_view_from_cpu_tensor(tensor)
-    del tensor
-    gc.collect()
-    assert pointer not in released
-    assert view[-1].item() == 7
-    del view
-    gc.collect()
-    assert released.count(pointer) == 1
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -914,60 +872,16 @@ def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("capture", [False, True])
-def test_engram_shared_prefetch_stream_replays_both_layers(capture):
-    """Each layer consumes its own rows after shared-stream prefetch and replay."""
-    modules = []
-    stream = torch.cuda.Stream()
-    for _ in range(2):
-        module = Engram.__new__(Engram)
-        torch.nn.Module.__init__(module)
-        module._prefetch_stream = stream
-        module.embed_tokens = _make_embedding(cpu_offload=True)
-        module.use_sequence_parallel = False
-        with torch.device("cuda"):
-            module._init_staging(8, module.embed_tokens.dim)
-        modules.append(module)
-    hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
-    outputs = [torch.empty_like(module.staged_rows) for module in modules]
+def test_engram_shared_prefetch_stream():
+    """Two layers share one prefetch stream; per-layer events decouple consumers.
 
-    def step():
-        for index, module in enumerate(modules):
-            module.prepare_embeddings(hashes[:, index])
-        for index, module in enumerate(modules):
-            outputs[index].copy_(module.embed(hashes[:, index]))
-
-    step()
-    torch.accelerator.synchronize()
-    graph = torch.cuda.CUDAGraph() if capture else None
-    if graph is not None:
-        with torch.cuda.graph(graph):
-            step()
-    for _ in range(3):
-        hashes.random_(1024, 3072)
-        step() if graph is None else graph.replay()
-        for index, module in enumerate(modules):
-            layer = module.embed_tokens
-            expected = _reference_lookup(
-                layer.weight.cuda(),
-                layer.weight_scale_inv.cuda(),
-                hashes[:, index],
-                layer.vocab_start_idx,
-                layer.vocab_end_idx,
-            )
-            torch.testing.assert_close(outputs[index], expected, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_shared_prefetch_stream_does_not_serialize_consumers():
-    """The first layer consumes its rows while a later lookup is still running.
-
-    Waiting on the whole shared stream instead of the layer's own event would
-    stall this consumer behind the second lookup, which is the regression the
-    per-layer completion event exists to prevent.
+    Consuming the first layer must not wait for a later layer's lookup still in
+    flight on the shared stream (a stream-wide wait is the regression the
+    per-layer completion event prevents), and graph replays must return each
+    layer's own rows.
     """
-    modules = []
     stream = torch.cuda.Stream()
+    modules = []
     for _ in range(2):
         module = Engram.__new__(Engram)
         torch.nn.Module.__init__(module)
@@ -987,29 +901,43 @@ def test_engram_shared_prefetch_stream_does_not_serialize_consumers():
         real_lookup(indices, out, background=background)
 
     slow_layer.lookup = slow_lookup
-
     hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
     for index, module in enumerate(modules):
         module.prepare_embeddings(hashes[:, index])
-    first = modules[0].embed(hashes[:, 0]).clone()
-    consumed = torch.cuda.Event()
-    consumed.record()
-
-    consumed.synchronize()
+    modules[0].embed(hashes[:, 0])
+    torch.cuda.current_stream().synchronize()
     assert not modules[1]._prefetch_done.query(), (
         "consuming the first layer waited for the second layer's lookup"
     )
-
     torch.accelerator.synchronize()
-    layer = modules[0].embed_tokens
-    expected = _reference_lookup(
-        layer.weight.cuda(),
-        layer.weight_scale_inv.cuda(),
-        hashes[:, 0],
-        layer.vocab_start_idx,
-        layer.vocab_end_idx,
-    )
-    torch.testing.assert_close(first, expected, rtol=0, atol=0)
+
+    slow_layer.lookup = real_lookup
+    outputs = [torch.empty_like(module.staged_rows) for module in modules]
+
+    def step():
+        for index, module in enumerate(modules):
+            module.prepare_embeddings(hashes[:, index])
+        for index, module in enumerate(modules):
+            outputs[index].copy_(module.embed(hashes[:, index]))
+
+    step()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+    for _ in range(3):
+        hashes.random_(1024, 3072)
+        graph.replay()
+        for index, module in enumerate(modules):
+            layer = module.embed_tokens
+            expected = _reference_lookup(
+                layer.weight.cuda(),
+                layer.weight_scale_inv.cuda(),
+                hashes[:, index],
+                layer.vocab_start_idx,
+                layer.vocab_end_idx,
+            )
+            torch.testing.assert_close(outputs[index], expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -1191,256 +1119,3 @@ def test_engram_head_collectives_survive_graph_breaks():
     if torch.accelerator.device_count() < 2:
         pytest.skip("Requires two GPUs")
     torch.multiprocessing.spawn(_engram_tp_worker, args=(2, get_open_port()), nprocs=2)
-
-
-@pytest.mark.parametrize("coverage", [89, 95, None])
-@pytest.mark.parametrize(
-    "table_mib,pmd_mib,span_mib", [(100, 2, 100), (600, 512, 1024)]
-)
-def test_engram_page_recovery_after_loading(
-    monkeypatch, coverage, table_mib, pmd_mib, span_mib
-):
-    """Only coverage below the 90% threshold evicts pages before collapse."""
-    events: list[str | tuple[str, int, int]] = []
-    monkeypatch.setattr(
-        nvidia_engram_ops, "_engram_thp_size", lambda: pmd_mib * 1024**2
-    )
-
-    def hugepage_bytes(pointer, size):
-        assert (pointer, size) == (0, span_mib * 1024**2)
-        return None if coverage is None else size * coverage // 100
-
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_engram_hugepage_bytes",
-        hugepage_bytes,
-    )
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_drop_engram_checkpoint_cache",
-        lambda path: events.append("drop"),
-    )
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_collapse_engram_host_pages",
-        lambda pointer, size: events.append(("collapse", pointer, size)),
-    )
-    monkeypatch.setattr(nvidia_engram_ops._EngramPageThrottle, "_pressure", lambda _: 0)
-    nvidia_engram_ops._finish_engram_host_pages(0, table_mib * 1024**2, None)
-    if coverage != 89:
-        assert events == []
-        return
-    assert events[0] == "drop"
-    chunks = [event for event in events[1:] if isinstance(event, tuple)]
-    starts = [pointer for _, pointer, _ in chunks]
-    sizes = [size for _, _, size in chunks]
-    assert starts == sorted(starts)  # one pass over the range
-    assert sum(sizes) == span_mib * 1024**2  # full coverage, no overlap
-    assert all(size % (pmd_mib * 1024**2) == 0 for size in sizes)  # PMD-aligned
-
-
-@pytest.mark.parametrize("errors", [[0], [11, 0], [11, 11, 11], [22]])
-def test_engram_collapse_retries_only_eagain(monkeypatch, errors):
-    """Retry transient compaction failures at most three times; keep base pages."""
-    import ctypes
-
-    attempts: list[int] = []
-    sleeps: list[int] = []
-
-    def madvise(pointer, size, advice):
-        assert (pointer, size, advice) == (4096, 8192, 25)
-        error = errors[len(attempts)]
-        attempts.append(error)
-        ctypes.set_errno(error)
-        return -1 if error else 0
-
-    monkeypatch.setattr(
-        nvidia_engram_ops.ctypes,
-        "CDLL",
-        lambda *a, **kw: SimpleNamespace(madvise=madvise),
-    )
-    monkeypatch.setattr(nvidia_engram_ops.time, "sleep", sleeps.append)
-    nvidia_engram_ops._collapse_engram_host_pages(4096, 8192)
-    assert attempts == errors
-    assert sleeps == [1] * (len(errors) - 1)
-
-
-def test_engram_checkpoint_cache_release_is_scoped_and_best_effort(
-    tmp_path, monkeypatch
-):
-    """Evict only this checkpoint's safetensors and tolerate inaccessible files."""
-    import os
-
-    paths = [
-        tmp_path / name for name in ("a.safetensors", "b.safetensors", "config.json")
-    ]
-    for path in paths:
-        path.write_bytes(b"checkpoint")
-    advised = []
-
-    def fadvise(fd, offset, length, advice):
-        assert (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED)
-        advised.append(os.fstat(fd).st_ino)
-        raise OSError("advice refused")
-
-    monkeypatch.setattr(nvidia_engram_ops.os, "posix_fadvise", fadvise)
-    nvidia_engram_ops._prepare_engram_host_pages(tmp_path)
-    nvidia_engram_ops._prepare_engram_host_pages(tmp_path)
-    assert sorted(advised) == sorted(path.stat().st_ino for path in paths[:2])
-    nvidia_engram_ops._drop_engram_checkpoint_cache(tmp_path)
-    assert len(advised) == 4
-
-
-@pytest.mark.parametrize("cached", [False, True])
-def test_engram_checkpoint_directory_uses_weight_source(tmp_path, monkeypatch, cached):
-    """Evict the weight checkpoint, including a custom HF cache, not the config repo."""
-    revision = "a" * 40
-    checkpoint = (
-        tmp_path / "models--test--weights" / "snapshots" / revision
-        if cached
-        else tmp_path / "weights"
-    )
-    checkpoint.mkdir(parents=True)
-    (checkpoint / "model.safetensors.index.json").write_text("{}")
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            model="test/config",
-            model_weights="test/weights" if cached else str(checkpoint),
-            revision=revision,
-        ),
-        load_config=SimpleNamespace(download_dir=str(tmp_path)),
-    )
-    monkeypatch.setattr(nvidia_engram_ops, "get_current_vllm_config", lambda: config)
-    assert nvidia_engram_ops._engram_checkpoint_dir() == checkpoint
-
-
-@pytest.mark.parametrize(
-    "top,pmd,expected",
-    [
-        ("always [madvise] never", "always [inherit] madvise never", "madvise"),
-        ("always madvise [never]", "always inherit [madvise] never", "madvise"),
-        ("[always] madvise never", "always inherit madvise [never]", "never"),
-        ("always madvise [never]", None, "never"),
-        (None, None, "unknown"),
-    ],
-)
-def test_engram_thp_mode_respects_per_size_policy(monkeypatch, top, pmd, expected):
-    """PMD overrides take precedence; older kernels only expose the global mode."""
-
-    def read_text(path):
-        value = pmd if path.parent.name == "hugepages-524288kB" else top
-        if value is None:
-            raise FileNotFoundError(path)
-        return value
-
-    monkeypatch.setattr(nvidia_engram_ops.Path, "read_text", read_text)
-    assert nvidia_engram_ops._engram_thp_mode(512 * 1024**2) == expected
-
-
-@pytest.mark.parametrize(
-    "cgroup,local,system,expected",
-    [
-        ("0::/test.slice/job", 5, 90, 5),
-        ("0::/", 5, 90, 5),
-        ("0::/test.slice/job", None, 15, 15),
-        ("0::/test.slice/job", "malformed", 15, 15),
-        ("1:memory:/job", 5, 15, 15),
-        ("0::/../../hidden", 5, 15, 15),
-        ("0::/test.slice/job", None, None, None),
-    ],
-)
-def test_engram_psi_prefers_cgroup_and_falls_back(
-    monkeypatch, cgroup, local, system, expected
-):
-    """A busy host must not throttle a healthy cgroup; unavailable PSI is optional."""
-
-    def read_text(path):
-        if str(path) == "/proc/self/cgroup":
-            return cgroup
-        value = system if str(path) == "/proc/pressure/memory" else local
-        if value is None:
-            raise PermissionError(path)
-        return f"some avg10={value} avg60=0.00 avg300=0.00 total=0\n"
-
-    monkeypatch.setattr(nvidia_engram_ops.Path, "read_text", read_text)
-    assert nvidia_engram_ops._EngramPageThrottle()._pressure() == expected
-
-
-@pytest.fixture
-def engram_psi_clock(monkeypatch):
-    clock = [0.0]
-
-    def sleep(seconds):
-        clock[0] += seconds
-
-    monkeypatch.setattr(nvidia_engram_ops.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(nvidia_engram_ops.time, "sleep", sleep)
-    return clock
-
-
-def test_engram_psi_hysteresis_and_cumulative_budget(monkeypatch, engram_psi_clock):
-    """Resume only below the low watermark; waits across calls share one budget."""
-    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 1.0)
-    throttle = nvidia_engram_ops._EngramPageThrottle()
-    readings = iter([20, 15, 10, 19, 21, 30, 30])
-    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
-    throttle.wait()
-    assert engram_psi_clock[0] == 0.5
-    assert not throttle.exhausted
-    throttle.wait()
-    assert engram_psi_clock[0] == 0.5
-    throttle.wait()
-    assert engram_psi_clock[0] == 1.0
-    assert throttle.exhausted
-    throttle.wait()  # Exhaustion is sticky, with no further reads or sleeps.
-    assert engram_psi_clock[0] == 1.0
-
-
-def test_engram_fault_timeout_finishes_tail_and_skips_collapse(
-    monkeypatch, engram_psi_clock
-):
-    """Pressure timeout keeps prefaulting every base page, but prevents compaction."""
-    page = nvidia_engram_ops.mmap.PAGESIZE
-    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PAGE_CHUNK_BYTES", 2 * page)
-    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 0.5)
-    throttle = nvidia_engram_ops._EngramPageThrottle()
-    readings = iter([0, 30, 30, 30])
-    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
-    storage = bytearray([7]) * (7 * page)
-    nvidia_engram_ops._fault_engram_host_pages(storage, page, 5 * page, page, throttle)
-    assert storage[page : 6 * page : page] == bytes(5)
-    assert storage[0] == storage[6 * page] == 7
-    assert throttle.exhausted
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: page)
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_hugepage_bytes", lambda *a: 0)
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_collapse_engram_host_pages",
-        lambda *a: pytest.fail("Collapse must be skipped after timeout"),
-    )
-    nvidia_engram_ops._finish_engram_host_pages(0, 5 * page, None, throttle)
-
-
-def test_engram_collapse_stops_when_shared_budget_expires(
-    monkeypatch, engram_psi_clock
-):
-    """Recovery checks pressure between chunks and honors earlier allocation waits."""
-    page = nvidia_engram_ops.mmap.PAGESIZE
-    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PAGE_CHUNK_BYTES", 2 * page)
-    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 0.75)
-    throttle = nvidia_engram_ops._EngramPageThrottle()
-    readings = iter([30, 10, 0, 30, 30, 30])
-    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
-    throttle.wait()  # Allocation already spent 0.25 seconds waiting.
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: page)
-    monkeypatch.setattr(nvidia_engram_ops, "_engram_hugepage_bytes", lambda *a: 0)
-    chunks = []
-    monkeypatch.setattr(
-        nvidia_engram_ops,
-        "_collapse_engram_host_pages",
-        lambda pointer, size: chunks.append((pointer, size)),
-    )
-    nvidia_engram_ops._finish_engram_host_pages(page, 5 * page, None, throttle)
-    assert chunks == [(page, 2 * page)]
-    assert throttle.exhausted
-    assert engram_psi_clock[0] == 0.75

@@ -57,12 +57,10 @@ class EngramConfig:
     /dev/shm capacity and a shared IPC namespace."""
 
     thp_packing: bool = False
-    """Request transparent huge pages for private DeepSeek-V4.1 host tables.
-    Releases cached checkpoint pages before pre-faulting the table and retries
-    huge-page collapse after loading. This can increase startup latency and
-    discard the warm checkpoint cache. Ordinary pages remain usable if recovery
-    fails. Rounds each table up to a PMD boundary, which can increase resident
-    memory. Requires CPU offload; not supported with DP shared storage now."""
+    """Request transparent huge pages for private CPU-offloaded host tables.
+    May increase startup latency and discards the cached checkpoint pages.
+    Falls back to ordinary pinned pages when huge pages are unavailable.
+    Requires cpu_offload; incompatible with dp_shared_memory."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
