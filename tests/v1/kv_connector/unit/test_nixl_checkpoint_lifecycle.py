@@ -258,10 +258,11 @@ def test_transfer_results_report_ids_drained_during_quiesce() -> None:
     worker._recving_transfers = {}
     worker._recving_metadata = {}
     worker._failed_recv_reqs = queue.Queue()
+    worker._recv_failures = set()
     worker._replicated_pcp_done_sending = set()
     worker._reqs_to_send = {}
     worker._get_new_notifs = lambda: set()
-    worker._pop_done_transfers = lambda _transfers: set()
+    worker._pop_done_transfers = lambda _transfers: (set(), set())
     worker._quiesce_drained_sending = {"sent-1"}
     worker._quiesce_drained_recving = {"recv-1", "failed-1"}
     worker._quiesce_drained_failed = {"failed-1"}
