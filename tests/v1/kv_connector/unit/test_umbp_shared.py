@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+import threading
+import time
 
 import pytest
 import torch
@@ -335,6 +337,45 @@ def test_scheduler_tracks_consecutive_load_plan():
         "umbp:vllm:v1:test:tp0:pcp0:dcp0:pp0:g0:61",
         "umbp:vllm:v1:test:tp0:pcp0:dcp0:pp0:g0:62",
     ]
+
+
+def test_scheduler_async_lookup_defers_then_returns_hit():
+    gate = threading.Event()
+
+    class _GatedHandle(_SchedulerHandle):
+        def lookup(self, keys):
+            gate.wait(timeout=5)
+            return [True] * len(keys)
+
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {
+                "mode": "embedded",
+                "lookup_async": True,
+                "load_async": False,
+            }
+        ),
+        _kv_cache_config(),
+        _GatedHandle([]),
+        BlockIdentityCodec(UMBPNamespace("async")),
+    )
+    request = SimpleNamespace(
+        request_id="async",
+        num_tokens=32,
+        block_hashes=[b"a", b"b"],
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+    gate.set()
+    result = (None, False)
+    for _ in range(100):
+        result = scheduler.get_num_new_matched_tokens(request, 0)
+        if result != (None, False):
+            break
+        time.sleep(0.01)
+    scheduler.close()
+
+    assert result == (32, False)
 
 
 def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():

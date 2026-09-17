@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -58,6 +59,7 @@ class UMBPStoreConnectorScheduler:
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
         self.enable_lookup = bool(extra.get("enable_lookup", True))
+        self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         if extra.get("enable_partial_hash_hits", False):
             raise ValueError(
@@ -72,6 +74,11 @@ class UMBPStoreConnectorScheduler:
         self._pending_loads: dict[str, list[BlockTransferPlan]] = {}
         self._load_specs: dict[str, LoadSpec] = {}
         self._lookup_states: dict[str, LookupState] = {}
+        self._lookup_futures: dict[str, Future[list[bool]]] = {}
+        self._lookup_executor = ThreadPoolExecutor(
+            max_workers=int(extra.get("lookup_workers", 2)),
+            thread_name_prefix="umbp-lookup",
+        )
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._next_generation = 0
@@ -135,11 +142,28 @@ class UMBPStoreConnectorScheduler:
                 block_hash, self.topology, group_ids
             )
         ]
-        try:
-            hits = list(self.runtime.lookup(keys))
-        except Exception as exc:
-            lookup_state.fail(str(exc))
-            return 0, False
+        if self.lookup_async:
+            future = self._lookup_futures.get(request.request_id)
+            if future is None:
+                future = self._lookup_executor.submit(
+                    lambda: list(self.runtime.lookup(keys))
+                )
+                self._lookup_futures[request.request_id] = future
+                return None, False
+            if not future.done():
+                return None, False
+            self._lookup_futures.pop(request.request_id, None)
+            try:
+                hits = future.result()
+            except Exception as exc:
+                lookup_state.fail(str(exc))
+                return 0, False
+        else:
+            try:
+                hits = list(self.runtime.lookup(keys))
+            except Exception as exc:
+                lookup_state.fail(str(exc))
+                return 0, False
         if len(hits) != len(keys):
             lookup_state.fail("lookup returned an invalid result length")
             return 0, False
@@ -234,6 +258,9 @@ class UMBPStoreConnectorScheduler:
             self._request_trackers.pop(request_id, None)
             self._requests.pop(request_id, None)
             self._lookup_states.pop(request_id, None)
+            future = self._lookup_futures.pop(request_id, None)
+            if future is not None:
+                future.cancel()
         for request in scheduler_output.scheduled_new_reqs:
             load_plans = self._pending_loads.pop(request.req_id, [])
             self._load_specs.pop(request.req_id, None)
@@ -429,6 +456,9 @@ class UMBPStoreConnectorScheduler:
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
+        future = self._lookup_futures.pop(request.request_id, None)
+        if future is not None:
+            future.cancel()
         return False, None
 
     def register_finished_partial_tail(
@@ -507,4 +537,5 @@ class UMBPStoreConnectorScheduler:
         return bool(self._pinned_store_blocks)
 
     def close(self) -> None:
+        self._lookup_executor.shutdown(wait=True, cancel_futures=True)
         self.runtime.close()
