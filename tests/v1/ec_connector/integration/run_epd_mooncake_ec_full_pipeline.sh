@@ -13,7 +13,7 @@
 #   MODEL                    HF model id (default: Qwen/Qwen2.5-VL-3B-Instruct)
 #   GPU_SINGLE / GPU_E / GPU_PD   GPU ids (defaults 0 / 0 / 1)
 #   ENDPOINT_PORT, ENCODE_PORT, PREFILL_DECODE_PORT
-#   EPD_REGISTRY_ADDR           proxy registry address
+#   EC_MOONCAKE_RESERVATION_HOST  consumer control host (default 127.0.0.1)
 #   MOONCAKE_EC_PROTOCOL        tcp | rdma (default tcp)
 #   USE_MM_PROMPTS              1 (default) or 0 for text-only quick sanity
 #   TIMEOUT_SECONDS             wait_for_server timeout (default 1200)
@@ -45,9 +45,11 @@ PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19537}"
 ENDPOINT_PORT="${ENDPOINT_PORT:-10002}"
 BASELINE_PORT="${BASELINE_PORT:-10003}"
 
-EPD_REGISTRY_ADDR="${EPD_REGISTRY_ADDR:-tcp://127.0.0.1:19019}"
+EC_MOONCAKE_RESERVATION_HOST="${EC_MOONCAKE_RESERVATION_HOST:-127.0.0.1}"
+EC_MOONCAKE_RESERVATION_PORT="${EC_MOONCAKE_RESERVATION_PORT:-19019}"
 MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-tcp}"
-export EPD_REGISTRY_ADDR
+export EC_MOONCAKE_RESERVATION_HOST
+export EC_MOONCAKE_RESERVATION_PORT
 export MOONCAKE_EC_PROTOCOL
 if [[ "$MOONCAKE_EC_PROTOCOL" == "tcp" ]]; then
   # TransferEngine may otherwise auto-select RDMA on hosts with an HCA.
@@ -72,7 +74,6 @@ print(json.dumps({
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
-        "proxy_registry_addr": os.environ["EPD_REGISTRY_ADDR"],
     },
 }, separators=(",", ":")))
 PY
@@ -83,11 +84,24 @@ import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
+    "ec_ip": os.environ["EC_MOONCAKE_RESERVATION_HOST"],
+    "ec_port": int(os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")),
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "tcp"),
-        "proxy_registry_addr": os.environ["EPD_REGISTRY_ADDR"],
     },
 }, separators=(",", ":")))
+PY
+)
+
+EC_MOONCAKE_RESERVATION_ADDR=$("$PYTHON_BIN" <<'PY'
+import os
+
+from vllm.utils.network_utils import make_zmq_path
+
+print(make_zmq_path(
+    "tcp", os.environ["EC_MOONCAKE_RESERVATION_HOST"],
+    int(os.environ["EC_MOONCAKE_RESERVATION_PORT"]),
+))
 PY
 )
 
@@ -183,23 +197,10 @@ run_baseline() {
 run_epd_mooncake() {
   echo "================================"
   echo "EPD 1E + 1PD with ECMooncakeConnector"
-  echo "Registry: $EPD_REGISTRY_ADDR"
+  echo "Reservation port on consumer: $EC_MOONCAKE_RESERVATION_PORT"
   echo "Mooncake protocol: $MOONCAKE_EC_PROTOCOL"
   echo "================================"
   cleanup_instances
-
-  echo "Starting EPD proxy on $ENDPOINT_PORT"
-  "$PYTHON_BIN" "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
-    --host "0.0.0.0" \
-    --port "$ENDPOINT_PORT" \
-    --registry-address "$EPD_REGISTRY_ADDR" \
-    >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
-  local PROXY_PID=$!
-  PIDS+=("$PROXY_PID")
-  wait_for_server "$ENDPOINT_PORT" "$PROXY_PID" || {
-    echo "Proxy failed to start"
-    return 1
-  }
 
   echo "Starting ENCODER on GPU $GPU_E port $ENCODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
@@ -240,6 +241,21 @@ run_epd_mooncake() {
   echo "Waiting for PD..."
   wait_for_server "$PREFILL_DECODE_PORT" "$PD_PID" || { echo "PD failed to start"; return 1; }
 
+  echo "Starting EPD proxy on $ENDPOINT_PORT"
+  "$PYTHON_BIN" "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+    --host "0.0.0.0" \
+    --port "$ENDPOINT_PORT" \
+    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
+    --prefill-servers-urls "disable" \
+    --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
+    --ec-consumer-zmq-addrs \
+      "$EC_MOONCAKE_RESERVATION_ADDR" \
+    >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
+  local PROXY_PID=$!
+  PIDS+=("$PROXY_PID")
+
+  echo "Waiting for proxy..."
+  wait_for_server "$ENDPOINT_PORT" "$PROXY_PID" || { echo "Proxy failed to start"; return 1; }
   curl -s "http://127.0.0.1:${ENDPOINT_PORT}/health" || true
   echo ""
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dynamic registration and liveness for the EPD proxy's instance registry."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -49,12 +49,8 @@ class TestRegistration:
         assert registry.register(record) is False
         assert registry.urls(ENCODE) == ["http://e0:8000"]
 
-    def test_consumer_reports_its_own_transfer_addresses(self, registry):
-        """Only the EC consumer knows these, so they ride with its record.
-
-        Deriving them from a positionally-aligned CLI list instead breaks the
-        moment an instance is added or removed.
-        """
+    def test_transfer_addresses_stay_with_the_registered_consumer(self, registry):
+        """Roster updates must not shift a consumer's transfer addresses."""
         registry.register(
             InstanceRecord(
                 DECODE,
@@ -94,174 +90,44 @@ class TestLiveness:
         assert registry.status()["encode"]["evicted"] == ["http://e0:8000"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("is_static", [False, True])
+    @pytest.mark.parametrize("role", [ENCODE, DECODE])
     async def test_a_recovered_instance_rejoins_without_re_registering(
-        self, registry, is_static
+        self, registry, role
     ):
         """Restarting every encoder to recover from a blip is not acceptable."""
-        role = DECODE if is_static else ENCODE
-        registry.register(InstanceRecord(role, "http://e0:8000", is_static=is_static))
+        registry.register(InstanceRecord(role, "http://e0:8000"))
         for _ in range(registry._fail_threshold):
             await _probe_round(registry, healthy=set())
         assert registry.urls(role) == []
 
-        if is_static:
-            await _probe_round(registry, healthy=set(), now=120)
-
-        await _probe_round(registry, healthy={"http://e0:8000"}, now=121)
+        await _probe_round(registry, healthy={"http://e0:8000"}, now=1)
         assert registry.urls(role) == ["http://e0:8000"]
 
     @pytest.mark.asyncio
-    async def test_a_heartbeat_does_not_override_failed_health_checks(self, registry):
-        record = InstanceRecord(ENCODE, "http://e0:8000", engine_id="engine")
+    async def test_re_registration_does_not_override_failed_health_checks(
+        self, registry
+    ):
+        record = InstanceRecord(ENCODE, "http://e0:8000")
         registry.register(record)
         for _ in range(registry._fail_threshold):
             await _probe_round(registry, healthy=set())
         registry.register(record)
         assert registry.urls(ENCODE) == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("healthy", [False, True])
+    async def test_inflight_probe_cannot_restore_unregistered_instance(
+        self, registry, healthy
+    ):
+        record = InstanceRecord(ENCODE, "http://e0:8000")
+        registry.register(record)
+        for _ in range(registry._fail_threshold):
+            await _probe_round(registry, healthy=set())
 
-class TestSelfRegistration:
-    """What an instance reports, and when it reports at all."""
+        async def probe(self, session, url):
+            registry.unregister(url)
+            return healthy
 
-    @pytest.mark.parametrize(
-        "host,ssl,expected",
-        [
-            (None, False, "http://192.0.2.1:8000"),
-            ("0.0.0.0", False, "http://192.0.2.1:8000"),
-            ("::", False, "http://192.0.2.1:8000"),
-            ("127.0.0.1", False, "http://127.0.0.1:8000"),
-            ("2001:db8::1", True, "https://[2001:db8::1]:8000"),
-        ],
-    )
-    def test_registration_uses_frontend_cli_address(self, host, ssl, expected):
-        from argparse import Namespace
-
-        from vllm.engine.arg_utils import AsyncEngineArgs
-
-        state = self._state(
-            ec_role="ec_consumer",
-            ec_extra={"proxy_registry_addr": "tcp://proxy:14580"},
-        )
-        args = Namespace(
-            ec_transfer_config=state.vllm_config.ec_transfer_config,
-            host=host,
-            port=8000,
-            ssl_keyfile="key.pem" if ssl else None,
-            ssl_certfile="cert.pem" if ssl else None,
-        )
-        with patch(
-            "vllm.utils.network_utils.get_ip",
-            return_value="192.0.2.1",
-        ):
-            config = AsyncEngineArgs.from_cli_args(args).ec_transfer_config
-        assert config.get_from_extra_config("_http_address", None) == expected
-
-    @pytest.mark.parametrize("options", [{"port": 0}, {"uds": "/tmp/vllm.sock"}])
-    def test_unsupported_addresses_are_rejected_only_for_registration(self, options):
-        from argparse import Namespace
-
-        from vllm.engine.arg_utils import AsyncEngineArgs
-
-        ec_config = self._state(ec_role="ec_consumer").vllm_config.ec_transfer_config
-        args = Namespace(ec_transfer_config=ec_config, **options)
-        assert AsyncEngineArgs.from_cli_args(args).ec_transfer_config is ec_config
-        ec_config.ec_connector_extra_config["proxy_registry_addr"] = "tcp://proxy:14580"
-        with pytest.raises(ValueError, match="EPD registration requires"):
-            AsyncEngineArgs.from_cli_args(args)
-
-    @staticmethod
-    def _state(ec_extra=None, ec_role=None, kv_role=None, port=8000):
-        from types import SimpleNamespace
-
-        from vllm.config.ec_transfer import ECTransferConfig
-        from vllm.config.kv_transfer import KVTransferConfig
-
-        ec_config = None
-        if ec_extra is not None or ec_role is not None:
-            ec_config = ECTransferConfig(
-                ec_connector="ECExampleConnector" if ec_role else None,
-                ec_role=ec_role,
-                ec_connector_extra_config=ec_extra or {},
-            )
-        kv_config = (
-            KVTransferConfig(kv_connector="NixlConnector", kv_role=kv_role)
-            if kv_role
-            else None
-        )
-        return SimpleNamespace(
-            vllm_config=SimpleNamespace(
-                ec_transfer_config=ec_config,
-                kv_transfer_config=kv_config,
-                parallel_config=SimpleNamespace(
-                    data_parallel_size=1, data_parallel_index=0
-                ),
-            ),
-            args=SimpleNamespace(host="127.0.0.1", port=port, ssl_certfile=None),
-        )
-
-    def test_a_statically_wired_deployment_announces_nothing(self):
-        from vllm.distributed.ec_transfer.ec_connector import registration as mod
-
-        with patch.object(mod.ProxyRegistrar, "start"):
-            assert mod.start_worker_registration(self._state().vllm_config) is None
-            assert (
-                mod.start_worker_registration(
-                    self._state(ec_role="ec_producer").vllm_config
-                )
-                is None
-            )
-
-    def test_an_instance_with_no_ec_role_does_not_register(self):
-        from vllm.distributed.ec_transfer.ec_connector import registration as mod
-
-        state = self._state(
-            ec_extra={
-                "proxy_registry_addr": "tcp://proxy:14580",
-                "_http_address": "http://127.0.0.1:8000",
-            }
-        )
-        with patch.object(mod.ProxyRegistrar, "start"):
-            assert mod.start_worker_registration(state.vllm_config) is None
-
-    @pytest.mark.parametrize("rank", [0, 1])
-    @pytest.mark.parametrize("backend", ["ECExampleConnector", "ECCPUConnector"])
-    def test_worker_registration_is_owned_by_one_rank(self, rank, backend):
-        from vllm.distributed.ec_transfer import ec_transfer_state as state_mod
-        from vllm.distributed.ec_transfer.ec_connector import registration as mod
-
-        config = self._state(
-            ec_role="ec_consumer",
-            ec_extra={
-                "proxy_registry_addr": "tcp://proxy:14580",
-                "_http_address": "http://127.0.0.1:8000",
-            },
-        ).vllm_config
-        config.ec_transfer_config.ec_connector = backend
-        parallel = "vllm.distributed.parallel_state"
-        with (
-            patch.object(state_mod, "_EC_CONNECTOR_AGENT", None),
-            patch.object(state_mod, "_EC_REGISTRAR", None),
-            patch.object(state_mod.ECConnectorFactory, "create_connector") as factory,
-            patch(f"{parallel}.get_tp_group", return_value=Mock(rank_in_group=rank)),
-            patch(f"{parallel}.get_pp_group", return_value=Mock(rank_in_group=0)),
-            patch(f"{parallel}.get_pcp_group", return_value=Mock(rank_in_group=0)),
-            patch.object(mod.ProxyRegistrar, "start") as start,
-            patch.object(mod.ProxyRegistrar, "close") as close,
-        ):
-            state_mod.ensure_ec_transfer_initialized(config)
-            state_mod.ensure_ec_transfer_initialized(config)
-            assert start.call_count == (1 if rank == 0 else 0)
-            state_mod.ensure_ec_transfer_shutdown()
-            assert close.call_count == start.call_count
-            factory.return_value.shutdown.assert_called_once()
-
-    def test_roles_follow_what_the_instance_was_configured_to_do(self):
-        from vllm.distributed.ec_transfer.ec_connector.registration import infer_role
-
-        encode = self._state(ec_role="ec_producer").vllm_config
-        assert infer_role(encode) == InstanceRole.ENCODE
-        prefill = self._state(ec_role="ec_consumer", kv_role="kv_producer").vllm_config
-        assert infer_role(prefill) == InstanceRole.PREFILL
-        decode = self._state(kv_role="kv_consumer").vllm_config
-        assert infer_role(decode) == InstanceRole.DECODE
+        with patch.object(InstanceRegistry, "_probe", probe):
+            await registry._probe_once(None)
+        assert registry.status()["encode"] == {"live": [], "evicted": []}

@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """OpenAI-compatible proxy for E+PD and E+P+D disaggregation.
 
-Use static server URLs, or --registry-address for dynamic E and P/PD
-registration with static separate D instances. Both modes share encoder
+Use static server URLs, or --dynamic-registration for launcher-managed HTTP
+registration of E, P/PD and D instances. Both modes share encoder
 fan-out, metadata-only rewriting, prefill, and retry/streaming forwarding.
 """
 
@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -29,10 +30,9 @@ from typing import Any
 import aiohttp
 import msgspec
 import uvicorn
-import zmq
-import zmq.asyncio
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 ###############################################################################
 # FastAPI app & global state
@@ -53,6 +53,7 @@ class InstanceRole(str, enum.Enum):
     ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
+    PREFILL_DECODE = "prefill_decode"
 
 
 @dataclass
@@ -62,29 +63,16 @@ class InstanceRecord:
     Attributes:
         role: Which stage this instance serves.
         url: Base OpenAI-compatible URL, e.g. ``http://host:8000``.
-        ec_zmq_addrs: Control addresses of this instance's encoder-cache
-            receive channels, one per rank. Only an EC consumer reports
-            these, and only it knows them: they are derived from its own
-            connector config and rank layout. The proxy names one to the
-            encoder so a push lands where the request will run.
+        ec_zmq_addrs: Mooncake TP-rank-0 control addresses, one per DP replica,
+            supplied by the launcher from the consumer's fixed port config.
         dp_size: Data-parallel replicas behind `url`, so the proxy can pick
             a replica and name the same one to both halves of a request.
-        metadata: Anything else the instance chose to report.
     """
 
     role: InstanceRole
     url: str
     ec_zmq_addrs: list[str] = field(default_factory=list)
     dp_size: int = 1
-    metadata: dict[str, Any] = field(default_factory=dict)
-    engine_id: str | None = None
-    dp_rank: int | None = None
-    is_static: bool = False
-    registered_at: float = field(default_factory=time.monotonic)
-
-    @property
-    def key(self) -> tuple[str, int | None]:
-        return self.url, self.dp_rank
 
 
 class InstanceRegistry:
@@ -100,10 +88,10 @@ class InstanceRegistry:
         self._fail_threshold = fail_threshold
         self._evicted_ttl = evicted_ttl
 
-        self._live: dict[tuple[str, int | None], InstanceRecord] = {}
-        self._evicted: dict[tuple[str, int | None], InstanceRecord] = {}
-        self._evicted_since: dict[tuple[str, int | None], float] = {}
-        self._fail_counts: dict[tuple[str, int | None], int] = {}
+        self._live: dict[str, InstanceRecord] = {}
+        self._evicted: dict[str, InstanceRecord] = {}
+        self._evicted_since: dict[str, float] = {}
+        self._fail_counts: dict[str, int] = {}
         # One cursor per role, only ever incremented. Rebuilding it whenever
         # the roster changes -- what an `itertools.cycle` over a mutable list
         # forces -- restarts every fan-out at the first instance and hot-spots
@@ -113,53 +101,40 @@ class InstanceRegistry:
         self._probe_task: asyncio.Task | None = None
 
     def register(self, record: InstanceRecord) -> bool:
-        """Add or refresh an instance. Returns True if it was not already live."""
-        key = record.key
+        """Add or refresh an instance without overriding its health status."""
+        roles = {
+            other.role
+            for other in itertools.chain(self._live.values(), self._evicted.values())
+        }
+        split_roles = {InstanceRole.PREFILL, InstanceRole.DECODE}
+        if (record.role is InstanceRole.PREFILL_DECODE and roles & split_roles) or (
+            record.role in split_roles and InstanceRole.PREFILL_DECODE in roles
+        ):
+            raise ValueError("Cannot mix prefill_decode with standalone prefill/decode")
+        key = record.url
         previous = self._live.get(key) or self._evicted.get(key)
-        if previous is not None and previous.engine_id == record.engine_id:
+        if previous is not None:
+            if previous.role is not record.role:
+                raise ValueError("Unregister the instance before changing its role")
             target = self._live if key in self._live else self._evicted
             target[key] = record
             return False
-        self._fail_counts.pop(key, None)
-        self._evicted.pop(key, None)
-        self._evicted_since.pop(key, None)
-        was_new = previous is None
         self._live[key] = record
-        logger.info(
-            "%s instance %s: %s",
-            "Registered" if was_new else "Refreshed",
-            record.role.value,
-            record.url,
-        )
-        return was_new
+        logger.info("Registered instance %s: %s", record.role.value, record.url)
+        return True
 
-    def unregister(
-        self, url: str, engine_id: str | None = None, dp_rank: int | None = None
-    ) -> bool:
+    def unregister(self, url: str) -> bool:
         """Drop an instance for good, so a probe cannot bring it back."""
-        key = (url, dp_rank)
-        record = self._live.get(key) or self._evicted.get(key)
-        found = record is not None and (
-            engine_id is None or record.engine_id == engine_id
-        )
-        if not found:
+        key = url
+        if key not in self._live and key not in self._evicted:
             return False
         self._live.pop(key, None)
         self._evicted.pop(key, None)
         self._evicted_since.pop(key, None)
         self._fail_counts.pop(key, None)
+        self._replica_cursors.pop(key, None)
         logger.info("Unregistered instance: %s", url)
         return True
-
-    def find(self, engine_id: str, dp_rank: int) -> InstanceRecord | None:
-        return next(
-            (
-                record
-                for record in self._live.values()
-                if record.engine_id == engine_id and record.dp_rank == dp_rank
-            ),
-            None,
-        )
 
     def instances(self, role: InstanceRole) -> list[InstanceRecord]:
         return [record for record in self._live.values() if record.role is role]
@@ -244,6 +219,9 @@ class InstanceRegistry:
         )
         now = time.monotonic()
         for record, healthy in zip(targets, results):
+            current = self._live.get(record.url) or self._evicted.get(record.url)
+            if current is not record:
+                continue
             if healthy is True:
                 self._on_probe_success(record)
             else:
@@ -255,7 +233,7 @@ class InstanceRegistry:
             return resp.status == 200
 
     def _on_probe_success(self, record: InstanceRecord) -> None:
-        key = record.key
+        key = record.url
         self._fail_counts.pop(key, None)
         if key in self._evicted:
             self._evicted.pop(key, None)
@@ -268,7 +246,7 @@ class InstanceRegistry:
             )
 
     def _on_probe_failure(self, record: InstanceRecord, now: float) -> None:
-        key = record.key
+        key = record.url
         if key not in self._live:
             # Either already evicted, or unregistered while this probe was in
             # flight. A round snapshots its targets and then awaits, so a
@@ -294,85 +272,37 @@ class InstanceRegistry:
         if self._evicted_ttl <= 0:
             return
         for key, since in list(self._evicted_since.items()):
-            if self._evicted[key].is_static:
-                continue
             if now - since < self._evicted_ttl:
                 continue
             record = self._evicted.pop(key, None)
             self._evicted_since.pop(key, None)
             self._fail_counts.pop(key, None)
+            self._replica_cursors.pop(key, None)
             if record is not None:
                 logger.warning("Instance %s stayed down; forgetting it", record.url)
 
 
-class RegistrationServer:
-    """Receive instance announcements on the proxy event loop."""
+class InstanceRegistration(BaseModel):
+    role: InstanceRole
+    url: AnyHttpUrl
+    ec_zmq_addrs: list[str] = Field(default_factory=list)
+    dp_size: int = Field(default=1, ge=1)
 
-    def __init__(self, address: str, registry: InstanceRegistry) -> None:
-        self.address = address
-        self.registry = registry
-        self._socket: zmq.asyncio.Socket | None = None
-        self._task: asyncio.Task | None = None
+    @model_validator(mode="after")
+    def validate_consumer_addresses(self):
+        if self.ec_zmq_addrs and len(self.ec_zmq_addrs) != self.dp_size:
+            raise ValueError("Provide one Mooncake control address per DP replica")
+        return self
 
-    def start(self) -> None:
-        context = zmq.asyncio.Context.instance()
-        self._socket = context.socket(zmq.REP)
-        self._socket.setsockopt(zmq.LINGER, 0)
-        self._socket.bind(self.address)
-        self._task = asyncio.create_task(self._serve())
 
-    async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-        if self._socket is not None:
-            self._socket.close()
-
-    async def _serve(self) -> None:
-        assert self._socket is not None
-        while True:
-            try:
-                request = await self._socket.recv_json()
-                result = self._handle(request)
-                await self._socket.send_json({"ok": True, "result": result})
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                await self._socket.send_json({"ok": False, "error": str(error)})
-
-    def _handle(self, request: dict[str, Any]) -> dict[str, Any]:
-        operation = request["operation"]
-        if operation == "unregister":
-            self.registry.unregister(
-                request["url"].rstrip("/"),
-                request.get("engine_id"),
-                request.get("dp_rank"),
-            )
-            return {}
-        if operation == "peers":
-            record = self.registry.find(request["engine_id"], request["dp_rank"])
-            if record is None:
-                raise RuntimeError("EC consumer is not registered")
-            return {"addresses": record.ec_zmq_addrs}
-        if operation != "register":
-            raise ValueError(f"Unknown registration operation: {operation}")
-        self.registry.register(
-            InstanceRecord(
-                role=InstanceRole(request["role"]),
-                url=request["url"].rstrip("/"),
-                ec_zmq_addrs=request.get("ec_zmq_addrs", []),
-                dp_size=request.get("dp_size", 1),
-                engine_id=request.get("engine_id"),
-                dp_rank=request.get("dp_rank"),
-            )
-        )
-        return {}
+def require_admin_key(x_api_key: str = Header(default="")) -> None:
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if not expected or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(403, "Invalid admin API key")
 
 
 @dataclass
 class EPDProxyConfig:
-    registry_address: str = "tcp://0.0.0.0:14580"
-    decode_servers_urls: list[str] = field(default_factory=list)
     probe_interval: float = 5.0
     probe_timeout: float = 2.0
     fail_threshold: int = 3
@@ -399,21 +329,26 @@ class _Route:
 
 
 class EPDProxy:
-    def __init__(self, config: EPDProxyConfig, registry: InstanceRegistry):
-        self.config = config
+    def __init__(self, registry: InstanceRegistry):
         self.registry = registry
 
     # ---------------------------------------------------------------- #
     # Routing                                                          #
     # ---------------------------------------------------------------- #
     def route(self, num_items: int) -> _Route:
-        decode = self.registry.pick(InstanceRole.DECODE)
+        decode = self.registry.pick(InstanceRole.PREFILL_DECODE) or self.registry.pick(
+            InstanceRole.DECODE
+        )
         if decode is None:
             raise HTTPException(
                 status_code=503, detail="No decode instance is registered"
             )
-        prefill = self.registry.pick(InstanceRole.PREFILL)
-        if self.config.decode_servers_urls and prefill is None:
+        prefill = (
+            self.registry.pick(InstanceRole.PREFILL)
+            if decode.role is InstanceRole.DECODE
+            else None
+        )
+        if decode.role is InstanceRole.DECODE and prefill is None:
             raise HTTPException(
                 status_code=503, detail="No prefill instance is registered"
             )
@@ -430,16 +365,10 @@ class EPDProxy:
         """Pin the EC consumer replica and, for push connectors, its endpoint."""
         candidate = route.prefill or route.decode
         route.consumer = candidate
-        if candidate.dp_rank is not None:
-            route.dp_rank = candidate.dp_rank
-            if candidate.ec_zmq_addrs:
-                route.consumer_zmq = candidate.ec_zmq_addrs[0]
-        elif candidate.ec_zmq_addrs:
-            rank = self.registry.next_replica(candidate)
-            route.consumer_zmq = candidate.ec_zmq_addrs[
-                rank % len(candidate.ec_zmq_addrs)
-            ]
-            route.dp_rank = rank if candidate.dp_size > 1 else None
+        rank = self.registry.next_replica(candidate)
+        route.dp_rank = rank if candidate.dp_size > 1 else None
+        if candidate.ec_zmq_addrs:
+            route.consumer_zmq = candidate.ec_zmq_addrs[rank]
 
 
 app = FastAPI()
@@ -1342,23 +1271,16 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         fail_threshold=config.fail_threshold,
         evicted_ttl=config.evicted_ttl,
     )
-    for url in config.decode_servers_urls:
-        registry.register(
-            InstanceRecord(InstanceRole.DECODE, url.rstrip("/"), is_static=True)
-        )
-    proxy = EPDProxy(config, registry)
-    registration = RegistrationServer(config.registry_address, registry)
+    proxy = EPDProxy(registry)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await on_startup()
         try:
-            registration.start()
             registry.start_probing()
             yield
         finally:
             await registry.stop_probing()
-            await registration.stop()
             await on_shutdown()
 
     app = FastAPI(lifespan=lifespan)
@@ -1368,6 +1290,30 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
     @app.get("/instances")
     async def list_instances():
         return registry.status()
+
+    @app.post("/instances", dependencies=[Depends(require_admin_key)])
+    async def register_instance(body: InstanceRegistration):
+        if body.ec_zmq_addrs and body.role not in (
+            InstanceRole.PREFILL,
+            InstanceRole.PREFILL_DECODE,
+        ):
+            raise HTTPException(400, "Only EC consumers accept Mooncake addresses")
+        try:
+            created = registry.register(
+                InstanceRecord(
+                    body.role,
+                    str(body.url).rstrip("/"),
+                    body.ec_zmq_addrs,
+                    body.dp_size,
+                )
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"registered": created}
+
+    @app.delete("/instances", dependencies=[Depends(require_admin_key)])
+    async def unregister_instance(url: AnyHttpUrl):
+        return {"removed": registry.unregister(str(url).rstrip("/"))}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -1394,7 +1340,9 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models():
-        decode = registry.pick(InstanceRole.DECODE)
+        decode = registry.pick(InstanceRole.PREFILL_DECODE) or registry.pick(
+            InstanceRole.DECODE
+        )
         if decode is None:
             raise HTTPException(
                 status_code=503, detail="No decode instance is registered"
@@ -1448,8 +1396,9 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--registry-address",
-        help="Enable dynamic E and P/PD registration at this ZMQ address.",
+        "--dynamic-registration",
+        action="store_true",
+        help="Enable launcher-managed HTTP registration for E+PD or E+P+D.",
     )
     parser.add_argument("--probe-interval", type=float, default=DEFAULT_PROBE_INTERVAL)
     parser.add_argument("--probe-timeout", type=float, default=DEFAULT_PROBE_TIMEOUT)
@@ -1483,8 +1432,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--decode-servers-urls",
-        nargs="+",
-        default=[],
+        default="",
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
     parser.add_argument(
@@ -1519,7 +1467,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    args.decode_servers_urls = ",".join(args.decode_servers_urls)
     if args.fail_threshold < 1:
         parser.error("--fail-threshold must be at least 1")
     if args.log_requests:
@@ -1527,21 +1474,20 @@ if __name__ == "__main__":
         app.middleware("http")(log_requests)
     NO_REWRITE = args.no_rewrite
     DECODE_RETRIES = max(0, args.decode_retries)
-    if args.registry_address:
+    if args.dynamic_registration:
+        if not os.getenv("ADMIN_API_KEY"):
+            parser.error("--dynamic-registration requires ADMIN_API_KEY")
         if (
             args.encode_servers_urls
             or args.prefill_servers_urls.lower() not in ("disable", "none", "")
+            or args.decode_servers_urls
             or args.ec_consumer_zmq_addrs
         ):
             parser.error(
-                "With --registry-address, E and P/PD must register dynamically"
+                "With --dynamic-registration, instances register through /instances"
             )
         app = build_app(
             EPDProxyConfig(
-                registry_address=args.registry_address,
-                decode_servers_urls=[
-                    u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
-                ],
                 probe_interval=args.probe_interval,
                 probe_timeout=args.probe_timeout,
                 fail_threshold=args.fail_threshold,

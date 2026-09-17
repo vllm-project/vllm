@@ -120,27 +120,3 @@ class ECTransferConfig:
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)
-
-    def update_from_cli_args(self, args: Any) -> None:
-        """Pass the frontend address to workers when dynamic registration is enabled."""
-        if not self.get_from_extra_config("proxy_registry_addr", None):
-            return
-        from vllm.utils.network_utils import get_ip, make_zmq_path
-
-        if getattr(args, "uds", None):
-            raise ValueError("EPD registration requires a TCP API server")
-        port = getattr(args, "port", None)
-        if not port:
-            raise ValueError("EPD registration requires an explicit nonzero --port")
-        host = getattr(args, "host", None)
-        if not host or host in ("0.0.0.0", "::"):
-            host = get_ip()
-        scheme = (
-            "https"
-            if getattr(args, "ssl_keyfile", None)
-            and getattr(args, "ssl_certfile", None)
-            else "http"
-        )
-        self.ec_connector_extra_config["_http_address"] = make_zmq_path(
-            scheme, host, port
-        )

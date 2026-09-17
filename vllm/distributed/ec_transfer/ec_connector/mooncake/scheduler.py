@@ -78,18 +78,13 @@ class ECMooncakeScheduler:
 
         self._is_producer = config.is_producer
         self._is_consumer = config.is_consumer
-        self._control_addr = config.registry_addr
+        self._control_addr = config.control_addr
         self._push_wait_timeout = config.push_wait_timeout_s
         self._encoder_cache_hidden_dim = (
             _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
         )
         self._model_config = vllm_config.model_config
-        assert vllm_config.ec_transfer_config is not None
-        self._control_client = ControlClient(
-            config.control_timeout_ms,
-            config.dp_rank,
-            vllm_config.ec_transfer_config.engine_id,
-        )
+        self._control_client = ControlClient(config.control_timeout_ms)
         self._control_executor = ThreadPoolExecutor(
             max_workers=_CONTROL_WORKERS,
             thread_name_prefix="ec-mooncake-control",

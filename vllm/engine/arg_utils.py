@@ -1805,8 +1805,6 @@ class EngineArgs:
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
-        if engine_args.ec_transfer_config is not None:
-            engine_args.ec_transfer_config.update_from_cli_args(args)
         return engine_args
 
     def create_model_config(self) -> ModelConfig:

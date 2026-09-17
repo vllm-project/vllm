@@ -87,7 +87,7 @@ wait_for_server() {
 cleanup_instances() {
     echo "Cleaning up any running vLLM instances..."
     pkill -f "vllm serve" || true
-    pkill -f 'ec_transfer[.]proxy' || true
+    pkill -f "disagg_epd_proxy.py" || true
     sleep 2
 }
 
@@ -152,19 +152,9 @@ run_epd_1e_1pd() {
     local ENCODE_PORT=$ENCODE_PORT
     local PREFILL_DECODE_PORT=$PREFILL_DECODE_PORT
     local PROXY_PORT=$ENDPOINT_PORT
-    local REGISTRY_PORT=$((PROXY_PORT + 1))
     
     declare -a PIDS=()
     
-    # Start the proxy first: it holds the roster the workers register into.
-    echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" --host "0.0.0.0" --port "$PROXY_PORT" \
-        --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
-        > "$LOG_PATH"/epd_proxy.log 2>&1 &
-    PIDS+=($!)
-    echo "Waiting for proxy..."
-    wait_for_server "$PROXY_PORT"
-
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
     env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -181,8 +171,7 @@ run_epd_1e_1pd() {
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_producer",
             "ec_connector_extra_config": {
-                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
+                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
         > "$LOG_PATH"/1e1pd_encoder.log 2>&1 &
@@ -203,8 +192,7 @@ run_epd_1e_1pd() {
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_consumer",
             "ec_connector_extra_config": {
-                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
+                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
         > "$LOG_PATH"/1e1pd_pd.log 2>&1 &
@@ -216,6 +204,20 @@ run_epd_1e_1pd() {
     echo "Waiting for PD instance..."
     wait_for_server "$PREFILL_DECODE_PORT"
 
+    # Start proxy
+    echo "Starting EPD proxy on port $PROXY_PORT"
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+        --host "0.0.0.0" \
+        --port "$PROXY_PORT" \
+        --encode-servers-urls "http://localhost:$ENCODE_PORT" \
+        --prefill-servers-urls "disable" \
+        --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
+        > "$LOG_PATH"/1e1pd_proxy.log 2>&1 &
+    PIDS+=($!)
+    
+    # Wait for proxy
+    echo "Waiting for proxy..."
+    wait_for_server "$PROXY_PORT"
 
     curl http://127.0.0.1:"$PROXY_PORT"/v1/models
     curl http://127.0.0.1:"$PROXY_PORT"/health
@@ -355,20 +357,9 @@ run_epd_1e_1p_1d() {
     local PREFILL_PORT=$PREFILL_PORT
     local DECODE_PORT=$DECODE_PORT
     local PROXY_PORT=$ENDPOINT_PORT
-    local REGISTRY_PORT=$((PROXY_PORT + 1))
     
     declare -a PIDS=()
     
-    # E and P register dynamically; D is configured statically.
-    echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" --host "0.0.0.0" --port "$PROXY_PORT" \
-        --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
-        --decode-servers-urls "http://127.0.0.1:$DECODE_PORT" \
-        > "$LOG_PATH"/epd_proxy.log 2>&1 &
-    PIDS+=($!)
-    echo "Waiting for proxy..."
-    wait_for_server "$PROXY_PORT"
-
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
     env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -385,8 +376,7 @@ run_epd_1e_1p_1d() {
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_producer",
             "ec_connector_extra_config": {
-                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
+                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
         > "$LOG_PATH"/1e1p1d_encoder.log 2>&1 &
@@ -409,8 +399,7 @@ run_epd_1e_1p_1d() {
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_consumer",
             "ec_connector_extra_config": {
-                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
+                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
         --kv-transfer-config '{
@@ -448,6 +437,20 @@ run_epd_1e_1p_1d() {
     echo "Waiting for decode instance..."
     wait_for_server "$DECODE_PORT"
     
+    # Start proxy
+    echo "Starting EPD proxy on port $PROXY_PORT"
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+        --host "0.0.0.0" \
+        --port "$PROXY_PORT" \
+        --encode-servers-urls "http://localhost:$ENCODE_PORT" \
+        --prefill-servers-urls "http://localhost:$PREFILL_PORT" \
+        --decode-servers-urls "http://localhost:$DECODE_PORT" \
+        > "$LOG_PATH"/1e1p1d_proxy.log 2>&1 &
+    PIDS+=($!)
+    
+    # Wait for proxy
+    echo "Waiting for proxy..."
+    wait_for_server "$PROXY_PORT"
 
     curl http://127.0.0.1:"$PROXY_PORT"/v1/models
     curl http://127.0.0.1:"$PROXY_PORT"/health

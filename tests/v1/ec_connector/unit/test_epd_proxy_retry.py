@@ -188,7 +188,7 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         stage = request.match_info["stage"]
         if dynamic:
             consumer = "prefill" if prefill else "decode"
-            expected_rank = "1" if stage == consumer else None
+            expected_rank = "0" if stage == consumer else None
             assert request.headers.get("X-data-parallel-rank") == expected_rank
         assert request.content_type == "application/json"
         body = await request.json()
@@ -238,27 +238,8 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         monkeypatch.setattr(proxy, "NO_REWRITE", False)
         target_app = proxy.app
         if dynamic:
-            target_app = proxy.build_app(
-                proxy.EPDProxyConfig(
-                    registry_address="tcp://127.0.0.1:0",
-                    probe_interval=0,
-                    decode_servers_urls=proxy.app.state.d_urls if prefill else [],
-                )
-            )
-            for role in proxy.InstanceRole:
-                if role.value == "prefill" and not prefill:
-                    continue
-                if role.value == "decode" and prefill:
-                    continue
-                consumer = "prefill" if prefill else "decode"
-                target_app.state.registry.register(
-                    proxy.InstanceRecord(
-                        role,
-                        str(server.make_url(f"/{role.value}")),
-                        dp_rank=1 if role.value == consumer else 0,
-                        dp_size=2 if role.value == consumer else 1,
-                    )
-                )
+            monkeypatch.setenv("ADMIN_API_KEY", "test-key")
+            target_app = proxy.build_app(proxy.EPDProxyConfig(probe_interval=0))
         item = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}}
         body = {
             "model": "test",
@@ -284,7 +265,35 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=target_app), base_url="http://proxy"
             ) as client:
+                if dynamic:
+                    registrations = [("encode", "encode")]
+                    registrations += (
+                        [("prefill", "prefill"), ("decode", "decode")]
+                        if prefill
+                        else [("prefill_decode", "decode")]
+                    )
+                    for role, stage in registrations:
+                        consumer = "prefill" if prefill else "decode"
+                        registered = await client.post(
+                            "/instances",
+                            headers={"X-API-Key": "test-key"},
+                            json={
+                                "role": role,
+                                "url": str(server.make_url(f"/{stage}")),
+                                "dp_size": 2 if stage == consumer else 1,
+                            },
+                        )
+                        assert registered.status_code == 200
                 response = await client.post("/v1/chat/completions", json=body)
+                if dynamic:
+                    removed = await client.delete(
+                        "/instances",
+                        headers={"X-API-Key": "test-key"},
+                        params={"url": str(server.make_url("/decode"))},
+                    )
+                    assert removed.json() == {"removed": True}
+                    unavailable = await client.post("/v1/chat/completions", json=body)
+                    assert unavailable.status_code == 503
             assert response.status_code == 200
             assert response.content == expected
             assert response.headers["content-type"].startswith(
