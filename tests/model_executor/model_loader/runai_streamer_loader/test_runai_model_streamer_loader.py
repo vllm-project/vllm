@@ -122,3 +122,25 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
             _runai_loader({"concurrency": 16, "memory_limit": -5})
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
+
+
+def test_runai_get_all_weights_matches_load_weights_source():
+    # ``reload_weights`` (used to restore weights after a level 2 sleep) calls
+    # ``get_all_weights``; it must resolve the same source, including the
+    # ``model_weights`` override, that ``load_weights`` uses.
+    fake_self = types.SimpleNamespace(
+        _get_weights_iterator=lambda path, revision: iter(
+            [(f"{path}@{revision}", None)]
+        )
+    )
+    model_config = types.SimpleNamespace(
+        model="org/model", model_weights="s3://bucket/weights", revision="myrev"
+    )
+
+    weights = list(
+        rsl.RunaiModelStreamerLoader.get_all_weights(
+            fake_self, model_config, model=None
+        )
+    )
+
+    assert weights == [("s3://bucket/weights@myrev", None)]
