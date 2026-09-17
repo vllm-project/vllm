@@ -308,6 +308,25 @@ async def test_derender_chat_unknown_model(client):
     assert response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_derender_chat_model_omitted_resolves_served_name(client):
+    """Omitting `model` resolves the served name rather than rejecting.
+
+    Mirrors test_serving_chat.py's "full name is returned when no model is
+    specified" assertion for the derender path. Asserts the resolved value,
+    not just the status, so the fallback is proven to have fired.
+    """
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"generate_response": _make_generate_response(synthetic_ids)},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == MODEL_NAME
+
+
 # ---------------------------------------------------------------------------
 # Completion derender tests
 # ---------------------------------------------------------------------------
@@ -536,7 +555,7 @@ async def test_derender_chat_oversized_token_ids_rejected(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_too_many_choices_rejected(client):
-    """choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
+    """Choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
     # Default VLLM_MAX_N_SEQUENCES is 16384; use a larger count.
     oversized_choices = [
         {"index": i, "token_ids": [42], "finish_reason": "stop"} for i in range(20_000)
@@ -622,7 +641,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_oversized_top_logprobs_rejected(client):
-    """top_logprobs count exceeding 20 returns 400."""
+    """top_logprobs count exceeding max_logprobs (default 20) returns 400."""
     oversized_top_logprobs = {
         "content": [
             {
@@ -654,7 +673,9 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "top_logprobs count" in response.json()["error"]["message"]
+    msg = response.json()["error"]["message"]
+    assert "top_logprobs count" in msg
+    assert "max_logprobs" in msg
 
 
 @pytest.mark.asyncio

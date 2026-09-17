@@ -7,6 +7,7 @@ from typing import NamedTuple
 import torch
 
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -103,23 +104,6 @@ def get_layer_transfer_geometry(
     element_size = kv_cache.element_size()
     spec = layer_to_spec[layer_name]
     is_mla_cache = is_mla_cache_layer(layer_to_spec, layer_name)
-
-    if is_mla_cache and len(shape) == 3:
-        num_blocks, block_size, latent_dim = shape
-        slot_size_bytes = latent_dim * element_size
-        block_len = block_size * slot_size_bytes
-        return LayerTransferGeometry(
-            num_blocks=num_blocks,
-            block_size=block_size,
-            block_len=block_len,
-            slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
-            local_kv_stride=None,
-            remote_kv_stride=None,
-            transfers_per_block=1,
-            regions_per_block=1,
-            split_kv_regions=False,
-        )
 
     if not is_mla_cache and len(shape) == 5 and shape[0] == 2:
         _, num_blocks = shape[:2]
@@ -223,6 +207,30 @@ def get_layer_transfer_geometry(
             split_kv_regions=False,
         )
 
+    if (
+        isinstance(spec, AttentionSpec)
+        and len(shape) == 4
+        and shape[1] == spec.num_heads
+        and shape[2] == spec.num_states
+        and shape[3] * element_size == spec.state_content_size_bytes
+    ):
+        # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
+        num_blocks, num_heads, num_states, content_dim = shape
+        slot_size_bytes = num_heads * content_dim * element_size
+        block_len = num_states * slot_size_bytes
+        return LayerTransferGeometry(
+            num_blocks=num_blocks,
+            block_size=spec.block_size,
+            block_len=block_len,
+            slot_size_bytes=slot_size_bytes,
+            block_stride=stride[0],
+            local_kv_stride=None,
+            remote_kv_stride=None,
+            transfers_per_block=1,
+            regions_per_block=1,
+            split_kv_regions=False,
+        )
+
     cache_kind = "MLA" if is_mla_cache else "K/V"
     raise ValueError(
         f"Unsupported MoRIIO {cache_kind} cache shape for layer "
@@ -237,6 +245,16 @@ def iter_layer_registration_regions(
 ) -> list[tuple[torch.Tensor, int]]:
     geometry = get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec)
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
+    if geometry.regions_per_block == 1:
+        # With padded or interleaved pages the block stride exceeds the
+        # meaningful block_len; register the strided span. The span ends with
+        # the last block's meaningful bytes, not a whole stride, so it never
+        # runs past the backing allocation of a strided layer view.
+        block_stride_bytes = geometry.block_stride * kv_cache.element_size()
+        region_len = max(
+            region_len,
+            (geometry.num_blocks - 1) * block_stride_bytes + geometry.block_len,
+        )
     if geometry.split_kv_regions:
         return [(cache, region_len) for cache in kv_cache]
     return [(kv_cache, region_len)]
@@ -282,10 +300,16 @@ def compute_block_transfer_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    if len(local_block_ids) != len(remote_block_ids):
+    # A shorter (or empty) local list is the READ-mode "drop the transfer, just
+    # free the prefill blocks" case (full-prefix-hit / aborted-before-scheduled):
+    # decode pulls fewer blocks than the prefill holds. The zip loop below pairs
+    # local[i]<->remote[i] and sizes by len(local), so a short local transfers
+    # only what decode allocated and an empty local is a no-op. A longer local
+    # list is a genuine bug and still fails loudly.
+    if len(local_block_ids) > len(remote_block_ids):
         raise ValueError(
-            "local_block_ids and remote_block_ids must have the same length: "
-            f"{len(local_block_ids)} != {len(remote_block_ids)}"
+            "local_block_ids longer than remote_block_ids: "
+            f"{len(local_block_ids)} > {len(remote_block_ids)}"
         )
     geometry = get_layer_transfer_geometry(
         layer_name, kv_cache, layer_to_spec, remote_num_blocks

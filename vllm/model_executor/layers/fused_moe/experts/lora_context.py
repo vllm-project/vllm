@@ -10,8 +10,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 @dataclass
 class MoELoRAContext:
-    """
-    Carries all LoRA state for one MoE forward pass.
+    """Carries all LoRA state for one MoE forward pass.
 
     Built by FusedMoEWithLoRA.forward() and propagated explicitly through the
     modular kernel path (FusedMoEKernel -> FusedMoEExpertsModular.apply) so
@@ -42,6 +41,11 @@ class MoELoRAContext:
     # Whether VLLM_TUNED_CONFIG_FOLDER is set; selects get_lora_op_configs vs
     # try_get_optimal_moe_lora_config for Triton kernel tile configs.
     use_tuned_config: bool
+
+    # Shared MoE LoRA: w13 lora_A and w2 lora_B are shared across all experts
+    # (stored collapsed with expert-dim 1). When True, LoRAExpertsMixin expands
+    # them to local_num_experts via a stride-0 view before the kernel.
+    enable_moe_shared_loras: bool = False
 
     # Optional dual-stream support for overlapping each (base GEMM, LoRA)
     # pair. When aux_stream is None, the experts.apply() path runs the

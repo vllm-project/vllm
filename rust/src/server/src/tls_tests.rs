@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
 //! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
@@ -523,15 +526,18 @@ async fn tls_handshake_timeout_drops_silent_client() {
     let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
 
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
-    tokio::task::yield_now().await;
-    tokio::time::advance(tls::TLS_HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-
+    let start = tokio::time::Instant::now();
     let mut buf = [0u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await;
+    let read = tcp.read(&mut buf).await;
     assert!(
-        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        matches!(read, Ok(0) | Err(_)),
         "server must drop a stalled TLS handshake (expected close, got {read:?})"
+    );
+    // The close is the handshake deadline, not an earlier one
+    assert!(
+        start.elapsed() >= tls::TLS_HANDSHAKE_TIMEOUT,
+        "closed too early to be the handshake deadline: {:?}",
+        start.elapsed()
     );
     shutdown.cancel();
 }

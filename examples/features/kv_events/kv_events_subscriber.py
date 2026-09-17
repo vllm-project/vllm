@@ -18,7 +18,7 @@ class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
 
 
 class KVCacheEvent(msgspec.Struct, omit_defaults=True, gc=False, tag=True):
-    """Base class for all KV cache-related events"""
+    """Base class for all KV cache-related events."""
 
 
 class BlockStored(KVCacheEvent):
@@ -42,12 +42,17 @@ class BlockStored(KVCacheEvent):
     """
 
     group_idx: int | None = None
+    kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
+    locality: str | None = None
+    session_id: str | None = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
     group_idx: int | None = None
+    locality: str | None = None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -99,7 +104,7 @@ def main():
                     replay.send((last_seq + 1).to_bytes(8, "big"))
 
                     while poller.poll(timeout=200):
-                        seq_bytes, replay_payload = replay.recv_multipart()
+                        _, seq_bytes, replay_payload = replay.recv_multipart()
                         if not replay_payload:
                             # End of replay marker is sent as an empty frame
                             # for the payload

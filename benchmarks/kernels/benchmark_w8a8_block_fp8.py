@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 mp.set_start_method("spawn", force=True)
 
@@ -56,10 +57,12 @@ def w8a8_block_matmul(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization.
                     It should be 2-dim, e.g., [128, 128].
+        config: Triton kernel launch config, e.g. tile sizes and num_warps.
         output_dtype: The dtype of the returned tensor.
 
     Returns:
         torch.Tensor: The result of matmul.
+
     """
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
@@ -264,7 +267,7 @@ def save_configs(
     input_type="fp8",
 ) -> None:
     os.makedirs(save_path, exist_ok=True)
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = (
         f"N={N},K={K},device_name={device_name},dtype={input_type}_w8a8,"
         f"block_shape=[{block_n},{block_k}].json"

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::any::type_name;
 use std::io::Cursor;
 
@@ -27,6 +30,7 @@ pub mod multimodal;
 pub mod output;
 pub mod request;
 pub mod sampling;
+mod serde_utils;
 pub mod stats;
 pub mod structured_outputs;
 pub mod tensor;

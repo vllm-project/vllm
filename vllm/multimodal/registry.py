@@ -29,7 +29,12 @@ from .processing import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
+    from vllm.config import (
+        ModelConfig,
+        ObservabilityConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -40,8 +45,7 @@ _I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
 
 class ProcessingInfoFactory(Protocol[_I_co]):
-    """
-    Constructs a
+    """Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
     instance from the context.
     """
@@ -53,8 +57,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 
 
 class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
+    """Constructs a
     [`BaseDummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
     instance from the context.
     """
@@ -63,8 +66,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
 
 
 class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
-    """
-    Constructs a
+    """Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
     instance from the context.
     """
@@ -96,13 +98,10 @@ class _ProcessorFactories(Generic[_I]):
 
 
 class MultiModalRegistry:
-    """
-    A registry that dispatches data processing according to the model.
-    """
+    """A registry that dispatches data processing according to the model."""
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
-        """
-        Checks if the model supports multimodal inputs.
+        """Checks if the model supports multimodal inputs.
         Returns True if the model is multimodal with any non-zero supported
         modalities, otherwise returns False, effectively running in
         text-only mode.
@@ -114,11 +113,18 @@ class MultiModalRegistry:
         try:
             info = self._create_processing_info(model_config, tokenizer=None)
         except ValueError:
-            logger.warning_once(
-                "Model %s is treated as multimodal but has no registered "
-                "multimodal processor; running in text-only mode.",
-                model_config.model,
-            )
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if model_config.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    model_config.model,
+                )
             return False
 
         # Check if all supported modalities have limit == 0
@@ -146,8 +152,7 @@ class MultiModalRegistry:
         info: ProcessingInfoFactory[_I],
         dummy_inputs: DummyInputsBuilderFactory[_I],
     ):
-        """
-        Register a multi-modal processor to a model class. The processor
+        """Register a multi-modal processor to a model class. The processor
         is constructed lazily, hence a factory method should be passed.
 
         When the model receives multi-modal data, the provided function is
@@ -215,9 +220,7 @@ class MultiModalRegistry:
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
-        """
-        Create a multi-modal processor for a specific model and tokenizer.
-        """
+        """Create a multi-modal processor for a specific model and tokenizer."""
         if not model_config.is_multimodal_model:
             model_name = model_config.served_model_name or model_config.model
             raise ValueError(f"{model_name} is not a multimodal model")
@@ -236,13 +239,15 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
+        scheduler_config: "SchedulerConfig | None" = None,
     ) -> MultiModalInput:
-        """
-        Create dummy data for profiling the memory usage of a model.
+        """Create dummy data for profiling the memory usage of a model.
 
         The model is identified by `model_config`.
         """
         seq_len = model_config.max_model_len
+        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
+            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)
