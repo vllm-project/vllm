@@ -42,6 +42,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.stats import (
+    UMBPStoreConnectorStats,
+)
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -553,6 +556,22 @@ def test_worker_emits_block_stored_event_after_store_completion():
         b"parent"
     )
     assert result.kv_events[0].token_ids == [1, 2, 3, 4]
+
+
+def test_umbp_stats_aggregate_and_reduce():
+    first = UMBPStoreConnectorStats()
+    first.record("load", submitted=2, completed=1, failed=1, num_bytes=64)
+    second = UMBPStoreConnectorStats()
+    second.record("load", completed=1, num_bytes=32)
+
+    merged = first.aggregate(second)
+
+    assert merged.reduce() == {
+        "load_submitted": 2,
+        "load_completed": 2,
+        "load_failed": 1,
+        "load_num_bytes": 96,
+    }
 
 
 def test_worker_preserves_scheduler_supplied_ranges():
