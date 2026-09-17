@@ -105,10 +105,13 @@ fn auto_turn(
 
 /// Reject tool names the streaming parser could not round-trip as channel
 /// recipients (`[A-Za-z0-9_.\-]+`): the grammar interpolates them verbatim
-/// into channel begins and invoke wrappers.
+/// into channel begins and invoke wrappers. `self` and `user` are reserved:
+/// the parser classifies those recipients as reasoning/content channels, so a
+/// tool channel with that begin would never be parsed as a tool call.
 fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
     for tool in tools {
         let valid = !tool.name.is_empty()
+            && !matches!(tool.name.as_str(), "self" | "user")
             && tool
                 .name
                 .chars()
@@ -714,6 +717,29 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, xgrammar_structural_tag::Error::Custom(_)));
+    }
+
+    #[test]
+    fn reserved_channel_recipients_are_rejected_as_tool_names() {
+        // The parser reserves `self` (reasoning) and `user` (content): a tool
+        // with one of those names would build a grammar whose tool channel is
+        // never parsed as a tool call.
+        for reserved in ["self", "user"] {
+            let tools = vec![tool(reserved, json!({"type": "object"}))];
+            let error = MuseGlimmerStructuralTagBuilder
+                .build_scoped(
+                    &tools,
+                    Some(ScopedToolChoice::Required),
+                    None,
+                    &StructuralTagOptions::default(),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, xgrammar_structural_tag::Error::Custom(_)),
+                "{reserved}: {error:?}"
+            );
+        }
     }
 
     #[test]
