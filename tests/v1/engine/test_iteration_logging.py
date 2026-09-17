@@ -1131,7 +1131,7 @@ def test_make_scheduler_timeout_state_failure_still_refreshes_sampling_cache():
 
 def test_scheduler_timeout_diagnostic_state_includes_resource_pressure():
     scheduler = SimpleNamespace(
-        kv_cache_manager=SimpleNamespace(usage=0.75),
+        get_kv_cache_usage=lambda: 0.75,
         running=[1, 2],
         skipped_waiting=[1],
         waiting=[1, 2, 3],
