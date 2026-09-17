@@ -812,16 +812,20 @@ fn safe_body_text_len(
     }
 
     // Iterate the holdback to a fixpoint: trimming a partial marker can expose
-    // a trailing ` to=…` fragment (" to=skill<") and vice versa.
+    // a trailing ` to=…` fragment (" to=skill<") and vice versa. One marker
+    // strip with nothing else to strip is settled: a marker's third byte is a
+    // letter, so of a run of marker starts only the last can still grow into a
+    // marker and the earlier ones are text. The fragment scan resumes at the
+    // previous strip point, so one call is O(n) overall.
     let mut emit_len = text.len();
     loop {
         let marker_hold = max_partial_prefix_len(&text[..emit_len], hold_markers);
-        let mut new_len = emit_len - marker_hold;
-        new_len -= open_tail_to_fragment_len(&text[..new_len]);
-        if new_len == emit_len {
+        let body_end = emit_len - marker_hold;
+        let fragment_hold = open_tail_to_fragment_len(&text[..body_end]);
+        emit_len = body_end - fragment_hold;
+        if fragment_hold == 0 {
             break;
         }
-        emit_len = new_len;
     }
     if emit_len == 0 {
         return incomplete();
@@ -1234,6 +1238,38 @@ mod tests {
 
         assert_eq!(output.normal_text(), "ab");
         assert_eq!(output.reasoning_text(), "r");
+    }
+
+    #[test]
+    fn muse_glimmer_marker_run_holdback_stays_linear() {
+        // A run of marker starts holds back only its last `<|`: per delta the
+        // holdback is a single pass, not a fixpoint rescan over the whole run
+        // (which made "<|" * n in 1-byte deltas effectively cubic).
+        let text = format!(
+            " to=user<|message|>a{}<|eom|>tail<|eot|>",
+            "<|".repeat(2048)
+        );
+        let chunks = char_chunks(&text, 1);
+        let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let streamed = collect_stream(&mut test_parser(), &chunk_refs);
+        let whole = collect_stream(&mut test_parser(), &[&text]);
+
+        assert_eq!(streamed, whole);
+        assert_eq!(whole.normal_text(), format!("a{}tail", "<|".repeat(2048)));
+    }
+
+    #[test]
+    fn muse_glimmer_holdback_marker_and_to_fragment_compose() {
+        // A ` to=…` fragment behind a partial marker stays held until the
+        // marker question resolves.
+        let output = assert_chunking_invariant(" to=user<|message|>v to=skill<|eom|><|eot|>");
+        assert_eq!(output.normal_text(), "v to=skill");
+
+        // At stream end the partial marker is dropped and the fragment flushes.
+        let mut parser = test_parser();
+        let mut output = parser.parse_chunk(" to=user<|message|>v to=skill<|").unwrap();
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.normal_text(), "v to=skill");
     }
 
     #[test]
