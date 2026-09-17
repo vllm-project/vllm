@@ -507,9 +507,7 @@ def test_update_invalid_blocks_resets_output_placeholders_branch1(
 
     request.num_output_placeholders = 1
 
-    allocated = recompute_scheduler.kv_cache_manager.get_block_ids(
-        request.request_id
-    )
+    allocated = recompute_scheduler.kv_cache_manager.get_block_ids(request.request_id)
     req_block_ids = allocated[0]
     invalid_block_idx = 50
     invalid_block_id = req_block_ids[invalid_block_idx]
@@ -576,17 +574,16 @@ def test_update_invalid_blocks_resets_output_placeholders_branch2(
     request_a.num_output_placeholders = 1
     request_b.num_output_placeholders = 1
 
-    blocks_a = recompute_scheduler.kv_cache_manager.get_block_ids(
-        request_a.request_id
-    )[0]
-    blocks_b = recompute_scheduler.kv_cache_manager.get_block_ids(
-        request_b.request_id
-    )[0]
+    blocks_a = recompute_scheduler.kv_cache_manager.get_block_ids(request_a.request_id)[
+        0
+    ]
+    blocks_b = recompute_scheduler.kv_cache_manager.get_block_ids(request_b.request_id)[
+        0
+    ]
 
     shared_block_idx = 40
     assert blocks_a[shared_block_idx] == blocks_b[shared_block_idx], (
-        "common-prefix requests must share blocks at index "
-        f"{shared_block_idx}"
+        f"common-prefix requests must share blocks at index {shared_block_idx}"
     )
 
     invalid_block_id = blocks_a[shared_block_idx]
