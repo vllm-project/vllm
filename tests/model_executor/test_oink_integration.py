@@ -62,7 +62,6 @@ def test_oink_availability_checks(
     expected_fused: bool,
 ):
     """Test OINK support detection with clean import state for each parameter set."""
-
     # Use spawn to run function in fresh process with clean imports
     # TODO migrate to spawn utility:
     # https://github.com/vllm-project/vllm/issues/41415

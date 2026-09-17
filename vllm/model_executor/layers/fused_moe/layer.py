@@ -153,6 +153,11 @@ def FusedMoEFactory(
     load_weights function in each model implementation.
 
     Args:
+        intermediate_pad: Padding added to the intermediate size, if any.
+        swiglu_alpha: Optional alpha parameter for the SwiGLU activation.
+        swiglu_beta: Optional beta parameter for the SwiGLU activation.
+
+    Args:
         num_experts: Number of experts in the model (global count)
         top_k: Number of experts selected for each token
         hidden_size: Input hidden state size of the transformer
@@ -211,6 +216,7 @@ def FusedMoEFactory(
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 
@@ -348,6 +354,7 @@ def FusedMoEFactory(
         moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
+        elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
         activation=moe_activation,
