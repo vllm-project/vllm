@@ -279,6 +279,44 @@ def make_request(
     )
 
 
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_effective_attention_block_size_matches_events(dcp):
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.engine.core import EngineCore
+
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], new_kv_cache_spec()),
+        ],
+    )
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([config]),
+        max_model_len=256,
+        scheduler_block_size=16 * dcp,
+        hash_block_size=16 * dcp,
+        dcp_world_size=dcp,
+        enable_kv_cache_events=True,
+    )
+    core = EngineCore.__new__(EngineCore)
+    core.vllm_config = SimpleNamespace(cache_config=CacheConfig(block_size=16))
+    core.scheduler = SimpleNamespace(kv_cache_manager=manager)
+    core._initialize_effective_attention_block_size()
+    block_size = core.vllm_config.cache_config.effective_attention_block_size
+    assert block_size == 16 * dcp
+
+    request = make_request(
+        "block-size", list(range(64)), block_size=16 * dcp, hash_fn=sha256
+    )
+    assert manager.allocate_slots(request, 64) is not None
+    assert [
+        event.block_size
+        for event in manager.take_events()
+        if isinstance(event, BlockStored)
+    ] == [block_size]
+
+
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -1031,9 +1069,7 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
 
 
 def test_metrics():
-    """
-    Test the prefix caching metrics.
-    """
+    """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
@@ -1063,9 +1099,7 @@ def test_metrics():
 
 
 def test_metrics_empty_stats():
-    """
-    Test the prefix caching metrics with empty stats.
-    """
+    """Test the prefix caching metrics with empty stats."""
     metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
@@ -1865,7 +1899,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
 
 def test_allocate_with_lookahead():
-    """Verify that lookahead tokens correctly affect block allocation"""
+    """Verify that lookahead tokens correctly affect block allocation."""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
@@ -3208,6 +3242,45 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert "attention compute is unchanged" in caplog_vllm.text
 
 
+def test_hidden_states_with_tp_scales_page_size():
+    """When TP shrinks KV pages below the hidden-state per-token cost,
+    get_kv_cache_groups must scale up target block sizes so that the
+    common page accommodates the unsharded hidden states."""
+    # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
+    # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
+    #         = 16 * 2 * 64 * 2 = 4096 bytes.
+    kv_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
+    #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
+    hs_spec = HiddenStateCacheSpec(
+        block_size=16,
+        num_kv_heads=6,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    specs = {
+        "target.0.attn": kv_spec,
+        "target.1.attn": kv_spec,
+        "cache_only_layers.48": hs_spec,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    # The hidden-state layer should be present and no assertion should fire.
+    all_layers = {name for g in groups for name in g.layer_names}
+    assert "cache_only_layers.48" in all_layers
+
+    # The target group block sizes must have been scaled up.
+    for g in groups:
+        if "cache_only_layers.48" not in g.layer_names:
+            assert g.kv_cache_spec.block_size > kv_spec.block_size
+
+
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
 
@@ -3845,8 +3918,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
-    """
-    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+    """Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
 
     This test guards against that regression by verifying that a VllmConfig
     with kv_events_config set still resolves disable_hybrid_kv_cache_manager
@@ -4135,9 +4207,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -4146,7 +4218,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
