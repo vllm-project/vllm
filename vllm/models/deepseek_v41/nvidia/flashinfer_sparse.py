@@ -417,10 +417,6 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 decode_is_valid_token=decode_is_valid_token,
                 swa_block_span=swa_block_span,
                 compressed_block_span=compressed_block_span,
-                prefill_left_visible=swa_metadata.prefill_left_visible,
-                prefill_right_visible=swa_metadata.prefill_right_visible,
-                # getattr for tests that bypass __init__ via object.__new__.
-                max_image_tokens=getattr(self, "max_image_tokens", 0),
             )
             if swa_only:
                 swa_metadata.flashinfer_sparse_index_cache["swa_only"] = (
