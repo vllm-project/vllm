@@ -12,7 +12,14 @@ correctly handles this mismatch.
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 
 from .utils import make_dummy_moe_config
 
@@ -249,6 +256,57 @@ class TestNarrowExpertDataForPadding:
 class TestWeightLoadingWithPaddedHiddenSize:
     """Integration-style tests that simulate padded weight loading."""
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("tp_rank", [0, 1])
+    def test_load_w2_chunks_noncontiguous_cpu_source_to_padded_cuda(
+        self, dtype, tp_rank
+    ):
+        hidden = 4096
+        intermediate = 1024
+        loaded_weight = (
+            torch.arange(hidden * intermediate * 2)
+            .remainder(251)
+            .to(dtype)
+            .reshape(hidden, intermediate * 2)
+        )
+        tp_source = loaded_weight[
+            :, intermediate * tp_rank : intermediate * (tp_rank + 1)
+        ]
+        expert_data_full = torch.zeros(
+            hidden + 8, intermediate + 8, device="cuda", dtype=dtype
+        )
+        destination = expert_data_full[:hidden, :intermediate]
+
+        assert not tp_source.is_contiguous()
+        assert tp_source.nbytes > 1 << 20
+        assert not destination.is_contiguous()
+
+        experts = object.__new__(RoutedExperts)
+        torch.nn.Module.__init__(experts)
+        experts.moe_config = make_dummy_moe_config()
+        experts.moe_config.moe_parallel_config.tp_size = 2
+
+        torch.accelerator.synchronize()
+        allocated_before = torch.accelerator.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
+        experts._load_w2(
+            expert_data=expert_data_full,
+            shard_dim=1,
+            loaded_weight=loaded_weight,
+            tp_rank=tp_rank,
+        )
+        torch.accelerator.synchronize()
+        peak_extra = torch.accelerator.max_memory_allocated() - allocated_before
+
+        # A single copy into the strided CUDA view allocates a full-shard
+        # temporary. Correct values alone would not catch that regression.
+        assert peak_extra < tp_source.nbytes
+
+        torch.testing.assert_close(destination.cpu(), tp_source)
+        assert torch.count_nonzero(expert_data_full[hidden:, :]) == 0
+        assert torch.count_nonzero(expert_data_full[:hidden, intermediate:]) == 0
+
     def test_load_w2_with_padding(self):
         """Simulate loading w2 weights when hidden_size is padded."""
         padded_hidden = 3072
@@ -362,6 +420,74 @@ class TestWeightLoadingWithPaddedHiddenSize:
             expert_data_full[:original_hidden, original_intermediate:],
             torch.zeros(original_hidden, padded_intermediate - original_intermediate),
         )
+
+
+class TestUnquantizedTrtLlmPrePadding:
+    @staticmethod
+    def _make_method(
+        intermediate: int,
+        backend: UnquantizedMoeBackend = UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+    ) -> UnquantizedFusedMoEMethod:
+        moe_config = make_dummy_moe_config(
+            num_experts=2,
+            hidden_dim=64,
+            intermediate_size=intermediate,
+        )
+        method = object.__new__(UnquantizedFusedMoEMethod)
+        method.moe = moe_config
+        method.unquantized_backend = backend
+        method.moe_kernel = None
+        return method
+
+    @pytest.mark.parametrize(
+        "backend,original,expected",
+        [
+            (UnquantizedMoeBackend.FLASHINFER_TRTLLM, 1344, 1408),
+            (UnquantizedMoeBackend.FLASHINFER_TRTLLM, 1408, 1408),
+            (UnquantizedMoeBackend.TRITON, 1344, 1344),
+        ],
+    )
+    def test_rounds_intermediate_before_weight_allocation(
+        self,
+        backend: UnquantizedMoeBackend,
+        original: int,
+        expected: int,
+    ):
+        method = self._make_method(original, backend)
+
+        hidden, intermediate = method.maybe_roundup_sizes(
+            hidden_size=64,
+            intermediate_size_per_partition=original,
+            act_dtype=torch.bfloat16,
+            moe_parallel_config=method.moe.moe_parallel_config,
+        )
+
+        assert hidden == 64
+        assert intermediate == expected
+
+    @pytest.mark.parametrize("is_act_and_mul", [True, False])
+    def test_create_weights_zeroes_preallocated_padding(self, is_act_and_mul: bool):
+        method = self._make_method(1344)
+        if not is_act_and_mul:
+            method.moe.activation = MoEActivation.RELU2_NO_MUL
+        method.moe.intermediate_size_per_partition = 1408
+        layer = torch.nn.Module()
+
+        method.create_weights(
+            layer=layer,
+            num_experts=2,
+            hidden_size=64,
+            intermediate_size_per_partition=1408,
+            params_dtype=torch.bfloat16,
+        )
+
+        up_mult = 2 if is_act_and_mul else 1
+        assert layer.w13_weight.shape == (2, up_mult * 1408, 64)
+        assert layer.w2_weight.shape == (2, 64, 1408)
+        assert torch.count_nonzero(layer.w13_weight[:, 1344:1408]) == 0
+        if is_act_and_mul:
+            assert torch.count_nonzero(layer.w13_weight[:, 2752:]) == 0
+        assert torch.count_nonzero(layer.w2_weight[:, :, 1344:]) == 0
 
 
 class TestLoadWeightsExpertBias:

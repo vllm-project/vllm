@@ -273,7 +273,7 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
             layer_types = set(rope_parameters) & set(
                 hf_configuration_utils.ALLOWED_LAYER_TYPES
             )
-            if shared_keys := set(rope_parameters) - layer_types:
+            if layer_types and (shared_keys := set(rope_parameters) - layer_types):
                 for key in shared_keys:
                     del rope_parameters[key]
                 logger.warning(
