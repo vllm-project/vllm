@@ -793,3 +793,41 @@ def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
     assert all(isinstance(e, BlockStored) for e in events)
     assert {e.group_idx for e in events} == {0}
     assert all(len(e.token_ids) == BLOCK_SIZE for e in events)
+
+
+def test_joint_prefix_events_separate_reused_and_loaded_blocks():
+    """Interleaved GPU hits emit reuse runs; completion registers only CPU targets."""
+    from tests.v1.simple_kv_offload.test_scheduler import _make_joint_prefix_case
+    from vllm.v1.outputs import KVConnectorOutput
+
+    offload, manager, request, _ = _make_joint_prefix_case(
+        ("gcgg",), enable_events=True
+    )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=BLOCK_SIZE,
+            num_external_computed_tokens=3 * BLOCK_SIZE,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    hashes = [maybe_convert_block_hash(h) for h in request.block_hashes[:4]]
+    events = manager.block_pool.take_events()
+    assert [event.block_hashes for event in events] == [[hashes[0]], hashes[2:]]
+    assert [event.parent_block_hash for event in events] == [None, hashes[1]]
+
+    offload.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), 3 * BLOCK_SIZE
+    )
+    offload.update_connector_output(
+        KVConnectorOutput(finished_recving={request.request_id})
+    )
+    manager.cache_blocks(request, 4 * BLOCK_SIZE)
+    events = manager.block_pool.take_events()
+    assert [event.block_hashes for event in events] == [[hashes[1]]]
+    offload.request_finished(request, [])
+    manager.free(request)

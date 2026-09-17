@@ -3065,3 +3065,483 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
         without_ring, max_batched
     )
     assert target_with == target_without
+
+
+def _make_joint_prefix_case(locations, *, enable_events=False):
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    fix = make_scheduler(
+        num_cpu_blocks=16, num_gpu_blocks=16, num_groups=len(locations)
+    )
+    manager = KVCacheManager(
+        fix.kv_cache_config,
+        1024,
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        enable_kv_cache_events=enable_events,
+    )
+    fix.scheduler.bind_gpu_block_pool(manager.block_pool)
+    request = make_request(num_blocks=4)
+    if enable_events:
+        request.kv_cache_report_mode = "full"
+    sources = {}
+    for group, layout in enumerate(locations):
+        for index, location in enumerate(layout):
+            for device, pool in (
+                ("g", manager.block_pool),
+                ("c", fix.scheduler.cpu_block_pool),
+            ):
+                if location == device or location == "b":
+                    block = pool.get_new_blocks(1)[0]
+                    pool._insert_block_hash(
+                        make_block_hash_with_group_id(
+                            request.block_hashes[index], group
+                        ),
+                        block,
+                        num_tokens=(index + 1) * BLOCK_SIZE,
+                    )
+                    pool.free_blocks([block])
+                    sources[group, index, device] = block
+    return fix.scheduler, manager, request, sources
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [
+        ("gggg",),
+        ("cccc",),
+        ("gcgg",),
+        ("cgcg",),
+        ("gbcg",),
+        ("gmgg",),
+        ("cgcg", "gcgc"),
+        ("gmgg", "cmcc"),
+    ],
+)
+def test_joint_prefix_reuses_gpu_and_loads_only_cpu(locations):
+    """Residency determines source selection and exact transfer positions."""
+    offload, manager, request, sources = _make_joint_prefix_case(locations)
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    expected_length = min(
+        layout.index("m") if "m" in layout else 4 for layout in locations
+    )
+    cpu_positions = []
+    assert hit.num_computed_tokens == expected_length * BLOCK_SIZE
+    assert [len(group) for group in hit.blocks] == [expected_length] * len(locations)
+    for group in range(len(locations)):
+        for index in range(expected_length):
+            device = "g" if (group, index, "g") in sources else "c"
+            assert hit.blocks[group][index].block is sources[group, index, device]
+            assert hit.blocks[group][index].is_cpu == (device == "c")
+            if device == "c":
+                cpu_positions.append((group, index))
+    needs_load = bool(cpu_positions)
+    assert hit.needs_load == needs_load
+    external = hit.num_computed_tokens - hit.num_gpu_prefix_tokens
+    assert (
+        manager.allocate_slots(
+            request,
+            0 if needs_load else 1,
+            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
+            num_external_computed_tokens=external,
+            delay_cache_blocks=needs_load,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    blocks = manager.get_blocks(request.request_id)
+    for group in range(len(locations)):
+        for index in range(expected_length):
+            target = blocks.blocks[group][index]
+            if (group, index) in cpu_positions:
+                assert target.block_hash is None
+            else:
+                assert target is sources[group, index, "g"]
+    offload.update_state_after_alloc(request, blocks, external)
+    assert not hit.pinned
+    metadata = offload.build_connector_meta(make_scheduler_output({}))
+    assert list(zip(metadata.load_gpu_blocks, metadata.load_cpu_blocks)) == [
+        (blocks.blocks[group][index].block_id, sources[group, index, "c"].block_id)
+        for group, index in cpu_positions
+    ]
+    if needs_load:
+        offload.update_connector_output(
+            KVConnectorOutput(finished_recving={request.request_id})
+        )
+        manager.cache_blocks(request, hit.num_computed_tokens)
+        for group, index in cpu_positions:
+            assert manager.block_pool.get_cached_block(
+                request.block_hashes[index], [group]
+            ) == [blocks.blocks[group][index]]
+    offload.request_finished(request, [])
+    manager.free(request)
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        assert all(block.ref_cnt == 0 for block in pool.blocks if not block.is_null)
+
+
+def test_joint_lookup_memoizes_hits_and_misses(monkeypatch):
+    """Each pool/hash/group is probed at most once, including negative results."""
+    from collections import Counter
+
+    from vllm.v1.core.kv_cache_lookup import JointCacheLookup
+    from vllm.v1.core.kv_cache_utils import BlockHash
+
+    fix = make_scheduler()
+    request = make_request()
+    gpu = fix.gpu_block_pool
+    cpu = fix.scheduler.cpu_block_pool
+    block = cpu.get_new_blocks(1)[0]
+    cpu._insert_block_hash(
+        make_block_hash_with_group_id(request.block_hashes[0], 0),
+        block,
+        num_tokens=BLOCK_SIZE,
+    )
+    cpu.free_blocks([block])
+    calls: Counter[tuple[str, BlockHash, int]] = Counter()
+    for name, pool in (("gpu", gpu), ("cpu", cpu)):
+        original = pool.get_cached_block
+
+        def counted(block_hash, groups, original=original, name=name):
+            calls.update((name, block_hash, group) for group in groups)
+            return original(block_hash, groups)
+
+        monkeypatch.setattr(pool, "get_cached_block", counted)
+    lookup = JointCacheLookup(gpu, cpu)
+    for _ in range(3):
+        assert lookup.get_cached_block(request.block_hashes[0], [0]) == [block]
+        assert lookup.get_cached_block(request.block_hashes[1], [0]) is None
+    assert calls == {
+        (name, request.block_hashes[index], 0): 1
+        for name in ("gpu", "cpu")
+        for index in (0, 1)
+    }
+
+
+@pytest.mark.parametrize("attention", ["swa", "mamba", "mamba_align", "mixed_sizes"])
+def test_joint_sparse_prefix_allocates_reachable_states(attention):
+    """Sparse groups load reachable states without materializing null padding."""
+    from dataclasses import replace
+
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    num_blocks = 4
+    config = _make_kv_cache_config(48, 2)
+    if attention.startswith("mamba"):
+        spec = MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((1, 1),),
+            dtypes=(DTYPE,),
+            mamba_cache_mode="align" if attention == "mamba_align" else "all",
+        )
+    else:
+        spec = replace(
+            config.kv_cache_groups[1].kv_cache_spec,
+            block_size=BLOCK_SIZE * (2 if attention == "mixed_sizes" else 1),
+            sliding_window=BLOCK_SIZE * 2,
+        )
+    config.kv_cache_groups[1] = KVCacheGroupSpec(["layer_1"], spec)
+    block_size = BLOCK_SIZE * (2 if attention == "mixed_sizes" else 1)
+    offload = SimpleCPUOffloadScheduler(
+        _make_vllm_config(),
+        config,
+        _BYTES_PER_BLOCK * 48,
+        block_size,
+        BLOCK_SIZE,
+    )
+    manager = KVCacheManager(config, 1024, block_size, BLOCK_SIZE)
+    offload.bind_gpu_block_pool(manager.block_pool)
+    request = make_request(num_blocks=num_blocks)
+    for group_idx, group in enumerate(config.kv_cache_groups):
+        group_size = group.kv_cache_spec.block_size
+        for end in range(group_size, num_blocks * BLOCK_SIZE + 1, group_size):
+            # The final state is on CPU; earlier states alternate pools.
+            pool = (
+                offload.cpu_block_pool
+                if end % (2 * group_size) == 0
+                else manager.block_pool
+            )
+            block = pool.get_new_blocks(1)[0]
+            pool._insert_block_hash(
+                make_block_hash_with_group_id(
+                    request.block_hashes[end // BLOCK_SIZE - 1], group_idx
+                ),
+                block,
+                num_tokens=end,
+            )
+            pool.free_blocks([block])
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    assert hit.num_computed_tokens == num_blocks * BLOCK_SIZE
+    retained = {id(source.block) for group in hit.blocks for source in group}
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        for block in pool.blocks:
+            if not block.is_null:
+                assert block.ref_cnt == int(id(block) in retained)
+    assert hit.blocks[1][-1].block.block_hash == make_block_hash_with_group_id(
+        request.block_hashes[num_blocks - 1], 1
+    )
+    external = hit.num_computed_tokens - hit.num_gpu_prefix_tokens
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
+            num_external_computed_tokens=external,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    offload.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), external
+    )
+    offload.update_connector_output(
+        KVConnectorOutput(finished_recving={request.request_id})
+    )
+    manager.cache_blocks(request, hit.num_computed_tokens)
+    offload.request_finished(request, [])
+    manager.free(request)
+    assert all(b.ref_cnt == 0 for b in manager.block_pool.blocks if not b.is_null)
+    assert all(b.ref_cnt == 0 for b in offload.cpu_block_pool.blocks if not b.is_null)
+
+
+@pytest.mark.parametrize("cleanup", ["cancel", "reset", "retry"])
+def test_joint_prefix_allocation_failure_preserves_caches(cleanup):
+    """Insufficient capacity does not materialize any CPU holes or lose GPU hits."""
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    fix = make_scheduler(num_gpu_blocks=4)
+    manager = KVCacheManager(fix.kv_cache_config, 1024, BLOCK_SIZE, BLOCK_SIZE)
+    fix.scheduler.bind_gpu_block_pool(manager.block_pool)
+    request = make_request(num_blocks=4)
+    for index in range(4):
+        pool = manager.block_pool if index % 2 == 0 else fix.scheduler.cpu_block_pool
+        block = pool.get_new_blocks(1)[0]
+        pool._insert_block_hash(
+            make_block_hash_with_group_id(request.block_hashes[index], 0),
+            block,
+            num_tokens=(index + 1) * BLOCK_SIZE,
+        )
+        pool.free_blocks([block])
+    hit = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
+    free_before = manager.block_pool.get_num_free_blocks()
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_prefix_tokens,
+            num_external_computed_tokens=hit.num_computed_tokens
+            - hit.num_gpu_prefix_tokens,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is None
+    )
+    assert manager.block_pool.get_num_free_blocks() == free_before
+    assert not manager.get_blocks(request.request_id).blocks[0]
+    if cleanup == "cancel":
+        fix.scheduler.request_finished(request, [])
+    elif cleanup == "reset":
+        assert fix.scheduler.reset()
+    else:
+        retry = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
+        assert not hit.pinned and retry.pinned
+        assert all(
+            source.block.ref_cnt == 1 for group in retry.blocks for source in group
+        )
+        fix.scheduler.build_connector_meta(make_scheduler_output({}))
+        assert not retry.pinned
+    assert not hit.pinned
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert all(
+        block.ref_cnt == 0
+        for block in fix.scheduler.cpu_block_pool.blocks
+        if not block.is_null
+    )
+
+
+@pytest.mark.parametrize(
+    "num_gpu_blocks, num_spec_tokens, admitted",
+    [(4, 0, False), (32, 0, True), (5, 1, False), (6, 1, True)],
+)
+def test_scheduler_uses_joint_lookup_without_legacy_scans(
+    monkeypatch, num_gpu_blocks, num_spec_tokens, admitted
+):
+    """The scheduler admits a whole joint match or defers it without partial loads."""
+    from tests.v1.core.utils import create_scheduler
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.v1.request import RequestStatus
+
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        num_blocks=num_gpu_blocks,
+        num_speculative_tokens=num_spec_tokens or None,
+    )
+    scheduler.kv_cache_config.kv_cache_tensors = _make_kv_cache_config(
+        num_gpu_blocks
+    ).kv_cache_tensors
+    config = scheduler.vllm_config
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    connector = SimpleCPUOffloadConnector(
+        config, KVConnectorRole.SCHEDULER, scheduler.kv_cache_config
+    )
+    scheduler.connector = connector
+    connector.bind_gpu_block_pool(scheduler.kv_cache_manager.block_pool)
+    offload = connector.scheduler_manager
+    request = make_request(num_blocks=4)
+    for index in range(4):
+        pool = (
+            offload.cpu_block_pool
+            if index == 1
+            else scheduler.kv_cache_manager.block_pool
+        )
+        block = pool.get_new_blocks(1)[0]
+        pool._insert_block_hash(
+            make_block_hash_with_group_id(request.block_hashes[index], 0),
+            block,
+            num_tokens=(index + 1) * BLOCK_SIZE,
+        )
+        pool.free_blocks([block])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("legacy prefix scan was called")
+
+    monkeypatch.setattr(scheduler.kv_cache_manager, "get_computed_blocks", forbidden)
+    monkeypatch.setattr(connector, "get_num_new_matched_tokens", forbidden)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if not admitted:
+        assert request.status == RequestStatus.WAITING
+        assert request.num_computed_tokens == 0
+        assert not output.kv_connector_metadata.load_gpu_blocks
+        assert not scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+        assert not offload._pending_joint_hits
+        for pool in (scheduler.kv_cache_manager.block_pool, offload.cpu_block_pool):
+            assert all(block.ref_cnt == 0 for block in pool.blocks if not block.is_null)
+        return
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 4 * BLOCK_SIZE
+    assert len(output.kv_connector_metadata.load_gpu_blocks) == 1
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.num_local_cached_tokens == 3 * BLOCK_SIZE
+    assert request.prefill_stats.num_external_cached_tokens == BLOCK_SIZE
+
+
+@pytest.mark.parametrize("locations", ["gc", "gcgg"])
+def test_joint_prefix_respects_bounded_replay(locations):
+    """Discard short hits without retaining pins; replay longer hits after loading."""
+    from tests.v1.core.test_prefix_replay import WINDOW, _replay_scheduler
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.v1.request import RequestStatus
+
+    scheduler = _replay_scheduler()
+    kv_config = scheduler.kv_cache_config
+    total_bytes = (
+        sum(group.kv_cache_spec.page_size_bytes for group in kv_config.kv_cache_groups)
+        * kv_config.num_blocks
+    )
+    kv_config.kv_cache_tensors = [
+        KVCacheTensor(
+            size=total_bytes,
+            layers=list(group.layer_names),
+            layer_stride=group.kv_cache_spec.page_size_bytes * kv_config.num_blocks,
+            block_stride=group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_config.kv_cache_groups
+    ]
+    config = scheduler.vllm_config
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    connector = SimpleCPUOffloadConnector(config, KVConnectorRole.SCHEDULER, kv_config)
+    scheduler.connector = connector
+    manager = scheduler.kv_cache_manager
+    connector.bind_gpu_block_pool(manager.block_pool)
+    offload = connector.scheduler_manager
+    request = make_request(num_blocks=4)
+    for index, location in enumerate(locations):
+        pool = manager.block_pool if location == "g" else offload.cpu_block_pool
+        block = pool.get_new_blocks(1)[0]
+        pool._insert_block_hash(
+            make_block_hash_with_group_id(request.block_hashes[index], 0),
+            block,
+            num_tokens=(index + 1) * BLOCK_SIZE,
+        )
+        pool.free_blocks([block])
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    matched_tokens = len(locations) * BLOCK_SIZE
+    if matched_tokens <= WINDOW:
+        assert request.status == RequestStatus.RUNNING
+        assert not output.kv_connector_metadata.load_gpu_blocks
+        assert request.prefill_stats.num_local_cached_tokens == 0
+        assert request.prefill_stats.num_external_cached_tokens == 0
+    else:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert len(output.kv_connector_metadata.load_gpu_blocks) == 1
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        output = scheduler.schedule()
+    expected_start = max(0, matched_tokens - WINDOW)
+    assert output.scheduled_new_reqs[0].num_computed_tokens == expected_start
+    assert output.scheduled_new_reqs[0].replay_start == expected_start
+    assert not offload._pending_joint_hits
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    metadata = offload.build_connector_meta(make_scheduler_output({}))
+    for event in (output.kv_connector_metadata.store_event, metadata.store_event):
+        if event >= 0:
+            simulate_store_completion(offload, event)
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        assert all(block.ref_cnt == 0 for block in pool.blocks if not block.is_null)
+
+
+@pytest.mark.parametrize("dcp", [1, 2])
+@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.parametrize("extra_tokens", [0, 1])
+def test_joint_prefix_preserves_dcp_eagle_and_last_token(dcp, eagle, extra_tokens):
+    """Joint lookup uses the same effective block and EAGLE drop boundaries."""
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    fix = _make_cp_scheduler(dcp_world_size=dcp)
+    size = BLOCK_SIZE * dcp
+    manager = KVCacheManager(
+        fix.kv_cache_config,
+        1024,
+        size,
+        size,
+        dcp_world_size=dcp,
+        use_eagle=eagle,
+    )
+    fix.scheduler.bind_gpu_block_pool(manager.block_pool)
+    request = _make_cp_request(4, size)
+    if not extra_tokens:
+        request = Request(
+            request_id=request.request_id,
+            prompt_token_ids=list(request.prompt_token_ids[:-1]),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(size, sha256),
+        )
+    for index in range(4):
+        pool = manager.block_pool if index % 2 == 0 else fix.scheduler.cpu_block_pool
+        block = pool.get_new_blocks(1)[0]
+        pool._insert_block_hash(
+            make_block_hash_with_group_id(request.block_hashes[index], 0),
+            block,
+            num_tokens=(index + 1) * size,
+        )
+        pool.free_blocks([block])
+    hit = fix.scheduler.get_joint_cache_hit(request, manager.coordinator)
+    assert hit.num_computed_tokens == (3 + extra_tokens - int(eagle)) * size
+    fix.scheduler.request_finished(request, [])
+    assert not hit.pinned

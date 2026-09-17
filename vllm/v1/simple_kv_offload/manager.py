@@ -24,6 +24,10 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
+from vllm.v1.core.kv_cache_lookup import (
+    JointCacheHit,
+    JointCacheLookup,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
@@ -210,6 +214,7 @@ class SimpleCPUOffloadScheduler:
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
+        self._pending_joint_hits: dict[str, JointCacheHit] = {}
 
         # Load metadata
         self._reqs_to_load: dict[str, LoadRequestState] = {}
@@ -320,6 +325,49 @@ class SimpleCPUOffloadScheduler:
         Called by Scheduler after kv_cache_manager is ready."""
         self._gpu_block_pool = gpu_block_pool
 
+    def get_joint_cache_hit(
+        self, request: "Request", coordinator: KVCacheCoordinator
+    ) -> JointCacheHit:
+        if stale := self._pending_joint_hits.pop(request.request_id, None):
+            stale.release()
+        assert self._gpu_block_pool is not None
+        lookup = JointCacheLookup(self._gpu_block_pool, self.cpu_block_pool)
+        max_length = max(0, request.num_tokens - 1)
+        if request.skip_reading_prefix_cache:
+            max_length = 0
+        result = JointCacheHit.find(
+            coordinator, lookup, request.block_hashes, max_length, self.block_size
+        )
+        result.pin()
+        self._pending_joint_hits[request.request_id] = result
+        return result
+
+    def _consume_joint_hit(
+        self, request: "Request", blocks: "KVCacheBlocks", hit: JointCacheHit
+    ) -> None:
+        gpu_blocks = []
+        cpu_blocks = []
+        for group_idx, group in enumerate(hit.blocks):
+            for index, source in enumerate(group):
+                if source.is_cpu:
+                    target = blocks.blocks[group_idx][index]
+                    if not target.is_null:
+                        gpu_blocks.append(target)
+                        cpu_blocks.append(source.block)
+        if cpu_blocks:
+            assert self._gpu_block_pool is not None
+            self.cpu_block_pool.touch(cpu_blocks)
+            self._gpu_block_pool.touch(gpu_blocks)
+            assert request.request_id not in self._reqs_to_load
+            self._reqs_to_load[request.request_id] = LoadRequestState(
+                request,
+                TransferMeta(
+                    [block.block_id for block in gpu_blocks],
+                    [block.block_id for block in cpu_blocks],
+                ),
+            )
+        hit.release()
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:
@@ -375,8 +423,6 @@ class SimpleCPUOffloadScheduler:
             return hit_length, True
         return 0, False
 
-    # TODO(yifan): this API now only matches the suffix part of the prefix cache. A more
-    # general API should scan blocks in both GPU and CPU block pool in a single pass.
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -396,6 +442,16 @@ class SimpleCPUOffloadScheduler:
                 block_ids=tuple([] for _ in range(num_groups)),
                 num_stored_blocks=[0] * num_groups,
             )
+
+        if joint_hit := self._pending_joint_hits.pop(req_id, None):
+            if num_external_tokens:
+                assert num_external_tokens == (
+                    joint_hit.num_computed_tokens - joint_hit.num_gpu_prefix_tokens
+                )
+                self._consume_joint_hit(request, blocks, joint_hit)
+            else:
+                joint_hit.release()
+            return
 
         # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
@@ -494,6 +550,10 @@ class SimpleCPUOffloadScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> SimpleCPUOffloadMetadata:
+        # Queries not admitted this step must not retain eviction pins.
+        for hit in self._pending_joint_hits.values():
+            hit.release()
+        self._pending_joint_hits.clear()
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids, store_meta = self.prepare_store_specs(
@@ -1140,6 +1200,9 @@ class SimpleCPUOffloadScheduler:
         so the scheduler can free blocks immediately."""
         req_id = request.request_id
 
+        if joint_hit := self._pending_joint_hits.pop(req_id, None):
+            joint_hit.release()
+
         # Release any temp CPU hit pin from get_num_new_matched_tokens()
         # if request is canceled or preempted before update_state_after_alloc()
         pending = self._pending_cpu_hits.pop(req_id, None)
@@ -1337,6 +1400,9 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        for hit in self._pending_joint_hits.values():
+            hit.release()
+        self._pending_joint_hits.clear()
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)
