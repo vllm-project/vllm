@@ -345,6 +345,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._lookup_dir = lookup_dir
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
+        self._gpu_devices: set[int] = set()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="umbp-embedded-transfer",
@@ -376,6 +377,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                     f"MORI UMBP failed to register KV storage 0x{storage_ptr:x}"
                 )
             self._registered_storages.add(storage_ptr)
+            if location == MemoryLocationType.GPU and device >= 0:
+                self._gpu_devices.add(device)
 
         if self._lookup_server is None:
             self._lookup_server = _MoriLookupServer(
@@ -438,14 +441,25 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         plans = tuple(plans)
         job = TransferJobState(plans)
         job.start()
+        ready_events: list[torch.cuda.Event] = []
+        for device in self._gpu_devices:
+            with torch.cuda.device(device):
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream(device))
+                ready_events.append(event)
         self._futures[id(job)] = self._executor.submit(
-            self._store_sync, job, plans
+            self._store_sync, job, plans, ready_events
         )
         return job
 
     def _store_sync(
-        self, job: TransferJobState, plans: tuple[BlockTransferPlan, ...]
+        self,
+        job: TransferJobState,
+        plans: tuple[BlockTransferPlan, ...],
+        ready_events: list[torch.cuda.Event],
     ) -> TransferJobState:
+        for event in ready_events:
+            event.synchronize()
         if not plans:
             job.complete()
             return job
