@@ -258,10 +258,12 @@ class KimiK3ReasoningParser(ReasoningParser):
 
         Handles four shapes:
           * response opener without think markers -> no think channel; all content
-          * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
-          * open marker absent but a   close marker exists (gen-prefix consumed
+          * no think markers -> unfinished reasoning (the think-open marker was
+            consumed as the generation prefix)
+          * open marker present -> reasoning starts after ``<|open|>think<|sep|>``
+          * open marker absent but a close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
-          * neither marker present     -> truncated reasoning after a consumed
+          * neither marker present -> truncated reasoning after a consumed
             generation prefix
         ``rest`` is whatever follows the close marker, fed on to the tool parser.
         """
@@ -272,6 +274,17 @@ class KimiK3ReasoningParser(ReasoningParser):
         # reasoning content begins right after think-open (or at start if the
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
+        # Preserve response-only output as content.
+        if (
+            m_open is None
+            and self._think_close_re.search(model_output) is None
+            and self._response_open_re.search(model_output) is not None
+        ):
+            return None, self._content_after_reasoning(model_output, request)
+        # In thinking mode the template supplies the think-open marker as a
+        # generation prefix, so output with no markers is truncated reasoning.
+        if m_open is None and self._think_close_re.search(model_output) is None:
+            return model_output or None, None
 
         m_close = self._think_close_re.search(model_output, content_start)
         if (
