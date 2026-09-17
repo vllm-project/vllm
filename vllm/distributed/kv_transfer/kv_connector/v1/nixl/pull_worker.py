@@ -169,7 +169,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if groups_differ and dcp_active:
+            read_specs = self._dcp_region_read_specs(meta, plan.all_source_ranks)
+        elif groups_differ:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -359,6 +361,93 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+
+    def _dcp_region_read_specs(
+        self, meta: ReqMeta, source_ranks: tuple[int, ...]
+    ) -> list[ReadSpec]:
+        """Match DCP token positions across independently grouped MLA regions."""
+        assert meta.remote is not None and self.transfer_topo is not None
+        remote = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+        remote_groups = self.dst_region_group_ids[meta.remote.engine_id]
+        local_groups = self.region_group_ids or remote_groups
+        if not meta.local_physical_block_ids:
+            return [ReadSpec(rank, [], []) for rank in source_ranks]
+        if (
+            not self.use_mla
+            or self._has_mamba
+            or min(*local_groups, *remote_groups) < 0
+        ):
+            raise NotImplementedError(
+                "DCP region pulls require unshared pure MLA regions"
+            )
+        if self.block_size != remote.remote_block_size:
+            raise NotImplementedError(
+                "DCP region pulls require equal physical block sizes"
+            )
+        if meta.remote.num_tokens is None or not meta.local_num_computed_blocks:
+            raise ValueError(
+                "DCP region pulls require token and per-group prefix counts"
+            )
+        local_ratio = self._physical_blocks_per_logical_kv_block
+        remote_ratio = remote.remote_physical_blocks_per_logical
+        if self.dcp_size > 1 and local_ratio != remote_ratio:
+            raise NotImplementedError(
+                "Different logical block sizes require a DCP=1 region receiver"
+            )
+        local_by_region = self._block_ids_by_region(
+            meta.local_physical_block_ids, local_groups
+        )
+        remote_by_region = self._block_ids_by_region(
+            meta.remote.block_ids, remote_groups
+        )
+        transfer_groups = self.kv_cache_config.transfer_group_ids
+        cached = [
+            meta.local_num_computed_blocks[transfer_groups[group]]
+            for group in local_groups
+        ]
+
+        # DCP stripes logical blocks; physical pages within a stripe stay
+        # contiguous. Match by global page position before choosing descriptors.
+        positions = []
+        num_pages = cdiv(meta.remote.num_tokens, self.block_size)
+        meta.region_blocks_to_zero = []
+        for ids, prefix in zip(local_by_region, cached, strict=True):
+            page = np.arange(len(ids), dtype=np.int64) + prefix * local_ratio
+            logical, offset = np.divmod(page, local_ratio)
+            position = (logical * self.dcp_size + self.dcp_rank) * local_ratio + offset
+            positions.append(position)
+            meta.region_blocks_to_zero.append(
+                np.asarray(ids)[position >= num_pages].tolist()
+            )
+
+        reads = []
+        for rank in source_ranks:
+            local_ids, remote_ids = [], []
+            for ids, remote_blocks, position in zip(
+                local_by_region, remote_by_region, positions, strict=True
+            ):
+                remote_logical, offset = np.divmod(position, remote_ratio)
+                owned = (position < num_pages) & (
+                    remote_logical % remote.remote_dcp_size
+                    == rank % remote.remote_dcp_size
+                )
+                indices = remote_logical[owned] // remote.remote_dcp_size
+                if len(indices) and indices[-1] >= len(remote_blocks):
+                    raise ValueError(
+                        "Remote KV pages do not cover the requested DCP range"
+                    )
+                local_ids.append(np.asarray(ids, dtype=np.int64)[owned].tolist())
+                remote_ids.append(
+                    (
+                        np.asarray(remote_blocks, dtype=np.int64)[indices]
+                        * remote_ratio
+                        + offset[owned]
+                    ).tolist()
+                )
+            reads.append(
+                ReadSpec(rank, local_ids, remote_ids, block_ids_by_region=True)
+            )
+        return reads
 
     def _read_blocks(
         self,
