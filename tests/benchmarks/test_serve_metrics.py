@@ -44,3 +44,22 @@ def test_calculate_metrics_counts_overlapping_requests_as_concurrent() -> None:
     ]
 
     assert _peak_concurrency(outputs) == 2
+
+
+def test_calculate_metrics_counts_sequential_subsecond_requests_correctly() -> None:
+    outputs = [
+        _successful_output(start_time=0.0, latency=0.1),
+        _successful_output(start_time=0.2, latency=0.1),
+        _successful_output(start_time=0.4, latency=0.1),
+        _successful_output(start_time=0.6, latency=0.1),
+        _successful_output(start_time=0.8, latency=0.1),
+    ]
+
+    assert _peak_concurrency(outputs) == 1
+
+
+def test_calculate_metrics_treats_zero_latency_as_empty_interval() -> None:
+    outputs = [_successful_output(start_time=0.0, latency=0.0)]
+
+    # Under [start, end) semantics, [0.0, 0.0) occupies no time.
+    assert _peak_concurrency(outputs) == 0
