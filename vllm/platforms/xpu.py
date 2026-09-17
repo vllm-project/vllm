@@ -304,6 +304,27 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
+        if envs.VLLM_BATCH_INVARIANT:
+            model_config = vllm_config.model_config
+            if model_config is not None and (
+                model_config.quantization is not None
+                or vllm_config.quant_config is not None
+            ):
+                raise ValueError(
+                    "XPU batch invariance currently supports only unquantized "
+                    f"models; got quantization={model_config.quantization!r}. "
+                    "Use an unquantized model or disable VLLM_BATCH_INVARIANT."
+                )
+
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype not in ("auto", "float16", "bfloat16"):
+                raise ValueError(
+                    "XPU batch invariance currently does not support quantized "
+                    f"KV caches; got kv_cache_dtype={cache_dtype!r}. "
+                    "Use an unquantized KV cache dtype or disable "
+                    "VLLM_BATCH_INVARIANT."
+                )
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
