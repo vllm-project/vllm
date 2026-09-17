@@ -32,15 +32,16 @@ def _reference(
     world_size: int,
     group: dist.ProcessGroup,
     all_reduce: bool,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     M = x.shape[0]
     padded_M = (M + world_size - 1) // world_size * world_size
     partial = torch.empty(
         (padded_M, weight.shape[0]),
-        dtype=x.dtype,
+        dtype=out_dtype or x.dtype,
         device=x.device,
     )
-    torch.mm(x, weight.T, out=partial[:M])
+    partial[:M] = torch.mm(x, weight.T)
     if padded_M > M:
         partial[M:].zero_()
 
@@ -85,6 +86,7 @@ def _run_mode(
     rank: int,
     world_size: int,
     weights: dict[int, torch.Tensor],
+    weights_mxfp8: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
 ) -> None:
     # cute_dsl is unavailable off CUDA, so import it only inside the GPU worker.
     from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
@@ -96,8 +98,8 @@ def _run_mode(
     )
     input_generator = torch.Generator(device=device)
 
-    # Alternating shapes exercise producer-flag reuse across different grids,
-    # CTA-group choices, and both BN=128 and BN=256 dispatches.
+    # Alternating shapes exercise producer-flag reuse across different grids
+    # and CTA-group choices.
     for M, K in (*_SHAPES, *_SHAPES[::-1]):
         input_generator.manual_seed(2000 + M + K)
         x = torch.randn(
@@ -109,6 +111,34 @@ def _run_mode(
         )
         expected = _reference(x, weights[K], world_size, group, all_reduce)
         actual = gemm_rs_ar(x, weights[K])
+        torch.accelerator.synchronize(device)
+        _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
+
+    # MXFP8 dispatch over the same shapes. The wrapper quantizes activations
+    # internally; mirror that quantization for the reference. FP8 values times
+    # a power-of-2 scale are exact in BF16, so the reference only differs from
+    # the kernel in accumulation order and output rounding.
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+        mxfp8_e4m3_quantize,
+    )
+
+    for M, K in (*_SHAPES, *_SHAPES[::-1]):
+        input_generator.manual_seed(4000 + M + K)
+        x = torch.randn(
+            M,
+            K,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=input_generator,
+        )
+        x_q, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
+        x_ref = dequant_mxfp8_to_bf16(x_q, x_sf)
+        w_q, w_sf, w_ref = weights_mxfp8[K]
+        expected = _reference(
+            x_ref, w_ref, world_size, group, all_reduce, out_dtype=torch.bfloat16
+        )
+        actual = gemm_rs_ar(x, w_q, w_sf)
         torch.accelerator.synchronize(device)
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
 
@@ -173,8 +203,60 @@ def _run_mode(
             all_reduce,
         )
 
+    # MXFP8 under CUDA graph capture: the wrapper runs the activation-quant
+    # kernel inside the captured region.
+    w_q, w_sf, w_ref = weights_mxfp8[graph_K]
+    input_generator.manual_seed(4500)
+    graph_x_mxfp8 = torch.randn(
+        graph_M,
+        graph_K,
+        dtype=torch.bfloat16,
+        device=device,
+        generator=input_generator,
+    )
+    x_q, x_sf = mxfp8_e4m3_quantize(graph_x_mxfp8, is_sf_swizzled_layout=False)
+    graph_expected_mxfp8 = _reference(
+        dequant_mxfp8_to_bf16(x_q, x_sf),
+        w_ref,
+        world_size,
+        group,
+        all_reduce,
+        out_dtype=torch.bfloat16,
+    )
+    graph_output_mxfp8 = torch.empty_like(graph_expected_mxfp8)
+
+    with torch.cuda.stream(capture_stream):
+        for _ in range(3):
+            graph_output_mxfp8.copy_(gemm_rs_ar(graph_x_mxfp8, w_q, w_sf))
+    capture_stream.synchronize()
     dist.barrier(group=group)
-    del gemm_rs_ar, capture_stream, graph, graph_output
+
+    graph_mxfp8 = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph_mxfp8, stream=capture_stream):
+        graph_output_mxfp8.copy_(gemm_rs_ar(graph_x_mxfp8, w_q, w_sf))
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    dist.barrier(group=group)
+
+    for _ in range(3):
+        graph_mxfp8.replay()
+        torch.accelerator.synchronize(device)
+        _assert_valid_rows_close(
+            graph_output_mxfp8,
+            graph_expected_mxfp8,
+            graph_M,
+            rank,
+            all_reduce,
+        )
+
+    dist.barrier(group=group)
+    del (
+        gemm_rs_ar,
+        capture_stream,
+        graph,
+        graph_output,
+        graph_mxfp8,
+        graph_output_mxfp8,
+    )
 
 
 def _worker(local_rank: int, world_size: int, master_port: int) -> None:
@@ -203,6 +285,13 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
 
     weight_generator = torch.Generator(device=device)
     weights = {}
+    weights_mxfp8 = {}
+
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+        mxfp8_e4m3_quantize,
+    )
+
     for K in {K for _, K in _SHAPES}:
         weight_generator.manual_seed(1000 + rank * 10 + K)
         weights[K] = torch.randn(
@@ -212,6 +301,18 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
             device=device,
             generator=weight_generator,
         )
+
+        weight_generator.manual_seed(5000 + rank * 10 + K)
+        w = torch.randn(
+            _N,
+            K,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=weight_generator,
+        )
+        w_q, w_sf = mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=True)
+        _, w_sf_2d = mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=False)
+        weights_mxfp8[K] = (w_q, w_sf, dequant_mxfp8_to_bf16(w_q, w_sf_2d))
 
     # Production binds one mode per worker; exercise both mode-bound instances
     # sequentially in this test without implying that both are initialized.
@@ -223,6 +324,7 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
             rank=rank,
             world_size=world_size,
             weights=weights,
+            weights_mxfp8=weights_mxfp8,
         )
     cleanup_dist_env_and_memory()
 
