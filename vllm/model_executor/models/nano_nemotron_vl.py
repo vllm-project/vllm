@@ -118,7 +118,7 @@ class NanoNemotronVLAudioFeatureInputs(TensorSchema):
     type: Literal["audio_features"] = "audio_features"
     input_audio_features: Annotated[torch.Tensor, TensorShape("c", "t", "f")]
     feature_attention_mask: Annotated[torch.Tensor, TensorShape("c", "t")]
-    audio_num_clips: list[int]
+    audio_num_clips: list[int] | torch.Tensor
 
 
 class NanoNemotronVLImagePixelInputs(TensorSchema):
@@ -1508,7 +1508,7 @@ class NemotronH_Nano_VL_V2(
                 audio_num_clips = kwargs.get("audio_num_clips")
                 assert isinstance(input_audio_features, torch.Tensor)
                 assert isinstance(feature_attention_mask, torch.Tensor)
-                assert isinstance(audio_num_clips, list)
+                assert isinstance(audio_num_clips, (list, torch.Tensor))
                 modalities["audios"] = NanoNemotronVLAudioFeatureInputs(
                     input_audio_features=input_audio_features,
                     feature_attention_mask=feature_attention_mask,
