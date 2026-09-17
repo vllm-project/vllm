@@ -9,6 +9,7 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm.entrypoints.chat_utils import ConversationMessage
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionResponse,
@@ -16,11 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    RequestResponseMetadata,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -53,14 +50,14 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (all_conversations, engine_prompts) on success — one
             entry per conversation — or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         renderer = self.online_renderer
 

@@ -34,9 +34,10 @@ class BaseCacheStats:
 
 class CachingMetrics:
     """Metrics for caching with a hit rate of the most recent N requests.
+
     Args:
-        interval: The number of the most recent requests to aggregate.
-            Defaults to 1000.
+        max_recent_requests: The number of the most recent requests to aggregate.
+
     """
 
     def __init__(self, max_recent_requests: int = 1000) -> None:
@@ -62,6 +63,7 @@ class CachingMetrics:
 
         Args:
             stats: The prefix cache stats.
+
         """
         # reset_prefix_cache was invoked before the current update.
         # Reset the metrics before aggregating the current stats.
@@ -113,8 +115,7 @@ class CachingMetrics:
 
 @dataclass
 class PrefixCacheStats(BaseCacheStats):
-    """
-    Stores prefix cache hit statistics.
+    """Stores prefix cache hit statistics.
     - `reset`: Whether `reset_prefix_cache` was invoked.
     - `queries`: Refers to the number of tokens that were queried.
     """
@@ -144,8 +145,7 @@ class PrefixCacheStats(BaseCacheStats):
 
 @dataclass
 class MultiModalCacheStats(BaseCacheStats):
-    """
-    Stores multi-modal cache hit statistics.
+    """Stores multi-modal cache hit statistics.
     - `reset`: Whether `reset_mm_cache` was invoked.
     - `queries`: Refers to the number of multi-modal data items
       that were queried.
@@ -219,6 +219,7 @@ class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
     # This is an engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
@@ -244,6 +245,7 @@ class FinishedRequestStats:
     request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
+    num_preemptions: int = 0
     num_generation_tokens: int = 0
     max_tokens_param: int | None = None
     queued_time: float = 0.0
@@ -523,6 +525,7 @@ class IterationStats:
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
     def update_from_finished_request(
@@ -563,6 +566,7 @@ class IterationStats:
             request_id=request_id,
             e2e_latency=e2e_latency,
             num_prompt_tokens=num_prompt_tokens,
+            num_preemptions=req_stats.num_preemptions,
             num_generation_tokens=req_stats.num_generation_tokens,
             max_tokens_param=max_tokens_param,
             queued_time=queued_time,

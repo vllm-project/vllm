@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference with
+"""This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for text generation.
 
 For most models, the prompt format should follow corresponding examples
@@ -1660,8 +1659,7 @@ def run_phi3v(questions: list[str], modality: str) -> ModelRequestData:
 
 # Phi-4-multimodal-instruct
 def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process image inputs.
     """
     assert modality == "image"
@@ -2276,12 +2274,14 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "glm4_1v",
     "deepseek_ocr",
     "ernie45_vl",
+    "minicpmv2_5_vl",
+    "minicpmv2_6_vl",
+    "minicpmv4_vl",
 ]
 
 
 def get_multi_modal_input(args):
-    """
-    return {
+    """Return {
         "data": image or video,
         "question": question,
     }
