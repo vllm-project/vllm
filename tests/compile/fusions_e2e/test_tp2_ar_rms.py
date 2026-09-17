@@ -14,6 +14,7 @@ from .common import (
     Matches,
     custom_ops_combos,
     is_blackwell,
+    nvfp4_kernel_exposes_input_quant_key,
 )
 from .models import (
     FLASHINFER_ATTN,
@@ -139,6 +140,12 @@ def test_tp2_ar_rms_fp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if nvfp4_kernel_exposes_input_quant_key():
+        pytest.skip(
+            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
+            "instead of compiler pass-based fusion"
+        )
+
     matches = matches_fn(n_layers)
 
     # Reduce size of model and skip weight loading time
@@ -152,14 +159,13 @@ def test_tp2_ar_rms_fp4_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             fuse_allreduce_rms=True,
         ),
     )
 
     matches_check = [
-        "act_quant_fusion",
         "attn_quant_fusion",
         "ar_rms_fusion",
     ]

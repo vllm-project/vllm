@@ -14,6 +14,7 @@ from .common import (
     Matches,
     custom_ops_combos,
     is_blackwell,
+    nvfp4_kernel_exposes_input_quant_key,
 )
 from .models import (
     FLASHINFER_ATTN,
@@ -114,6 +115,12 @@ def test_tp2_async_tp_nvfp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if nvfp4_kernel_exposes_input_quant_key():
+        pytest.skip(
+            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
+            "instead of compiler pass-based fusion"
+        )
+
     # NVFP4 currently wires the all-gather + GEMM path only.
     matches = matches_fn(n_layers)._replace(async_tp=n_layers * 2)
 
@@ -127,7 +134,7 @@ def test_tp2_async_tp_nvfp4_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             enable_sp=True,
             fuse_gemm_comms=True,
@@ -138,7 +145,6 @@ def test_tp2_async_tp_nvfp4_fusions(
     )
 
     matches_check = [
-        "act_quant_fusion",
         "attn_quant_fusion",
         "sequence_parallel",
         "async_tp",
