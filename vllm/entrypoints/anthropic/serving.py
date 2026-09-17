@@ -572,7 +572,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             # Server tools (web_search, computer use, bash, ...) arrive without an
             # input_schema; vLLM can't run them as function tools, so skip them
             # rather than emit a malformed function declaration.
-            if tool.input_schema is None:
+            #
+            # A deferred tool is also announced without a schema, but there the
+            # point is that the model learns the name exists so it can request
+            # the tool later. Dropping it would defeat that, so forward it with
+            # parameters=None, which FunctionDefinition already accepts.
+            if tool.input_schema is None and not tool.defer_loading:
                 continue
             tools.append(
                 ChatCompletionToolsParam.model_validate(
