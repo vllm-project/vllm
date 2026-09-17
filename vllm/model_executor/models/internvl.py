@@ -70,13 +70,12 @@ from .utils import (
 
 
 class InternVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height of each image patch
-        - w: Width of each image patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height of each image patch
+    - w: Width of each image patch
     """
 
     type: Literal["pixel_values"]
@@ -85,11 +84,10 @@ class InternVLImagePixelInputs(TensorSchema):
 
 
 class InternVLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - f: Total image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of images
+    - f: Total image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -100,13 +98,12 @@ InternVLImageInputs: TypeAlias = InternVLImagePixelInputs | InternVLImageEmbeddi
 
 
 class InternVLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bvf: Batch size * number of videos * num_frames
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each video frame
-        - w: Width of each video frame
+    """Dimensions:
+    - bvf: Batch size * number of videos * num_frames
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each video frame
+    - w: Width of each video frame
     """
 
     type: Literal["pixel_values_videos"]
@@ -115,11 +112,10 @@ class InternVLVideoPixelInputs(TensorSchema):
 
 
 class InternVLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of videos
-        - f: Total video feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of videos
+    - f: Total video feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["video_embeds"]
@@ -327,7 +323,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
 
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
-    """InternVL ProcessingInfo extended for video processing"""
+    """InternVL ProcessingInfo extended for video processing."""
 
     def get_image_processor(self, **kwargs):
         config = self.get_hf_config()
@@ -418,7 +414,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 class InternVLDummyInputsBuilder(
     BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]
 ):
-    """InternVL DummyInputsBuilder extended for video support"""
+    """InternVL DummyInputsBuilder extended for video support."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
@@ -460,7 +456,7 @@ class InternVLDummyInputsBuilder(
 class InternVLMultiModalProcessor(
     BaseInternVLMultiModalProcessor[InternVLProcessingInfo]
 ):
-    """InternVL MultiModalProcessor extended for video support"""
+    """InternVL MultiModalProcessor extended for video support."""
 
     def _postprocess_hf_mm_data(
         self,
@@ -906,9 +902,7 @@ class InternVLChatModel(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",
