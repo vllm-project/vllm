@@ -1,0 +1,510 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""A small in-process embedded runtime for UMBP core validation.
+
+This implementation intentionally uses CPU tensors and a process-local byte
+store.  It validates the shared connector contract without pretending that a
+Python dictionary is a GPU-capable MORI-UMBP backend.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import contextlib
+import hashlib
+import json
+import os
+import socket
+import threading
+from collections.abc import Sequence
+from pathlib import Path
+
+import torch
+
+from ..data import (
+    BlockTransferPlan,
+    KVLayoutDescriptor,
+    RankTopology,
+    TransferJobState,
+)
+from .base import (
+    IUMBPRuntime,
+    UMBPRuntimeCapabilities,
+    UMBPSchedulerHandle,
+    UMBPWorkerHandle,
+)
+from .factory import UMBPRuntimeConfig
+
+
+class _EmbeddedStore:
+    def __init__(self) -> None:
+        self._objects: dict[str, bytes] = {}
+        self._staged: dict[int, dict[str, bytes]] = {}
+        self._lock = threading.RLock()
+
+    def contains(self, key: str) -> bool:
+        with self._lock:
+            return key in self._objects
+
+    def stage(self, job_id: int, key: str, value: bytes) -> None:
+        with self._lock:
+            self._staged.setdefault(job_id, {})[key] = value
+
+    def publish(self, job_id: int) -> None:
+        with self._lock:
+            staged = self._staged.pop(job_id, {})
+            self._objects.update(staged)
+
+    def get(self, key: str) -> bytes | None:
+        with self._lock:
+            return self._objects.get(key)
+
+
+class EmbeddedSchedulerHandle(UMBPSchedulerHandle):
+    def __init__(self, store: _EmbeddedStore) -> None:
+        self._store = store
+
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
+        return [self._store.contains(key) for key in keys]
+
+    def close(self) -> None:
+        return
+
+
+class EmbeddedWorkerHandle(UMBPWorkerHandle):
+    def __init__(
+        self,
+        store: _EmbeddedStore,
+        topology: RankTopology,
+        layout: KVLayoutDescriptor,
+    ) -> None:
+        self._store = store
+        self.topology = topology
+        self.layout = layout
+        self._registered = False
+        self.last_load_plans: list[BlockTransferPlan] = []
+        self.last_store_plans: list[BlockTransferPlan] = []
+
+    def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if any(cache.device.type != "cpu" for cache in kv_caches.values()):
+            raise RuntimeError(
+                "The validation embedded runtime supports CPU tensors only"
+            )
+        self._registered = True
+
+    @staticmethod
+    def _object_size(plan: BlockTransferPlan) -> int:
+        return max(
+            (item.object_offset + item.length for item in plan.ranges),
+            default=0,
+        )
+
+    @staticmethod
+    def _read_range(base_address: int, length: int) -> bytes:
+        return ctypes.string_at(base_address, length)
+
+    @staticmethod
+    def _write_range(base_address: int, payload: bytes) -> None:
+        ctypes.memmove(base_address, payload, len(payload))
+
+    def _read_object(self, plan: BlockTransferPlan) -> bytes:
+        if not self._registered:
+            raise RuntimeError("register_buffers must be called before store")
+        payload = bytearray(self._object_size(plan))
+        for item in plan.ranges:
+            end = item.object_offset + item.length
+            payload[item.object_offset:end] = self._read_range(
+                item.base_address, item.length
+            )
+        return bytes(payload)
+
+    def _write_object(self, plan: BlockTransferPlan, payload: bytes) -> None:
+        if not self._registered:
+            raise RuntimeError("register_buffers must be called before load")
+        for item in plan.ranges:
+            end = item.object_offset + item.length
+            if end > len(payload):
+                raise ValueError(f"stored object is too small for key {plan.key}")
+            self._write_range(
+                item.base_address,
+                payload[item.object_offset:end],
+            )
+
+    def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
+        self.last_load_plans = list(plans)
+        job = TransferJobState(tuple(plans))
+        job.start()
+        completed: list[str] = []
+        failed: list[str] = []
+        for plan in plans:
+            payload = self._store.get(plan.key)
+            if payload is None:
+                failed.append(plan.key)
+                continue
+            try:
+                self._write_object(plan, payload)
+                completed.append(plan.key)
+            except Exception:
+                failed.append(plan.key)
+        if completed:
+            job.complete(completed)
+        if failed:
+            job.fail(failed, "embedded object load failed")
+        return job
+
+    def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
+        self.last_store_plans = list(plans)
+        job = TransferJobState(tuple(plans))
+        job.start()
+        completed: list[str] = []
+        failed: list[str] = []
+        for plan in plans:
+            try:
+                self._store.stage(id(job), plan.key, self._read_object(plan))
+                completed.append(plan.key)
+            except Exception:
+                failed.append(plan.key)
+        if completed:
+            job.complete(completed)
+        if failed:
+            job.fail(failed, "embedded object store failed")
+        return job
+
+    def wait(self, job: TransferJobState) -> TransferJobState:
+        return job
+
+    def publish(self, job: TransferJobState) -> None:
+        if job.status.value != "completed":
+            raise RuntimeError("cannot publish an incomplete embedded job")
+        self._store.publish(id(job))
+
+    def close(self) -> None:
+        return
+
+
+class _MemoryEmbeddedRuntime(IUMBPRuntime):
+    """CPU validation runtime sharing one store across connector handles."""
+
+    capabilities = UMBPRuntimeCapabilities()
+    _store = _EmbeddedStore()
+
+    @classmethod
+    def from_config(cls, config: UMBPRuntimeConfig) -> "_MemoryEmbeddedRuntime":
+        del config
+        return cls()
+
+    def create_scheduler_handle(
+        self,
+        namespace: str,
+        topology: RankTopology,
+        layout: KVLayoutDescriptor,
+    ) -> UMBPSchedulerHandle:
+        del namespace, topology, layout
+        return EmbeddedSchedulerHandle(self._store)
+
+    def create_worker_handle(
+        self,
+        namespace: str,
+        topology: RankTopology,
+        layout: KVLayoutDescriptor,
+    ) -> UMBPWorkerHandle:
+        del namespace
+        return EmbeddedWorkerHandle(self._store, topology, layout)
+
+
+def _lookup_socket_path(
+    namespace: str,
+    rank_namespace: tuple[int, int, int, int],
+    lookup_dir: str,
+) -> str:
+    digest = hashlib.sha256(
+        f"{namespace}:{rank_namespace}".encode()
+    ).hexdigest()[:24]
+    return str(Path(lookup_dir) / f"vllm-umbp-{digest}.sock")
+
+
+class _MoriLookupServer:
+    """Small worker-local lookup bridge for the scheduler process."""
+
+    def __init__(self, path: str, client: object) -> None:
+        self.path = path
+        self.client = client
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._socket: socket.socket | None = None
+
+    def start(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.path)
+        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._socket.bind(self.path)
+        self._socket.listen(16)
+        self._socket.settimeout(0.2)
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="umbp-embedded-lookup",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _serve(self) -> None:
+        assert self._socket is not None
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            with connection:
+                try:
+                    request = b""
+                    while not request.endswith(b"\n"):
+                        chunk = connection.recv(65536)
+                        if not chunk:
+                            break
+                        request += chunk
+                    keys = json.loads(request.decode())
+                    result = self.client.batch_exists(keys)
+                    connection.sendall(
+                        (json.dumps([bool(value) for value in result]) + "\n").encode()
+                    )
+                except Exception:
+                    with contextlib.suppress(OSError):
+                        connection.sendall(b"[]\n")
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._socket is not None:
+            self._socket.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.path)
+
+
+class _MoriSchedulerHandle(UMBPSchedulerHandle):
+    def __init__(
+        self,
+        namespace: str,
+        topology: RankTopology,
+        lookup_dir: str,
+    ) -> None:
+        self._paths = [
+            _lookup_socket_path(namespace, rank, lookup_dir)
+            for rank in topology.all_namespaces()
+        ]
+
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
+        result = [False] * len(keys)
+        for path in self._paths:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1.0)
+                    sock.connect(path)
+                    sock.sendall((json.dumps(list(keys)) + "\n").encode())
+                    response = b""
+                    while not response.endswith(b"\n"):
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        response += chunk
+                    values = json.loads(response.decode() or "[]")
+                    result = [
+                        current or bool(values[index])
+                        for index, current in enumerate(result)
+                    ]
+            except (OSError, ValueError, IndexError):
+                continue
+        return result
+
+    def close(self) -> None:
+        return
+
+
+class _MoriWorkerHandle(UMBPWorkerHandle):
+    def __init__(
+        self,
+        client: object,
+        namespace: str,
+        topology: RankTopology,
+        lookup_dir: str,
+    ) -> None:
+        self.client = client
+        self._namespace = namespace
+        self._topology = topology
+        self._lookup_dir = lookup_dir
+        self._lookup_server: _MoriLookupServer | None = None
+        self._registered_storages: set[int] = set()
+
+    def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        try:
+            from mori.cpp import MemoryLocationType
+        except ImportError as exc:
+            raise RuntimeError("MORI UMBP Python bindings are unavailable") from exc
+
+        for cache in kv_caches.values():
+            storage = cache.untyped_storage()
+            storage_ptr = storage.data_ptr()
+            if storage_ptr in self._registered_storages:
+                continue
+            location = (
+                MemoryLocationType.GPU
+                if cache.device.type == "cuda"
+                else MemoryLocationType.CPU
+            )
+            device = cache.device.index if cache.device.index is not None else -1
+            if not self.client.register_memory(
+                storage_ptr, storage.nbytes(), location, device
+            ):
+                raise RuntimeError(
+                    f"MORI UMBP failed to register KV storage 0x{storage_ptr:x}"
+                )
+            self._registered_storages.add(storage_ptr)
+
+        if self._lookup_server is None:
+            self._lookup_server = _MoriLookupServer(
+                _lookup_socket_path(
+                    self._namespace,
+                    self._topology.local_namespace,
+                    self._lookup_dir,
+                ),
+                self.client,
+            )
+            self._lookup_server.start()
+
+    @staticmethod
+    def _range_args(plans: Sequence[BlockTransferPlan]):
+        keys = [plan.key for plan in plans]
+        object_sizes = [
+            max(
+                (item.object_offset + item.length for item in plan.ranges),
+                default=0,
+            )
+            for plan in plans
+        ]
+        pointers = [
+            [item.base_address for item in plan.ranges] for plan in plans
+        ]
+        sizes = [[item.length for item in plan.ranges] for plan in plans]
+        offsets = [
+            [item.object_offset for item in plan.ranges] for plan in plans
+        ]
+        return keys, object_sizes, pointers, sizes, offsets
+
+    def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
+        plans = tuple(plans)
+        job = TransferJobState(plans)
+        job.start()
+        if not plans:
+            job.complete()
+            return job
+        keys, _, pointers, sizes, offsets = self._range_args(plans)
+        results = self.client.batch_get_ranges_into_ptr(
+            keys, pointers, sizes, offsets
+        )
+        completed = [plan.key for plan, ok in zip(plans, results, strict=True) if ok]
+        failed = [plan.key for plan, ok in zip(plans, results, strict=True) if not ok]
+        if completed:
+            job.complete(completed)
+        if failed:
+            job.fail(failed, "MORI UMBP range load failed")
+        return job
+
+    def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
+        plans = tuple(plans)
+        job = TransferJobState(plans)
+        job.start()
+        if not plans:
+            job.complete()
+            return job
+        keys, object_sizes, pointers, sizes, offsets = self._range_args(plans)
+        results = self.client.batch_put_ranges_from_ptr(
+            keys, object_sizes, pointers, sizes, offsets
+        )
+        completed = [plan.key for plan, ok in zip(plans, results, strict=True) if ok]
+        failed = [plan.key for plan, ok in zip(plans, results, strict=True) if not ok]
+        if completed:
+            job.complete(completed)
+        if failed:
+            job.fail(failed, "MORI UMBP range store failed")
+        return job
+
+    def wait(self, job: TransferJobState) -> TransferJobState:
+        return job
+
+    def publish(self, job: TransferJobState) -> None:
+        if job.status.value != "completed":
+            raise RuntimeError("cannot publish an incomplete MORI UMBP job")
+        if not self.client.flush():
+            raise RuntimeError("MORI UMBP flush failed")
+
+    def close(self) -> None:
+        if self._lookup_server is not None:
+            self._lookup_server.close()
+        for storage_ptr in self._registered_storages:
+            self.client.deregister_memory(storage_ptr)
+        self._registered_storages.clear()
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
+        else:
+            self.client.flush()
+
+
+class EmbeddedRuntime(IUMBPRuntime):
+    """MORI-backed embedded runtime, with explicit memory test fallback."""
+
+    capabilities = UMBPRuntimeCapabilities()
+
+    @classmethod
+    def from_config(cls, config: UMBPRuntimeConfig) -> IUMBPRuntime:
+        if config.options.get("backend") == "memory":
+            return _MemoryEmbeddedRuntime.from_config(config)
+        try:
+            from mori.cpp import UMBPClient, UMBPConfig
+        except ImportError as exc:
+            raise RuntimeError(
+                "Embedded UMBP requires MORI built with BUILD_UMBP=ON"
+            ) from exc
+
+        client_config = UMBPConfig()
+        client_config.dram.capacity_bytes = config.options.get(
+            "capacity_bytes", 64 * 1024**3
+        )
+        return _MoriEmbeddedRuntime(
+            UMBPClient(client_config),
+            config.options.get("lookup_dir", "/tmp"),
+        )
+
+
+class _MoriEmbeddedRuntime(IUMBPRuntime):
+    capabilities = UMBPRuntimeCapabilities()
+
+    def __init__(self, client: object, lookup_dir: str) -> None:
+        self.client = client
+        self.lookup_dir = lookup_dir
+
+    def create_scheduler_handle(
+        self,
+        namespace: str,
+        topology: RankTopology,
+        layout: KVLayoutDescriptor,
+    ) -> UMBPSchedulerHandle:
+        del layout
+        return _MoriSchedulerHandle(namespace, topology, self.lookup_dir)
+
+    def create_worker_handle(
+        self,
+        namespace: str,
+        topology: RankTopology,
+        layout: KVLayoutDescriptor,
+    ) -> UMBPWorkerHandle:
+        del layout
+        return _MoriWorkerHandle(
+            self.client,
+            namespace,
+            topology,
+            self.lookup_dir,
+        )

@@ -7,7 +7,10 @@ from .base import (
     UMBPSchedulerHandle,
     UMBPWorkerHandle,
 )
+from .embedded import EmbeddedRuntime
 from .factory import UMBPRuntimeConfig, UMBPRuntimeFactory
+
+UMBPRuntimeFactory.register("embedded", EmbeddedRuntime.from_config)
 
 __all__ = [
     "IUMBPRuntime",
@@ -16,4 +19,5 @@ __all__ = [
     "UMBPWorkerHandle",
     "UMBPRuntimeConfig",
     "UMBPRuntimeFactory",
+    "EmbeddedRuntime",
 ]

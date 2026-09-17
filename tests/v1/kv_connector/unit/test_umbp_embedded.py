@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from types import SimpleNamespace
+
+import torch
+
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
+    UMBPStoreConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
+    BlockTransferPlan,
+    KVLayoutDescriptor,
+    KVRange,
+    KVRegion,
+    RankTopology,
+    UMBPConnectorMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
+    EmbeddedRuntime,
+    UMBPRuntimeConfig,
+)
+
+from .test_umbp_shared import _kv_cache_config, _vllm_config
+
+
+def _cpu_caches() -> dict[str, torch.Tensor]:
+    return {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in ("layer1", "layer2")
+    }
+
+
+def _request(request_id: str, block_ids: list[int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        request_id=request_id,
+        req_id=request_id,
+        num_tokens=32,
+        block_hashes=[f"{request_id}-a".encode(), f"{request_id}-b".encode()],
+        block_ids=(block_ids,),
+        num_computed_tokens=0,
+    )
+
+
+def _scheduler_output(request: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={request.req_id: 32},
+    )
+
+
+def test_embedded_round_trip_restores_all_layer_ranges():
+    kv_config = _kv_cache_config()
+    vllm_config = _vllm_config(
+        {
+            "mode": "embedded",
+            "backend": "memory",
+            "load_async": False,
+            "key_namespace": "embedded-round-trip",
+        }
+    )
+    source = _cpu_caches()
+    for index, cache in enumerate(source.values()):
+        cache.copy_(
+            torch.arange(cache.numel(), dtype=torch.float16).reshape(cache.shape)
+            + index
+        )
+
+    scheduler = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_config
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_config)
+    worker.register_kv_caches(source)
+
+    producer = _request("producer", [1, 2])
+    store_meta = scheduler.build_connector_meta(_scheduler_output(producer))
+    worker.bind_connector_metadata(store_meta)
+    worker.wait_for_save()
+
+    consumer = _request("consumer", [5, 6])
+    consumer.block_hashes = producer.block_hashes
+    assert scheduler.get_num_new_matched_tokens(consumer, 0) == (32, False)
+    scheduler.update_state_after_alloc(
+        consumer,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([5, 6],)),
+        32,
+    )
+    load_meta = scheduler.build_connector_meta(_scheduler_output(consumer))
+
+    destination = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in source
+    }
+    for cache in destination.values():
+        cache.zero_()
+    worker.register_kv_caches(destination)
+    worker.bind_connector_metadata(load_meta)
+    worker.start_load_kv(None)
+    worker.wait_for_layer_load("layer0")
+
+    for name in source:
+        if not torch.equal(source[name][1], destination[name][5]):
+            raise AssertionError(f"{name} first block did not round-trip")
+        if not torch.equal(source[name][2], destination[name][6]):
+            raise AssertionError(f"{name} second block did not round-trip")
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+def test_embedded_missing_object_reports_target_block_for_recompute():
+    kv_config = _kv_cache_config()
+    vllm_config = _vllm_config(
+        {
+            "mode": "embedded",
+            "backend": "memory",
+            "key_namespace": "embedded-missing",
+        }
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_config)
+    worker.register_kv_caches(_cpu_caches())
+    worker_impl = worker.connector_worker
+    assert worker_impl is not None
+    assert worker_impl.layout is not None
+    plan = worker_impl.layout.plan_registered_block("missing-key", 7)
+
+    metadata = UMBPConnectorMetadata(
+        load_plans=[plan],
+        load_requests={"request": [plan]},
+    )
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv(None)
+    worker.wait_for_layer_load("layer0")
+
+    assert worker.get_block_ids_with_load_errors() == {7}
+
+
+def test_embedded_publish_makes_object_visible_atomically():
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig("embedded", {"backend": "memory"})
+    )
+    topology = RankTopology()
+    layout = KVLayoutDescriptor(
+        regions=(KVRegion("layer0", 0, 16, 16, 0),),
+        topology=topology,
+    )
+    scheduler = runtime.create_scheduler_handle("publish-test", topology, layout)
+    worker = runtime.create_worker_handle("publish-test", topology, layout)
+    cache = torch.zeros(16, dtype=torch.uint8)
+    cache.copy_(torch.arange(16, dtype=torch.uint8))
+    worker.register_buffers({"layer0": cache})
+    plan = BlockTransferPlan(
+        key="publish-key",
+        block_id=0,
+        ranges=(
+            KVRange(
+                "layer0",
+                0,
+                0,
+                cache.data_ptr(),
+                16,
+                16,
+                0,
+            ),
+        ),
+    )
+
+    job = worker.store([plan])
+    assert scheduler.lookup(["publish-key"]) == [False]
+    completed = worker.wait(job)
+    worker.publish(completed)
+
+    assert scheduler.lookup(["publish-key"]) == [True]
+    worker.close()
+    scheduler.close()

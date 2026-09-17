@@ -267,10 +267,14 @@ def test_runtime_config_requires_distributed_identity():
         UMBPRuntimeConfig.from_vllm(_vllm_config({"mode": "distributed"}))
 
 
-def test_runtime_factory_reports_missing_adapter():
-    config = UMBPRuntimeConfig("embedded", {})
-    with pytest.raises(RuntimeError, match="no UMBP runtime adapter"):
-        UMBPRuntimeFactory.build(config)
+def test_runtime_factory_builds_embedded_adapter():
+    config = UMBPRuntimeConfig("embedded", {"backend": "memory"})
+    runtime = UMBPRuntimeFactory.build(config)
+
+    assert runtime.capabilities.lookup
+    assert runtime.capabilities.load
+    assert runtime.capabilities.store
+    assert runtime.capabilities.publish
 
 
 class _SchedulerHandle:
@@ -524,6 +528,199 @@ def test_embedded_connector_core_flow(monkeypatch):
     assert worker_connector.get_transfer_results({"consumer"}).finished_recving == {
         "consumer"
     }
+
+
+def test_builtin_embedded_runtime_register_store_and_load():
+    config = _kv_cache_config()
+    vllm_config = _vllm_config(
+        {
+            "mode": "embedded",
+            "backend": "memory",
+            "load_async": False,
+            "key_namespace": "builtin-embedded-test",
+        }
+    )
+    source_caches = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in ("layer1", "layer2")
+    }
+    for index, cache in enumerate(source_caches.values()):
+        cache.copy_(
+            torch.arange(cache.numel(), dtype=torch.float16).reshape(cache.shape)
+            + index
+        )
+
+    scheduler_connector = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, config
+    )
+    worker_connector = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.WORKER, config
+    )
+    worker_connector.register_kv_caches(source_caches)
+    producer = SimpleNamespace(
+        request_id="builtin-producer",
+        req_id="builtin-producer",
+        num_tokens=32,
+        block_hashes=[b"builtin-a", b"builtin-b"],
+        block_ids=([1, 2],),
+        num_computed_tokens=0,
+    )
+    producer_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[producer],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={"builtin-producer": 32},
+    )
+    store_metadata = scheduler_connector.build_connector_meta(producer_output)
+    worker_connector.bind_connector_metadata(store_metadata)
+    worker_connector.wait_for_save()
+
+    consumer = SimpleNamespace(
+        request_id="builtin-consumer",
+        req_id="builtin-consumer",
+        num_tokens=32,
+        block_hashes=[b"builtin-a", b"builtin-b"],
+    )
+    assert scheduler_connector.get_num_new_matched_tokens(consumer, 0) == (
+        32,
+        False,
+    )
+    scheduler_connector.update_state_after_alloc(
+        consumer,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([5, 6],)),
+        32,
+    )
+    consumer_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[consumer],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={"builtin-consumer": 32},
+    )
+    load_metadata = scheduler_connector.build_connector_meta(consumer_output)
+
+    destination_caches = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in source_caches
+    }
+    for cache in destination_caches.values():
+        cache.zero_()
+    worker_connector.register_kv_caches(destination_caches)
+    worker_connector.bind_connector_metadata(load_metadata)
+    worker_connector.start_load_kv(None)
+    worker_connector.wait_for_layer_load("layer0")
+    embedded_worker = worker_connector.connector_worker
+    assert embedded_worker is not None
+    assert len(embedded_worker.runtime.last_load_plans[0].ranges) == 2
+    load_errors = worker_connector.get_block_ids_with_load_errors()
+    if load_errors:
+        raise AssertionError(f"embedded load errors: {sorted(load_errors)}")
+
+    for name in source_caches:
+        if not torch.equal(source_caches[name][1], destination_caches[name][5]):
+            raise AssertionError(
+                f"{name} block 1 round-trip mismatch: "
+                f"src={source_caches[name][1, 0, 0, 0].item()} "
+                f"dst={destination_caches[name][5, 0, 0, 0].item()}"
+            )
+        if not torch.equal(source_caches[name][2], destination_caches[name][6]):
+            raise AssertionError(
+                f"{name} block 2 round-trip mismatch: "
+                f"src={source_caches[name][2, 0, 0, 0].item()} "
+                f"dst={destination_caches[name][6, 0, 0, 0].item()}"
+            )
+
+
+def test_builtin_embedded_tp2_pp2_dcp2_rank_store_completeness():
+    config = _kv_cache_config()
+    extra = {
+        "mode": "embedded",
+        "backend": "memory",
+        "load_async": False,
+        "key_namespace": "builtin-tp2-pp2-dcp2-test",
+    }
+    request = SimpleNamespace(
+        request_id="ranked-producer",
+        req_id="ranked-producer",
+        num_tokens=32,
+        block_hashes=[b"ranked-a", b"ranked-b"],
+        block_ids=([1, 2],),
+        num_computed_tokens=0,
+    )
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={"ranked-producer": 32},
+    )
+    caches = {
+        name: torch.empty_strided(
+            (8, 2, 16, 8),
+            (512, 256, 8, 1),
+            dtype=torch.float16,
+        )
+        for name in ("layer1", "layer2")
+    }
+
+    for pp_rank in range(2):
+        for dcp_rank in range(2):
+            for tp_rank in range(2):
+                vllm_config = _vllm_config(
+                    extra,
+                    tensor_parallel_rank=tp_rank,
+                    tensor_parallel_size=2,
+                    pipeline_parallel_rank=pp_rank,
+                    pipeline_parallel_size=2,
+                    decode_context_parallel_rank=dcp_rank,
+                    decode_context_parallel_size=2,
+                    world_size=8,
+                )
+                scheduler_connector = UMBPStoreConnector(
+                    vllm_config, KVConnectorRole.SCHEDULER, config
+                )
+                worker_connector = UMBPStoreConnector(
+                    vllm_config, KVConnectorRole.WORKER, config
+                )
+                worker_connector.register_kv_caches(caches)
+                metadata = scheduler_connector.build_connector_meta(
+                    scheduler_output
+                )
+                worker_connector.bind_connector_metadata(metadata)
+                worker_connector.wait_for_save()
+
+    vllm_config = _vllm_config(
+        extra,
+        tensor_parallel_rank=0,
+        tensor_parallel_size=2,
+        pipeline_parallel_rank=0,
+        pipeline_parallel_size=2,
+        decode_context_parallel_rank=0,
+        decode_context_parallel_size=2,
+        world_size=8,
+    )
+    scheduler_connector = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, config
+    )
+    consumer = SimpleNamespace(
+        request_id="ranked-consumer",
+        num_tokens=32,
+        block_hashes=[b"ranked-a", b"ranked-b"],
+    )
+
+    assert scheduler_connector.get_num_new_matched_tokens(consumer, 0) == (
+        32,
+        False,
+    )
 
 
 def test_embedded_tp_dcp_pp_rank_local_store_flow(monkeypatch):
