@@ -305,3 +305,105 @@ def test_impl_handles_noncontiguous_qnope(
     assert q_out.dtype == current_platform.fp8_dtype()
     _assert_q_out_close(q_out, c, fp8_q_out=True, seq_len=seq_len)
     _assert_kv_close(kv_cache, c)
+
+
+@pytest.mark.parametrize("is_neox_style", [False, True])
+@pytest.mark.parametrize("block_size", [1, 64])
+@pytest.mark.parametrize("seed", [0])
+@torch.inference_mode()
+def test_nope_identity_cos_sin_leaves_pe_unrotated(
+    default_vllm_config,
+    is_neox_style: bool,
+    block_size: int,
+    seed: int,
+    seq_len: int = 42,
+    num_q_heads: int = 16,
+    qk_rope_head_dim: int = 64,
+    kv_lora_rank: int = 512,
+    num_blocks: int = 64,
+) -> None:
+    """Kimi-K3 is NoPE, and reaches this kernel via a cos=1/sin=0 cache.
+
+    Two properties this relies on, both checked here:
+
+    * the rotation is the identity, so q_pe/k_pe arrive unrotated; and
+    * a *single-row* cache suffices for arbitrary positions, because the
+      per-head and ``_opt`` decode kernels clamp ``pos`` into
+      ``[0, cos_cache.size(0))``. K3's max_position_embeddings is 1M, so a
+      full-length constant cache would cost ~268 MB for the same no-op.
+
+    ``num_q_heads`` is kept at the production value so the dispatcher picks
+    one of those two kernels; the general decode kernel does not clamp, and
+    the K3 wrapper disables fusion for configs that would select it.
+    """
+    from vllm.models.kimi_k3.amd.mla import KimiK3NoPERotaryEmbedding
+
+    rocm_aiter_ops.register_ops_once()
+    set_random_seed(seed)
+    device = "cuda"
+    torch.set_default_device(device)
+    dtype = torch.bfloat16
+
+    rope = KimiK3NoPERotaryEmbedding(qk_rope_head_dim, dtype).to(device)
+    cos_cache, sin_cache = rope.cos_sin_cache.chunk(2, dim=-1)
+    cos_cache = cos_cache.contiguous()
+    sin_cache = sin_cache.contiguous()
+    assert cos_cache.shape == (1, qk_rope_head_dim // 2)
+
+    # Positions far beyond the single-row cache: the clamp must absorb them.
+    positions = torch.randint(0, 1 << 20, (seq_len,), device=device)
+
+    ql_nope = torch.randn(seq_len, num_q_heads, kv_lora_rank, dtype=dtype)
+    q_pe = torch.randn(seq_len, num_q_heads, qk_rope_head_dim, dtype=dtype)
+    kv_c = torch.randn(seq_len, kv_lora_rank, dtype=dtype)
+    k_pe = torch.randn(seq_len, 1, qk_rope_head_dim, dtype=dtype)
+    q_scale = torch.tensor([0.3], dtype=torch.float32, device=device)
+    k_scale = torch.tensor([0.1], dtype=torch.float32, device=device)
+
+    entry_size = kv_lora_rank + qk_rope_head_dim
+    slot_mapping = torch.tensor(
+        random.sample(range(num_blocks * block_size), seq_len),
+        dtype=torch.long,
+        device=device,
+    )
+
+    # Reference: no RoPE anywhere.
+    ref_q_out = torch.cat([ql_nope, q_pe], dim=-1)
+    ref_kv_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=torch.uint8, device=device
+    )
+    ops.concat_and_cache_mla(
+        kv_c,
+        k_pe.squeeze(1),
+        ref_kv_cache,
+        slot_mapping,
+        kv_cache_dtype="fp8",
+        scale=k_scale,
+    )
+
+    q_out = torch.empty(
+        seq_len, num_q_heads, entry_size, dtype=torch.bfloat16, device=device
+    )
+    kv_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=torch.uint8, device=device
+    )
+    rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+        ql_nope,
+        q_pe,
+        kv_c,
+        k_pe.squeeze(1),
+        kv_cache.view(current_platform.fp8_dtype()),
+        q_out,
+        slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
+        is_neox=is_neox_style,
+        is_nope_first=True,
+    )
+
+    torch.testing.assert_close(q_out, ref_q_out, atol=2e-2, rtol=2e-2)
+    c = SimpleNamespace(ref_kv_cache=ref_kv_cache, k_scale=k_scale)
+    _assert_kv_close(kv_cache, c)

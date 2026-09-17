@@ -766,6 +766,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache = self.hisparse_cache
         if slot_mapping is None or (cache is not None and cache.dummy_batch):
             return
+        if self._fuses_qk_rope_cache(attn_metadata):
+            # forward_impl writes the cache as part of the fused Q-prep.
+            return
         kv_c_normed, k_pe, slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
@@ -807,6 +810,55 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache = self.hisparse_cache
         if cache is not None and cache.runtime.is_group_leader:
             cache.prepare_group_for_batch(attn_metadata)
+
+    def can_fuse_qk_rope_cache(self) -> bool:
+        """Batch-independent half of the fused Q-prep decision.
+
+        The MLA wrapper decides RoPE ownership once at load time, while
+        ``_fuses_qk_rope_cache`` decides per batch. Both are built on this, so
+        the wrapper cannot hand RoPE to a kernel that will not run.
+        """
+        if not getattr(self.impl, "use_fused_qk_rope_cache", False):
+            return False
+        if self.rotary_emb is None:
+            return False
+        # An impl that fuses only some batches leaves the wrapper applying
+        # RoPE eagerly on all of them, so the kernel must not apply it again.
+        # Safe only when that rotation is a declared no-op (a NoPE model).
+        if not getattr(self.impl, "always_fuses_qk_rope_cache", False) and not getattr(
+            self.rotary_emb, "is_identity", False
+        ):
+            return False
+        # Skipping the standalone write also skips the PCP latent all-gather,
+        # a collective every rank must reach, and the HiSparse cursor advance.
+        # Neither is reproduced by the fused kernel.
+        return not self.use_pcp and self.hisparse_cache is None
+
+    def _fuses_qk_rope_cache(self, attn_metadata: "MLACommonMetadata | None") -> bool:
+        """Whether this batch folds the KV-cache write into the fused Q-prep.
+
+        ``update_kv_cache`` and ``forward_impl`` must agree: the former skips
+        the standalone write exactly when the latter performs the fused call.
+        Derived only from state both already hold, so no value is carried
+        across the two custom-op boundaries between them.
+        """
+        if not self.can_fuse_qk_rope_cache():
+            return False
+        if getattr(self.impl, "always_fuses_qk_rope_cache", False):
+            # Declared to fuse unconditionally -- sparse routes every token
+            # through MQA, so one call covers the batch, prefill included.
+            # Keyed off the same flag the wrapper uses to hand over RoPE, so
+            # the two agree by construction.
+            return True
+        # Dense MLA sends only decode tokens through MQA, so the fused call
+        # would leave a mixed batch's prefill rows unwritten.
+        if attn_metadata is None:
+            return False
+        if attn_metadata.num_actual_tokens != attn_metadata.num_decode_tokens:
+            return False
+        # Under DCP the kernel skips padded (slot < 0) tokens, but those rows
+        # still join the query all-gather, so their q_out would be garbage.
+        return self.impl.dcp_world_size == 1
 
     def _get_fused_rope_cos_sin(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Split rotary_emb.cos_sin_cache into contiguous cos/sin halves."""
@@ -1099,12 +1151,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
-            use_fused_qk_rope_cache = (
-                self.impl.is_sparse
-                and getattr(self.impl, "use_fused_qk_rope_cache", False)
-                and self.rotary_emb is not None
-            )
-            if use_fused_qk_rope_cache:
+            if self._fuses_qk_rope_cache(attn_metadata):
                 if positions is None:
                     raise RuntimeError(
                         "Fused MLA Q-prep is enabled but `positions` was not "

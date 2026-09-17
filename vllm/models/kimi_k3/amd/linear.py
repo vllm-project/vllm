@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -63,7 +63,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
+from vllm.models.kimi_k3.amd.mla import (
+    KimiK3MultiHeadLatentAttentionWrapper,
+    KimiK3NoPERotaryEmbedding,
+)
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -417,11 +420,18 @@ class KimiMLAAttention(nn.Module):
                 prefix=f"{prefix}.g_proj",
             )
 
+        # NoPE identity RoPE: never applied, it only supplies the cos/sin the
+        # fused AITER MLA Q-prep kernel requires. See KimiK3NoPERotaryEmbedding.
+        rotary_emb = KimiK3NoPERotaryEmbedding(
+            self.qk_rope_head_dim,
+            get_current_vllm_config().model_config.dtype,
+        )
+
         # TODO: Remove this mypy workaround once the K3 PR is fully merged.
         mla_modules = MLAModules(  # type: ignore[call-arg]
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
-            rotary_emb=None,
+            rotary_emb=rotary_emb,
             o_proj=self.o_proj,
             fused_qkv_a_proj=self.fused_qkv_a_proj
             if self.q_lora_rank is not None

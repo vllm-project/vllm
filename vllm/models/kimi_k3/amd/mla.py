@@ -5,10 +5,49 @@
 from typing import cast
 
 import torch
+from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+
+
+class KimiK3NoPERotaryEmbedding(nn.Module):
+    """Identity RoPE, so Kimi-K3 can reach the fused AITER MLA Q-prep kernel.
+
+    Kimi-K3 MLA is NoPE (``mla_use_nope``), but the fused kernel that writes the
+    KV cache and assembles the fp8 decode query also applies RoPE, and takes the
+    cos/sin caches as required arguments. Feeding it ``cos = 1, sin = 0`` makes
+    that rotation the identity.
+
+    The cache is a single row. AITER's per-head and ``_opt`` decode kernels
+    clamp ``pos`` into ``[0, cos_cache.size(0))``, so real positions can be
+    passed through untouched -- at K3's ``max_position_embeddings`` of 1M a
+    full-length constant cache would otherwise cost ~268 MB for a provable
+    no-op. Its *general* decode kernel does not clamp, so the wrapper
+    disables fusion for the configs that would select it.
+
+    ``forward`` is never called: the K3 wrapper is NoPE and skips it.
+    """
+
+    is_neox_style: bool = True
+    # Lets MLAAttention fuse on an impl that does not fuse every batch: the
+    # wrapper's eager RoPE and the kernel's are both no-ops here.
+    is_identity: bool = True
+
+    def __init__(self, rotary_dim: int, dtype: torch.dtype) -> None:
+        super().__init__()
+        half = rotary_dim // 2
+        cos_sin_cache = torch.cat(
+            [torch.ones(1, half, dtype=dtype), torch.zeros(1, half, dtype=dtype)],
+            dim=-1,
+        )
+        self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
+
+    def forward(
+        self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return query, key
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
@@ -17,6 +56,31 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
+        # K3 is NoPE, so rotary_emb exists only to supply the fused kernel's
+        # identity cos/sin; forward() below never applies it. A real RoPE here
+        # would be silently dropped, so reject one outright.
+        assert self.rotary_emb is None or isinstance(
+            self.rotary_emb, KimiK3NoPERotaryEmbedding
+        ), "Kimi-K3 MLA is NoPE; a positional rotary_emb would be ignored"
+
+        # A single-row cos/sin cache is only safe on the AITER decode kernels
+        # that clamp `pos` into it. Its general decode kernel does not, and
+        # would read out of bounds. That kernel is chosen when the _opt
+        # condition below fails -- K3 hits it at 3 heads/rank (TP32). The
+        # _opt condition is independent of the KV block size and is also
+        # satisfied by the per-head kernel's config, so it is decidable here.
+        kernel_clamps_positions = (
+            self.kv_lora_rank == 512
+            and self.qk_rope_head_dim == 64
+            and self.kv_lora_rank * self.num_heads >= 2048
+        )
+        if not kernel_clamps_positions:
+            self.mla_attn.impl.use_fused_qk_rope_cache = False
+
+        # NoPE, so there is no eager RoPE to defer: this only decides whether
+        # `positions` is forwarded. Fusing implies this, so the fused branch
+        # can never find `positions` missing.
+        self._defer_rope_to_fused_kernel = self.mla_attn.can_fuse_qk_rope_cache()
 
     def _normalize_q_kv(
         self,
@@ -91,10 +155,9 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             heads *= q_proj_layer.group_size
         q = q.view(-1, heads, self.qk_head_dim)
 
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+        # NoPE: no rotation is applied here. `positions` is forwarded only so
+        # the fused Q-prep kernel can index its identity cos/sin caches.
+        fused_positions = positions if self._defer_rope_to_fused_kernel else None
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
@@ -112,6 +175,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
+            positions=fused_positions,
         )
 
         if self.g_proj is not None:

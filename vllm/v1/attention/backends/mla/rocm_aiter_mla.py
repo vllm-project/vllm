@@ -1561,7 +1561,91 @@ class AiterMLAHelper:
         ).flatten()
 
 
-class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
+class FusedQKRopeCacheMLAMixin:
+    """Fold the MLA decode Q-prep and the KV-cache write into one AITER launch.
+
+    Without this, decode runs the cache write (``concat_and_cache_mla``) and the
+    ``[ql_nope | rope(q_pe)]`` concat + fp8 quant as separate kernels.
+    ``use_fused_qk_rope_cache`` only advertises that this impl *can* fuse;
+    whether a given batch actually does is decided by
+    ``MLAAttention._fuses_qk_rope_cache``, which also suppresses the standalone
+    cache write so the two never disagree.
+
+    Mixed in by both the sparse and dense ROCm AITER MLA impls, which do not
+    share a base class.
+    """
+
+    # Capability: this impl *can* fuse. Whether a given batch does is
+    # ``MLAAttention._fuses_qk_rope_cache``.
+    use_fused_qk_rope_cache: bool = False
+    # Stronger claim: this impl fuses *every* batch, so the MLA wrapper may
+    # hand RoPE ownership to the kernel and skip applying it eagerly. False
+    # for dense, which falls back to the split path on non-decode-only
+    # batches -- skipping the eager RoPE there would drop it entirely.
+    always_fuses_qk_rope_cache: bool = False
+
+    kv_cache_dtype: str
+    head_size: int
+
+    def _init_fused_qk_rope_cache(self) -> None:
+        self.use_fused_qk_rope_cache = (
+            rocm_aiter_ops.is_fused_mla_qkprep_enabled()
+            and self.kv_cache_dtype.startswith("fp8")
+            and self.kv_cache_dtype != "fp8_ds_mla"
+        )
+
+    def fused_qk_rope_concat_and_cache(
+        self,
+        layer: AttentionLayer,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,  # [T, kv_lora_rank]
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+    ) -> torch.Tensor:
+        """Fused RoPE + Q-concat + KV-concat + fp8 KV-cache write."""
+        from vllm.platforms import current_platform
+
+        num_tokens, num_q_heads = ql_nope.shape[:2]
+        # aiter kernel requires contiguous ql_nope
+        ql_nope = ql_nope.contiguous()
+        q_out_dtype = (
+            current_platform.fp8_dtype()
+            if self.kv_cache_dtype.startswith("fp8")
+            else ql_nope.dtype
+        )
+        q_out = torch.empty(
+            (num_tokens, num_q_heads, self.head_size),
+            dtype=q_out_dtype,
+            device=ql_nope.device,
+        )
+        kv_cache_3d = kv_cache.view(kv_cache.shape[0], -1, self.head_size)
+
+        rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+            ql_nope,
+            q_pe,
+            k_c_normed,
+            k_pe.squeeze(1),
+            kv_cache_3d,
+            q_out,
+            slot_mapping,
+            layer._k_scale,
+            layer._q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox=is_neox,
+            is_nope_first=True,
+        )
+        return q_out
+
+
+class AiterMLAImpl(FusedQKRopeCacheMLAMixin, MLACommonImpl[AiterMLAMetadata]):
     # DCP decode paths return natural-log softmax LSE for the cross-rank merge.
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
@@ -1633,6 +1717,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+
+        self._init_fused_qk_rope_cache()
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs

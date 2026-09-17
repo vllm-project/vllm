@@ -140,8 +140,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             rotary_emb=self.rotary_emb,
         )
 
-        self._defer_rope_to_fused_kernel = self.rotary_emb is not None and getattr(
-            self.mla_attn.impl, "use_fused_qk_rope_cache", False
+        # Hand RoPE to the kernel only when it can fuse at all *and* fuses
+        # every batch -- otherwise the batches it declines would lose RoPE.
+        self._defer_rope_to_fused_kernel = (
+            self.mla_attn.can_fuse_qk_rope_cache()
+            and getattr(self.mla_attn.impl, "always_fuses_qk_rope_cache", False)
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)
         if indexer_op is not None and hasattr(
