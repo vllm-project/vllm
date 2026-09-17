@@ -477,6 +477,11 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
         if config.out_dtype not in (torch.bfloat16, torch.float32):
             return False, "Only bfloat16/float32 output dtype supported."
+        n = config.weight_shape[0]
+        if n % 32 != 0:
+            # float8_linear_prepack_cpu tiles N in chunks of 32 and cannot
+            # handle a remainder tile smaller than that.
+            return False, f"requires weight output dim (N={n}) to be a multiple of 32."
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -621,6 +626,11 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col > 0 and weight_gs.row > 0:
             return False, "Block-quantized weights not handled by FP8 W8A8 kernel."
+        n = config.weight_shape[0]
+        if n % 32 != 0:
+            # float8_linear_prepack_cpu tiles N in chunks of 32 and cannot
+            # handle a remainder tile smaller than that.
+            return False, f"requires weight output dim (N={n}) to be a multiple of 32."
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

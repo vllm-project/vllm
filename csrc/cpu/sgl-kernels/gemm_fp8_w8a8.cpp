@@ -10,6 +10,9 @@
 #include "common.h"
 #include "vec.h"
 
+// Runtime check for AMX-FP8, implemented in cpu_isa.cpp.
+extern bool cpu_has_amx_fp8();
+
 namespace {
 
 #define BLOCK_N 32
@@ -26,12 +29,7 @@ bool cpublas_could_pack() {
   if (cpublas_checked) {
     return cpublas_can_pack;
   }
-#ifdef CPUBLAS_BRGEMM_F8F8BF16
-  std::cout << "Using F8F8 packing..." << std::endl;
-  cpublas_can_pack = at::native::cpublas::could_pack(at::kFloat8_e4m3fn);
-#else
-  cpublas_can_pack = at::native::cpublas::could_pack(at::kBFloat16);
-#endif
+  cpublas_can_pack = cpu_has_amx_fp8() && at::native::cpublas::could_pack(at::kFloat8_e4m3fn);
   cpublas_checked = true;
   return cpublas_can_pack;
 }
@@ -417,8 +415,12 @@ void tinygemm_kernel(
     float* ukernel_buf,
     at::BFloat16* dqA_buf,
     at::BFloat16* dqB_buf) {
-  // cpublas_can_pack = True, act_quant_mode = per row (2), wei_quant_mode = per group (3)
-  _micro_gemm<true, BLOCK_N, 2, 3>(C, A, scales_a, B, scales_b, M, K, lda, ldc, ldsa, ukernel_buf, dqA_buf, dqB_buf);
+  // act_quant_mode = per row (2), wei_quant_mode = per group (3)
+  if (cpublas_could_pack()) {
+    _micro_gemm<true, BLOCK_N, 2, 3>(C, A, scales_a, B, scales_b, M, K, lda, ldc, ldsa, ukernel_buf, dqA_buf, dqB_buf);
+  } else {
+    _micro_gemm<false, BLOCK_N, 2, 3>(C, A, scales_a, B, scales_b, M, K, lda, ldc, ldsa, ukernel_buf, dqA_buf, dqB_buf);
+  }
 }
 
 #define INSTANTIATE_TINYGEMM_TEMPLATE() \

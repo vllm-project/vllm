@@ -623,11 +623,6 @@ if (ENABLE_X86_ISA)
         message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
     endif()
 
-    if("$ENV{VLLM_CPU_FP8_BRGEMM}" STREQUAL "1")
-        message(STATUS "Enabling macro: VLLM_CPU_FP8_BRGEMM")
-        target_compile_definitions(_C PRIVATE VLLM_CPU_FP8_BRGEMM)
-    endif()
-
     # AVX512F 
     define_extension_target(
         _C_AVX512
