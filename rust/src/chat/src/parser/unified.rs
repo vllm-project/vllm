@@ -28,8 +28,16 @@ pub mod names {
 type UnifiedParserCreator =
     fn(&[ChatTool], DynTokenizer) -> vllm_parser::unified::Result<Box<dyn UnifiedParser>>;
 
+/// One registered unified parser implementation.
+#[derive(Clone)]
+pub struct UnifiedParserEntry {
+    create: UnifiedParserCreator,
+    /// See [`UnifiedParser::forwards_engine_reasoning_parser`].
+    forwards_engine_reasoning_parser: bool,
+}
+
 /// Registry and model matcher for unified parsers.
-pub type UnifiedParserFactory = ParserFactory<UnifiedParserCreator>;
+pub type UnifiedParserFactory = ParserFactory<UnifiedParserEntry>;
 
 impl UnifiedParserFactory {
     /// Get the global unified parser factory with built-in registrations and
@@ -70,7 +78,20 @@ impl UnifiedParserFactory {
     where
         T: UnifiedParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(
+            name,
+            UnifiedParserEntry {
+                create: T::create,
+                forwards_engine_reasoning_parser: T::forwards_engine_reasoning_parser(),
+            },
+        )
+    }
+
+    /// Whether `name` may be forwarded to the engine as its reasoning parser.
+    /// Names outside this registry are the engine's own reasoning parsers and
+    /// are always forwarded.
+    pub fn forwards_engine_reasoning_parser(&self, name: &str) -> bool {
+        self.creator(name).is_none_or(|entry| entry.forwards_engine_reasoning_parser)
     }
 
     /// Construct a parser from an exact name.
@@ -86,7 +107,7 @@ impl UnifiedParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
+        (creator.create)(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "unified",
             name: name.to_string(),
             error: error.into(),
@@ -170,6 +191,14 @@ mod tests {
             Some(names::MUSE_GLIMMER)
         );
         factory.create(names::MUSE_GLIMMER, &[], Arc::new(tokenizer)).unwrap();
+    }
+
+    #[test]
+    fn factory_forwards_engine_reasoning_parser_per_parser() {
+        let factory = UnifiedParserFactory::new();
+
+        assert!(!factory.forwards_engine_reasoning_parser(names::MUSE_GLIMMER));
+        assert!(factory.forwards_engine_reasoning_parser(names::KIMI_K3));
     }
 
     #[test]

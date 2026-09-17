@@ -288,6 +288,17 @@ pub trait UnifiedParser: Send {
         None
     }
 
+    /// Return whether this parser's name may be forwarded to the engine as
+    /// its reasoning parser. A parser whose whole-generation structural tag
+    /// must apply from token 0 returns `false`: an engine-side reasoner would
+    /// withhold the grammar until it reports a reasoning end.
+    fn forwards_engine_reasoning_parser() -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
+
     /// Return the parser-provided ID for a tool call by index, if the model emitted one.
     fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
         None

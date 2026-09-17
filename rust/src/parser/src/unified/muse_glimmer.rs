@@ -361,6 +361,17 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         Some(&MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER)
     }
 
+    // The legacy Python `muse_glimmer` reasoner only recognizes tool channels
+    // (not `to=user`), and this parser's whole-generation structural tags
+    // must apply from token 0 — so the engine must not be given a reasoning
+    // parser for this model.
+    fn forwards_engine_reasoning_parser() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 

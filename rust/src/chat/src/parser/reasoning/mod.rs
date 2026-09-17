@@ -30,7 +30,6 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
-    pub const MUSE_GLIMMER: &str = "muse_glimmer";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
     pub const SEED_OSS: &str = "seed_oss";
@@ -78,16 +77,6 @@ impl ReasoningParserFactory {
             .register_parser::<Step3ReasoningParser>(names::STEP3)
             .register_parser::<Step3p5ReasoningParser>(names::STEP3P5);
 
-        // `muse_glimmer` registers by name only, deliberately without a model
-        // pattern: the legacy Python `muse_glimmer` reasoner only recognizes
-        // tool channels (not `to=user`), and this parser's whole-generation
-        // structural tags must apply from token 0 — so the engine must not be
-        // given a reasoning parser for this model. The dummy marker makes
-        // `effective_engine_reasoning_parser` filter the name out of the
-        // forwarded engine arguments (Auto resolves it via the unified
-        // factory's patterns, which takes precedence there).
-        factory.register_unified_dummy(names::MUSE_GLIMMER);
-
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
             .register_pattern("deepseek-v4.1", names::DEEPSEEK_V41)
@@ -128,21 +117,6 @@ impl ReasoningParserFactory {
         T: ReasoningParser + 'static,
     {
         self.register_creator(name, Arc::new(T::create))
-    }
-
-    /// Register a name-only placeholder for a unified parser, so that an
-    /// explicit `--reasoning-parser <name>` validates but constructing it on
-    /// the split reasoning path fails with a clear error.
-    fn register_unified_dummy(&mut self, name: &'static str) -> &mut Self {
-        self.mark_unified_dummy(name);
-        self.register_creator(
-            name,
-            Arc::new(move |_tokenizer| {
-                Err(ReasoningError::DummyUnifiedParser {
-                    name: name.to_string(),
-                })
-            }),
-        )
     }
 
     /// Construct a parser from an exact name.

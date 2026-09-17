@@ -795,14 +795,13 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    let factory = vllm_chat::ReasoningParserFactory::global();
+    let unified = vllm_chat::UnifiedParserFactory::global();
     selection
         .resolve_reasoning_name(model)
-        // Unified-only parsers have no engine-side reasoner: the Rust
-        // frontend owns output parsing, and their whole-generation structural
-        // tags must apply from token 0 — an engine reasoner would withhold
-        // grammars until a reasoning end the legacy parsers may never report.
-        .filter(|name| !factory.is_unified_dummy(name))
+        // A unified parser whose whole-generation structural tag must apply
+        // from token 0 opts out of the engine-side reasoner, which would
+        // withhold the grammar until it reports a reasoning end.
+        .filter(|name| unified.forwards_engine_reasoning_parser(name))
         .map(str::to_owned)
 }
 

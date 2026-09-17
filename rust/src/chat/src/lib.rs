@@ -30,6 +30,7 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::unified::UnifiedParserFactory;
 pub use parser::{ParserSelection, validate_parser_overrides};
 pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
