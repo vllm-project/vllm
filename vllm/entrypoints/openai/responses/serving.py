@@ -118,6 +118,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_per_request_metrics: bool = False,
+        per_request_output_token_metrics: bool = False,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -147,6 +148,11 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
+        self.per_request_output_token_metrics = per_request_output_token_metrics
+        if per_request_output_token_metrics and not reasoning_parser:
+            raise ValueError(
+                "--per-request-output-token-metrics requires --reasoning-parser"
+            )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -493,7 +499,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     )
             # Phase timing needs each observable engine output batch even when
             # the client requested a non-streaming response.
-            if self.enable_per_request_metrics and not request.stream:
+            if self.per_request_output_token_metrics and not request.stream:
                 sampling_params.output_kind = RequestOutputKind.DELTA
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
@@ -662,7 +668,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             async for res in generator:
                 context.request_metrics = res.metrics
                 context.append_output(res)
-                context.record_request_phase_metrics(res)
+                if self.per_request_output_token_metrics:
+                    context.record_output_token_metrics(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
@@ -746,7 +753,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 await self._initialize_tool_sessions(request, context, exit_stack)
                 async for current_context in result_generator:
                     if (
-                        self.enable_per_request_metrics
+                        self.per_request_output_token_metrics
                         and not request.stream
                         and isinstance(current_context, SimpleContext)
                         and current_context.response_parser is not None
@@ -762,7 +769,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                             ),
                             finished=current_output.finish_reason is not None,
                         )
-                        current_context.record_request_phase_metrics(
+                        current_context.record_output_token_metrics(
                             current_context.last_output
                         )
             except asyncio.CancelledError:
@@ -842,7 +849,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 parser=context.response_parser,
             )
             # SimpleContext parses its output here for non-streaming requests.
-            context.record_request_phase_metrics(final_res)
+            if self.per_request_output_token_metrics:
+                context.record_output_token_metrics(final_res)
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -898,17 +906,15 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
         per_request_metrics = None
         if (
-            self.enable_per_request_metrics
-            and context.request_metrics_cover_all_generation_turns
-        ):
+            self.enable_per_request_metrics or self.per_request_output_token_metrics
+        ) and context.request_metrics_cover_all_generation_turns:
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
             )
-            (
-                per_request_metrics.reasoning,
-                per_request_metrics.content,
-                per_request_metrics.unclassified_token_count,
-            ) = context.build_request_phase_metrics()
+            if self.per_request_output_token_metrics:
+                per_request_metrics.output_token_metrics = (
+                    context.build_output_token_metrics()
+                )
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -1262,7 +1268,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
                     finished=output.finish_reason is not None,
                 )
-                ctx.record_request_phase_metrics(ctx.last_output)
+                if self.per_request_output_token_metrics:
+                    ctx.record_output_token_metrics(ctx.last_output)
             else:
                 delta_message = DeltaMessage(content=output.text)
 

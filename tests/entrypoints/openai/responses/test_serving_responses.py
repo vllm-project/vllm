@@ -41,7 +41,7 @@ from vllm.entrypoints.generate.base.protocol import (
     RequestResponseMetadata,
     TokenPhaseCounts,
 )
-from vllm.entrypoints.generate.base.serving import RequestPhaseMetricsTracker
+from vllm.entrypoints.generate.base.serving import OutputTokenMetricsTracker
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -1270,8 +1270,8 @@ def _stats_at(last_token_ts: float) -> RequestStateStats:
     )
 
 
-def test_request_phase_metrics_tracker_uses_common_origin_and_phase_intervals():
-    tracker = RequestPhaseMetricsTracker()
+def test_output_token_metrics_tracker_uses_common_origin_and_category_intervals():
+    tracker = OutputTokenMetricsTracker()
     tracker.update(_stats_at(2.0), TokenPhaseCounts(1, 0, 1))
     tracker.update(_stats_at(2.05), TokenPhaseCounts(2, 0, 1))
     tracker.update(_stats_at(2.1), TokenPhaseCounts(3, 0, 1))
@@ -1279,39 +1279,41 @@ def test_request_phase_metrics_tracker_uses_common_origin_and_phase_intervals():
     tracker.update(_stats_at(2.75), TokenPhaseCounts(3, 2, 1))
     tracker.update(_stats_at(3.0), TokenPhaseCounts(3, 3, 1))
 
-    reasoning, content, unclassified = tracker.build()
+    metrics = tracker.build()
 
-    assert reasoning is not None
+    assert metrics is not None
+    reasoning = metrics.reasoning
+    content = metrics.content
     assert reasoning.token_count == 3
     assert reasoning.time_to_first_token_ms == pytest.approx(500.0)
     assert reasoning.generation_time_ms == pytest.approx(100.0)
     assert reasoning.mean_itl_ms == pytest.approx(50.0)
     assert reasoning.tokens_per_second == pytest.approx(20.0)
-    assert content is not None
     assert content.token_count == 3
     assert content.time_to_first_token_ms == pytest.approx(1000.0)
     assert content.generation_time_ms == pytest.approx(500.0)
     assert content.mean_itl_ms == pytest.approx(250.0)
     assert content.tokens_per_second == pytest.approx(4.0)
-    assert unclassified == 1
+    assert metrics.unclassified_token_count == 1
 
 
-def test_request_phase_metrics_tracker_does_not_infer_intra_batch_itl():
-    tracker = RequestPhaseMetricsTracker()
+def test_output_token_metrics_tracker_does_not_infer_intra_batch_itl():
+    tracker = OutputTokenMetricsTracker()
     tracker.update(_stats_at(2.0), TokenPhaseCounts(2, 0, 0))
     tracker.update(_stats_at(2.5), TokenPhaseCounts(3, 0, 0))
 
-    reasoning, _, _ = tracker.build()
+    metrics = tracker.build()
 
-    assert reasoning is not None
+    assert metrics is not None
+    reasoning = metrics.reasoning
     assert reasoning.token_count == 3
     assert reasoning.generation_time_ms == pytest.approx(500.0)
     assert reasoning.mean_itl_ms is None
     assert reasoning.tokens_per_second is None
 
 
-def test_request_phase_metrics_tracker_accepts_boundary_count_corrections():
-    tracker = RequestPhaseMetricsTracker()
+def test_output_token_metrics_tracker_accepts_boundary_count_corrections():
+    tracker = OutputTokenMetricsTracker()
     tracker.update(_stats_at(2.0), TokenPhaseCounts(1, 0, 0))
     tracker.update(_stats_at(2.1), TokenPhaseCounts(2, 0, 0))
     tracker.update(_stats_at(2.2), TokenPhaseCounts(3, 0, 0))
@@ -1319,29 +1321,33 @@ def test_request_phase_metrics_tracker_accepts_boundary_count_corrections():
     # reasoning token as control and starts the content phase.
     tracker.update(_stats_at(2.3), TokenPhaseCounts(2, 1, 1))
 
-    reasoning, content, unclassified = tracker.build()
+    metrics = tracker.build()
 
-    assert reasoning is not None
+    assert metrics is not None
+    reasoning = metrics.reasoning
+    content = metrics.content
     assert reasoning.token_count == 2
     assert reasoning.generation_time_ms == pytest.approx(100.0)
-    assert content is not None
     assert content.token_count == 1
     assert content.time_to_first_token_ms == pytest.approx(800.0)
-    assert unclassified == 1
+    assert metrics.unclassified_token_count == 1
 
 
-def test_request_phase_metrics_tracker_distinguishes_zero_from_unsupported():
-    unsupported = RequestPhaseMetricsTracker()
-    assert unsupported.build() == (None, None, None)
+def test_output_token_metrics_tracker_distinguishes_zero_from_unsupported():
+    unsupported = OutputTokenMetricsTracker()
+    assert unsupported.build() is None
 
-    supported = RequestPhaseMetricsTracker()
+    supported = OutputTokenMetricsTracker()
     supported.update(None, TokenPhaseCounts(0, 0, 0))
-    reasoning, content, unclassified = supported.build()
-    assert reasoning is not None and reasoning.token_count == 0
-    assert content is not None and content.token_count == 0
+    metrics = supported.build()
+    assert metrics is not None
+    reasoning = metrics.reasoning
+    content = metrics.content
+    assert reasoning.token_count == 0
+    assert content.token_count == 0
     assert reasoning.time_to_first_token_ms is None
     assert content.time_to_first_token_ms is None
-    assert unclassified == 0
+    assert metrics.unclassified_token_count == 0
 
 
 def _make_request_output(
@@ -1388,6 +1394,7 @@ def _make_serving_instance(
     *,
     reasoning_parser: str = "",
     enable_per_request_metrics: bool = False,
+    per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
@@ -1408,7 +1415,13 @@ def _make_serving_instance(
         chat_template_content_format="auto",
         reasoning_parser=reasoning_parser,
         enable_per_request_metrics=enable_per_request_metrics,
+        per_request_output_token_metrics=per_request_output_token_metrics,
     )
+
+
+def test_output_token_metrics_require_reasoning_parser():
+    with pytest.raises(ValueError, match="requires --reasoning-parser"):
+        _make_serving_instance(per_request_output_token_metrics=True)
 
 
 async def _empty_context_generator():
@@ -1462,16 +1475,15 @@ async def test_responses_per_request_metrics_follow_server_flag():
     enabled_response = await _make_full_metrics_response(True)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
-    assert enabled_response.metrics.reasoning is not None
-    assert enabled_response.metrics.reasoning.token_count == 0
-    assert enabled_response.metrics.content is not None
-    assert enabled_response.metrics.content.token_count == 2
-    assert enabled_response.metrics.unclassified_token_count == 0
+    assert enabled_response.metrics.output_token_metrics is None
 
 
 @pytest.mark.asyncio
-async def test_responses_phase_metrics_follow_parser_classification():
-    serving = _make_serving_instance(enable_per_request_metrics=True)
+async def test_responses_output_token_metrics_follow_parser_classification():
+    serving = _make_serving_instance(
+        reasoning_parser="qwen3",
+        per_request_output_token_metrics=True,
+    )
     request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
     sampling_params = SamplingParams(max_tokens=16)
     parser = MagicMock()
@@ -1510,11 +1522,12 @@ async def test_responses_phase_metrics_follow_parser_classification():
 
     assert isinstance(response, ResponsesResponse)
     assert response.metrics is not None
-    assert response.metrics.reasoning is not None
-    assert response.metrics.reasoning.token_count == 2
-    assert response.metrics.content is not None
-    assert response.metrics.content.token_count == 1
-    assert response.metrics.unclassified_token_count == 1
+    assert response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    output_metrics = response.metrics.output_token_metrics
+    assert output_metrics is not None
+    assert output_metrics.reasoning.token_count == 2
+    assert output_metrics.content.token_count == 1
+    assert output_metrics.unclassified_token_count == 1
 
 
 @pytest.mark.asyncio
