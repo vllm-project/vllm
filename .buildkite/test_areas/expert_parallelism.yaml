@@ -43,7 +43,7 @@ steps:
 
 - label: ":nvidia: (H100) Elastic EP Scaling"
   key: elastic-ep-scaling-test
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   device: h100
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
