@@ -233,7 +233,8 @@ impl MuseGlimmerUnifiedParser {
             alt((preceded(literal(MESSAGE), rest).map(Some), eof.value(None))),
         )
         .parse_next(&mut tail_input);
-        // Exactly `assistant` (plus optional whitespace) or no header at all.
+        // Not an assistant header, or one malformed before `<|message|>`
+        // (`assistant\n`, an empty `to=`): nothing is prefilled.
         let Ok((recipient, body)) = parsed else {
             return;
         };
