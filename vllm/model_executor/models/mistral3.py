@@ -248,7 +248,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo]):
+class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -280,7 +280,7 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(

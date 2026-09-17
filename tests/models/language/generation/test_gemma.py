@@ -60,8 +60,7 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 def test_gemma4_kv_shared_layer_loads_plain_q_proj() -> None:
     """KV-shared layers have q_proj instead of a packed qkv_proj; their
     redundant K/V tensors in original checkpoints have no parameter and are
-    skipped rather than failing the load.
-    """
+    skipped rather than failing the load."""
     model = torch.nn.Module()
     model.config = SimpleNamespace(num_experts=0)
     model.start_layer, model.end_layer = 0, 2
@@ -93,8 +92,7 @@ def test_gemma4_kv_shared_layer_loads_plain_q_proj() -> None:
 @pytest.mark.cpu_test
 def test_gemma3n_kv_shared_layer_mapper() -> None:
     """Only non-shared layers pack q/k/v into qkv_proj; KV-shared layers keep
-    q_proj and drop the redundant K/V tensors original checkpoints ship.
-    """
+    q_proj and drop the redundant K/V tensors original checkpoints ship."""
     config = SimpleNamespace(num_hidden_layers=4, num_kv_shared_layers=2)
     mapper = Gemma3nTextModel.hf_to_vllm_mapper | _kv_sharing_weights_mapper(config)
     weights = [

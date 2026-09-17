@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The empty-shard mask fused into the DCP A2A pack kernel must be bit-exact
-with the eager ``mask_dcp_empty_shards_`` pass it replaces.
-"""
+with the eager ``mask_dcp_empty_shards_`` pass it replaces."""
 
 import pytest
 import torch

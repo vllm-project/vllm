@@ -581,8 +581,7 @@ _constrain_to_fx_strides_patched = False
 def _apply_constrain_to_fx_strides_patch():
     """Patch lowering.constrain_to_fx_strides globally. Safe to call
     multiple times; only the first call does anything.
-    Only applies for torch >= 2.11 and < 2.12.
-    """
+    Only applies for torch >= 2.11 and < 2.12."""
     global _constrain_to_fx_strides_patched
     if _constrain_to_fx_strides_patched:
         return

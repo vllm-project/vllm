@@ -579,8 +579,7 @@ def test_rocm_aiter_mla_dual_rmsnorm_group_quant_vs_sequential(m):
 
 def test_rocm_aiter_mla_dual_rmsnorm_group_quant_strided_split_view():
     """Split-view inputs, as produced by the DeepSeek-V4 q/kv split, match
-    contiguous inputs.
-    """
+    contiguous inputs."""
     require_aiter()
     require_fp8()
     from vllm._aiter_ops import rocm_aiter_ops

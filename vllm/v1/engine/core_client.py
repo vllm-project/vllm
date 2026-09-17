@@ -248,8 +248,7 @@ class EngineCoreClient(ABC):
 
     def dp_engines_running(self) -> bool:
         """Returns True if data parallel engines are collectively in a
-        running state.
-        """
+        running state."""
         raise NotImplementedError
 
     async def commit_elastic_ep(self) -> None:
@@ -446,8 +445,7 @@ class InprocClient(EngineCoreClient):
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
-    circular reference back to the client object.
-    """
+    circular reference back to the client object."""
 
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
@@ -801,8 +799,7 @@ class MPClient(EngineCoreClient):
 
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
-        config changes (e.g. auto-fitted max_model_len) back to the frontend.
-        """
+        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
         vllm_config = self.vllm_config
         response = (
             msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
@@ -1333,8 +1330,7 @@ class AsyncMPClient(MPClient):
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Assumes external load-balancing by default.
-    """
+    EngineCore. Assumes external load-balancing by default."""
 
     def __init__(
         self,
@@ -1518,8 +1514,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Load-balances between multiple engine processes.
-    """
+    EngineCore. Load-balances between multiple engine processes."""
 
     def __init__(
         self,
@@ -1827,8 +1822,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         num_redundant_experts: int,
     ) -> None:
         """Prepare scale up by creating new engine cores and reconfiguring
-        existing ones.
-        """
+        existing ones."""
         self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
@@ -1920,8 +1914,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def _commit_scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
-        reconfiguring existing engine cores.
-        """
+        reconfiguring existing engine cores."""
         cur_data_parallel_size = len(self.core_engines)
 
         self.eep_scaling_cache = ElasticScalingCache(
