@@ -205,3 +205,54 @@ def test_a_replicated_cache_is_budgeted_for_the_whole_sequence(world: int) -> No
 
     # The sharded one still shrinks, or DCP buys no headroom.
     assert sharded.max_memory_usage_bytes(config) < sharded.max_memory_usage_bytes(solo)
+
+
+# --- the grouping contract --------------------------------------------------
+#
+# These pin the shape the serving path needs. The selector and the main KV are
+# co-packed at DCP=1 and must split at DCP>1, because a group carries one block
+# table and the two then need different widths of it.
+
+
+def _uniform(*specs) -> bool:
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    return UniformTypeKVCacheSpecs.is_uniform_type(
+        {f"layer.{i}": spec for i, spec in enumerate(specs)}
+    )
+
+
+def test_one_rank_keeps_the_selector_packed_with_the_main_kv() -> None:
+    """No DCP, no split: a single-rank run must keep the layout it had."""
+    replicated_off = MLAAttentionSpec(
+        block_size=784,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=DTYPE,
+        tokens_per_state=8,
+    )
+    assert _uniform(_main_kv_spec(), replicated_off)
+
+
+def test_dcp_splits_the_selector_into_its_own_group() -> None:
+    assert not _uniform(_main_kv_spec(), _compressed_spec())
+
+
+def test_the_two_need_different_block_table_widths() -> None:
+    """Why they cannot share a group. 168 vs 335 is what serving reported."""
+    config = _config(max_model_len=262144, dcp=2)
+    assert _main_kv_spec().max_num_blocks_per_req(config, 262144) == 168
+    assert _compressed_spec().max_num_blocks_per_req(config, 262144) == 335
+
+
+def test_the_raw_ring_is_placed_rather_than_rejected() -> None:
+    """The DCP guard rejects by type, and the ring has to be on the list.
+
+    It is replicated, like Mamba: every rank writes every token into its own
+    ring so the replicated selector reads identical ones.
+    """
+    from vllm.v1.core.kv_cache_coordinator import DCP_AWARE_SPECS
+
+    assert isinstance(_raw_ring_spec(), DCP_AWARE_SPECS)
+    assert isinstance(_main_kv_spec(), DCP_AWARE_SPECS)
+    assert dcp_world_size_for_kv_cache_spec(_raw_ring_spec(), 2) == 1
