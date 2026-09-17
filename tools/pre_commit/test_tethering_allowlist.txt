@@ -36,6 +36,9 @@ tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects
 tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
 tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transfer.py is tethered; not added to that job (#53784)
 
+# tests/entrypoints/cli/
+tests/entrypoints/cli/test_serve.py  # added by #53124 (2026-09-15); no job collects tests/entrypoints/cli/
+
 # tests/kernels/
 tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
 
@@ -90,3 +93,4 @@ tests/watermarking/test_detection.py  # watermarking feature (#54053); no job co
 tests/watermarking/test_gumbel.py  # watermarking feature (#54053); no job collects tests/watermarking/
 tests/watermarking/test_prf.py  # watermarking feature (#54053); no job collects tests/watermarking/
 tests/watermarking/test_watermarking.py  # watermarking feature (#54053); no job collects tests/watermarking/
+tests/watermarking/test_watermarking_e2e.py  # watermarking hardening (#56309); no job collects tests/watermarking/
