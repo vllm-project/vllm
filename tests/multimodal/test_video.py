@@ -32,7 +32,6 @@ from vllm.multimodal.video import (
     VideoSourceMetadata,
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
-    glm_sample_frame_indices,
 )
 from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
 from vllm.multimodal.video_decoders.pynvvideocodec import (
@@ -1600,7 +1599,7 @@ def test_glm5next_backend_indices_match_sampler(
         source, target, max_frames=max_frames
     )
 
-    assert indices == glm_sample_frame_indices(
+    assert indices == Glm5NextVideoBackend._sample_frame_indices(
         total_frames,
         original_fps,
         duration,
@@ -1693,7 +1692,7 @@ def test_glm5next_backend_codec_parity(tmp_path, backend):
     # Dense default sampling (gap 5) and a sparse max_frames cap (gap 20).
     for max_frames in (None, 6):
         kwargs = {} if max_frames is None else {"max_frames": max_frames}
-        expected = glm_sample_frame_indices(
+        expected = Glm5NextVideoBackend._sample_frame_indices(
             total_frames, float(fps), 12.0, max_frame_count=max_frames
         )
 
@@ -1716,7 +1715,7 @@ def test_glm5next_backend_decodes_only_sampled_frames(tmp_path):
     total_frames, fps = 60, 10
     path = _write_gray_video(tmp_path, total_frames, fps)
 
-    expected = glm_sample_frame_indices(total_frames, float(fps), 6.0)
+    expected = Glm5NextVideoBackend._sample_frame_indices(total_frames, float(fps), 6.0)
 
     frames, metadata = Glm5NextVideoBackend.load_bytes(path.read_bytes())
 
