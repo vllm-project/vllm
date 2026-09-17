@@ -136,29 +136,24 @@ def _default_input_image_details(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    result = value
-    for field in ("content", "output"):
-        parts = value.get(field)
-        if not isinstance(parts, list):
-            continue
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
 
-        new_parts = []
-        changed = False
-        for part in parts:
-            new_part = part
-            if (
-                isinstance(part, dict)
-                and part.get("type") == "input_image"
-                and "detail" not in part
-            ):
-                new_part = {**part, "detail": "auto"}
-            new_parts.append(new_part)
-            changed |= new_part is not part
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
 
-        if changed:
-            result = {**result, field: new_parts}
-
-    return result
+    return {**value, "content": new_content} if changed else value
 
 
 class ResponsesRequest(OpenAIBaseModel):
