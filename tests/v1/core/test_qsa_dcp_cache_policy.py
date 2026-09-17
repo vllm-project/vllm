@@ -196,9 +196,9 @@ def test_a_replicated_cache_is_budgeted_for_the_whole_sequence(world: int) -> No
     unsharded = _main_kv_spec()
     replicated = _compressed_spec()
 
-    assert replicated.dcp_shard_count == 1, "replicated caches are never split"
-    assert sharded.dcp_shard_count == world
-    assert unsharded.dcp_shard_count == 1
+    assert replicated.logical_block_span == replicated.block_size, "never split"
+    assert sharded.logical_block_span == sharded.block_size * world
+    assert unsharded.logical_block_span == unsharded.block_size
 
     # Sizing now follows the spec, not the config, so compare specs. The
     # replicated cache is budgeted exactly as an unsharded one is.
@@ -320,6 +320,7 @@ def _aligned_selector(dcp: int) -> MLAAttentionSpec:
         dtype=DTYPE,
         tokens_per_state=8,
         dcp_transparent=True,
+        dcp_shard_count=1,  # span already expressed, as the real spec does
     )
 
 
@@ -371,6 +372,6 @@ def test_one_rank_is_untouched() -> None:
 def test_a_replicated_cache_still_gets_the_whole_sequence() -> None:
     """Widening the span must not quietly halve the budget."""
     selector = _aligned_selector(2)
-    assert selector.dcp_shard_count == 1, "replicated: never sharded"
+    assert selector.logical_block_span == selector.block_size, "never sharded"
     # 168 blocks of 196 states covers all 32,768 states
     assert 168 * (selector.block_size // 8) >= 262144 // 8

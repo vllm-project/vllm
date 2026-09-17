@@ -9,8 +9,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
-from functools import cached_property
-from math import prod
+from functools import cached_property, reduce
+from math import gcd, prod
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
@@ -529,26 +529,27 @@ class AttentionSpec(KVCacheSpec):
         """
         return self.unpadded_page_size_bytes
 
-    dcp_shard_count: int = 1
-    """How many ways DCP splits this cache. Resolved once, before grouping, by
-    ``stamp_dcp_shard_counts``.
+    dcp_shard_count: int | None = None
+    """How many ways DCP splits this cache, when ``block_size`` counts stored
+    slots rather than token positions.
 
-    A replicated cache stays 1 however large the DCP group is. Every rank holds
-    the whole sequence, so it must be budgeted for the whole sequence.
+    ``None`` means unresolved: ``stamp_dcp_shard_counts`` fills it from the spec
+    type before grouping. A spec whose ``block_size`` already counts token
+    positions sets it to 1 itself and is left alone.
 
-    Carried as a field rather than computed from the config, because grouping
-    needs the token span of a block and has no config in scope."""
+    Carried as a field rather than read from the config, because grouping needs
+    the token span of a block and has no config in scope."""
 
     @property
     def logical_block_span(self) -> int:
         """Token positions one block-table entry covers.
 
-        A sharded block holds ``block_size`` slots drawn from ``block_size *
-        shard count`` positions. A replicated one covers ``block_size``. Two
-        caches can share a block table only when these agree, whatever their
-        ownership.
+        Two caches can share a block table only when these agree, whatever
+        their ownership. A sharded block holding ``block_size`` slots covers
+        ``block_size * shard count`` positions; a replicated one covers
+        ``block_size``.
         """
-        return self.block_size * self.dcp_shard_count
+        return self.block_size * (self.dcp_shard_count or 1)
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         del vllm_config
@@ -1315,19 +1316,23 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
-            # This is the manager block size, which is handed down as each
-            # member's kernel block size. It is NOT the logical span: a sharded
-            # member's span is wider than the block it actually stores, and
-            # using the span here gives its own layers a kernel block that
-            # cannot divide theirs.
+            # The manager block size, handed to each member as its kernel
+            # block. It is NOT the logical span: the slot mapper multiplies
+            # this by the DCP world size itself, so putting the span here
+            # counts the world size twice and every write lands in the wrong
+            # slot.
             #
-            # Assert the members agree rather than sampling whichever comes
-            # first in the dict.
+            # It only has to DIVIDE each member's block, not equal it, so take
+            # the gcd. A replicated member whose block spans several of these
+            # is then viewed as that many kernel blocks, which is the existing
+            # `blocks_per_page` path.
             block_sizes = {spec.block_size for spec in kv_cache_specs.values()}
-            assert len(block_sizes) == 1, (
-                f"A KV cache group stores one block size, got {sorted(block_sizes)}."
+            block_size = reduce(gcd, block_sizes)
+            assert all(bs % block_size == 0 for bs in block_sizes), (
+                f"A KV cache group's block must divide every member's, "
+                f"got {sorted(block_sizes)} -> {block_size}."
             )
-            return cls(block_size=block_sizes.pop(), kv_cache_specs=kv_cache_specs)
+            return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
         else:
             return None
 

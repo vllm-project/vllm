@@ -717,8 +717,10 @@ def stamp_dcp_shard_counts(
         return kv_cache_specs
     stamped: dict[str, KVCacheSpec] = {}
     for name, spec in kv_cache_specs.items():
-        count = dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
-        if isinstance(spec, AttentionSpec) and spec.dcp_shard_count != count:
+        if isinstance(spec, AttentionSpec) and spec.dcp_shard_count is None:
+            # Unresolved only. A spec whose block_size already counts token
+            # positions has set this to 1 and must not be scaled again.
+            count = dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
             spec = replace(spec, dcp_shard_count=count)
         stamped[name] = spec
     return stamped

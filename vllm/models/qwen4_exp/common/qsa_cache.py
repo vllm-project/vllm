@@ -895,7 +895,24 @@ class QSACompressedKeyCache(_QSAStateCache):
             #
             # Aligning needs the main KV spec to express its span too, with its
             # 784 slots as the kernel block inside it. See DCP-FIX-PLAN-REV3.md.
-            block_size=self.cache_config.block_size,
+            # Span the same tokens as the sharded main KV block so the two
+            # share a group. The main KV keeps its physical 784-slot block,
+            # which is what the slot mapper needs; the group takes the gcd of
+            # the two, so this block is simply viewed as several kernel blocks.
+            #
+            # `dcp_shard_count=1` says the span is stated here and must not be
+            # scaled again. `storage_block_size` pins the builder's view to the
+            # whole span, so it addresses all 196 states of it rather than the
+            # 98 in one kernel block.
+            dcp_shard_count=1,
+            block_size=(
+                self.cache_config.block_size
+                * vllm_config.parallel_config.decode_context_parallel_size
+            ),
+            storage_block_size=(
+                self.cache_config.block_size
+                * vllm_config.parallel_config.decode_context_parallel_size
+            ),
         )
 
 
