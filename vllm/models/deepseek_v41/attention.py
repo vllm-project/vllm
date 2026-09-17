@@ -788,8 +788,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_result, _ = maybe_execute_in_parallel(
                 prepare_indexer,
                 lambda: compressor.insert_cache(latent, positions, self.rotary_emb),
-                self.ln_events[0],
-                self.ln_events[1],
+                self.ln_events[2],
+                self.ln_events[3],
                 aux_stream,
             )
         else:
