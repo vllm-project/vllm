@@ -6,9 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -355,6 +357,29 @@ def test_snapshot_create_strips_the_portable_option(monkeypatch):
     assert "--dtype" in child_argv
 
 
+def test_snapshot_create_strips_the_work_dir_option(monkeypatch):
+    argv = [
+        "create",
+        "Qwen/Qwen3-0.6B",
+        "--revision",
+        _MODEL_REVISION,
+        "--snapshot-dir",
+        "/tmp/snapshot",
+        "--portable",
+        "--work-dir",
+        "/tmp/work",
+    ]
+    args = parse_snapshot(*argv)
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", *argv])
+
+    child_argv = list(_child_engine_argv(args, None))
+
+    assert child_argv[0] == "Qwen/Qwen3-0.6B"
+    assert "--portable" not in child_argv
+    assert "--work-dir" not in child_argv
+    assert "/tmp/work" not in child_argv
+
+
 @pytest.mark.parametrize("model_in_cli", [False, True])
 def test_snapshot_create_config_preserves_cli_precedence(
     tmp_path, monkeypatch, model_in_cli
@@ -515,6 +540,12 @@ def _oracle(
 
 
 def _manifest(**changes: object) -> SnapshotManifest:
+    if changes.get("portable"):
+        changes.setdefault("work_dir", "/tmp/vllm-snapshot-work-fixture")
+        changes.setdefault("cleanup_work_dir", False)
+    else:
+        changes.setdefault("work_dir", "/tmp/vllm-snapshot-artifact-fixture")
+        changes.setdefault("cleanup_work_dir", False)
     manifest = SnapshotManifest(
         schema_version=1,
         boundary="post-engine-init-reloadable-state-released",
@@ -542,6 +573,8 @@ def _manifest(**changes: object) -> SnapshotManifest:
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
         oracle_sampled_token_logprob=-0.125,
+        work_dir=changes["work_dir"],
+        cleanup_work_dir=changes["cleanup_work_dir"],
     )
     return SnapshotManifest.model_validate(
         {**manifest.model_dump(mode="python"), **changes}, strict=True
@@ -556,6 +589,7 @@ def _runtime_identity(**changes: object) -> Any:
 
 def _fake_snapshot_tools() -> Any:
     tools = create_autospec(LocalSnapshotTools, instance=True)
+    tools.create_work_dir.return_value = (Path("/tmp/vllm-snapshot-work"), False)
     tools.launch_child.return_value = 100
     tools.wait_ready.return_value = _oracle()
     tools.inventory.return_value = ProcessInventory(100, (100, 101), (101,), "GPU-abc")
@@ -746,6 +780,7 @@ def test_snapshot_create_preserves_bounded_criu_diagnostics_after_cleanup(
 ):
     target = tmp_path / "snapshot"
     tools = _fake_snapshot_tools()
+    tools.create_work_dir.return_value = (target, False)
     criu_tools = LocalSnapshotTools()
     criu_tools.plugin_dir = tmp_path
     original_run = criu_tools._run
@@ -771,14 +806,14 @@ def test_snapshot_create_preserves_bounded_criu_diagnostics_after_cleanup(
 
     criu_tools._run = run  # type: ignore[method-assign]
 
-    def fail_dump(workdir: Path, _inventory: ProcessInventory) -> None:
-        images = workdir / "images"
+    def fail_dump(artifact: Path, work_dir: Path, _inventory: ProcessInventory) -> None:
+        images = artifact / "images"
         images.mkdir()
         if failure_kind != "missing":
-            (images / "dump.log").write_text(
+            (work_dir / "dump.log").write_text(
                 "omitted dump prefix" + "d" * 9000 + "distinctive dump diagnostic"
             )
-        criu_tools._criu("dump", workdir, [])
+        criu_tools._criu("dump", artifact, [], work_dir)
 
     tools.dump.side_effect = fail_dump
     with pytest.raises(type(primary)) as excinfo:
@@ -816,9 +851,9 @@ def test_snapshot_criu_failure_selects_restore_log(
     tools.plugin_dir = tmp_path
     tools._privileged = lambda: []  # type: ignore[method-assign]
     artifact = tmp_path / "snapshot"
-    images = artifact / "images"
-    images.mkdir(parents=True)
-    (images / "restore.log").write_text(
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True)
+    (work_dir / "restore.log").write_text(
         "omitted restore prefix" + "r" * 9000 + "distinctive restore diagnostic"
     )
     primary = subprocess.CalledProcessError(1, ["criu", "restore"])
@@ -834,19 +869,81 @@ def test_snapshot_criu_failure_selects_restore_log(
     tools._run = run  # type: ignore[method-assign]
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
-        tools._criu("restore", artifact, [])
+        tools._criu("restore", artifact, [], work_dir)
 
     assert excinfo.value is primary
-    assert tailed == [str(images / "restore.log")]
+    assert tailed == [str(work_dir / "restore.log")]
     diagnostics = "\n".join(caplog.messages)
     assert "distinctive restore diagnostic" in diagnostics
     assert "omitted restore prefix" not in diagnostics
 
 
+def test_snapshot_create_removes_a_temporary_work_dir_when_a_later_step_fails(
+    tmp_path: Path,
+):
+    target = tmp_path / "snapshot"
+    work_dir = tmp_path / "work"
+    tools = _fake_snapshot_tools()
+    tools.create_work_dir.return_value = (work_dir, True)
+    tools.dump.side_effect = RuntimeError("dump failed")
+
+    with pytest.raises(RuntimeError, match="dump failed"):
+        create_snapshot(
+            argparse.Namespace(
+                snapshot_dir=str(target), model_tag="Qwen/Qwen3-0.6B", portable=True
+            ),
+            tools=tools,
+        )
+
+    # Neither the partial artifact nor the temporary work directory it drew
+    # survives the failure.
+    assert not target.exists()
+    assert not work_dir.exists()
+
+
+def test_snapshot_create_keeps_a_named_work_dir_when_a_later_step_fails(
+    tmp_path: Path,
+):
+    target = tmp_path / "snapshot"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    tools = _fake_snapshot_tools()
+    tools.create_work_dir.return_value = (work_dir, False)
+    tools.dump.side_effect = RuntimeError("dump failed")
+
+    with pytest.raises(RuntimeError, match="dump failed"):
+        create_snapshot(
+            argparse.Namespace(
+                snapshot_dir=str(target), model_tag="Qwen/Qwen3-0.6B", portable=True
+            ),
+            tools=tools,
+        )
+
+    assert not target.exists()
+    assert work_dir.exists()
+
+
+def test_snapshot_create_cleans_up_when_the_work_dir_is_refused(tmp_path: Path):
+    target = tmp_path / "snapshot"
+    tools = _fake_snapshot_tools()
+    tools.create_work_dir.side_effect = SnapshotCreateError("work dir refused")
+
+    with pytest.raises(SnapshotCreateError, match="work dir refused"):
+        create_snapshot(
+            argparse.Namespace(snapshot_dir=str(target), model_tag="Qwen/Qwen3-0.6B"),
+            tools=tools,
+        )
+
+    # The refusal happened after the artifact directory was created, so the
+    # finally block still removes it and a retry is not blocked.
+    assert not target.exists()
+    tools.launch_child.assert_not_called()
+
+
 def _restore_fixture(tmp_path: Path) -> argparse.Namespace:
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
-    write_manifest_atomic(artifact, _manifest())
+    write_manifest_atomic(artifact, _manifest(work_dir=str(artifact)))
     return argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
 
 
@@ -896,6 +993,286 @@ def test_snapshot_restore_accepts_matching_portable(tmp_path: Path):
     tools.restore.assert_called_once()
 
 
+def test_snapshot_manifest_records_whether_the_work_dir_is_cleaned_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    external = tmp_path / "work"
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "current_identity", lambda _uuid: _runtime_identity())
+    base = argparse.Namespace(
+        model_tag="Qwen/Qwen3-0.6B",
+        revision=_MODEL_REVISION,
+        served_model_name=None,
+        tokenizer_revision=None,
+        portable=True,
+    )
+
+    manifest = tools.make_manifest(
+        base,
+        ("Qwen/Qwen3-0.6B",),
+        ProcessInventory(100, (100,), (100,), "GPU-abc"),
+        _oracle(),
+        artifact,
+        work_dir=external,
+        cleanup_work_dir=False,
+    )
+    assert manifest.work_dir == str(external)
+    assert manifest.cleanup_work_dir is False
+
+    base.portable = False
+    manifest = tools.make_manifest(
+        base,
+        ("Qwen/Qwen3-0.6B",),
+        ProcessInventory(100, (100,), (100,), "GPU-abc"),
+        _oracle(),
+        artifact,
+    )
+    assert manifest.work_dir == str(artifact)
+    assert manifest.cleanup_work_dir is False
+
+
+def test_snapshot_restore_releases_through_the_manifest_work_dir(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(artifact, _manifest(portable=True, work_dir="/tmp/snap-work"))
+    args = argparse.Namespace(
+        snapshot_dir=str(artifact), host="127.0.0.1", port=9000, portable=True
+    )
+
+    tools = _fake_snapshot_tools()
+    restore_snapshot(args, tools=tools)
+
+    # The barrier marker belongs to the restoring machine's copy of the work
+    # directory, never to the shared artifact.
+    tools.release.assert_called_once_with(Path("/tmp/snap-work"), "127.0.0.1", 9000)
+
+
+def test_snapshot_create_work_dir_requires_portable():
+    args = parse_snapshot(
+        "create",
+        "Qwen/Qwen3-0.6B",
+        "--revision",
+        _MODEL_REVISION,
+        "--snapshot-dir",
+        "/tmp/snapshot",
+        "--work-dir",
+        "/tmp/work",
+    )
+
+    with pytest.raises(ValueError, match="requires --portable"):
+        snapshot_cli.validate_create_args(args)
+
+
+def test_snapshot_create_work_dir_in_place_layout(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+
+    tools = LocalSnapshotTools()
+    work_dir, cleanup = tools.create_work_dir(None, artifact, portable=False)
+    assert (work_dir, cleanup) == (artifact, False)
+
+
+@pytest.mark.parametrize("requested", [None, "explicit"])
+def test_snapshot_create_work_dir_stays_outside_the_artifact(
+    tmp_path: Path, requested: str | None
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    tools = LocalSnapshotTools()
+    request = None if requested is None else str(tmp_path / requested)
+
+    work_dir, cleanup = tools.create_work_dir(request, artifact, portable=True)
+
+    assert not work_dir.is_relative_to(artifact)
+    assert work_dir.stat().st_mode & 0o777 == 0o700
+    assert cleanup is (request is None)
+    if request is None:
+        assert work_dir.is_relative_to(Path(tempfile.gettempdir()))
+    with pytest.raises(SnapshotCreateError, match="must stay outside"):
+        tools.create_work_dir(str(artifact), artifact, portable=True)
+    with pytest.raises(SnapshotCreateError, match="must stay outside"):
+        tools.create_work_dir(str(artifact / "work"), artifact, portable=True)
+    with pytest.raises(SnapshotCreateError, match="already exists"):
+        tools.create_work_dir(str(work_dir), artifact, portable=True)
+    shutil.rmtree(work_dir)
+
+
+def test_snapshot_portable_create_records_and_discards_an_automatic_work_dir(
+    tmp_path: Path,
+):
+    target = tmp_path / "snapshot"
+    work_dir = tmp_path / "work"
+    tools = _fake_snapshot_tools()
+
+    def make_work_dir(_requested, _artifact, *, portable):
+        work_dir.mkdir(mode=0o700)
+        return work_dir, True
+
+    tools.create_work_dir.side_effect = make_work_dir
+    create_snapshot(
+        argparse.Namespace(
+            snapshot_dir=str(target),
+            model_tag="Qwen/Qwen3-0.6B",
+            portable=True,
+        ),
+        tools=tools,
+    )
+
+    tools.create_work_dir.assert_called_once_with(None, target, portable=True)
+    assert tools.launch_child.call_args[0][0] == work_dir
+    assert tools.make_manifest.call_args[1]["work_dir"] == work_dir
+    # The manifest is the work directory's only record, so create leaves no
+    # automatic copy behind on the machine that built the artifact.
+    assert not work_dir.exists()
+
+
+def test_snapshot_restore_discards_a_temporary_work_dir_when_done(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(
+        artifact,
+        _manifest(
+            portable=True, work_dir=str(tmp_path / "work"), cleanup_work_dir=True
+        ),
+    )
+    args = argparse.Namespace(
+        snapshot_dir=str(artifact), host="127.0.0.1", port=9000, portable=True
+    )
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+
+    tools = _fake_snapshot_tools()
+    restore_snapshot(args, tools=tools)
+
+    # The tree it leaves behind holds open files there; the directory itself
+    # is gone, like the one a create with no --work-dir leaves behind.
+    assert not work_dir.exists()
+
+
+def test_snapshot_restore_keeps_a_work_dir_the_operator_named(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(
+        artifact,
+        _manifest(
+            portable=True, work_dir=str(tmp_path / "work"), cleanup_work_dir=False
+        ),
+    )
+    args = argparse.Namespace(
+        snapshot_dir=str(artifact), host="127.0.0.1", port=9000, portable=True
+    )
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+
+    tools = _fake_snapshot_tools()
+    restore_snapshot(args, tools=tools)
+
+    assert work_dir.is_dir()
+
+
+def test_snapshot_restore_reuses_a_work_dir_after_a_earlier_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    (work_dir / "release.json").write_text('{"release": true}')
+    (work_dir / "restored.pid").write_text("100\n")
+    (work_dir / "child.log").write_bytes(b"x" * 5)
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    (artifact / "child.log.snapshot-size").write_text("5\n")
+    manifest = _manifest(portable=True, work_dir=str(work_dir))
+    tools = LocalSnapshotTools()
+    criu_arguments: list[list[str]] = []
+
+    def fake_criu(
+        _action: str, _artifact: Path, arguments: list[str], _work_dir: Path
+    ) -> None:
+        criu_arguments.append(list(arguments))
+        pidfile = Path(arguments[arguments.index("--pidfile") + 1])
+        pidfile.write_text("100\n")
+
+    def fake_run(command: list[str], **_kwargs: object):
+        return subprocess.CompletedProcess(command, 0, "100\n", "")
+
+    monkeypatch.setattr(tools, "_criu", fake_criu)
+    monkeypatch.setattr(tools, "_run", fake_run)
+    monkeypatch.setattr(tools, "_pin_restored_tree", lambda *_args: None)
+
+    assert tools.restore(artifact, manifest) == 100
+
+    # The earlier run's transaction files are replaced, so their stale
+    # contents cannot reach this run's barrier or PID check.
+    assert criu_arguments[0][criu_arguments[0].index("--pidfile") + 1] == str(
+        work_dir / "restored.pid"
+    )
+    assert (work_dir / "restored.pid").read_text() == "100\n"
+
+
+def test_snapshot_restore_populates_a_fresh_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o700)
+    (work_dir / "child.log").write_bytes(b"x" * 5)
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    (artifact / "child.log.snapshot-size").write_text("5\n")
+    manifest = _manifest(portable=True, work_dir=str(work_dir))
+    tools = LocalSnapshotTools()
+    criu_arguments: list[list[str]] = []
+
+    def fake_criu(
+        _action: str, _artifact: Path, arguments: list[str], _work_dir: Path
+    ) -> None:
+        criu_arguments.append(list(arguments))
+        pidfile = Path(arguments[arguments.index("--pidfile") + 1])
+        pidfile.write_text("100\n")
+
+    def fake_run(command: list[str], **_kwargs: object):
+        assert command[-1].endswith("restored.pid")
+        return subprocess.CompletedProcess(command, 0, "100\n", "")
+
+    monkeypatch.setattr(tools, "_criu", fake_criu)
+    monkeypatch.setattr(tools, "_run", fake_run)
+    monkeypatch.setattr(tools, "_pin_restored_tree", lambda *_args: None)
+
+    assert tools.restore(artifact, manifest) == 100
+
+    # An empty work directory is taken over as found, the control files land
+    # in it, and CRIU keeps its scratch state out of the artifact.
+    arguments = criu_arguments[0]
+    assert arguments[arguments.index("--pidfile") + 1] == str(work_dir / "restored.pid")
+    assert arguments[arguments.index("--work-dir") + 1] == str(work_dir)
+    assert "restored.pid" in [path.name for path in work_dir.iterdir()]
+    assert (work_dir / "child.log").stat().st_size == 5
+    assert [path.name for path in artifact.iterdir()] == ["child.log.snapshot-size"]
+
+
+def test_snapshot_restore_refuses_a_work_dir_it_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _mark_snapshot_pids_free(monkeypatch)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    # mkdir filters the mode through umask, so loosen it explicitly.
+    work_dir.chmod(0o777)
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    manifest = _manifest(portable=True, work_dir=str(work_dir))
+
+    with pytest.raises(SnapshotRestoreError, match="not a private directory"):
+        LocalSnapshotTools().restore(artifact, manifest)
+
+
 def test_snapshot_identity_mismatch_names_every_differing_field():
     with pytest.raises(SnapshotCompatibilityError) as mismatch:
         validate_identity(
@@ -933,6 +1310,17 @@ def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
             "oracle_sampled_token_logprob",
         ),
         ({"portable": "yes"}, "portable"),
+        ({"cleanup_work_dir": True}, "root"),
+        (
+            {
+                "portable": True,
+                "work_dir": "relative/path",
+                "cleanup_work_dir": False,
+            },
+            "root",
+        ),
+        ({"work_dir": 5}, "work_dir"),
+        ({"cleanup_work_dir": "yes"}, "cleanup_work_dir"),
     ],
 )
 def test_snapshot_manifest_validation(
@@ -1015,7 +1403,7 @@ def test_snapshot_restore_terminates_only_a_pinned_tree(
 ):
     _mark_snapshot_pids_free(monkeypatch)
     artifact = _local_restore_artifact(tmp_path)
-    manifest = _manifest()
+    manifest = _manifest(work_dir=str(artifact))
     root_pid = manifest.process_tree[0]
     tools = LocalSnapshotTools()
     terminated: list[int] = []
@@ -1091,7 +1479,7 @@ def test_snapshot_private_path_and_link_remap_security(
     tools.shm_dir = shm_dir
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
     with pytest.raises(SnapshotRestoreError, match="conflicting CRIU link remap"):
-        tools.restore(artifact, _manifest())
+        tools.restore(artifact, _manifest(work_dir=str(artifact)))
 
 
 @pytest.mark.parametrize("inventory_error", [None, PermissionError("denied")])
@@ -1417,14 +1805,17 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
     kernel.write_bytes(b"compiled kernel")
     lock = tmp_path / "launcher.lock"
     lock.write_bytes(b"held by pid 100")
+    artifact = _local_restore_artifact(tmp_path)
     manifest = _manifest(
+        work_dir=str(artifact),
         external_cache_files=(
             (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
             (str(lock), "locked"),
-        )
+        ),
     )
-    artifact = _local_restore_artifact(tmp_path)
-    before = {path.name: path.read_bytes() for path in artifact.iterdir()}
+    before = {
+        path.name: path.read_bytes() for path in artifact.iterdir() if path.is_file()
+    }
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
 
@@ -1441,7 +1832,12 @@ def test_snapshot_restore_rejects_rotated_cache_file_before_mutation(
         tools.restore(artifact, manifest)
     assert str(lock) in str(gone.value)
 
-    assert {path.name: path.read_bytes() for path in artifact.iterdir()} == before
+    # A refused restore leaves the image alone and marks it unreleased, so CRIU
+    # never sees a half-checked artifact.
+    assert {
+        path.name: path.read_bytes() for path in artifact.iterdir() if path.is_file()
+    } == before
+    assert json.loads((artifact / "release.json").read_text()) == {"release": False}
 
 
 def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
@@ -1450,12 +1846,13 @@ def test_snapshot_restore_rejects_a_cache_file_it_cannot_read(
     _mark_snapshot_pids_free(monkeypatch)
     kernel = tmp_path / "kernel.so"
     kernel.write_bytes(b"compiled kernel")
+    artifact = _local_restore_artifact(tmp_path)
     manifest = _manifest(
+        work_dir=str(artifact),
         external_cache_files=(
             (str(kernel), hashlib.sha256(b"compiled kernel").hexdigest()),
-        )
+        ),
     )
-    artifact = _local_restore_artifact(tmp_path)
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
     monkeypatch.setattr(tools, "_sha256", _unreadable)
