@@ -223,8 +223,11 @@ fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
 /// Whether the typed encoding can express every schema-valid call: no
 /// extra properties admitted (an explicit `additionalProperties`/
 /// `patternProperties` allowance cannot be rendered), every `required` name
-/// declared, and every key safe inside `<atem:parameter name="…">`. Anything
-/// else stays free-form rather than silently narrowing the schema.
+/// declared, and every key round-trippable through
+/// `<atem:parameter name="…">` — non-empty and free of `"`, `<`, and `>`.
+/// The parser reads attributes up to the first `>` and skips empty names,
+/// so the grammar must not force bytes it would drop. Anything else stays
+/// free-form rather than silently narrowing the schema.
 fn typed_encoding_is_faithful(parameters: &Value, properties: &Map<String, Value>) -> bool {
     let extra_properties_allowed = match parameters.get("additionalProperties") {
         None | Some(Value::Bool(false)) => false,
@@ -233,7 +236,9 @@ fn typed_encoding_is_faithful(parameters: &Value, properties: &Map<String, Value
     !extra_properties_allowed
         && parameters.get("patternProperties").is_none()
         && required_names(parameters).iter().all(|name| properties.contains_key(*name))
-        && properties.keys().all(|key| !key.contains(['"', '<']))
+        && properties.keys().all(|key| {
+            !key.is_empty() && !key.contains(['"', '<', '>'])
+        })
 }
 
 /// One or more typed invokes, newline-separated. The repetition is expressed
@@ -669,6 +674,37 @@ mod tests {
             .unwrap();
 
         assert!(!json.contains("<atem:parameter"));
+    }
+
+    #[test]
+    fn unroundtrippable_parameter_keys_keep_invoke_body_free_form() {
+        // The parser reads parameter attributes up to the first `>` and skips
+        // empty names, so keys with `>` or empty keys must not be baked into
+        // the typed encoding the grammar would force but the parser drops.
+        for properties in [
+            json!({ "a>b": { "type": "string" } }),
+            json!({ "": { "type": "string" } }),
+        ] {
+            let tools = vec![tool(
+                "calc",
+                json!({ "type": "object", "properties": properties }),
+            )];
+            let json = MuseGlimmerStructuralTagBuilder
+                .build_scoped(
+                    &tools,
+                    Some(ScopedToolChoice::Required),
+                    None,
+                    &StructuralTagOptions::default(),
+                )
+                .unwrap()
+                .to_json_string()
+                .unwrap();
+
+            assert!(
+                !json.contains("<atem:parameter"),
+                "properties {properties} should stay free-form"
+            );
+        }
     }
 
     #[test]
