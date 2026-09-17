@@ -754,13 +754,17 @@ fn failed_bare_header_text(input: &mut MuseGlimmerInput<'_>) -> ModalResult<()> 
 /// its first complete invoke. Commits only once a complete
 /// `<atem:invoke>…</atem:invoke>` is ahead; otherwise the parse either holds
 /// (incomplete) or fails definitively and the opener is literal content.
+/// Whitespace between the wrapper and the invoke is structural only when the
+/// wrapper matched; whitespace before a bare invoke stays content.
 fn atem_tool_channel_event(
     input: &mut MuseGlimmerInput<'_>,
     invoke_scan: &mut MarkerScanState,
 ) -> ModalResult<MuseGlimmerEvent> {
     let ((name, arguments),) = seq!(
-        _: opt(literal(FUNCTION_CALLS_OPEN)),
-        _: capped_run(0, is_ascii_multispace),
+        _: opt(preceded(
+            literal(FUNCTION_CALLS_OPEN),
+            capped_run(0, is_ascii_multispace),
+        )),
         |input: &mut MuseGlimmerInput<'_>| invoke_block(input, invoke_scan),
     )
     .parse_next(input)?;
@@ -1438,6 +1442,25 @@ mod tests {
 
         assert_eq!(output.normal_text(), "ab");
         assert_eq!(output.reasoning_text(), "r");
+    }
+
+    #[test]
+    fn muse_glimmer_whitespace_before_wrapperless_invoke_stays_content() {
+        // Whitespace between content and a wrapper-less reclassified invoke is
+        // content; only whitespace inside the wrapper is structural.
+        let output = assert_chunking_invariant(
+            "<|message|>pre <atem:invoke name=\"calc\"></atem:invoke><|eom|>\
+             <|start|>assistant to=user<|message|>done<|eot|>",
+        );
+        assert_eq!(output.normal_text(), "pre done");
+        assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
+
+        let output = assert_chunking_invariant(
+            "<|message|>pre <atem:function_calls>\n<atem:invoke name=\"calc\"></atem:invoke>\n\
+             </atem:function_calls><|eom|><|start|>assistant to=user<|message|>done<|eot|>",
+        );
+        assert_eq!(output.normal_text(), "pre done");
+        assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
     }
 
     #[test]
