@@ -34,6 +34,7 @@ from vllm.multimodal.cache import (
 )
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.paged_shm.client import PagedShmClient
+from vllm.multimodal.paged_shm.constants import PROCESSOR_CACHE_MM_HASH_PREFIX
 from vllm.multimodal.paged_shm.serial_utils import (
     PagedShmDecoder,
     PagedShmEncoder,
@@ -123,7 +124,7 @@ class PagedShmCache:
     def is_cached_item(self, mm_hash: str) -> bool:
         """Check if an item exists in the shared memory cache."""
         try:
-            self._client.get_info(mm_hash)
+            self._client.get_info(PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash)
             return True
         except RuntimeError:
             return False
@@ -131,7 +132,7 @@ class PagedShmCache:
     def invalidate(self, mm_hash: str) -> None:
         """Delete the item from shared memory."""
         try:
-            self._client.delete(mm_hash)
+            self._client.delete(PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash)
         except Exception as e:
             logger.debug("Failed to invalidate %s: %s", mm_hash, e)
 
@@ -167,7 +168,7 @@ class PagedShmCache:
         )
 
         req = ShmWriteRequest(
-            uuid=mm_hash,
+            uuid=PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash,
             size=total_blocks * self.block_size,
             use_cache=True,
         )
@@ -214,7 +215,7 @@ class PagedShmCache:
         4. Return the reconstructed item; finally close the read handle.
         """
         try:
-            alloc = self._client.open_read(mm_hash, timeout=self.open_write_timeout)
+            alloc = self._client.open_read(PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash, timeout=self.open_write_timeout)
             try:
                 with self.stream:
                     mm_item = read_decoded_from_blocks(

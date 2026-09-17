@@ -20,3 +20,5 @@ GET_INFO = b"get_info"
 GET_MANAGER_STATES = b"get_manager_states"
 GET_STORAGE_INFO = b"get_storage_info"
 DEBUG_CLEAN = b"DEBUG_CLEAN"
+
+PROCESSOR_CACHE_MM_HASH_PREFIX = "PC@"
