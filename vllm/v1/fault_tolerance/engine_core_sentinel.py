@@ -385,7 +385,6 @@ class EngineCoreSentinel:
         """Reinit the engine DP group (dp>1) and host the recovery store."""
         if self._initial_dp_size == 1:
             return
-        engine = self.engine
         params = ft_request.params
         recovery_round = params["recovery_round"]
         master_ip = params["dp_master_ip"]

@@ -724,8 +724,8 @@ class ParallelConfig:
         from torch.distributed import DistNetworkError
 
         from vllm.distributed.utils import (
-            steady_state_entered,
             stateless_init_torch_distributed_process_group,
+            steady_state_entered,
         )
 
         # Under FT, startup-created groups get no configured timeout: uneven

@@ -64,7 +64,12 @@ def _reinit_cpu_group(
     else:
         port, listen_socket = fetch_group_ports(store, key, 1)[0], None
     new_group = stateless_init_torch_distributed_process_group(
-        host, port, rank, size, backend="gloo", listen_socket=listen_socket,
+        host,
+        port,
+        rank,
+        size,
+        backend="gloo",
+        listen_socket=listen_socket,
         timeout=timeout,
     )
     stateless_destroy_torch_distributed_process_group(group.cpu_group)

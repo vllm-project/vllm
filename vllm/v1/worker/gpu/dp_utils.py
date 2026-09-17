@@ -52,9 +52,9 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
-    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
@@ -81,7 +81,7 @@ def sync_cudagraph_and_dp_padding(
     # consumers index it by original dp_rank.
     num_tokens_across_dp_full = tensor[0]
 
-    if parallel_config.enable_fault_tolerance:
+    if parallel_config is not None and parallel_config.enable_fault_tolerance:
         # Per-step barrier over the TP cpu group: a faulted sibling stops
         # arriving, so survivors fail here on the host instead of leaving
         # an orphaned TP collective running on device.
@@ -232,10 +232,10 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
-    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
@@ -264,8 +264,8 @@ def dispatch_cg_and_sync_dp(
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
-        parallel_config: Only needed to decide whether to microbatch, so
-            callers that never do (`allow_ubatching=False`) can leave it out.
+        parallel_config: Only needed for FT coordination and to decide whether
+            to microbatch, so callers that do neither can leave it out.
         allow_ubatching: Whether this rank's batch may be split into
             microbatches. Agreed across ranks before it takes effect.
         uniform_decode: Whether this rank's batch is a uniform decode, used
@@ -336,8 +336,8 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
-        parallel_config,
         max_query_len=max_query_len,
+        parallel_config=parallel_config,
         num_active_loras=num_active_loras,
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
