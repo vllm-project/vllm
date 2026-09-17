@@ -936,6 +936,7 @@ def LLM_with_max_seqs(
     max_model_len: int,
     attention_config: dict | None = None,
     kernel_config: dict | None = None,
+    enforce_eager: bool = False,
 ) -> LLM:
     """
     Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
@@ -953,6 +954,7 @@ def LLM_with_max_seqs(
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
         attention_config=attention_config,
+        enforce_eager=enforce_eager,
         # Enable for MOE models
         # enable_expert_parallel=True,
         **extra_kwargs,
