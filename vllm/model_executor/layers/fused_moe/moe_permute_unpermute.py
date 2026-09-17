@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
+
 
 @dataclass
 class MoEPermuteScratch:
@@ -100,6 +105,48 @@ class MoEPermuteScratch:
         topk_ids_int32 = self.topk_ids_int32[:numel].view_as(topk_ids)
         topk_ids_int32.copy_(topk_ids)
         return topk_ids_int32
+
+
+def get_moe_permute_scratch(
+    *,
+    max_num_tokens: int,
+    topk: int,
+    num_experts: int,
+    num_local_experts: int,
+    device: torch.device,
+    hidden_size: int | None = None,
+    hidden_dtype: torch.dtype | None = None,
+) -> MoEPermuteScratch:
+    """Share scratch across sequential layers in the current ubatch and lane.
+
+    Without a workspace manager, allocate new scratch for each call.
+    """
+
+    def create_scratch() -> MoEPermuteScratch:
+        return MoEPermuteScratch(
+            max_num_tokens=max_num_tokens,
+            topk=topk,
+            num_experts=num_experts,
+            num_local_experts=num_local_experts,
+            device=device,
+            hidden_size=hidden_size,
+            hidden_dtype=hidden_dtype,
+        )
+
+    if not is_workspace_manager_initialized():
+        return create_scratch()
+
+    key = (
+        MoEPermuteScratch,
+        max_num_tokens,
+        topk,
+        num_experts,
+        num_local_experts,
+        device,
+        hidden_size,
+        hidden_dtype,
+    )
+    return current_workspace_manager().get_persistent_resource(key, create_scratch)
 
 
 def moe_permute(
