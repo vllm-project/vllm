@@ -1078,21 +1078,13 @@ class MLADualRMSGroupQuantPattern(
             +-- kv_lora -> split_with_sizes([kv_c_dim, k_pe_dim])
                             +-- kv_c -> vllm_ir.rms_norm -> kv_normed (bf16)
                             +-- k_pe
-
-    ``transpose_scale`` is carried through for GEMM backends that consume
-    column-major activation scales.
     """
 
     GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
     FUSED_OP = rocm_aiter_ops.get_fused_mla_dual_rms_norm_group_quant_op()
-    # Check if we are using transposed scales (unfused kernel might not)
-    GROUP_QUANT_HAS_TRANSPOSE = any(
-        a.name == "transpose_scale" for a in GROUP_QUANT_OP._schema.arguments
-    )
 
-    def __init__(self, epsilon: float, transpose_scale: bool) -> None:
+    def __init__(self, epsilon: float) -> None:
         self._epsilon = epsilon
-        self._transpose_scale = transpose_scale
 
     def get_inputs(self) -> list[torch.Tensor]:
         q_dim, kv_c_dim, k_pe_dim = 256, 128, 64
@@ -1115,9 +1107,7 @@ class MLADualRMSGroupQuantPattern(
         ],
     ]:
         eps = self._epsilon
-        transpose_scale = self._transpose_scale
         group_quant_op = self.GROUP_QUANT_OP
-        has_transpose = self.GROUP_QUANT_HAS_TRANSPOSE
 
         def _pattern(
             projected: torch.Tensor,
@@ -1141,8 +1131,6 @@ class MLADualRMSGroupQuantPattern(
                 variance_epsilon=eps,
                 group_size=128,
             )
-            if has_transpose:
-                quant_kwargs["transpose_scale"] = transpose_scale
             q_quant = group_quant_op(**quant_kwargs)
             kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, eps)
             return q_quant[0], q_quant[1], kv_normed, k_pe
@@ -1162,7 +1150,6 @@ class MLADualRMSGroupQuantPattern(
         ],
     ]:
         eps = self._epsilon
-        transpose_scale = self._transpose_scale
         fused_op = self.FUSED_OP
 
         def _replacement(
@@ -1189,7 +1176,6 @@ class MLADualRMSGroupQuantPattern(
                 eps,
                 eps,
                 128,
-                transpose_scale,
             )
             # q_fp8, q_scale, kv_normed, k_pe
             return at[0], at[1], at[2], k_pe
@@ -1215,12 +1201,6 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
-            transpose_options = (
-                (False, True)
-                if MLADualRMSGroupQuantPattern.GROUP_QUANT_HAS_TRANSPOSE
-                else (False,)
+            self.register(
+                MLADualRMSGroupQuantPattern(epsilon)
             )
-            for transpose_scale in transpose_options:
-                self.register(
-                    MLADualRMSGroupQuantPattern(epsilon, transpose_scale)
-                )
