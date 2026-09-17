@@ -89,6 +89,8 @@ pub enum Error {
     ToolChoiceFunctionNotFound { name: String },
     #[error("failed to build structural tag: {message}")]
     StructuralTag { message: String },
+    #[error("unsupported structured outputs: {message}")]
+    UnsupportedStructuredOutputs { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -107,7 +109,7 @@ impl Error {
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
-            | Self::StructuralTag { .. } => true,
+            | Self::UnsupportedStructuredOutputs { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)

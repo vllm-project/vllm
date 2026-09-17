@@ -16,7 +16,7 @@ use xgrammar_structural_tag::{
     build_structural_tag,
 };
 
-use crate::error::bail_structural_tag;
+use crate::error::bail_unsupported_structured_outputs;
 use crate::request::{ChatRequest, ChatToolChoice};
 use crate::{Error, Result as ChatResult};
 
@@ -142,8 +142,8 @@ fn apply_scoped_structural_tag_constraint(
         // cannot be combined with tool calls; reject it honestly instead of
         // silently dropping the caller's constraint.
         Some(CallerResponseSchema::NotScopable) if forces_tool_channels => {
-            bail_structural_tag!(
-                "the request's structured outputs constraint cannot be combined with tool calls for this parser"
+            bail_unsupported_structured_outputs!(
+                "the constraint cannot be combined with tool calls for this parser"
             );
         }
         Some(CallerResponseSchema::NotScopable) => return Ok(()),
@@ -155,8 +155,8 @@ fn apply_scoped_structural_tag_constraint(
                 Some(ScopedToolChoice::Required | ScopedToolChoice::Function(_))
             ) =>
         {
-            bail_structural_tag!(
-                "the request's structured outputs constraint cannot be combined with tool_choice \"required\" or a named tool choice for this parser"
+            bail_unsupported_structured_outputs!(
+                "the constraint cannot be combined with tool_choice \"required\" or a named tool choice for this parser"
             );
         }
         Some(CallerResponseSchema::Scopable(schema)) => Some(schema),
@@ -636,7 +636,8 @@ mod tests {
         let error = apply_structural_tag_constraint(&mut request, None, Some(&builder))
             .expect_err("non-scopable constraint with forced tool choice should fail");
 
-        assert!(matches!(error, Error::StructuralTag { .. }));
+        assert!(matches!(error, Error::UnsupportedStructuredOutputs { .. }));
+        assert!(error.is_request_validation_error());
         assert!(error.to_report_string().contains("cannot be combined with tool calls"));
         // The caller's constraint is left untouched.
         assert!(structured_outputs(&request).constraint.is_regex());
@@ -655,7 +656,8 @@ mod tests {
         let error = apply_structural_tag_constraint(&mut request, None, Some(&builder))
             .expect_err("caller schema with required tool choice should fail");
 
-        assert!(matches!(error, Error::StructuralTag { .. }));
+        assert!(matches!(error, Error::UnsupportedStructuredOutputs { .. }));
+        assert!(error.is_request_validation_error());
         assert!(error.to_report_string().contains("tool_choice \"required\""));
         // The caller's constraint is left untouched.
         assert!(matches!(
