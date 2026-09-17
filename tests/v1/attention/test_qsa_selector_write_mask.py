@@ -113,3 +113,38 @@ def test_the_states_land_on_distinct_slots():
     stored = slots[slots >= 0]
     assert stored.numel() == NUM_TOKENS // RATIO
     assert torch.unique(stored).numel() == stored.numel(), "two states collided"
+
+
+def test_the_padding_tail_is_still_excluded():
+    """`mapped` is what excludes padding, and the fix must not weaken it.
+
+    A cudagraph-padded batch has more actual tokens than mapped ones. States
+    past the mapped bound must not be stored, whatever the main slot mapping
+    holds there.
+    """
+    real = 1000
+    query_start_loc = torch.tensor([0, real], dtype=torch.int32, device="cuda")
+    metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=torch.tensor([real], dtype=torch.int32, device="cuda"),
+        num_reqs=1,
+        num_actual_tokens=NUM_TOKENS,
+        max_query_len=real,
+        max_seq_len=real,
+        block_table_tensor=torch.arange(64, dtype=torch.int32, device="cuda").unsqueeze(
+            0
+        ),
+        # Every token owned, so only `mapped` can exclude the tail.
+        slot_mapping=torch.arange(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+    )
+    slots = build_qsa_metadata_triton(
+        metadata,
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        storage_block_size=STORAGE_BLOCK,
+        compress_ratio=RATIO,
+    )[3]
+    assert int((slots >= 0).sum()) == real // RATIO

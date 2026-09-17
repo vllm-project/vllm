@@ -299,6 +299,11 @@ def _build_qsa_metadata_kernel(
         logical_block = compressed_position // storage_block_size
         # No ownership term: this cache is replicated, so every rank stores
         # every state. The raw key ring above is gated the same way.
+        #
+        # This holds for the ordinary slot mapping, where PAD means the padding
+        # tail or another rank's position. A speculative builder that PADs a
+        # rejected or evicted row would need its own validity signal here,
+        # because such a row must not become a committed state.
         valid = (
             mapped
             & (logical_position >= 0)
