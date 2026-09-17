@@ -179,6 +179,11 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
             raise RuntimeError("cannot publish an incomplete embedded job")
         self._store.publish(id(job))
 
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        if job.status.value not in ("completed", "failed"):
+            job.cancel("preempted")
+        return job
+
     def close(self) -> None:
         return
 
@@ -477,6 +482,25 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             raise RuntimeError("cannot publish an incomplete MORI UMBP job")
         if not self.client.flush():
             raise RuntimeError("MORI UMBP flush failed")
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        future = self._futures.pop(id(job), None)
+        if future is None:
+            return job
+        if future.cancel():
+            job.cancel("preempted")
+            return job
+        try:
+            return future.result(timeout=self._timeout_s)
+        except TimeoutError:
+            job.fail(
+                [plan.key for plan in job.plans],
+                "MORI UMBP cancellation timed out",
+            )
+            return job
+        except Exception as exc:
+            job.fail([plan.key for plan in job.plans], str(exc))
+            return job
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
