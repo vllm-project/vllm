@@ -231,7 +231,6 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        # Every Qwen4Exp layer is MoE; the architecture has no dense variant.
         self.mlp = Qwen4ExpSparseMoeBlock(
             vllm_config=vllm_config, prefix=f"{prefix}.mlp"
         )
