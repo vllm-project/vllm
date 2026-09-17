@@ -17,9 +17,20 @@ Compact-local addressing, with ``W`` ranks and interleave ``I``:
     owner(g)    = (g // I) % W
     local_id(g) = (g // (W * I)) * I + (g % I)
 
-Do not pick the global block first and compact the offset afterwards. That form
-is only correct when the block size is at least the interleave, and it walks
-onto a neighbouring block otherwise.
+This has to agree with the slot mapping exactly, or a rank attends over keys it
+does not hold. The authority is the DCP branch of the slot-mapping kernel in
+``vllm/v1/worker/block_table.py``, which works inside a virtual block of
+``P * W`` positions (``P`` = page size):
+
+    vbo  = g % (P * W)
+    owner_of(g) = (vbo // I) % W
+    lbo  = (vbo // (W * I)) * I + (vbo % I)
+
+The two forms agree when ``I`` divides ``P``, and ``vllm/config/vllm.py``
+asserts exactly that whenever DCP is on. Under that invariant the flat form
+above reduces to ``(g // (P * W)) * P + lbo``, which is what the block table
+indexes. Without it the flat form drifts by a block per virtual block, so the
+impl re-checks the invariant rather than trusting it.
 
 After this runs the attention kernel needs no change. It already reads a token
 id, divides by the page size and indexes the block table, which under DCP holds

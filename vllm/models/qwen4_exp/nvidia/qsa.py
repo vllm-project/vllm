@@ -114,10 +114,21 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if self.dcp_world_size > 1:
             from vllm.config import get_current_vllm_config
 
-            parallel_config = get_current_vllm_config().parallel_config
+            config = get_current_vllm_config()
             self.cp_kv_cache_interleave_size = (
-                parallel_config.cp_kv_cache_interleave_size
+                config.parallel_config.cp_kv_cache_interleave_size
             )
+            # The compact-local id in ops/qsa_dcp.py only agrees with the slot
+            # mapping when the interleave divides the page. vLLM asserts this
+            # for DCP already; a silent mismatch reads the wrong keys, so it is
+            # worth the second look here.
+            page_size = config.cache_config.block_size
+            if page_size % self.cp_kv_cache_interleave_size:
+                raise NotImplementedError(
+                    f"Qwen4Exp QSA DCP needs a page size ({page_size}) divisible "
+                    f"by cp_kv_cache_interleave_size "
+                    f"({self.cp_kv_cache_interleave_size})"
+                )
         if self.kv_cache_dtype not in ("auto", "bfloat16"):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
         self.supports_quant_query_input = False

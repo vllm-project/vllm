@@ -234,3 +234,53 @@ def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
         )
     with pytest.raises(ValueError, match="requires an output gate"):
         qsa_ops.qsa_sparse_paged_attention(*args)
+
+
+# --- agreement with the slot mapping ----------------------------------------
+
+
+def _slot_mapping_owner_and_local(g, world, rank, interleave, page_size):
+    """Transcribed from the DCP branch of vllm/v1/worker/block_table.py.
+
+    That kernel decides which rank a position is written to, so it, not this
+    module, defines ownership. Returns (owned, block_index, slot_offset).
+
+    One manager block per KV block, which is the QSA case: the kernel's
+    BLOCKS_PER_KV_BLOCK is 1, so lbo stays inside one page.
+    """
+    virtual_block_size = page_size * world
+    vbi = g // virtual_block_size
+    vbo = g - vbi * virtual_block_size
+    owned = (vbo // interleave) % world == rank
+    lbo = (vbo // (world * interleave)) * interleave + (vbo % interleave)
+    assert lbo < page_size
+    return owned, vbi, lbo
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("page_size", [16, 64])
+@pytest.mark.parametrize("interleave", [1, 4, 16])
+def test_local_ids_address_the_same_slot_as_the_slot_mapping(
+    world, page_size, interleave
+):
+    """The one check that catches a wrong-keys bug with no other symptom.
+
+    vLLM asserts page_size % interleave == 0 whenever DCP is on, so only that
+    case has to hold.
+    """
+    if page_size % interleave:
+        pytest.skip("vLLM forbids this combination under DCP")
+
+    for rank in range(world):
+        for g in range(world * page_size * 3):
+            owned, block_index, slot_offset = _slot_mapping_owner_and_local(
+                g, world, rank, interleave, page_size
+            )
+            mine, _ = _reference_localize([g], world, rank, interleave)
+            assert bool(mine) == owned, f"ownership disagrees at g={g}"
+            if not owned:
+                continue
+            # The QSA kernel splits a local id exactly this way.
+            local_id = mine[0]
+            assert local_id // page_size == block_index
+            assert local_id % page_size == slot_offset
