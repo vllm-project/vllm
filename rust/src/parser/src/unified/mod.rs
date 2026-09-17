@@ -249,6 +249,11 @@ pub enum ScopedToolChoice {
 pub trait ScopedStructuralTagBuilder: Send + Sync {
     /// Build the structural tag. `tool_choice` is `None` when tools are absent
     /// or disabled (`"none"`), in which case no tool channels are generated.
+    ///
+    /// Every error but [`Serialize`](xgrammar_structural_tag::Error::Serialize)
+    /// rejects request data the grammar cannot express (a tool name the channel
+    /// framing cannot carry, an unknown named tool) and is reported to the
+    /// caller as a request validation failure.
     fn build_scoped(
         &self,
         tools: &[Tool],

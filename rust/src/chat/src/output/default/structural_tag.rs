@@ -162,8 +162,15 @@ fn apply_scoped_structural_tag_constraint(
             &StructuralTagOptions::default().with_reasoning(false),
         )
         .and_then(|tag| tag.to_json_string())
-        .map_err(|error| Error::StructuralTag {
-            message: error.to_report_string(),
+        .map_err(|error| match error {
+            // Serialization is the only server-side failure; every other
+            // builder error rejects request data the grammar cannot express.
+            xgrammar_structural_tag::Error::Serialize(_) => Error::StructuralTag {
+                message: error.to_report_string(),
+            },
+            _ => Error::UnsupportedStructuredOutputs {
+                message: error.to_report_string(),
+            },
         })?;
 
     // Overwrite any existing structured output settings with the structural tag constraint.
@@ -215,13 +222,15 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use serde_json::{Value, json};
     use vllm_engine_core_client::protocol::structured_outputs::{
         StructuredOutputBackend, StructuredOutputsParams,
     };
     use vllm_parser::tool::{Qwen3CoderToolParser, Tool, ToolParser};
+    use vllm_parser::unified::{MuseGlimmerUnifiedParser, UnifiedParser};
+    use vllm_tokenizer::test_utils::TestTokenizer;
     use xgrammar_structural_tag::format::{Format, StructuralTag};
 
     use super::*;
@@ -244,6 +253,16 @@ mod tests {
 
     fn qwen3_coder_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
         Qwen3CoderToolParser::create(tools).expect("Qwen3 Coder parser should build")
+    }
+
+    fn muse_glimmer_parser() -> Box<dyn UnifiedParser> {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<|start|>", 1001)
+            .with_regular_token("<|message|>", 1002)
+            .with_regular_token("<|eom|>", 1003)
+            .with_regular_token("<|eot|>", 1004);
+        MuseGlimmerUnifiedParser::create(&[], Arc::new(tokenizer))
+            .expect("Muse Glimmer parser should build")
     }
 
     /// Records `build_scoped` arguments and returns a minimal valid tag.
@@ -738,5 +757,25 @@ mod tests {
 
         assert!(request.sampling_params.structured_outputs.is_none());
         assert!(builder.calls().is_empty());
+    }
+
+    #[test]
+    fn scoped_builder_tool_name_rejection_is_request_validation_error() {
+        let mut request = request(
+            ChatToolChoice::Required,
+            vec![chat_tool("get weather", None)],
+        );
+        let parser = muse_glimmer_parser();
+
+        let error = apply_structural_tag_constraint(
+            &mut request,
+            None,
+            parser.scoped_structural_tag_builder(),
+        )
+        .expect_err("a tool name outside the recipient charset should fail");
+
+        assert!(matches!(error, Error::UnsupportedStructuredOutputs { .. }));
+        assert!(error.is_request_validation_error());
+        assert!(error.to_report_string().contains("get weather"));
     }
 }
