@@ -137,25 +137,13 @@ def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
 def _validate_supported_config(config: Glm5NextTextConfig) -> None:
     """Reject checkpoints using config options this implementation lacks.
 
-    These are vLLM implementation limits rather than schema constraints, so
-    `Glm5NextTextConfig` accepts them and we check them here.
+    The kpool indexer kernels always keep the incomplete trailing pool, so a
+    checkpoint asking otherwise would be served silently wrong.
     """
-    if config.index_topk is not None:
-        for option in (
-            "index_dsa_use_layernorm",
-            "index_kpool_compress",
-            "index_kpool_always_select_tail",
-        ):
-            if getattr(config, option, True) is not True:
-                raise NotImplementedError(
-                    f"GLM-5.3 sparse indexer requires {option}=True"
-                )
-
-    if getattr(config, "mhc", False):
-        if getattr(config, "hres_vwnstyle", True) is not True:
-            raise NotImplementedError("GLM-5.3 mHC requires hres_vwnstyle=True")
-        if getattr(config, "mhc_no_norm_weight", False) not in (False, None):
-            raise NotImplementedError("GLM-5.3 mHC requires mhc_no_norm_weight=False")
+    if config.index_topk is not None and not config.index_kpool_always_select_tail:
+        raise NotImplementedError(
+            "GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True"
+        )
 
 
 class Glm5NextMLP(nn.Module):

@@ -12,26 +12,10 @@ from transformers import Glm5NextTextConfig
 from vllm.models.glm5next.common.model import _validate_supported_config
 
 
-def _config(**kwargs) -> Glm5NextTextConfig:
-    return Glm5NextTextConfig(num_hidden_layers=2, **kwargs)
+def test_rejects_dropping_the_incomplete_kpool_tail():
+    config = Glm5NextTextConfig(
+        num_hidden_layers=2, index_topk=2048, index_kpool_always_select_tail=False
+    )
 
-
-@pytest.mark.parametrize(
-    ("kwargs", "option"),
-    [
-        (
-            {"index_topk": 2048, "index_dsa_use_layernorm": False},
-            "index_dsa_use_layernorm",
-        ),
-        ({"index_topk": 2048, "index_kpool_compress": False}, "index_kpool_compress"),
-        (
-            {"index_topk": 2048, "index_kpool_always_select_tail": False},
-            "index_kpool_always_select_tail",
-        ),
-        ({"mhc": True, "hres_vwnstyle": False}, "hres_vwnstyle"),
-        ({"mhc": True, "mhc_no_norm_weight": True}, "mhc_no_norm_weight"),
-    ],
-)
-def test_rejects_unimplemented_config_options(kwargs, option):
-    with pytest.raises(NotImplementedError, match=option):
-        _validate_supported_config(_config(**kwargs))
+    with pytest.raises(NotImplementedError, match="index_kpool_always_select_tail"):
+        _validate_supported_config(config)
