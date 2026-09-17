@@ -19,7 +19,6 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -52,7 +51,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
-    _HC_WEIGHTS_MAPPER,
+    _EXTRA_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
@@ -78,9 +77,19 @@ def _remap_ignored_layers(
     return remapped
 
 
+def _remap_quantized_layers(
+    quantized_layers: dict[str, dict],
+    mtp_start_layer_idx: int,
+) -> dict[str, dict]:
+    """Map checkpoint MTP layer indices to standalone draft indices."""
+    return {
+        _remap_ignored_layers([name], mtp_start_layer_idx)[0]: layer_info
+        for name, layer_info in quantized_layers.items()
+    }
+
+
 def _remap_mtp_weight_name(name: str) -> str | None:
     """Map Qwen4Exp checkpoint paths into the standalone draft model."""
-
     for checkpoint_prefix in (
         "model.language_model.",
         "language_model.",
@@ -136,6 +145,13 @@ def _make_draft_vllm_config(
                 "exclude_modules",
                 _remap_ignored_layers(exclude_modules, mtp_start_layer_idx),
             )
+        quantized_layers = getattr(draft_quant_config, "quantized_layers", None)
+        if quantized_layers:
+            setattr(  # noqa: B010
+                draft_quant_config,
+                "quantized_layers",
+                _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
+            )
 
     draft_vllm_config = replace(
         vllm_config,
@@ -147,17 +163,8 @@ def _make_draft_vllm_config(
     return draft_vllm_config
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "hidden_states": 0,
-    }
-)
 class Qwen4ExpMultiTokenPredictor(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -242,7 +249,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def _iter_qsa_attentions(self):
         """Yield MTP attention modules that own a QSA indexer."""
-
         for layer in self.layers:
             attention = getattr(layer, "self_attn", None)
             if (
@@ -253,13 +259,11 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def set_skip_topk(self, skip: bool) -> None:
         """Select on MTP step 0 and reuse its QSA indices on later steps."""
-
         for attention in self._iter_qsa_attentions():
             attention.indexer.skip_topk = skip
 
     def compact_topk_indices(self, row_indices: torch.Tensor) -> None:
         """Keep each request's target-aligned step-0 sparse-index row."""
-
         num_rows = row_indices.numel()
         for attention in self._iter_qsa_attentions():
             buffer = attention.topk_indices_buffer
@@ -280,6 +284,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | IntermediateTensors:
         hc_count = self.hc_count
         hidden_size = self.hidden_size
+        prev_block_output: torch.Tensor | None = None
 
         if get_pp_group().is_first_rank:
             assert hidden_states is not None
@@ -300,10 +305,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 num_tokens, hc_count, hidden_size
             )
             hidden_states = self.fc_hidden(hidden_states)
-            # Add the embedding residual to every branch, then fold back
-            # to [T, hc_count*H] (HC outer, HS inner) for the HC decoder.
-            hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states
             hidden_states = hidden_states.flatten(-2)
+            prev_block_output = inputs_embeds
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -312,7 +315,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
-            prev_block_output=None,
+            prev_block_output=prev_block_output,
             prev_injection=None,
             positions=positions,
             input_ids=None,
@@ -356,15 +359,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=mapper)
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "hidden_states": 0,
-    }
-)
 class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

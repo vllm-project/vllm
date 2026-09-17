@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
+    from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -54,42 +55,27 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
+    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+
     # [num_kept_tokens]
     token_ids: np.ndarray
-    # [num_generated_tokens + 1]
-    offsets: np.ndarray
-    # [num_reqs + 1]
+    # [num_positions + 1], or None for a single position
+    offsets: np.ndarray | None = None
+    # Unused with one position per request; kept for the wire layout.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        if self.cu_num_generated_tokens is None:
-            start_idx = req_idx
-        else:
-            start_idx = self.cu_num_generated_tokens[req_idx]
-        end_idx = start_idx + num_positions
-        flat_start = self.offsets[start_idx]
-        flat_end = self.offsets[end_idx]
+        assert num_positions == 1 and self.offsets is not None
         return SamplingMaskLists(
-            self.token_ids[flat_start:flat_end],
-            self.offsets[start_idx : end_idx + 1] - flat_start,
-            None,
+            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
         )
 
     def to_nested_list(self) -> list[list[int]]:
-        """Convert CSR representation to ``list[list[int]]``."""
-        return [
-            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
-            for i in range(len(self.offsets) - 1)
-        ]
-
-    @staticmethod
-    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
-        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
-        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
-        offsets = np.empty(len(counts) + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
-        return SamplingMaskLists(token_ids, offsets)
+        token_ids = self.token_ids.tolist()
+        if self.offsets is None:
+            return [token_ids]
+        offsets = self.offsets.tolist()
+        return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
 
 class LogprobsTensors(NamedTuple):
@@ -181,7 +167,6 @@ class LogprobsTensors(NamedTuple):
         num_positions: int, num_tokens_per_position: int
     ) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
-
         logprob_token_ids = torch.empty(
             (num_positions, num_tokens_per_position),
             dtype=torch.int32,
@@ -296,6 +281,9 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # Receive failures keyed by request identity. This remains unambiguous for
+    # hybrid/multi-pool cache layouts where numeric block IDs overlap.
+    failed_recving: set[str] = field(default_factory=set)
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -310,6 +298,7 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+            and not self.failed_recving
             and not self.kv_connector_worker_meta
         )
 
@@ -319,12 +308,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_stats: "ECConnectorStats | None" = None
     ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
 
     def is_empty(self):
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.ec_connector_stats
             and not self.ec_connector_worker_meta
         )
 
@@ -448,8 +439,7 @@ class DraftTokenIds:
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
 ) -> ModelRunnerOutput:
-    """
-    Create a ModelRunnerOutput stub that contains the correct
+    """Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:

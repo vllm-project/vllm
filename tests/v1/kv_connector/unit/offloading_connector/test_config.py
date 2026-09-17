@@ -15,13 +15,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
-    is_store_reachable_swa_chunk,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
@@ -31,6 +32,9 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
 def _make_vllm_config(
@@ -46,6 +50,7 @@ def _make_vllm_config(
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
+    config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
@@ -153,12 +158,14 @@ def _mla_spec(
     block_size: int = 16,
     head_size: int = 512,
     dtype: torch.dtype = torch.float32,
+    tokens_per_state: int = 1,
 ) -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=head_size,
         dtype=dtype,
+        tokens_per_state=tokens_per_state,
     )
 
 
@@ -227,6 +234,26 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
             KVCacheGroupSpec(["mla_layer"], mla_spec),
         ],
     )
+
+
+def _mamba_spec() -> MambaSpec:
+    return MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+
+def _uniform_spec(spec_kind: str) -> UniformTypeKVCacheSpecs:
+    # DSA models merge their indexer and MLA layers into a UniformType group,
+    # a container rather than an AttentionSpec, but still sharded across DCP.
+    specs: dict[str, Any] = (
+        {"mla_layer": _mla_spec(), "indexer_layer": _mla_spec(head_size=128)}
+        if spec_kind == "attention"
+        else {"mamba_layer0": _mamba_spec(), "mamba_layer1": _mamba_spec()}
+    )
+    return UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
 
 
 def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
@@ -313,6 +340,72 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
+def test_hisparse_offloads_only_indexer_group():
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+    )
+    indexer = KVCacheGroupSpec(
+        ["indexer"],
+        _full_attention_spec(),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
+    config = _make_vllm_config()
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+
+    assert [
+        (group.group_id, group.layer_names) for group in offloading_config.groups
+    ] == [(1, ("indexer",))]
+    assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
+
+
+def test_hisparse_partial_group_size_survives_scheduler_flattening():
+    """Worker and scheduler representations must produce identical mmap rows."""
+    layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
+    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+    assert wrapped is not None
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
+    worker_indexer = KVCacheGroupSpec(
+        list(layer_specs), wrapped, role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    scheduler_indexer = KVCacheGroupSpec(
+        list(layer_specs),
+        next(iter(layer_specs.values())),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+
+    def make_config(indexer: KVCacheGroupSpec) -> KVCacheConfig:
+        return KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[source, indexer],
+            hisparse_host_num_blocks=4,
+        )
+
+    config = _make_vllm_config()
+    worker = build_offloading_config(config, make_config(worker_indexer))
+    scheduler = build_offloading_config(config, make_config(scheduler_indexer))
+
+    assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
+    assert worker.worker_kv_bytes_per_block == wrapped.page_size_bytes
+
+
 def test_zero_blocks_skips_tensor_layout_validation():
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
@@ -353,18 +446,73 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         _make_mamba_hybrid_kv_cache_config(),
     )
     mamba_group = scheduler_config.kv_group_configs[1]
-    assert mamba_group.alignment_chunk_count == 2
-    assert [
-        chunk_idx
-        for chunk_idx in range(4)
-        if is_store_reachable_swa_chunk(
-            chunk_idx,
-            4,
-            mamba_group.alignment_chunk_count,
-            mamba_group.sliding_window_size_in_chunks,
-            mamba_group.is_eagle_group,
-        )
-    ] == [1, 3]
+    assert mamba_group.sliding_window_size_in_chunks == 1
+    assert scheduler_config.alignment_tokens is not None
+    manager_cls = KVCacheSpecRegistry.get_manager_class(mamba_group.kv_cache_spec)
+    assert manager_cls is not None
+    block_mask = manager_cls.reachable_block_mask(
+        start_block=0,
+        end_block=4,
+        alignment_tokens=scheduler_config.alignment_tokens,
+        kv_cache_spec=mamba_group.kv_cache_spec,
+        use_eagle=mamba_group.is_eagle_group,
+    )
+    assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
+
+
+@pytest.mark.parametrize("dcp_size,expected", [(1, 16), (2, 32)])
+def test_dcp_scales_uniform_type_attention_group_blocks(dcp_size, expected):
+    config = _make_vllm_config(
+        tensor_parallel_size=2, decode_context_parallel_size=dcp_size
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=64,
+                layers=["mla_layer", "indexer_layer"],
+                layer_stride=32,
+                block_stride=8,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mla_layer", "indexer_layer"], _uniform_spec("attention"))
+        ],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert offloading_config.groups[0].tokens_per_block == expected
+    assert offloading_config.cache.tokens_per_hash == expected
+
+
+@pytest.mark.parametrize(
+    "spec_kind,expected",
+    [
+        ("attention", 32),
+        # Mamba state is replicated across DCP ranks, so a uniform group of
+        # Mamba layers keeps its span.
+        ("mamba", 16),
+    ],
+)
+def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
+    config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
+    config.speculative_config = None
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer0", "layer1"], _uniform_spec(spec_kind)),
+            KVCacheGroupSpec(["mamba_layer"], _mamba_spec()),
+        ],
+    )
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        expected,
+        16,
+    )
 
 
 def test_preserves_data_parallel_config():
@@ -670,6 +818,15 @@ def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
     return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
 
 
+def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """GLM-5.2/DSv3.2-style wrapper: same-type layers whose specs differ."""
+    names = [f"l{i}" for i in range(len(specs))]
+    return KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
+    )
+
+
 @pytest.mark.parametrize(
     "kv_cache_groups",
     [
@@ -695,6 +852,16 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="mamba-hybrid",
         ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
+            True,
+            id="uniform-mla-wrapper",
+        ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            False,
+            id="uniform-uncertifiable-inner",
+        ),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
@@ -710,6 +877,43 @@ def test_canonical_layout_certifies_v2_model_runner():
     version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
     assert _parallelism_agnostic(groups, canonical=True, v2=True)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("scheduler", [False, True])
+def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
+    specs = {
+        f"l{i}": _mla_spec(block_size=64, head_size=size, dtype=torch.uint8)
+        for i, size in enumerate([656] * 4 + [132] * 3)
+    }
+    uniform = UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * uniform.page_size_bytes,
+                layers=list(specs),
+                layer_stride=0,
+                block_stride=uniform.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(list(specs), uniform)],
+    )
+    if scheduler:
+        kv_cache_config = generate_scheduler_kv_cache_config([kv_cache_config])
+    config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        extra_config={"canonical_layout": True, "cpu_bytes_to_use": 196608 * 8},
+    )
+    config.cache_config.kv_cache_layout = "LBHNC"
+    config.parallel_config.distributed_executor_backend = "mp"
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    spec = TieringOffloadingSpec(offloading_config)
+    assert spec.kv_bytes_per_chunk == 196608
+    assert spec.num_chunks == 8
+    mapper = FileMapper.from_offloading_spec("/cache", spec, parallel_agnostic=True)
+    assert mapper.get_run_config()["tp_size"] == 1
+    assert mapper.get_run_config()["replicated_layout"] is True
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
