@@ -54,7 +54,7 @@ def test_metadata_loads_carry_a_transfer_id_and_blocks():
 
 
 def test_metadata_saves_and_loads_are_independent():
-    """saves and loads dicts are independent."""
+    """Saves and loads dicts are independent."""
     meta = ECCPUConnectorMetadata()
 
     meta.saves["key"] = [1, 2]

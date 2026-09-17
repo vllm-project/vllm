@@ -32,7 +32,6 @@ def apply_qsa_rope(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Apply the main attention's exact 1D/MRoPE composition to QSA heads."""
-
     num_tokens, _, head_dim = tensor.shape
     rotary_dim = rotary_emb.rotary_dim
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
@@ -245,7 +244,6 @@ class QSAIndexer(nn.Module):
         valid-entry count (the attention kernel's loop bound, never a token
         index).
         """
-
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.

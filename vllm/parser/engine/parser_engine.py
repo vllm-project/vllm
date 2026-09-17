@@ -158,11 +158,11 @@ class ParserEngine(Parser):
 
     @property
     def reasoning_start_str(self) -> str | None:
-        return self.parser_engine_config.terminals.get("THINK_START")
+        return self.parser_engine_config.terminal_literal("THINK_START")
 
     @property
     def reasoning_end_str(self) -> str | None:
-        return self.parser_engine_config.terminals.get("THINK_END")
+        return self.parser_engine_config.terminal_literal("THINK_END")
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -645,34 +645,57 @@ class ParserEngine(Parser):
         for offset, token_id in enumerate(token_ids):
             if token_id in end_ids:
                 return offset
-        return None
+        return len(token_ids)
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        end_id = self._reasoning_end_token_id
+        config = self.parser_engine_config
+        wait_for_reasoning = config.wait_for_reasoning
+        if wait_for_reasoning is None:
+            wait_for_reasoning = config.initial_state is ParserState.REASONING
+        start_transition = config.transitions.get((config.initial_state, "THINK_START"))
+        start_opens_reasoning = (
+            start_transition is not None
+            and start_transition.next_state is ParserState.REASONING
+        )
+        end_ids = self._reasoning_end_token_ids
         start_id = self._reasoning_start_token_id
-        if end_id is not None:
-            if not input_ids:
-                return self.parser_engine_config.initial_state != ParserState.REASONING
-            boundary_ids = self._turn_boundary_token_ids
-            for i in range(len(input_ids) - 1, -1, -1):
-                token_id = input_ids[i]
-                if token_id == end_id:
-                    return True
-                if start_id is not None and token_id == start_id:
+        boundary_ids = self._turn_boundary_token_ids
+        for token_id in reversed(input_ids):
+            if token_id in end_ids:
+                return True
+            if token_id == start_id:
+                if start_opens_reasoning:
                     return False
-                if token_id in boundary_ids:
-                    return (
-                        self.parser_engine_config.initial_state != ParserState.REASONING
-                    )
-            return False
-        return self._reasoning_ended
+                break
+            if token_id in boundary_ids:
+                break
+        return not wait_for_reasoning
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        config = self.parser_engine_config
+        wait_for_reasoning = config.wait_for_reasoning
+        if wait_for_reasoning is None:
+            wait_for_reasoning = config.initial_state is ParserState.REASONING
+        if not wait_for_reasoning:
+            return input_ids
+
         end_id = self._reasoning_end_token_id
         if end_id is not None:
             for i in range(len(input_ids) - 1, -1, -1):
                 if input_ids[i] == end_id:
                     return input_ids[i + 1 :]
+
+        end_ids = self._reasoning_end_token_ids
+        if end_ids:
+            turn_start = 0
+            boundary_ids = self._turn_boundary_token_ids
+            for i in range(len(input_ids) - 1, -1, -1):
+                if input_ids[i] in boundary_ids:
+                    turn_start = i + 1
+                    break
+            for i in range(turn_start, len(input_ids)):
+                if input_ids[i] in end_ids:
+                    return input_ids[i:]
         return input_ids
 
     def get_streaming_fallback_content(
