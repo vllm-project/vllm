@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -31,6 +31,9 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import monitor_profiling_run, monitor_torch_compile
+
+DynamicArgDims: TypeAlias = dict[str, int | list[int] | dict[int, str]]
+"""Argument name -> the dynamic dimension(s) of that argument."""
 
 # shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
 _SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
@@ -89,7 +92,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
+    dynamic_arg_dims: DynamicArgDims | None,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -103,7 +106,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    dynamic_arg_dims: DynamicArgDims | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
@@ -117,7 +120,7 @@ def support_torch_compile(cls: type[_T]) -> type[_T]: ...
 def support_torch_compile(
     cls: type[_T] | None = None,
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    dynamic_arg_dims: DynamicArgDims | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
@@ -328,7 +331,7 @@ def _try_load_aot_compiled_fn(
 
 def _support_torch_compile(
     cls: type[_T],
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]],
+    dynamic_arg_dims: DynamicArgDims,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
