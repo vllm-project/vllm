@@ -182,20 +182,19 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = self.info.get_tokenizer()
 
         images = mm_data.get("images") or []
-        audios = mm_data.get("audios") or []
+        audios = mm_data.get("audio") or []
         if not isinstance(images, list):
             images = list(cast(Iterable[Any], images))
         if not isinstance(audios, list):
@@ -235,8 +234,9 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
             data["num_audio_tokens"] = torch.tensor(num_audio_tokens, dtype=torch.int64)
 
         processed_data = BatchFeature(data=data, tensor_type=None)
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _tokenize_with_placeholders(
         self,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
+"""Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
 preparation.
 
 - quantize_and_insert_k_cache: quantize bf16 K to UE8M0 FP8 and insert into
@@ -24,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -31,7 +31,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -61,8 +60,7 @@ def quantize_and_insert_k_kernel(
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
     use_fnuz: tl.constexpr = False,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     K Cache block layout (block_size=64 tokens):
     - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
@@ -174,8 +172,7 @@ def quantize_and_insert_k_cache(
     is_ue8m0: bool = True,
     use_fnuz: bool = False,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     K Cache block layout (block_size=64 tokens):
     - First 64 * 576 = 36864 bytes: Token data
@@ -521,11 +518,17 @@ def dequantize_and_gather_k_cache(
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
-            dequantize_and_gather_k_cache_cutedsl,
+            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         )
 
-        dequantize_and_gather_k_cache_cutedsl(
-            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
+            out=out,
+            k_cache=k_cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=offset,
         )
         return
 
