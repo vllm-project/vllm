@@ -125,6 +125,7 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        is_padding: bool = True,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -168,7 +169,7 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
-        input_buffers.is_padding[:num_tokens].fill_(True)
+        input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
