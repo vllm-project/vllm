@@ -263,42 +263,46 @@ def test_the_kernel_wrapper_rejects_a_gate_with_return_lse():
 # --- agreement with the slot mapping ----------------------------------------
 
 
-def _slot_mapping_owner_and_local(g, world, rank, interleave, page_size):
+def _slot_mapping_owner_and_local(g, world, rank, interleave, manager_block, page):
     """Transcribed from the DCP branch of vllm/v1/worker/block_table.py.
 
     That kernel decides which rank a position is written to, so it, not this
-    module, defines ownership. Returns (owned, block_index, slot_offset).
+    module, defines ownership. Two block sizes matter and they are not always
+    the same: the manager block it shards in (KV_CACHE_BLOCK_SIZE) and the
+    kernel page the block table is indexed in (block_size).
 
-    One manager block per KV block, which is the QSA case: the kernel's
-    BLOCKS_PER_KV_BLOCK is 1, so lbo stays inside one page.
+    Returns (owned, block_table_index, slot_offset).
     """
-    virtual_block_size = page_size * world
+    blocks_per_kv_block = manager_block // page
+    virtual_block_size = manager_block * world
     vbi = g // virtual_block_size
     vbo = g - vbi * virtual_block_size
     owned = (vbo // interleave) % world == rank
     lbo = (vbo // (world * interleave)) * interleave + (vbo % interleave)
-    assert lbo < page_size
-    return owned, vbi, lbo
+    return owned, vbi * blocks_per_kv_block + lbo // page, lbo % page
 
 
 @pytest.mark.parametrize("world", [2, 4])
-@pytest.mark.parametrize("page_size", [16, 64])
+@pytest.mark.parametrize("page", [16, 64])
+@pytest.mark.parametrize("blocks_per_kv_block", [1, 2, 4])
 @pytest.mark.parametrize("interleave", [1, 4, 16])
 def test_local_ids_address_the_same_slot_as_the_slot_mapping(
-    world, page_size, interleave
+    world, page, blocks_per_kv_block, interleave
 ):
     """The one check that catches a wrong-keys bug with no other symptom.
 
-    vLLM asserts page_size % interleave == 0 whenever DCP is on, so only that
-    case has to hold.
+    The invariant is that the interleave divides the MANAGER block, which is
+    what vLLM asserts for DCP. blocks_per_kv_block > 1 is the case where the
+    manager block and the kernel page come apart.
     """
-    if page_size % interleave:
+    manager_block = page * blocks_per_kv_block
+    if manager_block % interleave:
         pytest.skip("vLLM forbids this combination under DCP")
 
     for rank in range(world):
-        for g in range(world * page_size * 3):
+        for g in range(world * manager_block * 3):
             owned, block_index, slot_offset = _slot_mapping_owner_and_local(
-                g, world, rank, interleave, page_size
+                g, world, rank, interleave, manager_block, page
             )
             mine, _ = _reference_localize([g], world, rank, interleave)
             assert bool(mine) == owned, f"ownership disagrees at g={g}"
@@ -306,5 +310,5 @@ def test_local_ids_address_the_same_slot_as_the_slot_mapping(
                 continue
             # The QSA kernel splits a local id exactly this way.
             local_id = mine[0]
-            assert local_id // page_size == block_index
-            assert local_id % page_size == slot_offset
+            assert local_id // page == block_index
+            assert local_id % page == slot_offset

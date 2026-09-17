@@ -118,15 +118,17 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             self.cp_kv_cache_interleave_size = (
                 config.parallel_config.cp_kv_cache_interleave_size
             )
-            # The compact-local id in ops/qsa_dcp.py only agrees with the slot
-            # mapping when the interleave divides the page. vLLM asserts this
-            # for DCP already; a silent mismatch reads the wrong keys, so it is
-            # worth the second look here.
-            page_size = config.cache_config.block_size
-            if page_size % self.cp_kv_cache_interleave_size:
+            # The compact-local id in ops/qsa_dcp.py agrees with the slot
+            # mapping only when the interleave divides the block the mapper
+            # shards in. That block is a whole multiple of this one, so this is
+            # the stricter test, and it is the same one vllm/config/vllm.py
+            # makes for DCP. Repeat it here because that check is skipped for
+            # NIXL P/D, and a mismatch reads the wrong keys with no other sign.
+            block_size = config.cache_config.block_size
+            if block_size % self.cp_kv_cache_interleave_size:
                 raise NotImplementedError(
-                    f"Qwen4Exp QSA DCP needs a page size ({page_size}) divisible "
-                    f"by cp_kv_cache_interleave_size "
+                    f"Qwen4Exp QSA DCP needs a block size ({block_size}) "
+                    f"divisible by cp_kv_cache_interleave_size "
                     f"({self.cp_kv_cache_interleave_size})"
                 )
         if self.kv_cache_dtype not in ("auto", "bfloat16"):
