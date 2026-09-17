@@ -51,8 +51,7 @@ def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
 
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
-    output corresponding to Rank 0 for scheduler.
-    """
+    output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, expected_finished_count: int):
         # Complete transfer tracker. Used to track finished requests

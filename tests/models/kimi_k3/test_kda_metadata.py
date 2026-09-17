@@ -727,8 +727,7 @@ def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
     """`build_for_cudagraph_capture` is not capture-only: a DP rank with nothing
     scheduled re-stages its FULL-graph metadata through it on every dummy step,
     so it must not synchronize the device. The host-side draft counts have to
-    come from `query_start_loc_cpu` and match the device-derived values.
-    """
+    come from `query_start_loc_cpu` and match the device-derived values."""
     num_speculative_tokens = 2
     batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

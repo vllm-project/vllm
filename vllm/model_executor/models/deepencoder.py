@@ -363,8 +363,7 @@ class ImageEncoderViT(nn.Module):
 
 class Block(nn.Module):
     """Transformer blocks with support of window attention and residual propagation
-    blocks
-    """
+    blocks"""
 
     def __init__(
         self,

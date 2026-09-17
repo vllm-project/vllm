@@ -598,8 +598,7 @@ class EngineCore:
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise.
-        """
+        Overridden by the DP engine core; never throttles otherwise."""
         return False
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -1623,8 +1622,7 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def _convert_msgspec_args(method, args):
         """If a provided arg type doesn't match corresponding target method
-        arg type, try converting to msgspec object.
-        """
+        arg type, try converting to msgspec object."""
         if not args:
             return args
         arg_types = signature(method).parameters.values()
@@ -1693,6 +1691,8 @@ class EngineCoreProc(EngineCore):
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
+                if self.vllm_config.weight_transfer_config is not None
+                else False
             ),
         )
 
@@ -2006,8 +2006,7 @@ class EngineCoreProc(EngineCore):
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
-    in a data parallel context.
-    """
+    in a data parallel context."""
 
     def __init__(
         self,

@@ -110,8 +110,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Keep K and V packed in the content dim, unlike the native HIP
-        kernels the base class targets.
-        """
+        kernels the base class targets."""
         # block_size == 1 is the per-token page-size probe (see
         # Platform.get_page_size_bytes); real blocks must be gatherable in
         # 16-token units by the ROCm kernel.

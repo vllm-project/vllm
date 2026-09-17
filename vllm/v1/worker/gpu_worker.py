@@ -98,6 +98,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -336,8 +337,7 @@ class Worker(WorkerBase):
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
         cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit.
-        """
+        value on exit."""
         if not current_platform.is_cuda():
             yield
             return
@@ -773,7 +773,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.

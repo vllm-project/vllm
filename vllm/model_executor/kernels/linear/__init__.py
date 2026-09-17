@@ -178,7 +178,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledFp8BlockScaledMMKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
@@ -324,7 +323,6 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
@@ -468,7 +466,6 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -884,8 +881,7 @@ def choose_mp_linear_kernel(
 
 def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform.
-    """
+    current platform."""
     config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
 
     platform = current_platform._enum
@@ -937,8 +933,7 @@ def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
-    current platform.
-    """
+    current platform."""
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
     )
@@ -985,8 +980,7 @@ def init_mxfp6_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
-    current platform.
-    """
+    current platform."""
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1074,8 +1068,7 @@ def init_wfp8_a16_linear_kernel(
 
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform.
-    """
+    current platform."""
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1257,7 +1250,6 @@ __all__ = [
     "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
-    "AiterPreshuffledFp8BlockScaledMMKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",

@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
@@ -150,8 +151,7 @@ def test_select_default_backend_by_platform(
     expected_backend,
 ):
     """Test default backend selection per platform with all optional
-    accelerators (FlashInfer, AITER) disabled.
-    """
+    accelerators (FlashInfer, AITER) disabled."""
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
     ) as mock_platform:
@@ -227,6 +227,65 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
         assert selected_backend == UnquantizedMoeBackend.AITER
         assert expert_cls is not None
+
+
+@patch(
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_fused_moe_enabled",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_rdna_aiter_enabled",
+    return_value=False,
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_select_rocm_aiter_backend_non_gated_activation_falls_back(
+    mock_rdna_disabled, mock_aiter_enabled, mock_has_flashinfer, monkeypatch
+):
+    """Test ROCm backend selection falls back (not raises) for non-gated MoE."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = True
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+        assert moe_config.is_act_and_mul is False
+
+        selected_backend, expert_cls = select_unquantized_moe_backend(
+            moe_config=moe_config,
+        )
+
+        assert selected_backend != UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_explicit_aiter_backend_non_gated_activation_still_raises():
+    """Explicit `--moe-backend aiter` still raises for non-gated MoE;
+    only the env-var opt-in path falls back."""
+    moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+    moe_config.moe_backend = "aiter"  # explicit pin, not "auto"
+    assert moe_config.is_act_and_mul is False
+
+    with pytest.raises(ValueError):
+        select_unquantized_moe_backend(moe_config=moe_config)
 
 
 @patch(
@@ -445,8 +504,7 @@ def test_select_cuda_flashinfer_cutlass_backend(
     mock_has_flashinfer,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
-    and FlashInfer CUTLASS is available.
-    """
+    and FlashInfer CUTLASS is available."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
         patch.object(current_platform, "is_rocm", return_value=False),

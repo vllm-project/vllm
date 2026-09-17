@@ -31,11 +31,14 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -299,6 +302,80 @@ def refine_fp8_moe_block_shape(
     return [refine, refine]
 
 
+def pad_tp_shard_to_weight_blocks(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> bool:
+    """Pad the TP shard to whole checkpoint blocks, keeping scales rank-local."""
+    block_n, block_k = weight_block_size
+    if (
+        block_n != block_k
+        or config.tp_size == 1
+        or config.intermediate_size_per_partition % block_n == 0
+    ):
+        return False
+    if (
+        config.intermediate_size % block_n != 0
+        or config.hidden_dim % block_n != 0
+        or config.ep_size != 1
+        or config.is_lora_enabled
+        or config.has_bias
+    ):
+        raise ValueError(
+            f"Block-aligned FP8 TP sharding requires {block_n}-aligned "
+            "global expert dimensions, pure TP, and no LoRA or "
+            "expert bias."
+        )
+    config.tp_shard_with_padding = True
+    config.intermediate_size_per_partition = round_up(
+        config.intermediate_size_per_partition, block_n
+    )
+    return True
+
+
+def resolve_fp8_moe_weight_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+    activation_key: QuantKey,
+    is_checkpoint_fp8_serialized: bool,
+) -> tuple[list[int], tuple[int, int] | None]:
+    """Return the TP-adapted block shape and refine factor:
+    refine if kernels allow, else pad to the TP shard."""
+    refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
+    if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
+        kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
+        can_refine = refined_shape is not None and any(
+            k_cls._supports_quant_scheme(
+                create_fp8_quant_key(
+                    static=True, group_shape=GroupShape(*refined_shape)
+                ),
+                activation_key,
+            )
+            for k_cls in kernel_classes
+        )
+        if not can_refine and pad_tp_shard_to_weight_blocks(config, weight_block_size):
+            logger.info_once(
+                "FP8 %s TP loading uses complete checkpoint blocks: "
+                "local allocation %d, without weight requantization.",
+                config.moe_backend,
+                config.intermediate_size_per_partition,
+            )
+            return weight_block_size, None
+    if refined_shape is None:
+        return weight_block_size, None
+    logger.info_once(
+        "FP8 MoE block scales refined from %s to %s to fit "
+        "the TP-sharded intermediate size %d.",
+        str(weight_block_size),
+        str(refined_shape),
+        config.intermediate_size_per_partition,
+    )
+    return refined_shape, (
+        weight_block_size[0] // refined_shape[0],
+        weight_block_size[1] // refined_shape[1],
+    )
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -451,8 +528,7 @@ def _humming_fp8_weight_schema(
     layer: RoutedExperts, weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming weight schema from the canonical on-device fp8/mxfp8
-    tensors (scale dtype/shape, block size), not the producing quant method.
-    """
+    tensors (scale dtype/shape, block size), not the producing quant method."""
     # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
     # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
     if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
