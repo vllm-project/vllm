@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -264,6 +264,14 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    # Request-local CPU inputs whose placeholder ranges have been consumed.
+    # Unlike free_encoder_mm_hashes, these do not evict shared GPU embeddings.
+    free_encoder_input_ids: dict[str, list[int]] = field(default_factory=dict)
+    # Reinstall previously released inputs needed after a KV-load rollback.
+    restore_encoder_inputs: dict[str, dict[int, MultiModalFeatureSpec]] = field(
+        default_factory=dict
+    )
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
