@@ -12,6 +12,12 @@
 #include <cstdint>
 #include <type_traits>
 
+// Required by the short path inside `filtered_topk_row`, which this patch KEEPS. The earlier
+// revision deleted that path, so it dropped this include and added <type_traits> for the
+// static_assert instead. The port retains both: filtered_topk_row still calls hist4096::, and the
+// wrapper still needs is_same.
+#include "topk_histogram_4096.cuh"
+
 namespace vllm {
 namespace persistent {
 
@@ -1320,6 +1326,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
 // Kept with persistent_topk so the portable fallback owns the non-cluster path.
 // ============================================================================
 namespace filtered_topk {
+
+// Also required by the short path inside `filtered_topk_row`, which this patch keeps. The earlier
+// revision deleted that path, so it dropped both this alias and the include above.
+namespace hist4096 = topk_histogram_4096;
 
 // ============================================================================
 // FilteredTopK — single CTA per row for bs > 32
