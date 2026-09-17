@@ -133,6 +133,11 @@ pub struct EngineCoreOutput {
     /// the Rust frontend does not yet surface it in responses.
     #[serde(default)]
     pub spec_decode_metrics: Option<OpaqueValue>,
+    /// Sampled-token logprob per new token for requests that set
+    /// `SamplingParams.sampled_logprobs_only`; replaces `new_logprobs` for
+    /// them. Opaque here; the Rust frontend does not surface it yet.
+    #[serde(default)]
+    pub new_sampled_logprobs: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -440,6 +445,23 @@ mod tests {
     }
 
     #[test]
+    fn engine_core_output_round_trips_new_sampled_logprobs() {
+        let output = EngineCoreOutput {
+            request_id: "req-1".into(),
+            new_token_ids: vec![7, 8],
+            new_sampled_logprobs: Some(OpaqueValue::Array(vec![
+                OpaqueValue::F64(-0.5),
+                OpaqueValue::F64(-1.25),
+            ])),
+            ..Default::default()
+        };
+        let wire = (0, vec![output.clone()]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output]);
+    }
+
+    #[test]
     fn engine_core_output_requires_valid_known_fields() {
         for fields in [
             vec![],
@@ -501,6 +523,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            new_sampled_logprobs: None,
                         },
                     ],
                     scheduler_stats: None,
