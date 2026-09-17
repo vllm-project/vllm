@@ -1955,7 +1955,7 @@ def test_uno_tail_survives_preemption_and_stale_delivery(
     assert request.spec_token_ids == []
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == initial_free
-    assert not scheduler._uno_tail_requests
+    assert not scheduler.uno_tail.in_tail(request)
     # A later request reusing the id starts with ordinary proposals enabled.
     (replacement,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=16, block_size=4
