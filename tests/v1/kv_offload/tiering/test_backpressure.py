@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for back-pressure detection in TieringOffloadingManager.
+"""Unit tests for back-pressure detection in TieringOffloadingManager.
 
 These tests use a DelayedSecondaryTierManager that holds completed jobs
 until explicitly released, allowing precise control over when the manager
@@ -25,8 +24,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import (
+    DropAccountingPolicy,
     DropStorePolicy,
     EMABackpressureDetector,
+    ThrottledDropPolicy,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -572,6 +573,35 @@ class TestThrottledDropPolicy:
         bp.store_latency_ema = _BP_HIGH_WATER_S * 1.5
         for _ in range(20):
             assert bp.should_store(1) is False
+
+
+class TestSharedDropAccounting:
+    """Both policies share drop accounting via DropAccountingPolicy."""
+
+    @pytest.mark.parametrize("policy_cls", [DropStorePolicy, ThrottledDropPolicy])
+    def test_shared_base(self, policy_cls):
+        assert issubclass(policy_cls, DropAccountingPolicy)
+
+    @pytest.mark.parametrize("policy_cls", [DropStorePolicy, ThrottledDropPolicy])
+    def test_pop_returns_and_resets(self, policy_cls):
+        policy = policy_cls()
+        policy.on_store_skipped(3)
+        policy.on_store_skipped(2)
+        assert policy.pop_stores_dropped() == (2, 5)
+        assert policy.pop_stores_dropped() == (0, 0)
+
+    @pytest.mark.parametrize("policy_cls", [DropStorePolicy, ThrottledDropPolicy])
+    def test_reset_clears_counters(self, policy_cls):
+        policy = policy_cls()
+        policy.on_store_skipped(4)
+        policy.reset()
+        assert policy.pop_stores_dropped() == (0, 0)
+
+    def test_throttled_reset_also_clears_call_count(self):
+        policy = ThrottledDropPolicy()
+        policy._call_count = 7
+        policy.reset()
+        assert policy._call_count == 0
 
 
 class TestHealthyBypass:

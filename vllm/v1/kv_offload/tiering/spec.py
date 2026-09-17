@@ -287,10 +287,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
-        # Backpressure defaults are merged in priority order (highest first):
+        # Backpressure config is merged field-by-field in priority order
+        # (highest first):
         #   1. Per-tier ``backpressure`` dict in the tier config
         #   2. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
         #   3. Top-level ``backpressure`` in kv_connector_extra_config
+        # Merging per field (rather than per whole dict) means a partial
+        # tier override still inherits missing fields from the lower-precedence
+        # sources, so the resolved dict reaching the factory is complete.
         # Within each tier's resolved dict, tier-type-aware water marks
         # are filled in last so a bare ``"backpressure": {}`` picks up
         # sensible thresholds for the storage medium.
@@ -301,12 +305,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         for tier_cfg in self.secondary_tier_configs:
             tier_type = tier_cfg.get("type", "")
-            # Env var defaults for this tier type
-            if tier_type in bp_env and "backpressure" not in tier_cfg:
-                tier_cfg["backpressure"] = bp_env[tier_type].copy()
-            # Top-level config defaults
-            if bp_defaults is not None:
-                tier_cfg.setdefault("backpressure", bp_defaults.copy())
+            tier_override = tier_cfg.get("backpressure")
+            env_default = bp_env.get(tier_type)
+            # Overlay from lowest to highest precedence so higher-precedence
+            # fields win while lower-precedence ones fill in the gaps.
+            merged: dict[str, Any] = {}
+            for source in (bp_defaults, env_default, tier_override):
+                if source:
+                    merged.update(source)
+            # Only set a resolved dict when at least one source contributed
+            # (or an explicit ``backpressure`` key was present, e.g. ``{}``),
+            # so tiers without any backpressure config stay unconfigured.
+            if merged or "backpressure" in tier_cfg:
+                tier_cfg["backpressure"] = merged
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None

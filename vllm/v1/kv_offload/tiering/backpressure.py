@@ -24,17 +24,20 @@ class BackpressurePolicy(ABC):
     def reset(self) -> None: ...
 
 
-class DropStorePolicy(BackpressurePolicy):
-    """Silently drop stores to pressured tiers."""
+class DropAccountingPolicy(BackpressurePolicy):
+    """Base policy that tracks dropped store/block counters.
+
+    Subclasses implement ``should_store``; the shared drop accounting
+    (``on_store_skipped``/``pop_stores_dropped``/``reset``) lives here so
+    every policy reports these counters identically. Subclasses that add
+    their own state override ``reset`` and call ``super().reset()``.
+    """
 
     def __init__(self):
         self._stores_dropped: int = 0
         self._blocks_dropped: int = 0
 
-    def should_store(self, detector) -> bool:
-        return not detector.is_under_pressure()
-
-    def on_store_skipped(self, num_blocks) -> None:
+    def on_store_skipped(self, num_blocks: int) -> None:
         self._stores_dropped += 1
         self._blocks_dropped += num_blocks
 
@@ -49,7 +52,14 @@ class DropStorePolicy(BackpressurePolicy):
         self._blocks_dropped = 0
 
 
-class ThrottledDropPolicy(BackpressurePolicy):
+class DropStorePolicy(DropAccountingPolicy):
+    """Silently drop stores to pressured tiers."""
+
+    def should_store(self, detector) -> bool:
+        return not detector.is_under_pressure()
+
+
+class ThrottledDropPolicy(DropAccountingPolicy):
     """Drop stores proportionally to pressure severity.
 
     Instead of dropping all stores when pressure is detected, the drop
@@ -66,8 +76,7 @@ class ThrottledDropPolicy(BackpressurePolicy):
     """
 
     def __init__(self, ramp_factor: float = 2.0):
-        self._stores_dropped: int = 0
-        self._blocks_dropped: int = 0
+        super().__init__()
         self._call_count: int = 0
         self._ramp_factor = ramp_factor
 
@@ -88,19 +97,8 @@ class ThrottledDropPolicy(BackpressurePolicy):
         period = max(2, round(1.0 / drop_rate))
         return (self._call_count % period) != 0
 
-    def on_store_skipped(self, num_blocks: int) -> None:
-        self._stores_dropped += 1
-        self._blocks_dropped += num_blocks
-
-    def pop_stores_dropped(self) -> tuple[int, int]:
-        stores, blocks = self._stores_dropped, self._blocks_dropped
-        self._stores_dropped = 0
-        self._blocks_dropped = 0
-        return stores, blocks
-
     def reset(self) -> None:
-        self._stores_dropped = 0
-        self._blocks_dropped = 0
+        super().reset()
         self._call_count = 0
 
 
@@ -132,6 +130,7 @@ class BackpressureDetector(ABC):
         Args:
             submit_time: ``time.monotonic()`` when the job was submitted.
             num_bytes: Total bytes written (num_blocks * block_size_bytes).
+
         """
         if num_bytes <= 0:
             return
@@ -157,6 +156,7 @@ class BackpressureDetector(ABC):
                 (``"LOCAL"`` or ``"REMOTE"``). When ``"REMOTE"``, tiers
                 that would normally get local-storage watermarks (e.g.
                 ``"fs"``) receive network watermarks instead.
+
         """
         return None
 
