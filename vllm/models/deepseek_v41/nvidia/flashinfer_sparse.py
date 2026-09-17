@@ -37,17 +37,25 @@ if TYPE_CHECKING:
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
+_flashinfer_dsv4_prefill_workspace_by_device: dict[torch.device, torch.Tensor] = {}
 
 
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
-    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
+def _get_flashinfer_dsv4_workspace(
+    device: torch.device, is_prefill: bool = False
+) -> torch.Tensor:
+    workspace_map = (
+        _flashinfer_dsv4_prefill_workspace_by_device
+        if is_prefill
+        else _flashinfer_dsv4_workspace_by_device
+    )
+    workspace = workspace_map.get(device)
     if workspace is None:
         workspace = torch.zeros(
             _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
             dtype=torch.uint8,
             device=device,
         )
-        _flashinfer_dsv4_workspace_by_device[device] = workspace
+        workspace_map[device] = workspace
     return workspace
 
 
@@ -511,6 +519,9 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             )
 
         if num_prefill_tokens > 0:
+            prefill_workspace = _get_flashinfer_dsv4_workspace(
+                q.device, is_prefill=True
+            )
             # The prefill query view re-anchors at offset 0, so rebase the
             # cumulative query offsets to start at 0.
             prefill_cu = (
@@ -522,7 +533,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=query[num_decode_tokens:num_tokens],
                 swa_kv_cache=swa_k_cache,
-                workspace_buffer=workspace,
+                workspace_buffer=prefill_workspace,
                 sparse_indices=sparse_indices[num_decode_tokens:num_tokens],
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[num_decode_tokens:num_tokens],
@@ -544,8 +555,8 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     use_fp8_ds_mla_layout: ClassVar[bool] = True
 
     @staticmethod
-    def _get_workspace(device: torch.device) -> torch.Tensor:
-        return _get_flashinfer_dsv4_workspace(device)
+    def _get_workspace(device: torch.device, is_prefill: bool = False) -> torch.Tensor:
+        return _get_flashinfer_dsv4_workspace(device, is_prefill=is_prefill)
 
     @staticmethod
     def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -844,6 +855,10 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     swa_metadata.is_valid_token[prefill_token_slice],
                 )
             )
+            if extra_sparse_indices is not None:
+                extra_sparse_indices = extra_sparse_indices.reshape(
+                    num_prefill_tokens, 1, -1
+                )
 
         assert swa_metadata.prefill_swa_indices is not None
         assert swa_metadata.prefill_swa_lens is not None
@@ -893,7 +908,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=q_chunk,
                 swa_kv_cache=swa_kv_paged,
-                workspace_buffer=self._get_workspace(q.device),
+                workspace_buffer=self._get_workspace(q.device, is_prefill=True),
                 sparse_indices=swa_indices_chunk,
                 compressed_kv_cache=extra_kv_paged,
                 out=output[query_start:query_end],
