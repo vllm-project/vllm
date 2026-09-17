@@ -121,11 +121,14 @@ The gauge holds one series for each configuration that the manager reports. A ma
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |
 | `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
-| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by the bytes of one chunk. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by `cpu_kv_bytes_per_chunk`. |
+| `cpu_blocks_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | GPU blocks in one chunk. | The chunk-to-block conversion factor. Set by `blocks_per_chunk`, or derived from `block_size`. |
+| `cpu_kv_bytes_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Bytes of one chunk slot. | Rounded up to the host page size, so it can hold padding. With `cpu_num_chunks` it gives the exact size of the tier in bytes, the only capacity that holds for every model shape. Reads `None` when a caller builds the manager without a chunk size. |
+| `cpu_capacity_tokens_at_max_len` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Upper bound on the KV tokens the tier holds, over the request lengths up to `max_model_len`. | A group with a sliding window raises this above the byte capacity, because that group holds a fixed chunk count however long the request grows. Reads `None` when the token scale is not known, for example a `max_model_len` of 0. |
+
+`CPUOffloadingSpec` publishes the four `cpu_` labels on its one series. `TieringOffloadingSpec` publishes them on the `0:primary` series.
 
 The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
-
-`CPUOffloadingSpec` publishes `cpu_num_chunks` on its one series. `TieringOffloadingSpec` publishes it on the `0:primary` series. For a worked example of a secondary tier, the `example` tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
