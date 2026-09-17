@@ -110,9 +110,14 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
         elif current_platform.is_xpu():
-            if envs.VLLM_XPU_USE_SAMPLER_KERNEL:
+            if envs.VLLM_XPU_USE_SAMPLER_KERNEL and not envs.VLLM_BATCH_INVARIANT:
                 self.forward = self.forward_xpu
             else:
+                if envs.VLLM_BATCH_INVARIANT:
+                    logger.info_once(
+                        "VLLM_BATCH_INVARIANT is enabled. Using the "
+                        "PyTorch-native sampler on XPU."
+                    )
                 self.forward = self.forward_native
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
