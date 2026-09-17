@@ -477,8 +477,22 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
+    def _finalize_attn(self) -> None:
+        """Run the attention backend's post-load weight step on the draft layers.
+
+        They are ordinary DeepseekV4DecoderLayers, so they take the engine-wide
+        attention backend and owe it whatever the target model owes it -- mega
+        attention permutes wq_b / wo_a here and refuses to run without it.
+        Idempotent, like the target's.
+        """
+        for layer in self.model.layers:
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
+
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
+        self._finalize_attn()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
