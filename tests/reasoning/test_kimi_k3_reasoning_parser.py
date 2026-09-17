@@ -343,3 +343,127 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+# --- Implicit think close -----------------------------------------------------
+# The model intermittently omits <|close|>think<|sep|> and jumps straight into a
+# later channel; the parser treats the later-channel marker as an implicit think
+# close and hands the rest of the turn (marker included) downstream. Without the
+# resync, the whole turn — a valid tool call included — surfaces as reasoning
+# with empty tool_calls.
+
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
+TOOLS_CLOSE = f"{CLOSE}tools{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
+
+TOOLS_BLOCK = (
+    f"{TOOLS_OPEN}"
+    f'{OPEN}call tool="bash" index="1"{SEP}'
+    f'{OPEN}argument key="command" type="string"{SEP}ls{CLOSE}argument{SEP}'
+    f"{CLOSE}call{SEP}"
+    f"{TOOLS_CLOSE}"
+)
+
+
+def _tools_request() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {}},
+            }
+        ],
+        tool_choice="auto",
+    )
+
+
+def test_missing_think_close_resyncs_at_orphan_response_close():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    # The production trap shape: reasoning runs into answer prose, an orphan
+    # response-close follows, then a well-formed tools block.
+    reasoning, rest = parser.extract_reasoning_content(
+        f"planning the edit. Applying it now:"
+        f"{RESPONSE_CLOSE}{TOOLS_BLOCK}{MESSAGE_CLOSE}",
+        _tools_request(),
+    )
+
+    assert reasoning == "planning the edit. Applying it now:"
+    # Tool channels are preserved verbatim for the tool parser, marker included.
+    assert rest == f"{RESPONSE_CLOSE}{TOOLS_BLOCK}{MESSAGE_CLOSE}"
+
+
+def test_missing_think_close_resyncs_at_tools_open():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    reasoning, rest = parser.extract_reasoning_content(
+        f"thinking{TOOLS_BLOCK}{MESSAGE_CLOSE}", _tools_request()
+    )
+
+    assert reasoning == "thinking"
+    assert rest == f"{TOOLS_BLOCK}{MESSAGE_CLOSE}"
+
+
+def test_missing_think_close_resyncs_at_response_open():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"thinking{RESPONSE_OPEN}answer{RESPONSE_CLOSE}{MESSAGE_CLOSE}", request
+    )
+
+    assert reasoning == "thinking"
+    assert content == "answer"
+
+
+def test_is_reasoning_end_true_on_resync_marker_ids():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    tokenizer = DummyTokenizer()
+
+    ids = (
+        [100, 101, 102]
+        + tokenizer.encode(RESPONSE_CLOSE)
+        + tokenizer.encode(TOOLS_OPEN)
+        + [7, 8]
+    )
+
+    assert parser.is_reasoning_end(ids)
+    assert not parser.is_reasoning_end([100, 101, 102])
+
+
+def test_extract_content_ids_from_resync_marker():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    tokenizer = DummyTokenizer()
+
+    tail = tokenizer.encode(RESPONSE_CLOSE) + tokenizer.encode(TOOLS_OPEN) + [7, 8]
+
+    # Content starts AT the resync marker so the downstream tool parser sees
+    # the channel markers.
+    assert parser.extract_content_ids([100, 101, 102] + tail) == tail
+
+
+def test_streaming_resync_recovers_reasoning_and_content():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    text = f"planning the fix:{RESPONSE_CLOSE}{TOOLS_BLOCK}{MESSAGE_CLOSE}"
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    previous = ""
+    for i in range(0, len(text), 7):
+        current = text[: i + 7]
+        delta = current[len(previous) :]
+        message = parser.extract_reasoning_content_streaming(
+            previous, current, delta, [], [], []
+        )
+        if message is not None:
+            if message.reasoning:
+                reasoning_parts.append(message.reasoning)
+            if message.content:
+                content_parts.append(message.content)
+        previous = current
+
+    assert "".join(reasoning_parts) == "planning the fix:"
+    assert "".join(content_parts) == f"{RESPONSE_CLOSE}{TOOLS_BLOCK}{MESSAGE_CLOSE}"
