@@ -1291,16 +1291,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
         if not draft_tokens:
-            # No draft token scheduled (common case).
+            # No draft token scheduled (common case). A model state that
+            # samples no new token per step (diffusion prefill) gets no
+            # logits rows at all.
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = 0
-            total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
+            total_num_logits = num_reqs * num_bonus_tokens
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32) * num_bonus_tokens
+            cu_num_logits = (
+                torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+                * num_bonus_tokens
             )
-            expanded_idx_mapping = idx_mapping
+            expanded_idx_mapping = idx_mapping[:total_num_logits]
             expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device
+                total_num_logits, dtype=torch.int32, device=self.device
             )
         else:
             num_draft_tokens_per_req = np.fromiter(
@@ -1532,7 +1536,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
-        if grammar_output is not None:
+        if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
