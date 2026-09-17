@@ -1257,14 +1257,23 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         # Metadata builders are constructed from the per-layer spec, so the base
         # cdiv(max_len, block_size) would drop its DCP sharding and size the
         # block table wider than those builders expect.
-        widths = {
-            spec.max_num_blocks_per_req(vllm_config, max_len)
-            for spec in self.kv_cache_specs.values()
+        per_layer = {
+            name: spec.max_num_blocks_per_req(vllm_config, max_len)
+            for name, spec in self.kv_cache_specs.items()
         }
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
+        widths = set(per_layer.values())
+        if len(widths) != 1:
+            # Name a layer per width. Two bare numbers leave the reader with no
+            # way to find which layers disagree, and a group can hold dozens.
+            examples = {
+                width: next(n for n, v in per_layer.items() if v == width)
+                for width in sorted(widths)
+            }
+            raise AssertionError(
+                "All layers in the same KV cache group must need the same "
+                f"number of block table entries, got {sorted(widths)}. "
+                f"One layer per width: {examples}."
+            )
         return next(iter(widths))
 
     @classmethod
@@ -1278,6 +1287,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         block_sizes = set(spec.block_size for spec in kv_cache_specs.values())
         if len(block_sizes) > 1:
             # Different block sizes, not uniform.
+            return False
+        ownership = {
+            getattr(spec, "dcp_transparent", False) for spec in kv_cache_specs.values()
+        }
+        if len(ownership) > 1:
+            # A group carries one block table. A cache every rank holds whole
+            # and a cache split across ranks need different widths of it, so
+            # they cannot share one however alike their specs look.
             return False
         first_spec = next(iter(kv_cache_specs.values()))
         return first_spec.is_uniform_with_collection(kv_cache_specs)

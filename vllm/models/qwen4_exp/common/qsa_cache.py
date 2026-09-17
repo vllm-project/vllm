@@ -863,7 +863,6 @@ class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -876,7 +875,14 @@ class QSACompressedKeyCache(_QSAStateCache):
             # within its virtual block. And the selector has to score the whole
             # sequence: a sharded rank would choose from its own slice only,
             # which changes the selection rather than distributing it.
-            dcp_transparent=True,
+            #
+            # Only under DCP. The flag also splits this cache out of the main
+            # KV's group, because a group carries one block table and the two
+            # then need different widths. Setting it unconditionally would
+            # change the layout of every single-rank run for no reason.
+            dcp_transparent=(
+                vllm_config.parallel_config.decode_context_parallel_size > 1
+            ),
         )
 
 

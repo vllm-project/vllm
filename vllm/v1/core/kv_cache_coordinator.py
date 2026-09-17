@@ -20,6 +20,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -676,10 +677,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # DCP shards full-attention KV across ranks and replicates Mamba
             # state; other spec types (e.g. sliding window) have no DCP-aware
             # handling yet, so reject them explicitly.
+            #
+            # CircularBufferSpec is replicated for the same reason Mamba is.
+            # dcp_world_size_for_kv_cache_spec gives it 1, so its group keeps an
+            # unsharded slot mapping and every rank writes every token into its
+            # own ring. The rings stay identical, which is what a replicated
+            # selector reading them requires.
+            dcp_aware = (FullAttentionSpec, MambaSpec, CircularBufferSpec)
             for g in kv_cache_config.kv_cache_groups:
-                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+                assert isinstance(g.kv_cache_spec, dcp_aware), (
                     "DCP with hybrid KV cache layouts only supports "
-                    "full-attention and Mamba groups, got: "
+                    "full-attention, Mamba and circular-buffer groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache
