@@ -159,7 +159,10 @@ def getattr_iter(
 
 
 def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
-    """Collect attribute docstrings declared directly in ``cls``'s own body."""
+    """Get any docstrings placed after attribute assignments in a class body.
+
+    https://davidism.com/mit-license/
+    """
     try:
         source = inspect.getsource(cls)
     except (OSError, TypeError):
@@ -196,14 +199,8 @@ def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
-    """Get any docstrings placed after attribute assignments in a class body.
-
-    Also includes docstrings for attributes inherited from base classes, since
-    ``dataclasses.fields()`` exposes inherited fields as CLI arguments too.
-    Docstrings on ``cls`` take precedence over those from its base classes.
-
-    https://davidism.com/mit-license/
-    """
+    """Get any docstrings placed after attribute assignments in a class body or
+    its bases."""
     if not isinstance(cls, type):
         raise TypeError("Given object was not a class.")
 
