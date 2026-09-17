@@ -8,7 +8,6 @@ import torch
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
@@ -29,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
-    refine_fp8_moe_block_shape,
+    resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -82,14 +81,11 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
-from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
-
-logger = init_logger(__name__)
 
 
 class Fp8Config(QuantizationConfig):
@@ -508,63 +504,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Set weight key and activation key for kernel compatibility
         if self.block_quant:
             assert self.weight_block_size is not None
-            # TRTLLM needs intact checkpoint blocks. Decide the allocation
-            # before refinement/backend selection. The loader uses the padded
-            # allocation as its checkpoint stride for both weights and scales.
-            if (
-                self.moe.moe_backend == "flashinfer_trtllm"
-                and self.quant_config.is_checkpoint_fp8_serialized
-                and self.weight_block_size == [128, 128]
-                and self.moe.tp_size > 1
-                and self.moe.intermediate_size_per_partition % 128 != 0
-            ):
-                if (
-                    self.moe.intermediate_size % 128 != 0
-                    or self.moe.hidden_dim % 128 != 0
-                    or self.moe.ep_size != 1
-                    or self.moe.is_lora_enabled
-                    or self.moe.has_bias
-                ):
-                    raise ValueError(
-                        "Block-aligned FP8 TP sharding requires 128-aligned "
-                        "global expert dimensions, pure TP, and no LoRA or "
-                        "expert bias."
-                    )
-                self.moe.tp_shard_with_padding = True
-                self.moe.intermediate_size_per_partition = round_up(
-                    self.moe.intermediate_size_per_partition, 128
+            # Adapt the checkpoint block shape to TP sharding before
+            # building the weight key.
+            self.moe_block_shape, self.weight_scale_refine = (
+                resolve_fp8_moe_weight_block_shape(
+                    self.moe,
+                    self.weight_block_size,
+                    kFp8Dynamic128Sym,
+                    self.quant_config.is_checkpoint_fp8_serialized,
                 )
-                logger.info_once(
-                    "FP8 TRTLLM TP loading uses complete checkpoint blocks: "
-                    "local allocation %d, without weight requantization.",
-                    self.moe.intermediate_size_per_partition,
-                )
-            # TP shards the intermediate dim of the expert weights, so a
-            # per-shard size that is not a multiple of the checkpoint's block
-            # size makes the checkpoint's block scales impossible to shard
-            # exactly. When a finer block size (>= 32) divides both the
-            # checkpoint blocks and all involved dims, the weight scales are
-            # refined to that granularity at load time (a lossless upsampling,
-            # since the refined block divides the checkpoint block). The
-            # refined block shape is encoded in the weight key, so the oracle
-            # only selects kernels that support it (e.g. Triton, which takes
-            # the block shape as a runtime argument).
-            refined_shape = refine_fp8_moe_block_shape(self.moe, self.weight_block_size)
-            if refined_shape is not None:
-                block_n, block_k = self.weight_block_size
-                self.weight_scale_refine = (
-                    block_n // refined_shape[0],
-                    block_k // refined_shape[1],
-                )
-                self.moe_block_shape = refined_shape
-                logger.info_once(
-                    "FP8 MoE block scales refined from %s to %s to fit "
-                    "the TP-sharded intermediate size %d.",
-                    str(self.weight_block_size),
-                    str(refined_shape),
-                    self.moe.intermediate_size_per_partition,
-                )
-            assert self.moe_block_shape is not None
+            )
             weight_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(*self.moe_block_shape)
             )
