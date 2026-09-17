@@ -1312,7 +1312,6 @@ class DiffusionSampler:
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
         slots_np = input_batch.idx_mapping_np[:num_reqs]
-        is_decode_np = per_req_nlogits_np > 0
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
 
         # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
