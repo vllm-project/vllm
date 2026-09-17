@@ -42,7 +42,10 @@ use self::structural_tag::MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER;
 use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
-use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
+use crate::utils::{
+    MarkerScanState, incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul,
+    take_until_marker_mul,
+};
 
 const START: &str = "<|start|>";
 const MESSAGE: &str = "<|message|>";
@@ -82,6 +85,11 @@ const TOOL_NOISE_MARKERS: &[&str] = &[
     FUNCTION_CALLS_CLOSE,
     INVOKE_OPEN,
 ];
+/// Markers that end an invoke body: its close, or a complete framing marker
+/// (real ATEM bodies never contain framing, so the `<|eom|>`/`<|eot|>` must be
+/// allowed to close the channel); a bare `<|` that is no marker is body text
+/// (Python parity).
+const INVOKE_BODY_STOP_MARKERS: &[&str] = &[INVOKE_CLOSE, EOM, EOT, START];
 
 type MuseGlimmerInput<'i> = Partial<&'i str>;
 
@@ -151,6 +159,11 @@ enum MuseGlimmerMode {
 pub struct MuseGlimmerUnifiedParser {
     buffer: DecodedText,
     mode: MuseGlimmerMode,
+    /// Checkpoint of the close-marker scan over an invoke block buffered at
+    /// the cursor, so re-parsing the block on every delta does not rescan the
+    /// whole body. Offsets are cursor-relative: reset whenever bytes are
+    /// consumed.
+    invoke_scan: MarkerScanState,
     /// Number of tool calls emitted in the current response.
     emitted_call_count: usize,
     /// Number of `to=self` blocks opened in the current response; later blocks
@@ -170,6 +183,7 @@ impl MuseGlimmerUnifiedParser {
         Ok(Self {
             buffer: DecodedText::default(),
             mode: MuseGlimmerMode::default(),
+            invoke_scan: MarkerScanState::default(),
             emitted_call_count: 0,
             reasoning_block_count: 0,
             registered_names: tools.iter().map(|tool| tool.name.clone()).collect(),
@@ -297,6 +311,7 @@ impl MuseGlimmerUnifiedParser {
 
     fn reset_state(&mut self) -> String {
         self.mode = MuseGlimmerMode::Idle;
+        self.invoke_scan.reset();
         self.emitted_call_count = 0;
         self.reasoning_block_count = 0;
         self.buffer.take().text
@@ -313,6 +328,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         self.buffer.clear();
+        self.invoke_scan.reset();
         self.emitted_call_count = 0;
         self.reasoning_block_count = 0;
         self.initialize_mode(prompt_token_ids);
@@ -331,9 +347,10 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         self.buffer.append(delta);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-            parse_next_muse_glimmer_event(input, &mut self.mode)
+            parse_next_muse_glimmer_event(input, &mut self.mode, &mut self.invoke_scan)
         })? {
             let piece = self.buffer.drain_prefix(consumed_len);
+            self.invoke_scan.reset();
             self.apply_event(event, piece, output)?;
         }
 
@@ -393,12 +410,15 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
 fn parse_next_muse_glimmer_event(
     input: &mut MuseGlimmerInput<'_>,
     mode: &mut MuseGlimmerMode,
+    invoke_scan: &mut MarkerScanState,
 ) -> ModalResult<MuseGlimmerEvent> {
     match mode {
         MuseGlimmerMode::Idle => parse_idle_event(input),
         MuseGlimmerMode::Reasoning => parse_reasoning_event(input),
-        MuseGlimmerMode::Content { reclassify } => parse_content_event(input, *reclassify),
-        MuseGlimmerMode::Tool { .. } => parse_tool_event(input),
+        MuseGlimmerMode::Content { reclassify } => {
+            parse_content_event(input, *reclassify, invoke_scan)
+        }
+        MuseGlimmerMode::Tool { .. } => parse_tool_event(input, invoke_scan),
         MuseGlimmerMode::Done => parse_done_event(input),
     }
 }
@@ -437,6 +457,7 @@ fn parse_reasoning_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGl
 fn parse_content_event(
     input: &mut MuseGlimmerInput<'_>,
     reclassify: bool,
+    invoke_scan: &mut MarkerScanState,
 ) -> ModalResult<MuseGlimmerEvent> {
     if !reclassify {
         return alt((
@@ -455,7 +476,7 @@ fn parse_content_event(
         bare_tool_switch_event,
         literal(EOM).value(MuseGlimmerEvent::ChannelClose),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-        atem_tool_channel_event,
+        |input: &mut MuseGlimmerInput<'_>| atem_tool_channel_event(input, invoke_scan),
         // The ATEM opener is literal content when no complete invoke follows.
         alt((literal(FUNCTION_CALLS_OPEN), literal(INVOKE_OPEN))).value(MuseGlimmerEvent::Text),
         failed_bare_header_text.value(MuseGlimmerEvent::Text),
@@ -467,7 +488,10 @@ fn parse_content_event(
 
 /// Parse an event inside a tool channel: wrapper markers and stray text are
 /// skipped (Python scans with regex findall), complete invokes become calls.
-fn parse_tool_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+fn parse_tool_event(
+    input: &mut MuseGlimmerInput<'_>,
+    invoke_scan: &mut MarkerScanState,
+) -> ModalResult<MuseGlimmerEvent> {
     alt((
         // A framed header is authoritative anywhere, closing the tool channel.
         framed_header_event,
@@ -475,7 +499,7 @@ fn parse_tool_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmer
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
         literal(FUNCTION_CALLS_OPEN).value(MuseGlimmerEvent::Skip),
         literal(FUNCTION_CALLS_CLOSE).value(MuseGlimmerEvent::Skip),
-        tool_invoke_event,
+        |input: &mut MuseGlimmerInput<'_>| tool_invoke_event(input, invoke_scan),
         // A definitively-rejected marker at the cursor (an invoke whose body
         // quotes framing, an `<atem:invoke`-prefixed word, a `<|start|>` that
         // is no header) must still be consumed: the noise scanner cannot skip
@@ -562,21 +586,26 @@ fn failed_bare_header_text(input: &mut MuseGlimmerInput<'_>) -> ModalResult<()> 
 /// its first complete invoke. Commits only once a complete
 /// `<atem:invoke>…</atem:invoke>` is ahead; otherwise the parse either holds
 /// (incomplete) or fails definitively and the opener is literal content.
-fn atem_tool_channel_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+fn atem_tool_channel_event(
+    input: &mut MuseGlimmerInput<'_>,
+    invoke_scan: &mut MarkerScanState,
+) -> ModalResult<MuseGlimmerEvent> {
     let ((name, arguments),) = seq!(
         _: opt(literal(FUNCTION_CALLS_OPEN)),
         _: ws0,
-        invoke_block,
+        |input: &mut MuseGlimmerInput<'_>| invoke_block(input, invoke_scan),
     )
     .parse_next(input)?;
     Ok(MuseGlimmerEvent::AtemToolChannel { name, arguments })
 }
 
 /// Parse one complete `<atem:invoke name="N">…</atem:invoke>` block into a call.
-fn tool_invoke_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    invoke_block
+fn tool_invoke_event(
+    input: &mut MuseGlimmerInput<'_>,
+    invoke_scan: &mut MarkerScanState,
+) -> ModalResult<MuseGlimmerEvent> {
+    invoke_block(input, invoke_scan)
         .map(|(name, arguments)| MuseGlimmerEvent::Invoke { name, arguments })
-        .parse_next(input)
 }
 
 /// Parse one complete `<atem:invoke name="N">…</atem:invoke>` block into its
@@ -585,14 +614,21 @@ fn tool_invoke_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimme
 /// A framing marker (`<|…|>`) inside the block fails the parse: real ATEM
 /// bodies never contain framing, so such markup was quoted body text and the
 /// `<|eom|>`/`<|eot|>` after it must still be allowed to close the channel.
-fn invoke_block(input: &mut MuseGlimmerInput<'_>) -> ModalResult<(Option<String>, String)> {
+///
+/// The block is buffered whole and re-parsed from the cursor on every delta,
+/// so the body scan resumes from `invoke_scan` instead of rescanning it.
+fn invoke_block(
+    input: &mut MuseGlimmerInput<'_>,
+    invoke_scan: &mut MarkerScanState,
+) -> ModalResult<(Option<String>, String)> {
     let (attrs, body) = seq!(
         _: literal(INVOKE_OPEN),
         // `\b` after `invoke`: the tag name must not run into an identifier.
         _: peek(not(take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_'))),
         atem_tag_attrs,
         _: literal(">"),
-        atem_body_until_invoke_close,
+        // Stops at the close or at a framing marker; only the close may follow.
+        take_until_marker_mul(INVOKE_BODY_STOP_MARKERS, invoke_scan),
         _: literal(INVOKE_CLOSE),
     )
     .parse_next(input)?;
@@ -603,33 +639,6 @@ fn invoke_block(input: &mut MuseGlimmerInput<'_>) -> ModalResult<(Option<String>
 /// marker cannot be swallowed into a tag.
 fn atem_tag_attrs<'i>(input: &mut MuseGlimmerInput<'i>) -> ModalResult<&'i str> {
     take_till(0.., |c: char| c == '>' || c == '<').parse_next(input)
-}
-
-/// Parse an ATEM invoke body up to `</atem:invoke>`, leaving the close marker.
-/// Fails when a complete framing marker appears first (real ATEM bodies never
-/// contain framing, so the `<|eom|>`/`<|eot|>` must be allowed to close the
-/// channel); a bare `<|` that is no marker is body text (Python parity).
-fn atem_body_until_invoke_close<'i>(input: &mut MuseGlimmerInput<'i>) -> ModalResult<&'i str> {
-    let text = **input;
-    if let Some(close) = text.find(INVOKE_CLOSE) {
-        let body = &text[..close];
-        return match contains_body_marker(body) {
-            true => Err(ErrMode::Backtrack(ContextError::new())),
-            false => {
-                input.next_slice(close);
-                Ok(body)
-            }
-        };
-    }
-    match contains_body_marker(text) {
-        true => Err(ErrMode::Backtrack(ContextError::new())),
-        false => incomplete(),
-    }
-}
-
-/// Whether `text` contains a complete structural framing marker.
-fn contains_body_marker(text: &str) -> bool {
-    BODY_STOP_MARKERS.iter().any(|marker| text.contains(marker))
 }
 
 /// Parse safe text while waiting for the next channel header.
@@ -1578,6 +1587,20 @@ mod tests {
 
         assert_eq!(first_call(&output).arguments, r#"{"code":"a <| b"}"#);
         assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_long_parameter_value_round_trips_through_small_chunks() {
+        // The invoke is buffered whole, so a ~20KB value re-parses on every
+        // delta: the resumable body scan must not change what comes out.
+        let value: String = (0..1_200).map(|i| format!("line {i}: a <| b\n")).collect();
+        let output =
+            assert_chunking_invariant(&tool_channel("notes.write", &param("body", &value), EOT));
+
+        assert_eq!(
+            first_call(&output).arguments,
+            json!({ "body": value }).to_string()
+        );
     }
 
     #[test]

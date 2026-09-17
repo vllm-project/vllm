@@ -111,8 +111,9 @@ fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
     range.map(|range| range.start)
 }
 
-/// Streaming scan state for a buffered marker search [`take_until_marker`],
-/// so that we don't have to rescan the whole buffered prefix when resuming.
+/// Streaming scan state for a buffered marker search ([`take_until_marker`]
+/// and [`take_until_marker_mul`]), so that we don't have to rescan the whole
+/// buffered prefix when resuming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkerScanState {
     scan_start: usize,
@@ -125,6 +126,7 @@ impl MarkerScanState {
 }
 
 /// Parse text until `marker`, resuming from the last safe scan checkpoint.
+/// This is the single-marker variant of [`take_until_marker_mul`].
 ///
 /// This is the streaming-buffered variant of `winnow::token::take_until(0..,
 /// marker)`: it returns the slice before `marker` and leaves `marker` for the
@@ -140,15 +142,28 @@ pub fn take_until_marker<'i, 'a>(
     marker: &'a str,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut Partial<&'i str>| take_until_marker_(input, marker, state)
+    move |input: &mut Partial<&'i str>| take_until_marker_mul_(input, &[marker], state)
 }
 
-fn take_until_marker_<'i>(
+/// Parse text until the earliest of `markers`, resuming from the last safe
+/// scan checkpoint. This is the multi-marker variant of [`take_until_marker`].
+///
+/// The matched marker is left for the caller to consume, so a caller that
+/// only accepts some of `markers` (the others being early-exit sentinels)
+/// rejects the rest with a plain `literal` of the accepted one.
+pub fn take_until_marker_mul<'i, 'a>(
+    markers: &'a [&'a str],
+    state: &'a mut MarkerScanState,
+) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
+    move |input: &mut Partial<&'i str>| take_until_marker_mul_(input, markers, state)
+}
+
+fn take_until_marker_mul_<'i>(
     input: &mut Partial<&'i str>,
-    marker: &str,
+    markers: &[&str],
     state: &mut MarkerScanState,
 ) -> ModalResult<&'i str> {
-    debug_assert!(!marker.is_empty());
+    debug_assert!(markers.iter().all(|marker| !marker.is_empty()));
 
     let text = **input;
     if text.is_empty() {
@@ -158,7 +173,7 @@ fn take_until_marker_<'i>(
     // Normal updates store a char boundary; this keeps stale or misused state from panicking.
     let scan_start = floor_char_boundary(text, state.scan_start);
 
-    if let Some(offset) = text[scan_start..].find(marker) {
+    if let Some(offset) = find_slice_mul(&text[scan_start..], markers) {
         let marker_start = scan_start + offset;
         let body = &text[..marker_start];
         input.next_slice(marker_start);
@@ -166,7 +181,7 @@ fn take_until_marker_<'i>(
         return Ok(body);
     }
 
-    let keep_len = partial_prefix_len(text, marker);
+    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
     state.scan_start = text.len() - keep_len;
     incomplete()
 }
@@ -430,7 +445,7 @@ mod tests {
     use super::{
         JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
         partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
-        take_until_marker,
+        take_until_marker, take_until_marker_mul,
     };
 
     #[test]
@@ -629,6 +644,42 @@ mod tests {
 
         assert_eq!(body, "xx");
         assert_eq!(*input, "ababa!");
+    }
+
+    #[test]
+    fn take_until_marker_mul_stops_before_earliest_marker() {
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("body<|eom|>tail</end>");
+
+        let body = take_until_marker_mul(&["</end>", "<|eom|>"], &mut state)
+            .parse_next(&mut input)
+            .unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(*input, "<|eom|>tail</end>");
+        assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_mul_resumes_after_longest_split_marker() {
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("body<|eo");
+
+        let error = take_until_marker_mul(&["</end>", "<|eom|>"], &mut state)
+            .parse_next(&mut input)
+            .unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, "body".len());
+
+        let mut input = Partial::new("body<|eom|>tail");
+        let body = take_until_marker_mul(&["</end>", "<|eom|>"], &mut state)
+            .parse_next(&mut input)
+            .unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(*input, "<|eom|>tail");
+        assert_eq!(state, MarkerScanState::default());
     }
 
     #[test]
