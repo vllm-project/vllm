@@ -333,6 +333,11 @@ class MoEMixin(MixtureOfExperts):
                         gate = fuser.gate(moe_block, prefix, router_dtype)
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
+                            renormalize=(
+                                layer_renormalize
+                                if fuser.renormalize is None
+                                else fuser.renormalize
+                            ),
                             is_sequence_parallel=(
                                 self.parallel_config.use_sequence_parallel_moe
                             ),

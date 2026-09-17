@@ -697,6 +697,14 @@ def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:
     _Replacer().visit(module)
 
 
+def is_complete(graph: fx.Graph) -> bool:
+    """Did the trace run to completion? A partial graph has no `output` node.
+
+    Only a complete graph can be read for the *absence* of an op; in a partial
+    one the tail is exactly what is missing."""
+    return any(node.op == "output" for node in graph.nodes)
+
+
 def find_node(graph: fx.Graph, predicate: Callable[[fx.Node], bool]) -> fx.Node | None:
     """The first node in `graph` matching `predicate`, or `None`."""
     return next((n for n in graph.nodes if predicate(n)), None)
