@@ -48,6 +48,103 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
+_ENGRAM_PSI_PAUSE = 20.0
+_ENGRAM_PSI_RESUME = 10.0
+_ENGRAM_PSI_WAIT_SECONDS = 120.0
+_ENGRAM_PAGE_CHUNK_BYTES = 256 * 1024**2
+_ENGRAM_PSI_POLL_SECONDS = 0.25
+
+
+class _EngramPageThrottle:
+    """Share a bounded PSI wait budget across one table's fault and collapse."""
+
+    def __init__(self) -> None:
+        self.remaining = _ENGRAM_PSI_WAIT_SECONDS
+        self.exhausted = False
+        self.paths: list[Path] = []
+        try:
+            for line in Path("/proc/self/cgroup").read_text().splitlines():
+                if line.startswith("0::"):
+                    relative = line[3:].lstrip("/")
+                    # A cgroup namespace can hide the process's actual cgroup.
+                    if ".." not in Path(relative).parts:
+                        self.paths.append(
+                            Path("/sys/fs/cgroup") / relative / "memory.pressure"
+                        )
+                    break
+        except OSError:
+            pass
+        self.paths.append(Path("/proc/pressure/memory"))
+
+    def _pressure(self) -> float | None:
+        while self.paths:
+            try:
+                for line in self.paths[0].read_text().splitlines():
+                    if line.startswith("some "):
+                        fields = dict(field.split("=", 1) for field in line.split()[1:])
+                        pressure = float(fields["avg10"])
+                        if 0 <= pressure <= 100:
+                            return pressure
+            except (OSError, ValueError, KeyError):
+                pass
+            self.paths.pop(0)
+            if self.paths:
+                logger.info_once(
+                    "Engram cgroup v2 PSI unavailable; using system memory PSI."
+                )
+            else:
+                logger.info_once(
+                    "Engram memory PSI unavailable; page throttling is disabled."
+                )
+        return None
+
+    def wait(self) -> None:
+        if self.exhausted:
+            return
+        pressure = self._pressure()
+        if pressure is None or pressure < _ENGRAM_PSI_PAUSE:
+            return
+        logger.info("Pausing Engram page work: memory PSI some avg10=%.2f%%.", pressure)
+        while True:
+            if self.remaining <= 0:
+                self.exhausted = True
+                logger.warning(
+                    "Engram PSI wait budget exhausted; completing remaining page "
+                    "faults without throttling and skipping this table's collapse. "
+                    "MADV_HUGEPAGE remains enabled; insufficient memory can still "
+                    "cause allocation failure or an OOM kill."
+                )
+                return
+            if pressure is None or pressure <= _ENGRAM_PSI_RESUME:
+                return
+            start = time.monotonic()
+            time.sleep(min(_ENGRAM_PSI_POLL_SECONDS, self.remaining))
+            self.remaining -= time.monotonic() - start
+            pressure = self._pressure()
+
+
+def _engram_page_chunk_size(page_size: int) -> int:
+    return (_ENGRAM_PAGE_CHUNK_BYTES + page_size - 1) // page_size * page_size
+
+
+def _fault_engram_host_pages(
+    mapping: mmap.mmap,
+    offset: int,
+    size: int,
+    page_size: int,
+    throttle: _EngramPageThrottle,
+) -> None:
+    chunk_size = _engram_page_chunk_size(page_size)
+    for start in range(0, size, chunk_size):
+        throttle.wait()
+        np.frombuffer(
+            mapping,
+            dtype=np.uint8,
+            count=min(chunk_size, size - start),
+            offset=offset + start,
+        )[:: mmap.PAGESIZE] = 0
+
+
 def _engram_thp_size() -> int | None:
     try:
         size = int(
@@ -97,7 +194,9 @@ def _engram_hugepage_bytes(pointer: int, size: int) -> int | None:
 
 
 def _allocate_engram_host_storage(
-    num_bytes: int, checkpoint_dir: Path | None = None
+    num_bytes: int,
+    checkpoint_dir: Path | None = None,
+    throttle: _EngramPageThrottle | None = None,
 ) -> torch.Tensor | None:
     """Register a PMD-aligned private mapping, retaining ordinary-page fallback."""
     page_size = _engram_thp_size()
@@ -136,9 +235,9 @@ def _allocate_engram_host_storage(
         # Fault the whole advised range, including the rounded tail, before
         # registration can pin pages at base size. An unfaulted tail VMA has
         # no anon_vma, which fails the recovery MADV_COLLAPSE with EINVAL.
-        np.frombuffer(mapping, dtype=np.uint8, count=size, offset=offset)[
-            :: mmap.PAGESIZE
-        ] = 0
+        _fault_engram_host_pages(
+            mapping, offset, size, page_size, throttle or _EngramPageThrottle()
+        )
         tensor = torch.from_numpy(owner)
         pointer = tensor.data_ptr()
         # Register the PMD-rounded range, not num_bytes: ending the
@@ -236,19 +335,28 @@ def _collapse_engram_host_pages(pointer: int, size: int) -> None:
 
 
 def _finish_engram_host_pages(
-    pointer: int, num_bytes: int, checkpoint_dir: Path | None
+    pointer: int,
+    num_bytes: int,
+    checkpoint_dir: Path | None,
+    throttle: _EngramPageThrottle | None = None,
 ) -> None:
     # Same PMD rounding as _allocate_engram_host_storage, so coverage is
     # measured over exactly the advised VMA.
     page_size = _engram_thp_size() or mmap.PAGESIZE
     size = (num_bytes + page_size - 1) // page_size * page_size
+    throttle = throttle or _EngramPageThrottle()
     huge_bytes = _engram_hugepage_bytes(pointer, size)
-    if huge_bytes is not None and huge_bytes < size * 0.90:
+    if not throttle.exhausted and huge_bytes is not None and huge_bytes < size * 0.90:
         _drop_engram_checkpoint_cache(checkpoint_dir)
         logger.info(
             "Recovering Engram huge pages for %.2f GiB host table", size / 1024**3
         )
-        _collapse_engram_host_pages(pointer, size)
+        chunk_size = _engram_page_chunk_size(page_size)
+        for start in range(0, size, chunk_size):
+            throttle.wait()
+            if throttle.exhausted:
+                break
+            _collapse_engram_host_pages(pointer + start, min(chunk_size, size - start))
         huge_bytes = _engram_hugepage_bytes(pointer, size)
     log = logger.warning if huge_bytes == 0 else logger.info
     log(
@@ -458,6 +566,7 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         self._checkpoint_dir = checkpoint_dir
         self._host_page_storage: torch.Tensor | None = None
         self._host_pages_dirty = False
+        self._host_page_throttle: _EngramPageThrottle | None = None
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.dp_size = get_engram_dp_size()
@@ -510,8 +619,11 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             return super()._allocate_weights()
         if self.thp_packing:
             weight_bytes = self.part_num_embeddings * self.dim
+            self._host_page_throttle = _EngramPageThrottle()
             host_storage = _allocate_engram_host_storage(
-                weight_bytes + weight_bytes // self.block_size, self._checkpoint_dir
+                weight_bytes + weight_bytes // self.block_size,
+                self._checkpoint_dir,
+                self._host_page_throttle,
             )
             if host_storage is not None:
                 self._host_page_storage = host_storage
@@ -550,7 +662,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         storage = self._host_page_storage
         if storage is not None and self._host_pages_dirty:
             _finish_engram_host_pages(
-                storage.data_ptr(), storage.numel(), self._checkpoint_dir
+                storage.data_ptr(),
+                storage.numel(),
+                self._checkpoint_dir,
+                self._host_page_throttle,
             )
             self._host_pages_dirty = False
 

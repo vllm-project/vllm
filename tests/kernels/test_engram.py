@@ -1225,10 +1225,18 @@ def test_engram_page_recovery_after_loading(
         "_collapse_engram_host_pages",
         lambda pointer, size: events.append(("collapse", pointer, size)),
     )
+    monkeypatch.setattr(nvidia_engram_ops._EngramPageThrottle, "_pressure", lambda _: 0)
     nvidia_engram_ops._finish_engram_host_pages(0, table_mib * 1024**2, None)
-    assert events == (
-        ["drop", ("collapse", 0, span_mib * 1024**2)] if coverage == 89 else []
-    )
+    if coverage != 89:
+        assert events == []
+        return
+    assert events[0] == "drop"
+    chunks = [event for event in events[1:] if isinstance(event, tuple)]
+    starts = [pointer for _, pointer, _ in chunks]
+    sizes = [size for _, _, size in chunks]
+    assert starts == sorted(starts)  # one pass over the range
+    assert sum(sizes) == span_mib * 1024**2  # full coverage, no overlap
+    assert all(size % (pmd_mib * 1024**2) == 0 for size in sizes)  # PMD-aligned
 
 
 @pytest.mark.parametrize("errors", [[0], [11, 0], [11, 11, 11], [22]])
@@ -1327,3 +1335,112 @@ def test_engram_thp_mode_respects_per_size_policy(monkeypatch, top, pmd, expecte
 
     monkeypatch.setattr(nvidia_engram_ops.Path, "read_text", read_text)
     assert nvidia_engram_ops._engram_thp_mode(512 * 1024**2) == expected
+
+
+@pytest.mark.parametrize(
+    "cgroup,local,system,expected",
+    [
+        ("0::/test.slice/job", 5, 90, 5),
+        ("0::/", 5, 90, 5),
+        ("0::/test.slice/job", None, 15, 15),
+        ("0::/test.slice/job", "malformed", 15, 15),
+        ("1:memory:/job", 5, 15, 15),
+        ("0::/../../hidden", 5, 15, 15),
+        ("0::/test.slice/job", None, None, None),
+    ],
+)
+def test_engram_psi_prefers_cgroup_and_falls_back(
+    monkeypatch, cgroup, local, system, expected
+):
+    """A busy host must not throttle a healthy cgroup; unavailable PSI is optional."""
+
+    def read_text(path):
+        if str(path) == "/proc/self/cgroup":
+            return cgroup
+        value = system if str(path) == "/proc/pressure/memory" else local
+        if value is None:
+            raise PermissionError(path)
+        return f"some avg10={value} avg60=0.00 avg300=0.00 total=0\n"
+
+    monkeypatch.setattr(nvidia_engram_ops.Path, "read_text", read_text)
+    assert nvidia_engram_ops._EngramPageThrottle()._pressure() == expected
+
+
+@pytest.fixture
+def engram_psi_clock(monkeypatch):
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(nvidia_engram_ops.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(nvidia_engram_ops.time, "sleep", sleep)
+    return clock
+
+
+def test_engram_psi_hysteresis_and_cumulative_budget(monkeypatch, engram_psi_clock):
+    """Resume only below the low watermark; waits across calls share one budget."""
+    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 1.0)
+    throttle = nvidia_engram_ops._EngramPageThrottle()
+    readings = iter([20, 15, 10, 19, 21, 30, 30])
+    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
+    throttle.wait()
+    assert engram_psi_clock[0] == 0.5
+    assert not throttle.exhausted
+    throttle.wait()
+    assert engram_psi_clock[0] == 0.5
+    throttle.wait()
+    assert engram_psi_clock[0] == 1.0
+    assert throttle.exhausted
+    throttle.wait()  # Exhaustion is sticky, with no further reads or sleeps.
+    assert engram_psi_clock[0] == 1.0
+
+
+def test_engram_fault_timeout_finishes_tail_and_skips_collapse(
+    monkeypatch, engram_psi_clock
+):
+    """Pressure timeout keeps prefaulting every base page, but prevents compaction."""
+    page = nvidia_engram_ops.mmap.PAGESIZE
+    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PAGE_CHUNK_BYTES", 2 * page)
+    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 0.5)
+    throttle = nvidia_engram_ops._EngramPageThrottle()
+    readings = iter([0, 30, 30, 30])
+    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
+    storage = bytearray([7]) * (7 * page)
+    nvidia_engram_ops._fault_engram_host_pages(storage, page, 5 * page, page, throttle)
+    assert storage[page : 6 * page : page] == bytes(5)
+    assert storage[0] == storage[6 * page] == 7
+    assert throttle.exhausted
+    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: page)
+    monkeypatch.setattr(nvidia_engram_ops, "_engram_hugepage_bytes", lambda *a: 0)
+    monkeypatch.setattr(
+        nvidia_engram_ops,
+        "_collapse_engram_host_pages",
+        lambda *a: pytest.fail("Collapse must be skipped after timeout"),
+    )
+    nvidia_engram_ops._finish_engram_host_pages(0, 5 * page, None, throttle)
+
+
+def test_engram_collapse_stops_when_shared_budget_expires(
+    monkeypatch, engram_psi_clock
+):
+    """Recovery checks pressure between chunks and honors earlier allocation waits."""
+    page = nvidia_engram_ops.mmap.PAGESIZE
+    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PAGE_CHUNK_BYTES", 2 * page)
+    monkeypatch.setattr(nvidia_engram_ops, "_ENGRAM_PSI_WAIT_SECONDS", 0.75)
+    throttle = nvidia_engram_ops._EngramPageThrottle()
+    readings = iter([30, 10, 0, 30, 30, 30])
+    monkeypatch.setattr(throttle, "_pressure", lambda: next(readings))
+    throttle.wait()  # Allocation already spent 0.25 seconds waiting.
+    monkeypatch.setattr(nvidia_engram_ops, "_engram_thp_size", lambda: page)
+    monkeypatch.setattr(nvidia_engram_ops, "_engram_hugepage_bytes", lambda *a: 0)
+    chunks = []
+    monkeypatch.setattr(
+        nvidia_engram_ops,
+        "_collapse_engram_host_pages",
+        lambda pointer, size: chunks.append((pointer, size)),
+    )
+    nvidia_engram_ops._finish_engram_host_pages(page, 5 * page, None, throttle)
+    assert chunks == [(page, 2 * page)]
+    assert throttle.exhausted
+    assert engram_psi_clock[0] == 0.75
