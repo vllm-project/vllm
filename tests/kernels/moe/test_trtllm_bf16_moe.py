@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the FlashInfer TRTLLM BF16 MoE backend
+"""Tests for the FlashInfer TRTLLM BF16 MoE backend
 (`TrtLlmBf16ExpertsModular`).
 
 This mirrors the TRTLLM NvFP4 modular test shape: construct the modular

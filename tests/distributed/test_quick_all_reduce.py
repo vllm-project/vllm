@@ -396,8 +396,7 @@ def test_custom_quick_allreduce_bf16_cast(monkeypatch: pytest.MonkeyPatch):
 
 
 def qr_variable_input(rank, world_size):
-    """
-    When the tensor parallelism is set to 4 or 8, frequent changes
+    """When the tensor parallelism is set to 4 or 8, frequent changes
     in the input shape can cause QuickReduce to hang (this issue
     has been observed with the gpt_oss model).
     """
