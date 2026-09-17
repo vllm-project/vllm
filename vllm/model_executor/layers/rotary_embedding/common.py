@@ -243,10 +243,10 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm_xpu_kernels.rotary import apply_rotary_emb
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_apply_rotary_emb
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
-        output = apply_rotary_emb(x, cos, sin, self.is_neox_style)
+        output = torch.ops.vllm.xpu_apply_rotary_emb(x, cos, sin, self.is_neox_style)
         return self._post_process(output, origin_shape, origin_dtype)
 
     def forward_hip(
