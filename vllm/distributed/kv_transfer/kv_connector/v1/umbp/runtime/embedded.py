@@ -191,7 +191,11 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
 class _MemoryEmbeddedRuntime(IUMBPRuntime):
     """CPU validation runtime sharing one store across connector handles."""
 
-    capabilities = UMBPRuntimeCapabilities()
+    capabilities = UMBPRuntimeCapabilities(
+        ranged_io=True,
+        layerwise_load=True,
+        cancellation=True,
+    )
     _store = _EmbeddedStore()
 
     @classmethod
@@ -533,7 +537,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
 class EmbeddedRuntime(IUMBPRuntime):
     """MORI-backed embedded runtime, with explicit memory test fallback."""
 
-    capabilities = UMBPRuntimeCapabilities()
+    capabilities = UMBPRuntimeCapabilities(
+        ranged_io=True,
+        layerwise_load=True,
+        cancellation=True,
+        async_transfer=True,
+    )
 
     @classmethod
     def from_config(cls, config: UMBPRuntimeConfig) -> IUMBPRuntime:
@@ -559,7 +568,12 @@ class EmbeddedRuntime(IUMBPRuntime):
 
 
 class _MoriEmbeddedRuntime(IUMBPRuntime):
-    capabilities = UMBPRuntimeCapabilities()
+    capabilities = UMBPRuntimeCapabilities(
+        ranged_io=True,
+        layerwise_load=True,
+        cancellation=True,
+        async_transfer=True,
+    )
 
     def __init__(
         self,
