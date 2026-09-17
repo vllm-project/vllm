@@ -22,12 +22,9 @@
 //! ATEM value patterns use plain capturing groups only: xgrammar's regex
 //! engine follows JavaScript syntax and rejects `(?...)` constructs.
 
-use serde_json::{Map, Value, json};
-use xgrammar_structural_tag::builders::{
-    StructuralTagBuilder, StructuralTagContext, StructuralTagOptions,
-};
+use serde_json::{Map, Value};
+use xgrammar_structural_tag::builders::StructuralTagOptions;
 use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, TagFormat};
-use xgrammar_structural_tag::tool::BuilderToolChoice;
 use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
@@ -137,33 +134,6 @@ fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
         }
     }
     Ok(())
-}
-
-impl StructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
-    fn build(&self, ctx: StructuralTagContext<'_>) -> XgrammarResult<StructuralTag> {
-        // Muse Glimmer has no builtin tools; only function tools are scoped in.
-        let tools = ctx
-            .function_tools
-            .iter()
-            .map(|tool| Tool {
-                name: tool.function.name.clone(),
-                description: tool.function.description.clone(),
-                parameters: tool.function.parameters.clone().unwrap_or_else(|| json!(true)),
-                strict: tool.function.strict,
-            })
-            .collect::<Vec<_>>();
-        let tool_choice = match ctx.tool_choice {
-            BuilderToolChoice::Auto => Some(ScopedToolChoice::Auto),
-            BuilderToolChoice::Required => Some(ScopedToolChoice::Required),
-            BuilderToolChoice::Forced => Some(ScopedToolChoice::Function(
-                ctx.function_tools
-                    .first()
-                    .map(|tool| tool.function.name.clone())
-                    .ok_or(XgrammarError::ForcedToolChoiceInvalid { count: 0 })?,
-            )),
-        };
-        self.build_scoped(&tools, tool_choice, None, &ctx.options)
-    }
 }
 
 /// `reasoning* tool+`: at least one tool call, with any reasoning before it.
@@ -406,9 +376,6 @@ mod tests {
     use expect_test::expect;
     use serde_json::json;
     use xgrammar_structural_tag::builders::StructuralTagOptions;
-    use xgrammar_structural_tag::{
-        FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
-    };
 
     use super::{
         MuseGlimmerStructuralTagBuilder, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
@@ -647,28 +614,5 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, xgrammar_structural_tag::Error::Custom(_)));
-    }
-
-    #[test]
-    fn legacy_build_maps_choices_and_tools() {
-        let tools = vec![ToolParam::Function(FunctionToolParam::new(
-            FunctionDefinition::new("ping").with_parameters(json!({
-                "type": "object",
-                "properties": { "host": { "type": "string" } },
-                "required": ["host"]
-            })),
-        ))];
-        let tag = build_structural_tag(
-            MuseGlimmerStructuralTagBuilder,
-            &tools,
-            ToolChoice::required(),
-            StructuralTagOptions::default(),
-        )
-        .unwrap();
-        let json = tag.to_json_string().unwrap();
-
-        assert!(json.contains(r#""begin":" to=ping.ping<|message|>""#));
-        assert!(json.contains(r#""at_least_one":true"#));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"begin":" to=ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=ping.ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
     }
 }

@@ -40,7 +40,7 @@ use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use self::structural_tag::MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER;
 use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutput, token_id};
-use crate::tool::{StructuralTagBuilder, Tool, ToolCallDelta};
+use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
 
@@ -321,10 +321,6 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
-    }
-
-    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        Some(&MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER)
     }
 
     fn scoped_structural_tag_builder(&self) -> Option<&dyn ScopedStructuralTagBuilder> {
