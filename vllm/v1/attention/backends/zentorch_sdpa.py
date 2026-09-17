@@ -19,8 +19,6 @@ __all__ = ["should_use_zentorch_sdpa", "zentorch_sdpa_attn"]
 
 def should_use_zentorch_sdpa(
     attn_type: str,
-    alibi_slopes: torch.Tensor | None,
-    sliding_window: int | None,
     dtype: torch.dtype,
 ) -> bool:
     """True when encoder attention should dispatch to zentorch_sdpa.
@@ -76,6 +74,7 @@ def zentorch_sdpa_attn(
 
     Returns:
         `output`, filled in place.
+
     """
     # The op counts window tokens on each side of the diagonal; vLLM's window
     # includes the diagonal itself.

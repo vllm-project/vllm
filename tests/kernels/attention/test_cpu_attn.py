@@ -887,17 +887,9 @@ def test_zentorch_sdpa_attn(
 @pytest.mark.parametrize(
     "attn_type", [AttentionType.ENCODER_ONLY, AttentionType.ENCODER]
 )
-@pytest.mark.parametrize("use_alibi", [False, True])
-@pytest.mark.parametrize("sliding_window", [None, -1, 256])
 @pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
-def test_should_use_zentorch_sdpa(
-    attn_type: str,
-    use_alibi: bool,
-    sliding_window: int | None,
-    dtype: torch.dtype,
-) -> None:
-    alibi_slopes = torch.tensor([1.0]) if use_alibi else None
-    assert should_use_zentorch_sdpa(attn_type, alibi_slopes, sliding_window, dtype)
+def test_should_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
+    assert should_use_zentorch_sdpa(attn_type, dtype)
 
 
 @_skip_no_zentorch_sdpa
@@ -909,7 +901,7 @@ def test_should_use_zentorch_sdpa(
     ],
 )
 def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
-    assert not should_use_zentorch_sdpa(attn_type, None, -1, dtype)
+    assert not should_use_zentorch_sdpa(attn_type, dtype)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
