@@ -94,17 +94,26 @@ from .multimodal import (
 
 logger = init_logger(__name__)
 
-# GLM-5.3-Flash trained values that neither the checkpoint nor
-# `Glm5NextTextConfig` carries, so they cannot be read off the config.
 _MHC_TAU = 0.05
-_MHC_POST_MULT_VALUE = 2.0
-_LOGIT_SCALE = 1.0
+"""mHC routing temperature. A GLM-5.3-Flash trained value that neither the
+checkpoint nor `Glm5NextTextConfig` carries."""
 
-# GLM-5.3-Flash checkpoints ship vision_config.rms_norm_eps = 1e-5, but the
-# vision tower was trained with 1e-6. Serving with 1e-5 drifts the RMSNorm and
-# produces repetitive/degraded image descriptions, so force the trained value
-# regardless of the checkpoint field.
+_MHC_POST_MULT_VALUE = 2.0
+"""mHC post-multiplier. A GLM-5.3-Flash trained value that neither the
+checkpoint nor `Glm5NextTextConfig` carries."""
+
+_LOGIT_SCALE = 1.0
+"""Output logit scale. A GLM-5.3-Flash trained value that neither the
+checkpoint nor `Glm5NextTextConfig` carries."""
+
 _VISION_RMS_NORM_EPS = 1e-6
+"""Vision tower RMSNorm epsilon.
+
+GLM-5.3-Flash checkpoints ship `vision_config.rms_norm_eps = 1e-5`, but the
+vision tower was trained with 1e-6. Serving with 1e-5 drifts the RMSNorm and
+produces repetitive/degraded image descriptions, so force the trained value
+regardless of the checkpoint field.
+"""
 
 
 def _is_moe(config: Glm5NextTextConfig) -> bool:
