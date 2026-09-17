@@ -225,21 +225,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "require remote_num_tokens, per-group prefix counts "
                     "and unshared regions"
                 )
-            read_specs = []
-            for rank in plan.all_source_ranks:
-                matched_local, matched_remote = self._apply_prefix_caching_by_region(
-                    local_by_region,
-                    remote_by_region,
-                    num_computed_blocks=num_computed_blocks,
-                    num_remote_blocks=num_remote_blocks,
-                    remote_rank=rank,
-                    remote_dcp_size=remote_info.remote_dcp_size,
+            read_specs = [
+                ReadSpec(
+                    rank,
+                    *self._apply_prefix_caching_by_region(
+                        local_by_region,
+                        remote_by_region,
+                        num_computed_blocks=num_computed_blocks,
+                        num_remote_blocks=num_remote_blocks,
+                        remote_rank=rank,
+                        remote_dcp_size=remote_info.remote_dcp_size,
+                    ),
+                    block_ids_by_region=True,
                 )
-                read_specs.append(
-                    ReadSpec(
-                        rank, matched_local, matched_remote, block_ids_by_region=True
-                    )
-                )
+                for rank in plan.all_source_ranks
+            ]
             meta.region_blocks_to_zero = [
                 list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
                 for r, blocks in enumerate(local_by_region)
