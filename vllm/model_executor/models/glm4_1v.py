@@ -145,12 +145,11 @@ def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
 
 
 class Glm4vImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - cpp: Number of channels * patch_size * patch_size
-        - ni: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - cpp: Number of channels * patch_size * patch_size
+    - ni: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -160,12 +159,11 @@ class Glm4vImagePixelInputs(TensorSchema):
 
 
 class Glm4vImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - f: Number of image features (varies based on image resolution)
-        - h: Hidden size (must match language model backbone)
-        - n: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - f: Number of image features (varies based on image resolution)
+    - h: Hidden size (must match language model backbone)
+    - n: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -178,14 +176,13 @@ Glm4vImageInputs: TypeAlias = Glm4vImagePixelInputs | Glm4vImageEmbeddingInputs
 
 
 class Glm4vVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - ctpp: Number of channels * temporal_patch_size *
-            patch_size * patch_size
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - ctpp: Number of channels * temporal_patch_size *
+        patch_size * patch_size
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -195,13 +192,12 @@ class Glm4vVideoPixelInputs(TensorSchema):
 
 
 class Glm4vVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of video patches across all frames
-        - h: Hidden size (must match language model backbone)
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - p: Number of video patches across all frames
+    - h: Hidden size (must match language model backbone)
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["video_embeds"] = "video_embeds"
@@ -771,7 +767,6 @@ class Glm4vVisionTransformer(nn.Module):
         forward graph compatible with CUDA graph replay. Coordinate generation matches
         `rot_pos_emb` exactly to guarantee spatial alignment.
         """
-
         device = self.embeddings.position_embedding.weight.device
         dtype = self.dtype
         all_embeds = []
@@ -850,6 +845,7 @@ class Glm4vVisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -1585,52 +1581,59 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        mm_data = dict(mm_data)
-
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
 
         use_direct_path = (
             not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
         )
         if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
-                mm_data, hf_processor_mm_kwargs
+                hf_data, hf_kwargs
             )
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**prepared_kwargs),
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
-            processed_data.update(passthrough_data)
-            return processed_data
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            )
 
-        videos = mm_data.get("videos")
-        if isinstance(videos, list) and videos:
+        if (
+            "videos" in hf_data
+            and isinstance(videos := hf_data["videos"], list)
+            and len(videos) > 0
+        ):
+            # Videos are processed item-wise below; remove them from hf_data so
+            # the combined call at the end does not re-sample the raw frames.
+            del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
             swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
-            mm_data.pop("videos")
             for item in videos:
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True
                 )
@@ -1670,9 +1673,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            self.info.get_hf_processor(**hf_kwargs),
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
         if swap_video_frame_tokens:
             input_ids = processed_data["input_ids"]
@@ -1680,9 +1683,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -2347,6 +2350,7 @@ class Glm4vForConditionalGeneration(
                 parallelism.
             inputs_embeds: Optional pre-computed input embeddings.
             **kwargs: Additional keyword arguments.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -2370,9 +2374,7 @@ class Glm4vForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.model",
             connector="visual.merger.",
