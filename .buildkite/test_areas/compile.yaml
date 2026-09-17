@@ -92,7 +92,7 @@ steps:
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/"
-      timeout_in_minutes: 25
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -133,7 +133,7 @@ steps:
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/"
-      timeout_in_minutes: 30
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
