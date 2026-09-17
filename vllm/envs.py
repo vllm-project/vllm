@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_MM_INPUT_SHARED_STORAGE_PATH: str | None = None
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -1762,6 +1763,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
+    # Opt-in node-local directory for immutable MM input backing files.
+    "VLLM_MM_INPUT_SHARED_STORAGE_PATH": lambda: os.getenv(
+        "VLLM_MM_INPUT_SHARED_STORAGE_PATH"
+    ),
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
     ),

@@ -16,6 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
+from itertools import chain
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
@@ -46,6 +47,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
+from vllm.utils.jsontree import json_iter_leaves
 from vllm.utils.network_utils import (
     aiter_requires_tcp_store,
     get_distributed_init_method,
@@ -166,6 +168,7 @@ class MultiprocExecutor(Executor):
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
                 connect_ip=mq_connect_ip,
+                shared_tensor_dir=envs.VLLM_MM_INPUT_SHARED_STORAGE_PATH,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
@@ -417,7 +420,34 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        shared_tensor_ids = None
+        if envs.VLLM_MM_INPUT_SHARED_STORAGE_PATH and method == "execute_model":
+            scheduler_output = args[0] if args else kwargs.get("scheduler_output")
+            if isinstance(scheduler_output, SchedulerOutput):
+                features = chain(
+                    (
+                        f
+                        for r in scheduler_output.scheduled_new_reqs
+                        for f in r.mm_features
+                    ),
+                    (
+                        f
+                        for inputs in scheduler_output.restore_encoder_inputs.values()
+                        for f in inputs.values()
+                    ),
+                )
+                shared_tensor_ids = {
+                    id(tensor)
+                    for feature in features
+                    if feature.data is not None
+                    for element in feature.data.values()
+                    for tensor in json_iter_leaves(element.data)
+                    if isinstance(tensor, torch.Tensor)
+                }
+        self.rpc_broadcast_mq.enqueue(
+            (send_method, args, kwargs, output_rank),
+            shared_tensor_ids=shared_tensor_ids,
+        )
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:

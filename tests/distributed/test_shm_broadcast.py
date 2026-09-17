@@ -806,3 +806,197 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
 
     for q in queues:
         q.remote_socket.close(linger=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_shared_tensor_slow_reader_unlink_and_private_writes(tmp_path, dtype):
+    """A slow reader can map; last map unlinks; live views outlast writer cleanup."""
+    from pathlib import Path
+
+    from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
+
+    store = SharedTensorStore(str(tmp_path), 2)
+    tensor = torch.ones(1024, 1024, dtype=dtype).t()  # noncontiguous
+    rebuild, args = store.reduce_tensor(tensor)
+    path = Path(args[0])
+    first = rebuild(*args)
+    assert path.exists()
+    second = rebuild(*args)
+    assert not path.exists()
+    assert torch.equal(first, tensor)
+    assert torch.equal(second, tensor)
+    first[0, 0] = 7
+    assert second[0, 0] == 1
+    store.close()
+    assert torch.equal(second, tensor)
+
+
+def test_shared_tensor_unacknowledged_files_cleaned_on_shutdown(tmp_path):
+    from pathlib import Path
+
+    from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
+
+    store = SharedTensorStore(str(tmp_path), 2)
+    rebuild, args = store.reduce_tensor(torch.ones(1024, 1024))
+    first = rebuild(*args)
+    assert Path(args[0]).exists()
+    store.close()  # Simulate teardown after the other reader died.
+    assert not Path(args[0]).exists()
+    assert first.sum().item() == 1024 * 1024
+
+
+@pytest.mark.parametrize("max_chunk_bytes", [128, 4096])
+def test_shared_tensor_broadcast_local_remote_and_ring_reuse(tmp_path, max_chunk_bytes):
+    """Local readers map one inode; remote readers receive ordinary tensor bytes."""
+    from pathlib import Path
+
+    writer = MessageQueue(
+        3,
+        2,
+        max_chunks=1,
+        max_chunk_bytes=max_chunk_bytes,
+        connect_ip="127.0.0.1",
+        shared_tensor_dir=str(tmp_path),
+    )
+    readers = [
+        MessageQueue.create_from_handle(writer.export_handle(), i) for i in range(3)
+    ]
+    writer.wait_until_ready()
+    for reader in readers:
+        reader.wait_until_ready()
+    tensor = torch.ones(1024, 1024, dtype=torch.bfloat16)
+    try:
+        writer.enqueue({"pixels": tensor}, shared_tensor_ids={id(tensor)})
+        first = readers[0].dequeue(timeout=5)["pixels"]
+        files = list(tmp_path.glob("vllm-mm-*/tensor-*"))
+        assert len(files) == 1
+        second = readers[1].dequeue(timeout=5)["pixels"]
+        assert not Path(files[0]).exists()
+        remote = readers[2].dequeue(timeout=5)["pixels"]
+        for result in (first, second, remote):
+            assert torch.equal(result, tensor)
+        # A reused ring slot must not overwrite the still-live mapped input.
+        writer.enqueue("next")
+        for reader in readers:
+            assert reader.dequeue(timeout=5) == "next"
+        assert torch.equal(second, tensor)
+        first[0, 0] = 9
+        assert second[0, 0] == remote[0, 0] == 1
+    finally:
+        for reader in readers:
+            reader.shutdown()
+        writer.shutdown()
+
+
+def _map_shared_tensor_in_process(reduced, ready, release, result):
+    import os
+
+    rebuild, args = reduced
+    inode = os.stat(args[0]).st_ino
+    tensor = rebuild(*args)
+    result.send((inode, tuple(tensor.shape), str(tensor.dtype), tensor.sum().item()))
+    ready.set()
+    assert release.wait(timeout=30)
+    assert tensor.sum().item() == 1024 * 1024
+    result.close()
+
+
+def test_shared_tensor_eight_processes_use_one_backing_file(tmp_path):
+    """TP8-sized reader group retains valid views after the final reader unlinks."""
+    from pathlib import Path
+
+    from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
+
+    context = mp.get_context("spawn")
+    store = SharedTensorStore(str(tmp_path), 8)
+    reduced = store.reduce_tensor(torch.ones(1024, 1024, dtype=torch.bfloat16))
+    expected_inode = Path(reduced[1][0]).stat().st_ino
+    release = context.Event()
+    workers = []
+    try:
+        for _ in range(8):
+            ready = context.Event()
+            parent, child = context.Pipe(duplex=False)
+            process = context.Process(
+                target=_map_shared_tensor_in_process,
+                args=(reduced, ready, release, child),
+            )
+            process.start()
+            child.close()
+            workers.append((process, ready, parent))
+        for process, ready, result in workers:
+            assert ready.wait(timeout=30)
+            assert result.recv() == (
+                expected_inode,
+                (1024, 1024),
+                "torch.bfloat16",
+                1024 * 1024,
+            )
+        assert not Path(reduced[1][0]).exists()
+        store.close()
+        release.set()
+        for process, _, _ in workers:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+    finally:
+        release.set()
+        for process, _, result in workers:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+            result.close()
+        store.close()
+
+
+def test_shared_tensor_serialization_failure_removes_unpublished_files(tmp_path):
+    writer = MessageQueue(2, 2, shared_tensor_dir=str(tmp_path))
+    tensor = torch.ones(1024, 1024)
+    try:
+        with pytest.raises((AttributeError, pickle.PicklingError)):
+            writer.enqueue([tensor, lambda: None], shared_tensor_ids={id(tensor)})
+        assert list(tmp_path.glob("vllm-mm-*/tensor-*")) == []
+    finally:
+        writer.shutdown()
+
+
+def _abandoned_shared_tensor_writer(directory, result):
+    from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
+
+    store = SharedTensorStore(directory, 2)
+    _, args = store.reduce_tensor(torch.ones(1024, 1024))
+    result.send(args[0])
+    result.recv()  # Parent kills us before any reader maps the input.
+
+
+def test_shared_tensor_restart_reaps_dead_writer_but_preserves_live_writer(tmp_path):
+    from pathlib import Path
+
+    from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
+
+    live = SharedTensorStore(str(tmp_path), 2)
+    _, live_args = live.reduce_tensor(torch.ones(1024, 1024))
+    context = mp.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(
+        target=_abandoned_shared_tensor_writer, args=(str(tmp_path), child)
+    )
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(timeout=30)
+        abandoned = Path(parent.recv())
+        process.kill()
+        process.join(timeout=5)
+        assert abandoned.exists()
+        restarted = SharedTensorStore(str(tmp_path), 2)
+        try:
+            assert not abandoned.exists()
+            assert Path(live_args[0]).exists()
+        finally:
+            restarted.close()
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=5)
+        parent.close()
+        live.close()
