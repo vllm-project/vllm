@@ -72,19 +72,26 @@ This means that, with the Transformers modeling backend for vLLM, new models can
 
 This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers modeling backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
 
-To make your model compatible with the Transformers modeling backend, it needs:
+To make your model compatible with the Transformers modeling backend:
 
-1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
-    - If your model is encoder-only:
-        1. Add `is_causal = False` to `MyAttention`.
-    - If your model is mixture-of-experts (MoE):
-        1. Your sparse MoE block must have an attribute called `experts`.
-        2. The class of `experts` (`MyExperts`) must either:
-            - Inherit from `nn.ModuleList` (naive).
-            - Or contain all 3D `nn.Parameters` (packed).
-        3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
-2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
-3. `MyModel` must contain `_supports_attention_backend = True`.
+1. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
+    - It must make exactly one such call. vLLM attaches one `Attention` layer per `MyAttention` module.
+    - `MyAttention` must contain a unique `layer_idx`. vLLM keys its KV cache using this index.
+    - Pass `scaling=` to the interface if your scale is not `head_size**-0.5`. vLLM reads it from the call to the attention interface.
+2. If your model is encoder-only:
+    1. Add `is_causal = False` to `MyAttention`.
+3. If your model is mixture-of-experts (MoE):
+    1. Your sparse MoE block must have an attribute called `experts`.
+    2. The class of `experts` (`MyExperts`) must either:
+        - Inherit from `nn.ModuleList` (naive).
+        - Or contain all 3D `nn.Parameters` (packed).
+    3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+
+!!! note
+    `MyModel` no longer needs `_supports_attention_backend = True`, and `kwargs` no
+    longer need to be passed down through every module from `MyModel` to
+    `MyAttention`. vLLM reaches its attention layer through `MyAttention` itself, so
+    all it asks is that `MyAttention` dispatches through the interface.
 
 <details class="code">
 <summary>modeling_my_model.py</summary>
@@ -97,14 +104,24 @@ from torch import nn
 class MyAttention(nn.Module):
     is_causal = False  # Only do this for encoder-only models
 
+    def __init__(self, config, layer_idx):
+        ...
+        self.config = config
+        self.layer_idx = layer_idx
+        self.scaling = self.head_dim**-0.5
+        ...
+
     def forward(self, hidden_states, **kwargs):
         ...
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
             key_states,
             value_states,
+            scaling=self.scaling,
             **kwargs,
         )
         ...
@@ -127,7 +144,7 @@ class MySparseMoEBlock(nn.Module):
         ...
 
 class MyModel(PreTrainedModel):
-    _supports_attention_backend = True
+    ...
 ```
 
 </details>
@@ -135,7 +152,7 @@ class MyModel(PreTrainedModel):
 Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
-2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
+2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `_can_set_attn_implementation()`.
 3. `MyModel` is loaded into one of the Transformers modeling backend classes in [vllm/model_executor/models/transformers](../../vllm/model_executor/models/transformers) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
@@ -414,6 +431,7 @@ th {
 | `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
 | `Jais2ForCausalLM` | Jais2 | `inceptionai/Jais-2-8B-Chat`, `inceptionai/Jais-2-70B-Chat`, etc. | | ✅︎ |
 | `JambaForCausalLM` | Jamba | `ai21labs/AI21-Jamba-1.5-Large`, `ai21labs/AI21-Jamba-1.5-Mini`, `ai21labs/Jamba-v0.1`, etc. | ✅︎ | ✅︎ |
+| `K2HorizonForCausalLM` | K2-Horizon | `IFM/K2-Horizon-7B`, `IFM/K2-Horizon-375B` | | ✅︎ |
 | `KimiLinearForCausalLM` | Kimi-Linear-48B-A3B-Base, Kimi-Linear-48B-A3B-Instruct | `moonshotai/Kimi-Linear-48B-A3B-Base`, `moonshotai/Kimi-Linear-48B-A3B-Instruct` | | ✅︎ |
 | `Lfm2ForCausalLM` | LFM2 | `LiquidAI/LFM2-1.2B`, `LiquidAI/LFM2-700M`, `LiquidAI/LFM2-350M`, etc. | ✅︎ | ✅︎ |
 | `Lfm2MoeForCausalLM` | LFM2MoE | `LiquidAI/LFM2-8B-A1B-preview`, etc. | ✅︎ | ✅︎ |
@@ -472,6 +490,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `GPTBigCodeForCausalLM` | StarCoder, SantaCoder, WizardCoder | `bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, `WizardLM/WizardCoder-15B-V1.0`, etc. | ✅︎ | |
 | `HunYuanDenseV1ForCausalLM` | Hunyuan Dense | `tencent/Hunyuan-7B-Instruct` | ✅︎ | ✅︎ |
 | `HunYuanMoEV1ForCausalLM` | Hunyuan-A13B | `tencent/Hunyuan-A13B-Instruct`, `tencent/Hunyuan-A13B-Pretrain`, `tencent/Hunyuan-A13B-Instruct-FP8`, etc. | ✅︎ | ✅︎ |
+| `NanbeigeForCausalLM` | Nanbeige4.2 | `Nanbeige/Nanbeige4.2-3B`, etc. | ✅︎ | ✅︎ |
 | `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |
 | `Olmo3ForCausalLM` | OLMo3 | `allenai/Olmo-3-7B-Instruct`, `allenai/Olmo-3-32B-Think`, etc. | ✅︎ | ✅︎ |
@@ -520,6 +539,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
+| `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL | T + I<sup>E+</sup> | `inclusionAI/Ling-3.0-flash-VL` | | ✅︎ |
 | `BeeForConditionalGeneration` | Bee-8B | T + I<sup>E+</sup> | `Open-Bee/Bee-8B-RL`, `Open-Bee/Bee-8B-SFT` | | ✅︎ |
 | `Blip2ForConditionalGeneration` | BLIP-2 | T + I<sup>E</sup> | `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc. | ✅︎ | ✅︎ |
 | `Cohere2VisionForConditionalGeneration` | Command A Vision, Command-A+ | T + I<sup>+</sup> | `CohereLabs/command-a-vision-07-2025`, `CohereLabs/command-a-plus-05-2026`, etc. | | ✅︎ |
@@ -528,6 +548,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `DeepseekVLV2ForCausalLM` | DeepSeek-VL2 | T + I<sup>+</sup> | `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2`, etc. | | ✅︎ |
 | `DeepseekOCRForCausalLM` | DeepSeek-OCR | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR`, etc. | ✅︎ | ✅︎ |
 | `DeepseekOCR2ForCausalLM` | DeepSeek-OCR-2 | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-OCR-2`, etc. | ✅︎ | ✅︎ |
+| `DeepseekV4ForConditionalGeneration` | DeepSeek-V4 (vision) | T + I<sup>+</sup> | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp` | ✅︎ | ✅︎ |
 | `Eagle2_5_VLForConditionalGeneration` | Eagle2.5-VL | T + I<sup>E+</sup> | `nvidia/Eagle2.5-8B`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_VLMoeForConditionalGeneration` | Ernie4.5-VL | T + I<sup>+</sup>/ V<sup>+</sup> | `baidu/ERNIE-4.5-VL-28B-A3B-PT`, `baidu/ERNIE-4.5-VL-424B-A47B-PT` | | ✅︎ |
 | `Exaone4_5_ForConditionalGeneration` | EXAONE-4.5 | T + I<sup>E+</sup> | `LGAI-EXAONE/EXAONE-4.5-33B`, etc. | ✅︎ | ✅︎ |
@@ -581,6 +602,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | T + A | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
+| `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
 | `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
@@ -681,6 +703,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     its [DFlash](../features/speculative_decoding/README.md) path.
 
 !!! note
+    Both Nemotron Nano architecture names map to the same vLLM implementation.
+    Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`
+    checkpoints such as `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` accept text,
+    image and video only.
+
+!!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
@@ -692,7 +720,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
-| `FunASRForConditionalGeneration` | FunASR | `allendou/Fun-ASR-Nano-2512-vllm`, etc. | | |
+| `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |

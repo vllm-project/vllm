@@ -91,6 +91,26 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
+        query_lens_cpu = prefill_metadata.query_lens_cpu
+        if query_lens_cpu is None:
+            raise ValueError("TRTLLM ragged prefill requires CPU query lengths")
+        if query_lens_cpu.device.type != "cpu":
+            raise ValueError("TRTLLM ragged prefill query lengths must be on CPU")
+        if query_lens_cpu.ndim != 1 or query_lens_cpu.numel() == 0:
+            raise ValueError(
+                "TRTLLM ragged prefill requires a non-empty 1D query-length tensor"
+            )
+        min_query_len = int(torch.min(query_lens_cpu).item())
+        if min_query_len < 0:
+            raise ValueError("TRTLLM ragged prefill query lengths must be non-negative")
+        self._has_active_rows = min_query_len > 0
+        if not self._has_active_rows:
+            has_mixed_rows = bool(torch.any(query_lens_cpu > 0).item())
+            if has_mixed_rows:
+                raise ValueError(
+                    "TRTLLM ragged prefill contains mixed active and empty query "
+                    f"rows: query_lens={query_lens_cpu.tolist()}"
+                )
 
     def supports_out(self) -> bool:
         # Output head dim is v.shape[-1] == v_head_dim, so `out` is unpadded.
@@ -116,6 +136,18 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
                 dtype=self._prefill_metadata.output_dtype,
             )
 
+        if not self._has_active_rows:
+            out.zero_()
+            if return_softmax_lse:
+                lse = torch.empty(
+                    self.num_heads,
+                    q.shape[0],
+                    dtype=torch.float32,
+                    device=q.device,
+                )
+                return out, lse.fill_(-float("inf"))
+            return out
+
         ret = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -135,6 +167,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             is_causal=True,
             return_lse=return_softmax_lse,
             out=out,
+            skip_all_rows_active_check=True,
         )
 
         if isinstance(ret, tuple):
@@ -151,6 +184,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
+
+        if not chunk.all_rows_active:
+            raise ValueError(
+                "TRTLLM ragged context prefill contains an empty query or KV row"
+            )
 
         if out is None:
             out = torch.empty(
@@ -180,6 +218,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             is_causal=False,
             return_lse=True,
             out=out,
+            skip_all_rows_active_check=True,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)

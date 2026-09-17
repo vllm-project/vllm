@@ -48,7 +48,7 @@ _R = TypeVar("_R", default=Any)
 
 
 class OfflineInferenceMixin:
-    """Offline inference utils"""
+    """Offline inference utils."""
 
     request_counter: Counter
     renderer: BaseRenderer
@@ -113,14 +113,14 @@ class OfflineInferenceMixin:
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        """
-        Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
+        """Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
 
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
             A list of `EngineInput` objects ready to be passed into LLMEngine.
+
         """
         renderer = self.renderer
         model_config = self.model_config
@@ -168,14 +168,14 @@ class OfflineInferenceMixin:
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
-        """
-        Convert a list of conversations into prompts so that they can then
+        """Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
 
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
             A list of `EngineInput` objects ready to be passed into LLMEngine.
+
         """
         renderer = self.renderer
 
@@ -196,9 +196,16 @@ class OfflineInferenceMixin:
             ),
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        tok_params = renderer.default_chat_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
+        # The chat template is responsible for emitting BOS/EOS, so do not let
+        # the tokenizer add them again unless the caller asks for it. This
+        # matches the online chat API (`ChatCompletionRequest.add_special_tokens`
+        # defaults to `False`) and avoids a double BOS for multimodal models,
+        # whose processor default is `add_special_tokens=True` (#55197).
+        tokenization_kwargs = {
+            "add_special_tokens": False,
+            **(tokenization_kwargs or {}),
+        }
+        tok_params = renderer.default_chat_tok_params.with_kwargs(**tokenization_kwargs)
         prompt_extras = (
             None
             if mm_processor_kwargs is None

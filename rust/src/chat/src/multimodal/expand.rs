@@ -45,6 +45,14 @@ impl<'a> ExpansionLane<'a> {
 /// matching the original media-part order within that modality; markers of
 /// different modalities may interleave freely.
 ///
+/// Replacements may carry an [`AlignmentPad`](llm_multimodal::AlignmentPad)
+/// (e.g. DeepSeek-V4.1's compressor-alignment pad): `period - 1 - offset %
+/// period` pad tokens are
+/// prepended at splice time, where `offset` is the position the replacement
+/// lands at in the expanded prompt. The pads are part of the reported range
+/// and count as embed positions only if the pad token id equals the
+/// modality's embed token id.
+///
 /// The returned ranges point into the already-expanded prompt, grouped per
 /// modality in item order.
 pub(super) fn expand_prompt_token_ids(
@@ -56,12 +64,14 @@ pub(super) fn expand_prompt_token_ids(
         return Ok(HashMap::new());
     }
 
-    let replacement_growth = lanes
-        .iter()
-        .flat_map(|lane| lane.replacements.iter())
-        .fold(0usize, |total, replacement| {
-            total.saturating_add(replacement.tokens.len().saturating_sub(1))
-        });
+    let replacement_growth = lanes.iter().flat_map(|lane| lane.replacements.iter()).fold(
+        0usize,
+        |total, replacement| {
+            // Alignment pads are position-dependent; reserve the worst case.
+            let max_pads = replacement.alignment_pad.map_or(0, |pad| pad.period - 1);
+            total.saturating_add(max_pads + replacement.tokens.len().saturating_sub(1))
+        },
+    );
     let expanded_len = prompt_token_ids.len().saturating_add(replacement_growth);
 
     let mut expanded = Vec::with_capacity(expanded_len);
@@ -95,10 +105,20 @@ pub(super) fn expand_prompt_token_ids(
                 expanded.len()
             );
         }
-        let range_len = replacement_len.saturating_add(structural_prefix);
+        // Position-dependent alignment padding, computed from the offset the
+        // replacement block lands at in the expanded prompt (mirroring
+        // vLLM's `_apply_token_matches_with_placeholders` splice-time pad).
+        let pad_count = replacement.alignment_pad.map_or(0, |pad| pad.count_at(expanded.len()));
+        let range_len = structural_prefix + pad_count + replacement_len;
         let is_embed = {
             let mut mask = Vec::with_capacity(range_len);
             mask.extend(std::iter::repeat_n(false, structural_prefix));
+            if let Some(pad) = &replacement.alignment_pad {
+                mask.extend(std::iter::repeat_n(
+                    pad.token_id as u32 == lane.embed_token_id,
+                    pad_count,
+                ));
+            }
             mask.extend(
                 replacement.tokens.iter().map(|&token| token as u32 == lane.embed_token_id),
             );
@@ -106,6 +126,9 @@ pub(super) fn expand_prompt_token_ids(
         };
 
         let expanded_offset = expanded.len() - structural_prefix;
+        if let Some(pad) = &replacement.alignment_pad {
+            expanded.extend(std::iter::repeat_n(pad.token_id as u32, pad_count));
+        }
         expanded.extend(replacement.tokens.iter().map(|&token| token as u32));
         ranges.entry(lane.modality).or_default().push(PlaceholderRange {
             offset: expanded_offset,
@@ -228,7 +251,7 @@ mod tests {
 
     fn assert_bool_mask(range: &PlaceholderRange, expected: &[bool]) {
         let tensor = range.is_embed.as_ref().expect("is_embed mask");
-        assert_eq!(tensor.dtype, "bool");
+        assert_eq!(tensor.dtype.as_str(), "bool");
         assert_eq!(tensor.shape, vec![expected.len()]);
         assert_eq!(
             tensor.data,
@@ -454,7 +477,6 @@ mod tests {
     }
 
     const QWEN3_AUDIO_PAD_ID: u32 = 151_676;
-
     fn qwen3_audio_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
         prepared_media(
             Modality::Audio,
@@ -541,5 +563,111 @@ mod tests {
                 if message.contains("<|video_pad|>") && message.contains("`video`")
         ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
+    }
+
+    // DeepSeek-V4.1 image spans: every span position carries the image token
+    // id; a compressor-alignment pad (id 129265, period 2) is prepended at
+    // splice time so spans always start at the same compressor phase.
+    const DS_IMAGE_ID: u32 = 129_264;
+    const DS_IMAGE_PAD_ID: u32 = 129_265;
+
+    fn deepseek_prepared(span_lens: Vec<usize>) -> PreparedMedia {
+        prepared_media(
+            Modality::Image,
+            "<｜deepseek_image｜>",
+            DS_IMAGE_ID,
+            DS_IMAGE_ID,
+            span_lens
+                .into_iter()
+                .map(|len| {
+                    PromptReplacement::repeated(
+                        Modality::Image,
+                        "<｜deepseek_image｜>",
+                        DS_IMAGE_ID as TokenId,
+                        len,
+                    )
+                    .with_alignment_pad(DS_IMAGE_PAD_ID as TokenId, 2)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn expand_prompt_tokens_skips_alignment_pad_at_odd_offset() {
+        // Odd block start: already at the target compressor phase, no pad.
+        let mut prompt_token_ids = vec![1, DS_IMAGE_ID, 2];
+        let prepared = vec![deepseek_prepared(vec![3])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![1, DS_IMAGE_ID, DS_IMAGE_ID, DS_IMAGE_ID, 2]
+        );
+        assert_eq!(ranges[0].offset, 1);
+        assert_eq!(ranges[0].length, 3);
+        assert_bool_mask(&ranges[0], &[true, true, true]);
+    }
+
+    #[test]
+    fn expand_prompt_tokens_prepends_alignment_pad_at_even_offset() {
+        // Even block start: one pad token aligns the span to phase 1.
+        let mut prompt_token_ids = vec![1, 3, DS_IMAGE_ID, 2];
+        let prepared = vec![deepseek_prepared(vec![3])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                3,
+                DS_IMAGE_PAD_ID,
+                DS_IMAGE_ID,
+                DS_IMAGE_ID,
+                DS_IMAGE_ID,
+                2
+            ]
+        );
+        // The range starts at the pad; pads are not embed positions.
+        assert_eq!(ranges[0].offset, 2);
+        assert_eq!(ranges[0].length, 4);
+        assert_bool_mask(&ranges[0], &[false, true, true, true]);
+    }
+
+    #[test]
+    fn expand_prompt_tokens_alignment_pad_realigns_each_span() {
+        // Every image span must start at phase 1 (odd offset) regardless of
+        // where the previous span landed.
+        let mut prompt_token_ids = vec![1, DS_IMAGE_ID, 2, DS_IMAGE_ID, 3];
+        let prepared = vec![deepseek_prepared(vec![2, 2])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        // First span at odd offset 1: no pad (block [1,3)).
+        // Second marker originally at index 3; after the first expansion the
+        // block starts at offset 4 (even): one pad, span at odd offset 5.
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                DS_IMAGE_ID,
+                DS_IMAGE_ID,
+                2,
+                DS_IMAGE_PAD_ID,
+                DS_IMAGE_ID,
+                DS_IMAGE_ID,
+                3,
+            ]
+        );
+        assert_eq!((ranges[0].offset, ranges[0].length), (1, 2));
+        assert_bool_mask(&ranges[0], &[true, true]);
+        assert_eq!((ranges[1].offset, ranges[1].length), (4, 3));
+        assert_bool_mask(&ranges[1], &[false, true, true]);
+        // Both spans (past the pad) start at odd offsets.
+        assert_eq!((ranges[1].offset + 1) % 2, 1);
     }
 }

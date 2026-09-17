@@ -17,9 +17,10 @@ log) and vLLM continues to boot normally.
 
 Even when the SDK is installed, :func:`attach_router` also requires
 ``VLLM_ENABLE_COHERE_API=1`` in the environment before it will expose
-the chat route. The render route additionally requires
-``VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1``. These gates keep unrelated
-deployments from accidentally exposing the APIs.
+the chat route. The render route additionally requires scale-out
+endpoints to be enabled, i.e. ``--enable-scale-out`` or
+``--tokens-only``. These gates keep unrelated deployments from
+accidentally exposing the APIs.
 
 Note: the handlers must live at module scope (not inside
 ``attach_router``) so that FastAPI's ``typing.get_type_hints`` resolves
@@ -306,6 +307,7 @@ def attach_router(app: FastAPI) -> None:
         )
         return
     app.include_router(router)
-    if envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS:
+    args = getattr(app.state, "args", None)
+    if getattr(args, "enable_scale_out", False) or getattr(args, "tokens_only", False):
         app.include_router(render_router)
     app.add_middleware(CohereErrorEnvelopeMiddleware)

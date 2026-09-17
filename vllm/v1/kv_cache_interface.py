@@ -147,17 +147,21 @@ class KVCacheSpecKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+class SparseCacheRole(str, Enum):
+    SPARSE = "sparse"
+    INDEXER = "indexer"
+
+
 @dataclass(frozen=True)
 class KVCacheSpec:
-    """
-    A base class for specifying the KV cache format of one layer.
-    """
+    """A base class for specifying the KV cache format of one layer."""
 
     # number of tokens in a block
     block_size: int
 
     @property
     def prefix_cacheable(self) -> bool:
+        """Whether this spec's group participates in prefix caching."""
         return True
 
     @property
@@ -174,11 +178,11 @@ class KVCacheSpec:
 
     @property
     def page_size_bytes(self) -> int:
-        """
-        The size of a page with `block_size` tokens in bytes.
+        """The size of a page with `block_size` tokens in bytes.
 
         Returns:
             The page size
+
         """
         raise NotImplementedError
 
@@ -191,49 +195,48 @@ class KVCacheSpec:
             return kernel_block_size // self.tokens_per_state
         return 1
 
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return 128
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        """
-        The maximum possible memory usage of this KV cache in bytes.
+        """The maximum possible memory usage of this KV cache in bytes.
 
         Returns:
             The KV cache size in bytes
+
         """
         raise NotImplementedError
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        """
-        The number of block table entries needed per request, i.e. the row
+        """The number of block table entries needed per request, i.e. the row
         length of the worker-side block table for this cache group.
 
         Args:
             vllm_config: The vllm config.
             max_len: The maximum sequence length to size for, including the
                 encoder length for encoder-decoder models.
+
         """
         return cdiv(max_len, self.block_size)
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
-        """
-        Create a new KVCacheSpec from self but replacing the block size.
-        """
+        """Create a new KVCacheSpec from self but replacing the block size."""
         return replace(self, block_size=block_size)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
-        """
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All layers in the same KV cache group must be the same."
-        )
+        """Merge a list of KVCacheSpec objects into a single KVCacheSpec object."""
+        if not all(spec == specs[0] for spec in specs[1:]):
+            raise AssertionError(
+                "All layers in the same KV cache group must be the same."
+            )
         return copy.deepcopy(specs[0])
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
-        """
-        Whether this KVCacheSpec is uniform with all specs of all layers.
-        """
+        """Whether this KVCacheSpec is uniform with all specs of all layers."""
         uniform_type_base_spec = KVCacheSpecRegistry.get_uniform_type_base_spec(self)
         assert uniform_type_base_spec is not None, (
             f"Unsupported KV cache spec type: {type(self)}. "
@@ -242,6 +245,25 @@ class KVCacheSpec:
         return all(
             isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
         )
+
+    @property
+    def has_layer_views(self) -> bool:
+        """Whether generic allocation creates per-layer cache views.
+
+        Specs without a per-layer shape keep the raw backing tensor and lay it
+        out themselves. They also have no attention module of their own, so
+        they take no part in attention-backend or kernel-block selection.
+        """
+        return True
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        """Whether the worker computes a per-token slot mapping for this spec.
+
+        Specs that address their pages themselves (raw storage, ring buffers)
+        take no slot mapping row.
+        """
+        return True
 
 
 def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
@@ -382,6 +404,70 @@ def create_kv_cache_views(
 
 
 @dataclass(frozen=True, kw_only=True)
+class HiSparseHotSpec(KVCacheSpec):
+    """Ephemeral per-request HiSparse hot-cache allocation."""
+
+    page_size: int
+    blocks_per_request: int
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.blocks_per_request * self.page_size
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return self.blocks_per_request
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, kw_only=True)
+class HiSparseResidentSpec(KVCacheSpec):
+    """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
+
+    page_size: int
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        num_tokens = min(max_in_flight_tokens, max_model_len)
+        return cdiv(num_tokens, self.block_size)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
+            self.page_size
+        )
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
@@ -443,8 +529,7 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):
-    """
-    When hybrid allocator is disabled and the model contains both full
+    """When hybrid allocator is disabled and the model contains both full
     attention layers and sliding window attention layers, sliding
     window attention are regarded as full attention in KV cache manager
     (blocks are allocated for all tokens), while computed as sliding window
@@ -488,8 +573,7 @@ class FullAttentionSpec(AttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
+        """Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
         assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
@@ -555,7 +639,18 @@ class MLAAttentionSpec(FullAttentionSpec):
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
-    # Marks draft groups that flatten a non-causal query block into decode rows.
+    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
+    is_index_group_leader: bool = False
+    storage_block_size: int | None = None
+    """Token width used to view storage when it differs from the kernel block."""
+    block_stride_alignment: int | None = None
+    """Required alignment, in bytes, of the distance between consecutive
+    blocks of this cache. In block-major layouts that distance is the whole
+    block (all layers' pages), so the allocator rounds the block up to it.
+    DeepGEMM's paged sparse MQA-logits kernels address pages as
+    ``base + page * stride`` and need it 512B-aligned."""
+    # Group capability enabled when any member flattens a non-causal query block
+    # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -572,18 +667,22 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
+        cache_role_set = {spec.cache_role for spec in specs}
+        index_group_leader_set = {spec.is_index_group_leader for spec in specs}
+        storage_block_size_set = set(spec.storage_block_size for spec in specs)
+        block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
+            and len(cache_role_set) == 1
+            and len(index_group_leader_set) == 1
+            and len(storage_block_size_set) == 1
+            and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, and model version."
-        )
-        non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
-        assert len(non_causal_mtd_set) == 1, (
-            "All attention layers in the same KV cache group must agree on "
-            "non_causal_multi_token_decode."
+            "quantization method, tokens per state, model version, cache role, "
+            "index-sharing role, storage block size and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -597,7 +696,13 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
-            non_causal_multi_token_decode=non_causal_mtd_set.pop(),
+            cache_role=cache_role_set.pop(),
+            is_index_group_leader=index_group_leader_set.pop(),
+            storage_block_size=storage_block_size_set.pop(),
+            block_stride_alignment=block_stride_alignment_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -766,6 +871,10 @@ class CircularBufferSpec(AttentionSpec):
     reads the open group's committed keys from the ring.
     """
 
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # The ring occupies one block per request for its whole lifetime.
         del vllm_config
@@ -784,6 +893,10 @@ class CircularBufferSpec(AttentionSpec):
 
     @property
     def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
         return False
 
 
@@ -853,6 +966,28 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class KpoolTailSpec(SlidingWindowSpec):
+    """One-block circular scratch cache for a kpool indexer's raw tail."""
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
@@ -862,6 +997,7 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
     num_prefill_checkpoint_blocks: int = 0
+    prefill_checkpoint_alignment: int | None = None
     num_heads: int = 1
     tokens_per_state: int = -1
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
@@ -876,6 +1012,10 @@ class MambaSpec(KVCacheSpec):
         )
 
     @property
+    def real_page_size_bytes(self) -> int:
+        return self.state_content_size_bytes
+
+    @property
     def page_size_bytes(self) -> int:
         page_size = sum(
             prod(shape) * get_dtype_size(dtype)
@@ -885,6 +1025,10 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -918,10 +1062,47 @@ class MambaSpec(KVCacheSpec):
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
+            and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
+
+
+def get_mamba_prefill_checkpoint_position(
+    num_tokens: int,
+    hash_block_size: int,
+    drop_eagle_block: bool,
+) -> int:
+    """Return the reusable Mamba checkpoint boundary for a prefill."""
+    checkpoint_position = (num_tokens - 1) // hash_block_size * hash_block_size
+    if drop_eagle_block:
+        checkpoint_position -= hash_block_size
+    return max(checkpoint_position, 0)
+
+
+def is_mamba_prefill_checkpoint_valid(
+    query_start: int,
+    query_end: int,
+    checkpoint_position: int,
+    hash_block_size: int,
+    mamba_block_size: int,
+    checkpoint_alignment: int | None,
+) -> bool:
+    """Whether a backend can export the checkpoint in this query."""
+    if checkpoint_alignment is None:
+        return False
+    assert checkpoint_alignment > 0
+
+    initial_state_col = (query_start - 1) // mamba_block_size
+    checkpoint_col = cdiv(query_end, mamba_block_size) - 2
+    return (
+        query_start % hash_block_size == 0
+        and checkpoint_col > initial_state_col
+        and query_start + hash_block_size <= checkpoint_position
+        and query_start < checkpoint_position < query_end
+        and (checkpoint_position - query_start) % checkpoint_alignment == 0
+    )
 
 
 @dataclass(frozen=True)
@@ -933,9 +1114,7 @@ class EncoderOnlyAttentionSpec(AttentionSpec):
 
 @dataclass(frozen=True)
 class CrossAttentionSpec(AttentionSpec):
-    """
-    KV cache spec for cross-attention layers in encoder-decoder models.
-    """
+    """KV cache spec for cross-attention layers in encoder-decoder models."""
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
@@ -950,8 +1129,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
+        """Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
         assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
@@ -1001,8 +1179,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
 @dataclass(frozen=True)
 class UniformTypeKVCacheSpecs(KVCacheSpec):
-    """
-    A KV cache spec for multiple layers with the same type of attention. Here,
+    """A KV cache spec for multiple layers with the same type of attention. Here,
     same types means always need the same number of token slots. For example,
     sliding window attentions with different window sizes are not the same type
     and should not be merged into one UniformTypeKVCacheSpecs.
@@ -1022,6 +1199,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return self.first_spec.block_table_token_alignment
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
@@ -1046,8 +1227,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        """
-        Whether all layers have the same type of KV cache spec.
+        """Whether all layers have the same type of KV cache spec.
 
         Uses the registry to determine grouping base classes, so custom specs
         that inherit from FullAttentionSpec are treated as full attention.
@@ -1061,8 +1241,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @classmethod
     def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:
-        """
-        Return a SameTypeKVCacheSpecs object if all layers have the same type
+        """Return a SameTypeKVCacheSpecs object if all layers have the same type
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
@@ -1083,6 +1262,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
             for spec in self.kv_cache_specs.values()
         )
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return self.first_spec.uses_slot_mapping
 
 
 def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
@@ -1169,8 +1352,7 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 
 @dataclass
 class KVCacheTensor:
-    """
-    A class for specifying how the workers should initialize the KV cache.
+    """A class for specifying how the workers should initialize the KV cache.
 
     Placement of a set of same-shaped layers in the KV cache allocation.
     Layer ``layers[l]``'s page for block ``b`` starts at
@@ -1189,12 +1371,18 @@ class KVCacheTensor:
     layer_stride: int
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
+    host_resident: bool = False
+
+
+class KVCacheGroupRole(str, Enum):
+    DEFAULT = "default"
+    HISPARSE_SOURCE = "hisparse_source"
+    HISPARSE_INDEXER = "hisparse_indexer"
 
 
 @dataclass
 class KVCacheGroupSpec:
-    """
-    Represents a group of model layers that share the same KV cache block table.
+    """Represents a group of model layers that share the same KV cache block table.
     These layers are regarded as one layer in the KV cache manager.
     """
 
@@ -1204,15 +1392,18 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Host groups use the dedicated HiSparse pool; others share the device pool.
+    host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
+    # Ephemeral accelerator-side replicas are rebuilt from their transferable
+    # source group after a connector load.
     enable_kv_transfer: bool = True
+    role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
 
 
 @dataclass
 class KVCacheConfig:
-    """
-    The KV cache configuration of a model.
-    """
+    """The KV cache configuration of a model."""
 
     num_blocks: int
     """The number of KV cache blocks"""
@@ -1230,6 +1421,14 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+    hisparse_host_num_blocks: int | None = None
+    """Capacity of the dedicated HiSparse host-block manager, when enabled."""
+
+    hisparse_host_block_stride: int | None = None
+    """Physical bytes between consecutive HiSparse host blocks."""
+
+    hisparse_shared_host_pool: bool = False
+    """Whether local TP ranks share one physical HiSparse host pool."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
@@ -1238,6 +1437,23 @@ class KVCacheConfig:
             group_id
             for group_id, group in enumerate(self.kv_cache_groups)
             if group.enable_kv_transfer
+        )
+
+    @cached_property
+    def prefix_cacheable_group_ids(self) -> tuple[int, ...]:
+        """IDs of transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            group_id
+            for group_id in self.transfer_group_ids
+            if self.kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable
+        )
+
+    @cached_property
+    def prefix_cacheable_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            self.kv_cache_groups[group_id]
+            for group_id in self.prefix_cacheable_group_ids
         )
 
     @cached_property
@@ -1268,6 +1484,21 @@ class KVCacheConfig:
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     @property
+    def host_group_ids(self) -> tuple[int, ...]:
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if group.host_resident
+        )
+
+    def num_blocks_of(self, tensor: KVCacheTensor) -> int:
+        """Number of blocks addressable by the pool backing ``tensor``."""
+        if not tensor.host_resident:
+            return self.num_blocks
+        assert self.hisparse_host_num_blocks is not None
+        return self.hisparse_host_num_blocks
+
+    @property
     def has_mamba_layers(self) -> bool:
         return any(
             isinstance(spec, MambaSpec)
@@ -1277,9 +1508,11 @@ class KVCacheConfig:
 
     @property
     def has_mixed_precision_kv_cache(self) -> bool:
-        """Whether attention groups store their KV cache at more than one precision."""
+        """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
+            if group.host_resident:
+                continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)
                 for spec in iter_layer_specs(group.kv_cache_spec)

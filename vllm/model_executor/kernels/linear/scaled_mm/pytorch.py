@@ -7,7 +7,11 @@ import torch
 
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
@@ -46,8 +50,7 @@ def _supports_torch_fp8_scaled_mm() -> bool:
 
 
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    Base class for FP8 linear kernels using Torch.
+    """Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
     specific device capabilities and torch versions.
     """
@@ -87,6 +90,11 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
             return False, "requires per tensor activation and weight scales."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
 
     def apply_scaled_mm(
         self,

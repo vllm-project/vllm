@@ -34,6 +34,7 @@ class FinishReason(IntEnum):
 # Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
 class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     temperature: float = 1.0
+    watermarking: bool = True
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
@@ -100,6 +101,14 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
+    spec_decode_metrics: object | None = None
+
+
+class ExtendedEngineCoreOutput(EngineCoreOutput):
+    # Match Omni's append-only schema without requiring Omni or torch.
+    multimodal_output: dict[str, object] | None = None
+    is_segment_finished: bool = False
+    new_prompt_len_snapshot: int | None = None
 
 
 class EngineCoreOutputs(
@@ -123,6 +132,7 @@ request = EngineCoreRequest(
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
+        watermarking=False,
         top_p=0.9,
         top_k=8,
         seed=None,
@@ -204,6 +214,21 @@ outputs = EngineCoreOutputs(
     ],
     finished_requests={"req-1"},
 )
+
+extended_outputs = EngineCoreOutputs(
+    outputs=[
+        ExtendedEngineCoreOutput(
+            **msgspec.structs.asdict(outputs.outputs[0]),
+            multimodal_output={"audio": b"\x00\x01"},
+            is_segment_finished=True,
+            new_prompt_len_snapshot=12,
+        )
+    ],
+    finished_requests=outputs.finished_requests,
+)
+extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
+# The ordinary frontend's schema ignores even non-default extension values.
+assert msgspec.msgpack.decode(extended_outputs_bytes, type=EngineCoreOutputs) == outputs
 
 sampling_mask_wire = [
     [
@@ -421,6 +446,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    effective_attention_block_size: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -444,6 +470,7 @@ ready_response = EngineCoreReadyResponse(
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
+    effective_attention_block_size=64,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -455,6 +482,32 @@ ready_response = EngineCoreReadyResponse(
         topic="kv",
     ),
 )
+
+nixl_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "post_duration": [0.001, 0.002],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [],
+    "num_failed_notifications": [],
+    "num_kv_expired_reqs": [1],
+}
+mooncake_stats = {
+    "load_get": [
+        {
+            "duration_seconds": 0.05,
+            "num_keys": 3,
+            "num_bytes": 1024,
+            "status": "ok",
+            "num_failed_keys": 0,
+        }
+    ]
+}
+multi_connector_stats = {
+    "NixlConnector": nixl_stats,
+    "MooncakeStoreConnector": mooncake_stats,
+    "UnsupportedConnector": {"sample_count": 1},
+}
 
 print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
@@ -475,4 +528,8 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(nixl_stats).hex())
+print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
+print(extended_outputs_bytes.hex())
