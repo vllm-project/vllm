@@ -231,7 +231,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         from .ops.qsa_dcp import (
             qsa_dcp_empty_owner_rows,
             qsa_localize_dcp_indices,
-            qsa_neutralize_empty_owner_,
+            qsa_neutralize_empty_owner_lse_,
         )
 
         group = get_dcp_group()
@@ -265,10 +265,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             return_lse=True,
         )
 
-        # A rank that owns none of the selection contributes the identity of the
-        # merge. Zeroing the output matters as much as the -inf: an unwritten
-        # row times a zero weight is still NaN, and the reduction spreads it.
-        qsa_neutralize_empty_owner_(partial_out, partial_lse, empty_rows)
+        # A rank that owns none of the selection contributes the identity of
+        # the merge. The reducer zeroes any row whose weight comes out zero, so
+        # the -inf is the whole fix; the NaN payload behind it cannot escape.
+        qsa_neutralize_empty_owner_lse_(partial_lse, empty_rows)
 
         merged, _merged_lse = cp_lse_ag_out_rs(
             partial_out.float(),

@@ -153,24 +153,28 @@ def qsa_dcp_empty_owner_rows(packed_indices: torch.Tensor) -> torch.Tensor:
     return packed_indices[:, -1] <= 0
 
 
-def qsa_neutralize_empty_owner_(
-    out: torch.Tensor,
+def qsa_neutralize_empty_owner_lse_(
     lse: torch.Tensor,
     empty_rows: torch.Tensor,
 ) -> None:
-    """Give an empty owner the identity of the cross-rank merge.
+    """Give an empty owner the identity of the cross-rank merge: ``lse = -inf``.
 
-    ``out = 0`` and ``lse = -inf``. The merge weights by ``exp(lse - max)``, so
-    ``-inf`` contributes nothing, and zeroing the output keeps an undefined
-    payload from reaching the reduction: a stale or NaN value multiplied by a
-    zero weight is still NaN, and it would corrupt every rank.
+    The attention kernel already emits ``-inf`` for a row it never entered, so
+    this restates a contract rather than repairing one. It is kept because that
+    contract lives in another file, and a row that silently carries a finite
+    LSE would weight garbage into every rank's result.
+
+    The output needs no matching fix. ``correct_attn_out`` multiplies each
+    rank's output by its own ``exp2(lse - global_lse)`` and then forces the row
+    to zero wherever that factor is zero, so a NaN payload cannot survive. That
+    is worth relying on: zeroing ``[tokens, heads, head_dim]`` here would cost a
+    full read-modify-write of the partial output on every layer.
 
     Masked in place with no host synchronization, so this is safe to capture.
     """
     if empty_rows.dtype != torch.bool:
         raise ValueError("empty_rows must be a boolean mask")
-    if out.shape[0] != empty_rows.shape[0] or lse.shape[0] != empty_rows.shape[0]:
-        raise ValueError("empty_rows must have one entry per row of out and lse")
-    mask = empty_rows.to(device=out.device)
-    out.masked_fill_(mask.view(-1, *([1] * (out.ndim - 1))), 0.0)
+    if lse.shape[0] != empty_rows.shape[0]:
+        raise ValueError("empty_rows must have one entry per row of lse")
+    mask = empty_rows.to(device=lse.device)
     lse.masked_fill_(mask.view(-1, *([1] * (lse.ndim - 1))), float("-inf"))

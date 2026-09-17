@@ -147,50 +147,74 @@ def test_empty_owner_mask_tracks_the_count():
     assert got == [False, True, False]
 
 
-def test_neutral_values_are_zero_and_negative_infinity():
+def test_the_neutral_value_is_negative_infinity():
     """The identity of the LSE merge."""
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_neutralize_empty_owner_
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
+        qsa_neutralize_empty_owner_lse_,
+    )
 
-    out = torch.full((3, 2, 4), 5.0)
     lse = torch.full((3, 2), 1.5)
-    empty = torch.tensor([False, True, False])
-    qsa_neutralize_empty_owner_(out, lse, empty)
+    qsa_neutralize_empty_owner_lse_(lse, torch.tensor([False, True, False]))
 
-    assert torch.equal(out[1], torch.zeros_like(out[1]))
     assert torch.isneginf(lse[1]).all()
-    assert torch.equal(out[0], torch.full_like(out[0], 5.0)), "row 0 untouched"
+    assert torch.equal(lse[0], torch.full_like(lse[0], 1.5)), "row 0 untouched"
     assert torch.equal(lse[2], torch.full_like(lse[2], 1.5)), "row 2 untouched"
 
 
-def test_neutralizing_clears_a_poisoned_payload():
-    """`NaN * 0 = NaN`. Zeroing the output is what stops it spreading.
+def _reduce_like_correct_attn_out(outs, lses):
+    """The arithmetic of correct_attn_out in vllm/v1/attention/ops/dcp.py.
 
-    A sparse kernel can leave an unwritten row undefined. Relying on the `-inf`
-    weight alone leaves the NaN inside the product, and the reduction then
-    carries it to every rank.
-
-    Modelled with two ranks, because that is the case that matters: one rank
-    owns nothing and carries a poisoned payload, the other has a real result.
-    The merged answer must be the real one.
+    Base 2, because QSA scales its scores into log2 before the softmax. The
+    guards are the point: they are what lets the caller skip zeroing an empty
+    rank's output, so they are transcribed rather than assumed.
     """
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_neutralize_empty_owner_
+    lses = torch.where(torch.isnan(lses) | torch.isposinf(lses), -torch.inf, lses)
+    lse_max = lses.max(dim=0).values
+    lse_max = torch.where(torch.isneginf(lse_max), torch.zeros_like(lse_max), lse_max)
+    global_lse = torch.log2(torch.exp2(lses - lse_max).sum(dim=0)) + lse_max
 
+    total = torch.zeros_like(outs[0])
+    for rank in range(outs.shape[0]):
+        exponent = lses[rank] - global_lse
+        exponent = torch.where(
+            torch.isnan(exponent) | torch.isposinf(exponent), -torch.inf, exponent
+        )
+        factor = torch.exp2(exponent)
+        corrected = outs[rank] * factor.unsqueeze(-1)
+        corrected = torch.where(
+            (factor == 0.0).unsqueeze(-1), torch.zeros_like(corrected), corrected
+        )
+        total = total + corrected
+    return total
+
+
+def test_the_reducer_clears_an_empty_ranks_poisoned_payload():
+    """Why the caller only has to fix the LSE.
+
+    A sparse kernel leaves an unwritten row undefined, and `NaN * 0` is still
+    NaN. The reducer forces the row to zero wherever the weight is zero, so the
+    `-inf` alone is enough. If that ever stops being true, this test fails
+    instead of a benchmark quietly returning NaN.
+    """
     empty_out = torch.tensor([[[float("nan"), 1e30]]])
-    empty_lse = torch.tensor([[0.0]])
-    qsa_neutralize_empty_owner_(empty_out, empty_lse, torch.tensor([True]))
-    assert torch.isfinite(empty_out).all(), "a poisoned payload survived"
-
+    empty_lse = torch.tensor([[-torch.inf]])
     good_out = torch.tensor([[[2.0, 4.0]]])
     good_lse = torch.tensor([[1.0]])
 
-    lses = torch.stack([empty_lse, good_lse])
-    outs = torch.stack([empty_out, good_out])
-    lse_max = lses.max(dim=0).values
-    weights = torch.exp(lses - lse_max)
-    merged = (outs * weights.unsqueeze(-1)).sum(0) / weights.sum(0).unsqueeze(-1)
-
+    merged = _reduce_like_correct_attn_out(
+        torch.stack([empty_out, good_out]), torch.stack([empty_lse, good_lse])
+    )
     assert torch.isfinite(merged).all(), "the empty rank poisoned the merge"
     torch.testing.assert_close(merged, good_out)
+
+
+def test_every_rank_empty_still_reduces_to_a_finite_row():
+    """A padding row: no rank owns anything, and nothing may become NaN."""
+    outs = torch.stack([torch.full((1, 1, 2), float("nan"))] * 2)
+    lses = torch.stack([torch.tensor([[-torch.inf]])] * 2)
+
+    merged = _reduce_like_correct_attn_out(outs, lses)
+    assert torch.equal(merged, torch.zeros_like(merged))
 
 
 # --- contracts that keep the gate from being applied twice -------------------
