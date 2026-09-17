@@ -530,17 +530,6 @@ class SamplingParams(
 
         self._verify_args()
 
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and self.temperature >= _SAMPLING_EPS
-            and self.seed is None
-        ):
-            raise VLLMValidationError(
-                "Random sampling requires an explicit seed when "
-                "VLLM_BATCH_INVARIANT=1. Set seed in SamplingParams or use "
-                "temperature=0."
-            )
-
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
