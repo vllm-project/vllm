@@ -515,23 +515,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         if self._transformed_l1_weights is None:
             self._check_runtime_supported()
-            # MegaMoE's 1x32 activation scales need 16-byte TMA rows, so
-            # pad each gate/up half and the down projection to a multiple of 512.
-            padded_size = (self.intermediate_size + 511) // 512 * 512
-            padding = padded_size - self.intermediate_size
-            if padding:
-                for param in (self.w13_weight, self.w13_weight_scale):
-                    gate_up = param.data.unflatten(1, (2, self.intermediate_size))
-                    param.data = torch.nn.functional.pad(
-                        gate_up, (0, 0, 0, padding)
-                    ).flatten(1, 2)
-                self.w2_weight.data = torch.nn.functional.pad(
-                    self.w2_weight.data, (0, padding // 2)
-                )
-                self.w2_weight_scale.data = torch.nn.functional.pad(
-                    self.w2_weight_scale.data, (0, padding // 32)
-                )
-                self.intermediate_size = padded_size
             w13_scale = deep_gemm.transform_sf_into_required_layout(
                 self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
                 2 * self.intermediate_size,
@@ -1210,6 +1193,53 @@ class DeepseekV4DecoderLayer(nn.Module):
             requires_grad=False,
         )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                _MHC_FUSED_TILELANG_KERNEL,
+                _MHC_POST_TILELANG_KERNEL,
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+            )
+            from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+            include_pre_gemm_splits = is_deep_gemm_supported()
+            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+                use_norm_weight=True,
+                include_pre_gemm_splits=include_pre_gemm_splits,
+                include_broadcast_splits=(
+                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
+                ),
+                rms_eps=self.rms_norm_eps,
+                hc_pre_eps=self.hc_eps,
+                hc_sinkhorn_eps=self.hc_eps,
+                hc_post_mult_value=self.hc_post_alpha,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
+                norm_eps=(
+                    self.attn_norm.variance_epsilon,
+                    self.ffn_norm.variance_epsilon,
+                ),
+                broadcast_norm_eps=self.attn_norm.variance_epsilon,
+            )
+            if not include_pre_gemm_splits:
+                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.hc_mult,
+                    n_out=self.hc_mult * (2 + self.hc_mult),
+                )
+            _MHC_POST_TILELANG_KERNEL.register_warmup(
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1401,6 +1431,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+
+        if vllm_config.kernel_config.enable_jit_warmup and get_pp_group().is_last_rank:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_HEAD_FUSED_TILELANG_KERNEL,
+            )
+
+            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
+                hidden_size=config.hidden_size,
+                hc_mult=self.hc_mult,
+                rms_eps=self.rms_norm_eps,
+                hc_eps=self.hc_eps,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1790,6 +1832,7 @@ class DeepseekV4ForCausalLM(
     SupportsLoRA,
     DeepseekV4MixtureOfExperts,
 ):
+    finalizes_weights_during_load = True
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.

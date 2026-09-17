@@ -118,7 +118,7 @@ def test_fi_moe_ep_backend_accepted_for_dsv4(moe_backend):
     [["KimiK3ForConditionalGeneration"], ["MixtralForCausalLM"]],
 )
 def test_native_deep_gemm_mega_moe_not_arch_gated(architectures):
-    """vLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
+    """VLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
     models validate their own constraints at construction time."""
     validate_flashinfer_moe_ep_model("deep_gemm_mega_moe", architectures)
 

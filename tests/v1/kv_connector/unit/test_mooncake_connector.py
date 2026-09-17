@@ -179,7 +179,6 @@ class FakeMooncakeWrapper:
 
 def test_align_transfer_regions_uses_layer_name_occurrences():
     """Repeated layer names should align by occurrence order."""
-
     local_regions = [
         TransferRegion(
             layer_name="model.layers.1.self_attn",
@@ -232,7 +231,6 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
 @pytest.mark.asyncio
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
-
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
@@ -368,7 +366,6 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
     monkeypatch,
 ):
     """Producer sends its PP layer shard to the matching consumer layer address."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
@@ -447,7 +444,6 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
 
 def test_basic_interface():
     """Unit test for basic MooncakeConnector interface functionality."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -497,7 +493,6 @@ def test_basic_interface():
 
 def test_prompt_less_than_block_size():
     """Test that we can handle case where prompt is < block."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -536,7 +531,6 @@ def test_prompt_less_than_block_size():
 @pytest.fixture
 def bootstrap_server():
     """Fixture to launch and cleanup a Mooncake Bootstrap HTTP Server."""
-
     port = get_open_port()
     server = MooncakeBootstrapServer("127.0.0.1", port)
     server.start()
@@ -546,12 +540,10 @@ def bootstrap_server():
 
 @pytest.mark.asyncio
 async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
-    """
-    Tests the bootstrap server's api for worker registration and querying.
+    """Tests the bootstrap server's api for worker registration and querying.
 
     Validates DP/TP/PP rank indexing and error handling for duplicate registrations.
     """
-
     import httpx
 
     base_url = f"http://127.0.0.1:{bootstrap_server.port}"
@@ -716,13 +708,11 @@ def test_get_mooncake_bootstrap_addr_selects_expected_host(
 
 
 def test_scheduler_request_finished():
-    """
-    Tests the scheduler-side logic when a request finishes.
+    """Tests the scheduler-side logic when a request finishes.
 
     Differentiates between 'Finished' (requires transfer)
     and 'Aborted' (immediate free).
     """
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
@@ -751,7 +741,6 @@ def test_scheduler_request_finished():
 @contextlib.contextmanager
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
-
     with (
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
@@ -820,7 +809,6 @@ async def test_receive_kv_selects_remote_pp_workers(
     expected_addrs: list[str],
 ):
     """Decode workers should not hard-code producer pp_rank 0."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -875,7 +863,6 @@ async def test_receive_kv_selects_remote_pp_workers(
 
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
-
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
@@ -893,18 +880,78 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
 
 
 @pytest.mark.asyncio
+async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
+    """P4/D2 must retain KV until both D stages finish, including a no-op pull."""
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        patch.object(MooncakeConnectorWorker, "_sync_block_size_with_kernel"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        try:
+            worker.pp_size = 4
+            worker.kv_caches_base_addr = [0x1000]
+            worker.block_len_per_layer = [256]
+            worker.kv_block_len_per_layer = [256]
+            worker.registered_layer_names = ["model.layers.0.self_attn"]
+            worker.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req",
+                transfer_id="transfer",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+            )
+            send_meta.ready.set()
+            worker.reqs_need_send["transfer"] = send_meta
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(worker, "sender_loop", asyncio.get_running_loop()),
+                patch.object(worker, "_send_blocks", return_value=0) as send,
+            ):
+                for pp_rank in range(2):
+                    metadata = MooncakeXferMetadata(
+                        remote_hostname="consumer",
+                        remote_port=1234 + pp_rank,
+                        remote_tp_size=1,
+                        remote_tp_rank=0,
+                        remote_pp_size=2,
+                        req_blocks={"d-req": ("transfer", [[2]])},
+                        kv_caches_base_addr=[0x2000],
+                        block_lens=[256],
+                        kv_block_lens=[256],
+                        registered_layer_names=[f"model.layers.{pp_rank}.self_attn"],
+                        registered_layer_indices=[pp_rank],
+                    )
+                    await worker.send_kv_to_decode(b"consumer", sock, metadata)
+                    response = worker._xfer_resp_decoder.decode(
+                        sock.send_multipart.call_args.args[0][1]
+                    )
+                    assert response.status == MooncakeXferResponseStatus.FINISH
+                    assert response.ok_reqs == ["d-req"]
+                    assert ("transfer" in worker.reqs_need_send) == (pp_rank == 0)
+                    assert worker.finished_sending_reqs == (
+                        set() if pp_rank == 0 else {"p-req"}
+                    )
+                send.assert_called_once_with("consumer:1234", [0x1100], [0x2200], [256])
+        finally:
+            worker.shutdown()
+            worker.is_kv_consumer = True
+
+
+@pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
     FakeMooncakeWrapper,
 )
 async def test_kv_producer(monkeypatch):
-    """
-    Simulates a Producer Worker (Prefiller) receiving a transfer request
+    """Simulates a Producer Worker (Prefiller) receiving a transfer request
     from a Consumer (Decoder).
 
     Verifies memory offset calculation: ptr = base_addr + block_id * block_len.
     """
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
@@ -1071,12 +1118,10 @@ async def test_kv_producer(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
-    """
-    Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
+    """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 
     Verifies that MooncakeXferMetadata is correctly serialized and sent via ZMQ.
     """
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -1149,7 +1194,6 @@ async def test_kv_consumuer(monkeypatch):
 @pytest.mark.asyncio
 async def test_worker_get_finished_timeout(monkeypatch):
     """Tests the cleanup mechanism for requests."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
@@ -1201,7 +1245,6 @@ async def test_worker_get_finished_timeout(monkeypatch):
 )
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -1282,7 +1325,6 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     """Mixed MLA+Eagle caches should register by byte length, not shape."""
-
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -1346,8 +1388,7 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
 )
 @pytest.mark.parametrize("d_tp_size", [1, 4], ids=["p_tp2_d_tp1", "p_tp2_d_tp4"])
 async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
-    """
-    Tests heterogeneous TP support in the producer transfer path.
+    """Tests heterogeneous TP support in the producer transfer path.
 
     Verifies correct pointer and offset calculation when producer TP=2
     sends to consumer with TP=1 (P>D) or TP=4 (P<D).
@@ -1356,7 +1397,6 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
     - P TP=2 > D TP=1: one D rank receives; dst_offset based on P rank
     - P TP=2 < D TP=4: two D ranks receive; src_offset based on D rank
     """
-
     P_TP_SIZE = 2
     P_TP_RANK = 0
     LOCAL_BLOCK_LEN = 4096
