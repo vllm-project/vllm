@@ -13,7 +13,7 @@ import torch
 from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent, device_stream
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
@@ -173,7 +173,7 @@ def move_to_buffer(
     new_indices: np.ndarray,
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
+    stream: torch.Stream | None,
     ep_rank: int,
     communicator: EplbCommunicator,
     layer_idx: int = 0,
@@ -183,12 +183,12 @@ def move_to_buffer(
     Args:
         num_local_experts: Number of local experts.
         old_indices: (num_experts_total,) ndarray of current (old)
-            global-to-local expert assignments.
+            global-to-locals expert assignments.
         new_indices: (num_experts_total,) ndarray of desired (new)
             global-to-local assignments after rebalance.
         expert_weights: Original expert weights for the layer.
         expert_weights_buffers: Intermediate buffers (one per tensor).
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        stream: CUDA/XPU stream for async copies (can be None for sync mode).
         ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
@@ -261,10 +261,9 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                with torch.cuda.stream(cuda_stream):
+                with device_stream(stream):
                     for w, b in zip(expert_weights, expert_weights_buffers):
                         b[dst].copy_(w[src_local], non_blocking=True)
-
     communicator.set_transfer_context(old_indices, layer_idx)
 
     # 2. Post sends
@@ -430,7 +429,7 @@ def transfer_layer(
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
     is_profile: bool = False,
-    cuda_stream: torch.cuda.Stream | None = None,
+    stream: torch.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
 ) -> TransferMetadata:
@@ -451,7 +450,7 @@ def transfer_layer(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        stream: CUDA stream for async copies (can be None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
 
@@ -499,7 +498,7 @@ def transfer_layer(
         new_indices=new_layer_indices_np,
         expert_weights=expert_weights,
         expert_weights_buffers=expert_weights_buffer,
-        cuda_stream=cuda_stream,
+        stream=stream,
         ep_rank=ep_group.rank(),
         communicator=communicator,
         layer_idx=layer_idx,
@@ -601,7 +600,7 @@ def rearrange_expert_weights_inplace(
             new_indices=new_global_expert_indices_cpu[layer_idx],
             expert_weights=expert_weights[layer_idx],
             expert_weights_buffers=weights_buffer,
-            cuda_stream=None,
+            stream=None,
             ep_rank=ep_rank,
             communicator=communicator,
             layer_idx=layer_idx,
