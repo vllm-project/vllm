@@ -34,8 +34,7 @@ logger = init_logger(__name__)
 def get_mem_info_wrapper(
     device: int | str | torch.device | None = None,
 ) -> tuple[int, int]:
-    """
-    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+    """Get memory info for a device, matching `torch.accelerator.get_memory_info`.
 
     Args:
         device: Device specification. Can be:
@@ -46,6 +45,7 @@ def get_mem_info_wrapper(
 
     Returns:
         Tuple[int, int]: (free_memory, total_memory) in bytes
+
     """
     # Handle None - use current device
     if device is None:
@@ -240,9 +240,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.xpu.set_device(device)
 
     @classmethod
