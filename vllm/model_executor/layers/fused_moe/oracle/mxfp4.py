@@ -31,7 +31,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    mx_scale_kwargs as _mx_scale_kwargs,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
 )
@@ -68,15 +73,6 @@ if triton_kernels_version is not None:
             "version is compatible. Error: %s",
             e,
         )
-
-
-def _mx_scale_kwargs(scale):
-    """PrecisionConfig weight-scale kwargs: 3.8 uses b_mx_scale/b_microblock_size,
-    3.5.1/3.6 use weight_scale.
-    """
-    if triton_kernels_version == "3.8":
-        return {"b_mx_scale": scale, "b_microblock_size": 32}
-    return {"weight_scale": scale}
 
 
 def _pack_deepgemm_mxfp4_scales(
