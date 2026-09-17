@@ -60,15 +60,16 @@ def collect_ec_item_metadata(
 
     Keyed by mm_hash, each entry carries a `metadata` dict with whatever
     placeholder fields `resolver` says this model needs published for its
-    modality, so a consumer can skip the image transform. `data` is None for
-    items served from the processor cache, in which case the metadata is
+    modality, so a consumer can skip the image transform. `item_indices`
+    identifies every occurrence in `mm_features`, including repeated hashes.
+    `data` is None for items served from the processor cache, so the metadata is
     unavailable here and the consumer has to fall back to processing the
     media itself. A connector that also has transfer coordinates to report
     (e.g. NIXL peer_host/peer_port/size_bytes) merges those in alongside
     `metadata`, not into it.
     """
     items: dict[str, dict[str, Any]] = {}
-    for feature in mm_features:
+    for index, feature in enumerate(mm_features):
         metadata: dict[str, Any] = {}
         if feature.data is not None:
             wanted = resolver.fields_for(feature.modality)
@@ -81,7 +82,9 @@ def collect_ec_item_metadata(
                     # Some metadata (e.g. Qwen3-VL video timestamps) is
                     # produced as a plain list rather than a tensor.
                     metadata[key] = value
-        items[feature.identifier] = {"metadata": metadata}
+        entry = items.setdefault(feature.identifier, {"item_indices": []})
+        entry["metadata"] = metadata
+        entry["item_indices"].append(index)
     return items
 
 
@@ -103,6 +106,7 @@ class ECOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         worker_meta = None
+        connector_stats = None
         for model_runner_output in outputs:
             assert model_runner_output is not None
             ec_output = model_runner_output.ec_connector_output
@@ -117,9 +121,17 @@ class ECOutputAggregator:
                     meta if worker_meta is None else worker_meta.aggregate(meta)
                 )
 
+            if stats := ec_output.ec_connector_stats:
+                connector_stats = (
+                    stats
+                    if connector_stats is None
+                    else connector_stats.aggregate(stats)
+                )
+
         aggregated = ECConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            ec_connector_stats=connector_stats,
             ec_connector_worker_meta=worker_meta,
         )
         if aggregated.is_empty():
