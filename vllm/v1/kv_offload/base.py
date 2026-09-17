@@ -417,6 +417,10 @@ class OffloadingManager(ABC):
         Prometheus: a declared name that is absent here becomes an empty label
         value, and a name added here that the spec did not declare is dropped.
 
+        Document each key that you publish in
+        docs/features/kv_offloading_usage.md, because a label name reaches a
+        dashboard and stays there.
+
         Returns:
             Mapping of label name to value. The frontend renders each value
             with str(), so a value must be a scalar that msgpack carries, not

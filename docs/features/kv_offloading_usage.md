@@ -112,6 +112,23 @@ vllm serve <model> \
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
+## Info Metric Labels
+
+The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. Each label reports one static fact of the configured offloading spec, so a user may read the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no values. Each engine reports its own configuration, not the instance total.
+
+Both `CPUOffloadingSpec` and `TieringOffloadingSpec` publish the CPU tier facts:
+
+| Label | Meaning | Notes |
+| --- | --- | --- |
+| `cpu_num_chunks` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by `cpu_kv_bytes_per_chunk`. |
+| `cpu_blocks_per_chunk` | GPU blocks in one chunk. | The chunk-to-block conversion factor. Set by `blocks_per_chunk`, or derived from `block_size`. |
+| `cpu_kv_bytes_per_chunk` | Bytes of one chunk slot. | Rounded up to the host page size, so it can hold padding. With `cpu_num_chunks` it gives the exact size of the tier in bytes, the only capacity that holds for every model shape. Reads `None` when a caller builds the manager without a chunk size. Both specs above report a number. |
+| `cpu_capacity_tokens_at_max_len` | Upper bound on the KV tokens the tier holds, over the request lengths up to `max_model_len`. | A group with a sliding window raises this above the byte capacity, because that group holds a fixed chunk count however long the request grows. Reads `None` when the token scale is not known, for example a `max_model_len` of 0. |
+
+With `TieringOffloadingSpec`, the primary tier keeps the labels above unprefixed, so a CPU fact reads the same in a single-tier and in a multi-tier setup. A secondary tier label carries the prefix `tier<index>_<type>_`, where the index starts at 1 and `<type>` is the `type` key of the tier config. For example, the first tier in `secondary_tiers`, of type `fs`, therefore publishes a label `o_direct` as `tier1_fs_o_direct`. No in-tree secondary tier publishes a label today.
+
+All engines of one instance share the offloading config, so the label names bind once, from the first engine that reports. An engine that reports a different label set logs a warning and drops its own labels.
+
 ## Custom Eviction Policies
 
 `eviction_policy` resolves through `CachePolicyFactory` (`vllm/v1/kv_offload/cpu/policies/factory.py`), which pre-registers the built-in `lru` and `arc` policies.
