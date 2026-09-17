@@ -463,6 +463,11 @@ def build_qsa_metadata_triton(
     )
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+    elif common_attn_metadata.is_dummy_batch:
+        # A profile or capture batch writes to no cache. Read the flag rather
+        # than the slot mapping: PAD there also means another rank owns the
+        # position, and this cache is replicated, so it must write those.
+        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
@@ -562,6 +567,11 @@ def _build_qsa_metadata_torch(
         k_work_metadata_buffer[:, 1].copy_(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
+    if compress_ratio != 1 and common_attn_metadata.is_dummy_batch:
+        # Same reason as the fused path: a dummy batch writes to no cache, and
+        # the slot mapping cannot say so without also hiding another rank's
+        # positions from this replicated cache.
+        slot_mapping.fill_(PAD_SLOT_ID)
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 

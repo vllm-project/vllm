@@ -148,3 +148,25 @@ def test_the_padding_tail_is_still_excluded():
         compress_ratio=RATIO,
     )[3]
     assert int((slots >= 0).sum()) == real // RATIO
+
+
+@pytest.mark.parametrize("builder", BUILDERS, ids=["triton", "torch"])
+def test_a_dummy_batch_stays_inert_under_dcp(builder):
+    """The two signals must not be confused, in either direction.
+
+    A dummy batch writes nothing even though every rank owns real positions.
+    A real batch writes everything even though the mapping is full of PAD.
+    """
+    all_pad = torch.full((NUM_TOKENS,), PAD, dtype=torch.int64, device="cuda")
+    metadata = _metadata(all_pad)
+    object.__setattr__(metadata, "is_dummy_batch", True)
+    slots = builder(
+        metadata,
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int32, device="cuda"),
+        torch.zeros(NUM_TOKENS, dtype=torch.int64, device="cuda"),
+        storage_block_size=STORAGE_BLOCK,
+        compress_ratio=RATIO,
+    )[3]
+    assert int((slots >= 0).sum()) == 0, "a dummy batch must write nothing"

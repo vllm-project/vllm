@@ -1108,10 +1108,22 @@ def get_max_concurrency_for_kv_cache_config(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
+        logger.info(
+            "KVACCT group layers=%d block=%d page_bytes=%d blocks_per_req=%d",
+            len(group.layer_names),
+            group.kv_cache_spec.block_size,
+            group.kv_cache_spec.page_size_bytes,
+            required,
+        )
         if group.host_resident:
             host_blocks_per_request += required
         else:
             num_blocks_per_request += required
+    logger.info(
+        "KVACCT total pool_blocks=%d blocks_per_req=%d",
+        kv_cache_config.num_blocks,
+        num_blocks_per_request,
+    )
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
