@@ -73,6 +73,9 @@ if has_humming():
         humming_dtypes.uint8: INT8_DTYPE,
         humming_dtypes.uint2: torch.uint8,
         humming_dtypes.uint3: torch.uint8,
+        humming_dtypes.uint5: torch.uint8,
+        humming_dtypes.uint6: torch.uint8,
+        humming_dtypes.uint7: torch.uint8,
     }
 
     _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
@@ -85,8 +88,7 @@ if has_humming():
 
 
 def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
-    """
-    Map humming group sizes to QuantKey GroupShape.
+    """Map humming group sizes to QuantKey GroupShape.
 
     group_size:   elements per group along K (col); 0 means full dimension.
     group_size_n: elements per group along N (row); 0 means 1 (per-row).
@@ -304,7 +306,18 @@ def _humming_input_schema_to_quant_key(
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
 
-    scale_dtype = MXFP_SCALE_DTYPE if gs > 0 else torch.float32
+    # Pick the scale dtype the Humming kernel actually consumes. An explicit
+    # input_scale_dtype always wins. Otherwise infer from the grouping: MX
+    # microscale activations (group size 32, e.g. MXFP8) carry an e8m0 (uint8)
+    # scale, while block-FP8 (group size 128) and per-token FP8/int8 carry a
+    # float32 scale. Getting this right lets a grouped FP8 activation match
+    # kFp8Dynamic128Sym instead of an unmatchable uint8-scaled key.
+    if schema.input_scale_dtype is not None:
+        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+    elif gs == 32:
+        scale_dtype = MXFP_SCALE_DTYPE
+    else:
+        scale_dtype = torch.float32
 
     scale = ScaleDesc(dtype=scale_dtype, static=False, group_shape=group_shape)
 
@@ -550,6 +563,7 @@ def make_humming_moe_quant_config(
     quant_dtype: torch.dtype | str | None,
     weight_dtype: torch.dtype | str | None,
     weight_group_shape: GroupShape | None = None,
+    activation_group_shape: GroupShape | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
@@ -566,7 +580,14 @@ def make_humming_moe_quant_config(
     assert humming_configs is not None
     if quant_dtype is None:
         a_quant_desc = FusedMoEQuantDesc(dtype=None)
+    elif activation_group_shape is not None:
+        # Pre-dispatch quantization.
+        a_quant_desc = FusedMoEQuantDesc(
+            dtype=quant_dtype, shape=activation_group_shape
+        )
     else:
+        # Deferred path: Humming quantizes the activation internally, so the
+        # descriptor only needs a non-None dtype to mark it as quantized.
         shape = GroupShape(row=1, col=-1)
         a_quant_desc = FusedMoEQuantDesc(dtype=quant_dtype, shape=shape)
 
@@ -618,6 +639,19 @@ def get_humming_moe_quant_config(
     else:
         q_dtype = str(input_schema.a_dtype)
 
+    # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
+    # dispatch (so FP8 rather than BF16 crosses the interconnect) and consumed by
+    # Humming as-is.
+    activation_group_shape: GroupShape | None = None
+    input_scale_group_size = getattr(input_schema, "input_scale_group_size", 0) or 0
+    if (
+        q_dtype is not None
+        and q_dtype.startswith("float8")
+        and input_scale_group_size == 128
+    ):
+        q_dtype = _HUMMING_TO_QUANT_DTYPE.get(input_schema.a_dtype, FP8_DTYPE)
+        activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
+
     weight_scale_group_size = weight_schema.weight_scale_group_size
     weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
     weight_group_shape: tuple[int, ...] = ()
@@ -635,6 +669,7 @@ def get_humming_moe_quant_config(
         quant_dtype=q_dtype,
         weight_dtype=str(weight_schema.b_dtype),
         weight_group_shape=weight_group_shape,
+        activation_group_shape=activation_group_shape,
         w1_scale=getattr(layer, "w13_weight_scale", None),
         w1_gscale=getattr(layer, "w13_weight_scale_2", None),
         w1_zp=getattr(layer, "w13_zero_point", None),
@@ -655,11 +690,9 @@ def select_humming_moe_experts(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> type[mk.FusedMoEExperts] | None:
-    """
-    Select the primary Humming MoE Experts class
+    """Select the primary Humming MoE Experts class
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     if not has_humming():
         return None
 
@@ -773,14 +806,14 @@ def _replace_layer_parameters(
     tensors: dict[str, torch.Tensor],
     preserve_bias: bool = False,
 ) -> None:
-    """
-    Replace layer parameters for a sublayer with new tensors.
+    """Replace layer parameters for a sublayer with new tensors.
 
     Args:
         layer: The RoutedExperts layer
         sublayer_name: Name of the sublayer (e.g., "w13", "w2")
         tensors: Dict of parameter name to tensor
         preserve_bias: If True, don't delete bias parameters
+
     """
     # Delete old parameters
     for name, _ in list(layer.named_parameters()):
@@ -807,11 +840,11 @@ def _convert_sublayer_to_humming(
     num_experts: int,
     param_dtype: torch.dtype,
 ) -> tuple[Any, Any]:
-    """
-    Convert a sublayer's weights from checkpoint format to Humming format.
+    """Convert a sublayer's weights from checkpoint format to Humming format.
 
     Returns:
         Tuple of (converted_weight_schema, converted_input_schema)
+
     """
     from vllm.utils.humming import HummingWeightSchema
 
@@ -895,8 +928,7 @@ def _process_single_sublayer(
     param_dtype: torch.dtype,
     force_weight_schema: Any | None = None,
 ) -> tuple[Any, Any, "LayerConfig"]:
-    """
-    Process a single sublayer: convert, optionally requant, prepare, and transform.
+    """Process a single sublayer: convert, optionally requant, prepare, and transform.
 
     This combines the common logic from convert_to_humming_moe_kernel_format
     for processing a single sublayer.
@@ -915,6 +947,7 @@ def _process_single_sublayer(
 
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
+
     """
     from vllm.utils.humming import HummingWeightSchema
 
@@ -969,8 +1002,7 @@ def convert_to_humming_moe_kernel_format(
     input_schema: Any | None = None,
     force_weight_schema: Any | None = None,
 ) -> dict[str, "LayerConfig"]:
-    """
-    Convert MoE weights from checkpoint format to Humming kernel format.
+    """Convert MoE weights from checkpoint format to Humming kernel format.
 
     This function processes weights for each sublayer (w13, w2) by:
     1. Converting from checkpoint format to humming format if needed
@@ -996,8 +1028,8 @@ def convert_to_humming_moe_kernel_format(
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
         - Sets layer.humming_configs for quant config construction
-    """
 
+    """
     # Build schemas from quant_config if not provided
     has_bias = layer.moe_config.has_bias
     num_experts = layer.moe_config.num_local_experts

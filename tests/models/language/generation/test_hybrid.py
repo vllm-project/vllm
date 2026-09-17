@@ -9,6 +9,7 @@ import pytest
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
+from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -163,8 +164,7 @@ def test_chunked_prefill_with_parallel_sampling(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    Tests chunked prefill in conjunction with n > 1.
+    """Tests chunked prefill in conjunction with n > 1.
 
     In this case, prefill is populated with decoding tokens and
     we test that it doesn't fail.
@@ -198,8 +198,7 @@ def test_mamba_cache_cg_padding(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    This test is for verifying that mamba cache is padded to CG captured
+    """This test is for verifying that mamba cache is padded to CG captured
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
@@ -210,6 +209,8 @@ def test_mamba_cache_cg_padding(
     cudagraph_dispatcher.initialize_cudagraph_keys(
         vllm_config.compilation_config.cudagraph_mode
     )
+    if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
+        pytest.skip("CUDA/XPU graph is disabled.Please enable it to run this test. ")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
@@ -233,8 +234,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the hybrid inner state management doesn't
+    """This test is for verifying that the hybrid inner state management doesn't
     collapse in case where the number of incoming requests and
     finished_requests_ids is larger than the maximum mamba block capacity.
 
@@ -260,8 +260,7 @@ def test_state_cleanup(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the Hybrid state is cleaned up between
+    """This test is for verifying that the Hybrid state is cleaned up between
     steps.
 
     If it's not cleaned, an error would be expected.
