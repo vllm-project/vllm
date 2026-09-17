@@ -346,7 +346,7 @@ class Executor(ABC):
 
     def sleep(self, level: int = 1):
         remaining = SLEEP_TAGS - self.sleeping_tags
-        if not remaining:
+        if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()

@@ -376,6 +376,7 @@ class LLMEngine:
             self.logger_manager.record_sleep_state(1, level)
 
     def release_kv_cache_memory(self) -> None:
+        self.renderer.clear_mm_cache()
         self.engine_core.release_kv_cache_memory()
 
         if self.logger_manager is not None:
