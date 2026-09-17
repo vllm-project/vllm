@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import os
+import uuid
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -40,6 +42,7 @@ def _make_offloading_config(
     *,
     spec_name: str | None = "CPUOffloadingSpec",
     cpu_bytes_to_use: int | None = 65536,
+    engine_id: str = "test-engine",
     worker_kv_bytes_per_block: int = 8,
     groups: tuple[OffloadingGroupConfig, ...] | None = None,
     tokens_per_hash: int = 16,
@@ -72,7 +75,7 @@ def _make_offloading_config(
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         enable_kv_cache_events=False,
         extra_config=normalized_extra_config,
-        engine_id="test-engine",
+        engine_id=engine_id,
         model=OffloadingModelConfig(
             name="test-model", dtype="float16", max_model_len=max_model_len
         ),
@@ -363,6 +366,38 @@ def test_tiering_primary_tier_publishes_the_cpu_labels():
         # 5 slots of 32 tokens each, over a request of 32 chunks.
         "cpu_capacity_tokens_at_max_len": 160,
     }
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
+    """The tiering spec must give the primary tier the facts that it publishes.
+
+    The spec builds a real shared region before the primary tier, so this test
+    needs /dev/shm. It is the only test that runs the argument list of
+    TieringOffloadingSpec.get_manager(). Both the chunk size and the
+    configuration have a default, so a dropped argument gives no type error.
+    A unique engine_id keeps the region path of this test separate.
+    """
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        engine_id=f"test-tiering-{uuid.uuid4().hex}",
+        blocks_per_chunk=2,
+        max_model_len=1024,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    manager = spec.get_manager()
+    try:
+        assert manager.config_info() == {
+            "cpu_num_chunks": spec.num_chunks,
+            "cpu_blocks_per_chunk": 2,
+            "cpu_kv_bytes_per_chunk": spec.kv_bytes_per_chunk,
+            # 32 tokens for each chunk, over a request of 32 chunks.
+            "cpu_capacity_tokens_at_max_len": spec.num_chunks * 32,
+        }
+    finally:
+        manager.shutdown()
 
 
 def test_tiering_spec_aligns_row_size():
