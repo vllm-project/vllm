@@ -616,7 +616,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
     def use_projected_all_gather(self, num_tokens: int) -> bool:
-        return self.project_before_all_gather and num_tokens >= 2048
+        return self.project_before_all_gather and num_tokens >= 256
 
     def forward(
         self,

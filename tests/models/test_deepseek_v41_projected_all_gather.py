@@ -10,7 +10,7 @@ from vllm.models.common.ops import sequence_parallel as sp_ops
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 
 
-@pytest.mark.parametrize("num_tokens", [1023, 2048, 2051])
+@pytest.mark.parametrize("num_tokens", [255, 256, 259])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "has_compressor,has_indexer",
@@ -31,7 +31,7 @@ def test_projected_gather_preserves_rows_and_optional_inputs(
     expected = [padded.to(weight.dtype) @ weight for weight in weights]
     present = (True, has_compressor, has_indexer)
     gathers = []
-    project_locally = enabled and num_tokens >= 2048
+    project_locally = enabled and num_tokens >= 256
     local_rows = slice(3 * shard_size, 4 * shard_size)
 
     def gather(projected):
