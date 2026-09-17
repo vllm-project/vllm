@@ -6,6 +6,7 @@ from typing import ClassVar, Literal
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -82,7 +83,6 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -93,6 +93,60 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+# GLM-5.3-Flash trained values that neither the checkpoint nor
+# `Glm5NextTextConfig` carries, so they cannot be read off the config.
+_MHC_TAU = 0.05
+_MHC_POST_MULT_VALUE = 2.0
+_LOGIT_SCALE = 1.0
+
+# GLM-5.3-Flash checkpoints ship vision_config.rms_norm_eps = 1e-5, but the
+# vision tower was trained with 1e-6. Serving with 1e-5 drifts the RMSNorm and
+# produces repetitive/degraded image descriptions, so force the trained value
+# regardless of the checkpoint field.
+_VISION_RMS_NORM_EPS = 1e-6
+
+
+def _is_moe(config: Glm5NextTextConfig) -> bool:
+    return config.n_routed_experts is not None
+
+
+def _is_kda_layer(config: Glm5NextTextConfig, layer_idx: int) -> bool:
+    layer_types = config.layer_types
+    return (
+        layer_types is not None
+        and layer_idx < len(layer_types)
+        and layer_types[layer_idx] == "linear_attention"
+    )
+
+
+def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
+    layer_types = config.layer_types
+    return layer_types is not None and "linear_attention" in layer_types
+
+
+def _validate_supported_config(config: Glm5NextTextConfig) -> None:
+    """Reject checkpoints using config options this implementation lacks.
+
+    These are vLLM implementation limits rather than schema constraints, so
+    `Glm5NextTextConfig` accepts them and we check them here.
+    """
+    if config.index_topk is not None:
+        for option in (
+            "index_dsa_use_layernorm",
+            "index_kpool_compress",
+            "index_kpool_always_select_tail",
+        ):
+            if getattr(config, option, True) is not True:
+                raise NotImplementedError(
+                    f"GLM-5.3 sparse indexer requires {option}=True"
+                )
+
+    if getattr(config, "mhc", False):
+        if getattr(config, "hres_vwnstyle", True) is not True:
+            raise NotImplementedError("GLM-5.3 mHC requires hres_vwnstyle=True")
+        if getattr(config, "mhc_no_norm_weight", False) not in (False, None):
+            raise NotImplementedError("GLM-5.3 mHC requires mhc_no_norm_weight=False")
 
 
 class Glm5NextMLP(nn.Module):
@@ -151,7 +205,7 @@ class Glm5NextMLP(nn.Module):
 class Glm5NextMoE(nn.Module):
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -226,10 +280,10 @@ class Glm5NextMoE(nn.Module):
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_token,
+            top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.moe_renormalize,
+            renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
@@ -279,7 +333,7 @@ class Glm5NextDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         layer_idx: int,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
@@ -294,13 +348,13 @@ class Glm5NextDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
-        self.is_moe = config.is_moe
+        self.is_moe = _is_moe(config)
         self.num_hidden_layers = config.num_hidden_layers
         self.rms_norm_eps = config.rms_norm_eps
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
-        is_kda_layer = not is_mtp_layer and config.is_kda_layer(layer_idx)
+        is_kda_layer = not is_mtp_layer and _is_kda_layer(config, layer_idx)
         self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -330,7 +384,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 quant_config=None,  # MLA projections are BF16 in checkpoint
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
-                skip_rope=config.mla_nope,
+                skip_rope=config.mla_use_nope,
             )
 
         # MTP layers sit past the base model's hidden layers (layer_idx >=
@@ -373,13 +427,13 @@ class Glm5NextDecoderLayer(nn.Module):
 
         if self.mhc and not is_mtp_layer:
             # mhc config
-            self.mhc_num_residual_streams = config.mhc_num_residual_streams
-            self.mhc_tau = config.mhc_tau
+            self.mhc_num_residual_streams = config.hc_mult
+            self.mhc_tau = _MHC_TAU
             self.hc_eps = config.hc_eps
-            self.mhc_sinkhorn_iterations = config.mhc_sinkhorn_iterations
-            self.mhc_post_mult_value = config.mhc_post_mult_value
+            self.mhc_sinkhorn_iterations = config.hc_sinkhorn_iters
+            self.mhc_post_mult_value = _MHC_POST_MULT_VALUE
 
-            n = config.mhc_num_residual_streams
+            n = config.hc_mult
             d_model = n * self.hidden_size
             mix_hc = (2 + n) * n
 
@@ -623,7 +677,8 @@ class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
+        _validate_supported_config(config)
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -766,7 +821,7 @@ class Glm5NextModel(nn.Module):
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
         ]
-        if self.config.is_moe:
+        if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             # EPLB: the mapping enumerates physical experts, so it must cover
@@ -796,7 +851,7 @@ class Glm5NextModel(nn.Module):
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
         kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
+        if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
         _pending_wk_fp8: dict = {}
@@ -910,7 +965,7 @@ class Glm5NextModel(nn.Module):
                     if (
                         name.endswith(".bias")
                         and name not in params_dict
-                        and not self.config.is_linear_attn
+                        and not _is_linear_attn(self.config)
                     ):  # noqa: E501
                         continue
                     # Remapping the name of FP8 kv-scale.
@@ -937,7 +992,7 @@ class Glm5NextForCausalLM(
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        self.config = self.model_config.hf_config
+        self.config = self.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.model = Glm5NextModel(
@@ -953,7 +1008,7 @@ class Glm5NextForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(
-            self.config.vocab_size, scale=self.config.logit_scale
+            self.config.vocab_size, scale=_LOGIT_SCALE
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -986,7 +1041,7 @@ class Glm5NextForCausalLM(
         cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
@@ -1090,11 +1145,9 @@ class Glm5NextForConditionalGeneration(
             self.visual = Glm5NextVisionTransformer(
                 config.text_config,
                 config.vision_config,
-                # Read eps from the VISION sub-config, not the top-level
-                # `config.rms_norm_eps`: Glm5NextConfig.__getattribute__ mirrors
-                # the latter onto text_config (1e-5), silently ignoring the
-                # vision tower's own (1e-6) rms_norm_eps.
-                norm_eps=config.vision_config.rms_norm_eps,
+                # Not `config.vision_config.rms_norm_eps`; see
+                # `_VISION_RMS_NORM_EPS`.
+                norm_eps=_VISION_RMS_NORM_EPS,
                 # Vision tower ships BF16 weights in this fp8 checkpoint (no
                 # weight_scale_inv for visual.*), so it must NOT inherit the
                 # global fp8 quant_config -- doing so incorrectly quantizes
@@ -1163,7 +1216,7 @@ class Glm5NextForConditionalGeneration(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: Glm5NextConfig, weight_name: str
+    config: Glm5NextTextConfig, weight_name: str
 ) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
         config.num_nextn_predict_layers > 0

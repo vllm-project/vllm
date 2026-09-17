@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -69,13 +70,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from ..config import Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
@@ -240,7 +237,8 @@ class Qwen4ExpDecoderLayer(nn.Module):
         num_experts = getattr(config, "num_experts", 0) or 0
         absolute_layer_id = self.layer_idx + 1
         is_moe_layer = self.layer_idx not in mlp_only_layers and (
-            num_experts > 0 and absolute_layer_id % config.decoder_sparse_step == 0
+            num_experts > 0
+            and absolute_layer_id % getattr(config, "decoder_sparse_step", 1) == 0
         )
         if is_moe_layer:
             self.mlp = Qwen4ExpSparseMoeBlock(

@@ -703,6 +703,83 @@ class GLM46VVideoBackend(VideoBackend):
         )
 
 
+GLM_VIDEO_DEFAULT_FPS = 2.0
+GLM_VIDEO_DEFAULT_MAX_FRAMES = 2048
+
+
+def glm_sample_frame_indices(
+    total_frames: int,
+    fps: float,
+    duration: float,
+    *,
+    target_fps: float | None = None,
+    max_frame_count: int | None = None,
+    temporal_patch_size: int = 2,
+) -> list[int]:
+    """GLM video frame sampling (training-reference parity).
+
+    ``target_fps`` is the ``fps_interval`` request knob. The greedy walk
+    advances at ``1 / (temporal_patch_size * target_fps)`` seconds, so on
+    frame-dense sources it collects more candidates than ``extract_t`` and
+    the ``> extract_t`` fixup re-spreads the picks uniformly with
+    ``np.linspace`` -- that fallback is the intended reference behavior, not
+    an accident. Short clips (fewer frames than ``extract_t``) are spread at
+    evenly spaced timestamps (``floor`` sampling; the linspace variant
+    samples frames unevenly and cost 4 points on video grounding evals).
+    Request overrides: ``target_fps`` -> fps interval, ``max_frame_count``
+    -> frame cap.
+    """
+    max_frame_idx = total_frames - 1
+    if not duration:
+        duration = (round(max_frame_idx / fps) + 1) if fps else 0
+    if max_frame_count is None:
+        max_frame_count = GLM_VIDEO_DEFAULT_MAX_FRAMES
+    if target_fps is None:
+        target_fps = GLM_VIDEO_DEFAULT_FPS
+
+    extract_t = int(duration * target_fps)
+    extract_t = min(extract_t, int(max_frame_count))
+
+    duration_per_frame = 1 / fps
+    timestamps = [i * duration_per_frame for i in range(total_frames)]
+    max_second = int(duration)
+
+    if total_frames < extract_t:
+        frame_indices = [
+            math.floor(_i * total_frames / extract_t) for _i in range(extract_t)
+        ]
+    else:
+        frame_indices = []
+        current_second = 0.0
+        inv_fps = 1 / (temporal_patch_size * target_fps)
+        for frame_index in range(total_frames):
+            if timestamps[frame_index] >= current_second:
+                current_second += inv_fps
+                frame_indices.append(frame_index)
+                if current_second >= max_second:
+                    break
+
+    if len(frame_indices) < extract_t:
+        if len(frame_indices) == 0:
+            start, end = 0, max(total_frames - 1, 0)
+        else:
+            start, end = frame_indices[0], frame_indices[-1]
+        frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+    elif len(frame_indices) > extract_t:
+        frame_indices = np.linspace(0, total_frames - 1, extract_t, dtype=int).tolist()
+
+    seen, uniq = set(), []
+    for idx in frame_indices:
+        if idx not in seen:
+            seen.add(idx)
+            uniq.append(int(idx))
+
+    if len(uniq) & 1:
+        uniq.append(uniq[-1])
+
+    return uniq
+
+
 @VIDEO_LOADER_REGISTRY.register(
     "glm5next",
     # Both spellings: the borrowed-config type string (``Glm5Next...``) and
@@ -730,12 +807,6 @@ class Glm5NextVideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
-        # Lazy import: the processor module sits behind the
-        # transformers_utils package init, which multimodal must not pull in.
-        from vllm.transformers_utils.processors.glm5next import (
-            glm_sample_frame_indices,
-        )
-
         return glm_sample_frame_indices(
             source.total_frames_num,
             source.original_fps,

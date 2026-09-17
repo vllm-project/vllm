@@ -8,6 +8,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
@@ -15,9 +16,6 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,

@@ -3,7 +3,7 @@
 """GLM-5.3-Flash vision tower and multimodal processor."""
 
 from collections.abc import Mapping
-from functools import cached_property, partial
+from functools import partial
 
 import numpy as np
 import torch
@@ -612,37 +612,24 @@ class Glm5NextVisionTransformer(nn.Module):
 
 
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
-    """Wires up the vLLM-native processor for the multimodal checkpoint.
+    """Token-budget geometry for the multimodal checkpoint.
 
-    The checkpoint's ``processor_config.json`` declares a custom ``processor_class``
-    and stores its image/video processor configs inline (no standalone
-    ``preprocessor_config.json``), so ``AutoProcessor`` cannot resolve the
-    config. We bypass it and build our own ``Glm5NextProcessor``
-    (``vllm/transformers_utils/processors/glm5next.py``), a port of the
-    training-side pipeline that no longer imports transformers' GLM processor
-    classes. The port applies ``patch_expand_factor`` (checkpoint ships 1)
-    inside ``smart_resize``'s spatial factor.
+    This checkpoint's ``processor_config.json`` ships the token-budget style
+    (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, so the
+    inherited Glm4v ``size.longest_edge`` path does not apply.
     """
 
-    @cached_property
-    def _glm5_hf_processor(self):
-        from vllm.transformers_utils.processors.glm5next import Glm5NextProcessor
-
-        return Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
-
-    def get_hf_processor(self, **kwargs: object):
-        return self._glm5_hf_processor
-
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
-        from vllm.transformers_utils.processors.glm5next import _pixel_budget
-
-        return _pixel_budget(
-            proc.min_image_tokens,
-            proc.max_image_tokens,
-            proc.patch_size,
-            proc.merge_size,
-            proc.temporal_patch_size,
-        )
+        """(min_pixels, max_pixels) from the processor's token bounds; one
+        vision token covers ``temporal_patch_size * (patch_size * merge_size)
+        ** 2`` pixels."""
+        if proc.min_image_tokens is None or proc.max_image_tokens is None:
+            raise ValueError(
+                "min_image_tokens and max_image_tokens must be provided by "
+                "processor_config.json (or per-call kwargs)."
+            )
+        factor = proc.temporal_patch_size * (proc.patch_size * proc.merge_size) ** 2
+        return proc.min_image_tokens * factor, proc.max_image_tokens * factor
 
     def _get_image_max_pixels(self) -> int:
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
@@ -669,12 +656,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
         The inherited Glm4v path resolves the pixel budget from
         ``size.longest_edge`` and resizes with GLM-4V's ``smart_resize``. This
-        checkpoint's ``processor_config.json`` ships the token-budget style
-        (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, and
-        the alignment factor carries ``patch_expand_factor`` — resolve both
-        from the vLLM-native processor so profiling matches runtime geometry.
+        checkpoint ships token bounds instead, and the alignment factor carries
+        ``patch_expand_factor`` — resolve both from the processor so profiling
+        matches runtime geometry.
         """
-        from vllm.transformers_utils.processors.glm5next import smart_resize
+        from transformers.models.glm5_next.image_processing_glm5_next import (
+            smart_resize,
+        )
 
         vision_config = self.get_hf_config().vision_config
         patch_size = vision_config.patch_size
@@ -685,19 +673,20 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         factor = patch_size * merge_size * image_processor.patch_expand_factor
         # Keep the profiling search viable when the caller's budget is below
         # one aligned canvas of the requested duration.
-        max_image_pixels = max(max_image_pixels, temporal_patch_size * factor * factor)
+        pixels_per_token = temporal_patch_size * factor * factor
+        max_image_pixels = max(max_image_pixels, pixels_per_token)
 
         if do_resize:
             t = num_frames if num_frames > temporal_patch_size else temporal_patch_size
+            # `smart_resize` denominates its bounds in vision tokens.
             resized_height, resized_width = smart_resize(
-                t=t,
-                h=image_height,
-                w=image_width,
-                t_factor=temporal_patch_size,
-                h_factor=factor,
-                w_factor=factor,
+                num_frames=t,
+                height=image_height,
+                width=image_width,
+                temporal_factor=temporal_patch_size,
+                factor=factor,
                 min_pixels=1,
-                max_pixels=max_image_pixels,
+                max_pixels=max_image_pixels // pixels_per_token,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:

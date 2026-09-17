@@ -109,6 +109,16 @@ HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
+# `layer_types` spellings that consume a full attention KV cache. Sparse
+# attention still caches every token, so it counts as attention here.
+_ATTENTION_LAYER_TYPES = frozenset(
+    {
+        "full_attention",
+        "deepseek_sparse_attention",
+        "qwen_sparse_attention",
+    }
+)
+
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
     "pooling": ["embed", "classify"],
@@ -1640,7 +1650,8 @@ class ModelConfig:
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
-                        t == "full_attention" for t in layer_types_value[start:end]
+                        t in _ATTENTION_LAYER_TYPES
+                        for t in layer_types_value[start:end]
                     )
                 elif block_type == "linear_attention":
                     return sum(
