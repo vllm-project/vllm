@@ -491,12 +491,20 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
                 // The stream ended: a trailing ` to=…` fragment can no longer
                 // grow into a header, so it is flushed; only trailing
                 // truncated framing stays dropped.
-                let text = strip_trailing_truncated_framing(&self.buffer.text).to_string();
+                let text = strip_complete_bare_header(
+                    strip_trailing_truncated_framing(&self.buffer.text),
+                    self.bare_header_anchor,
+                )
+                .to_string();
                 self.buffer.clear();
                 output.push_text(text);
             }
             MuseGlimmerMode::Reasoning => {
-                let len = strip_trailing_truncated_framing(&self.buffer.text).len();
+                let len = strip_complete_bare_header(
+                    strip_trailing_truncated_framing(&self.buffer.text),
+                    self.bare_header_anchor,
+                )
+                .len();
                 let piece = self.buffer.drain_prefix(len);
                 self.buffer.clear();
                 output.push_reasoning(piece);
@@ -928,6 +936,27 @@ fn open_tail_to_fragment_len(text: &str) -> usize {
             .strip_prefix("to=")
             .is_some_and(|name| name.chars().all(|c| !c.is_whitespace() && c != '<'));
     if holds { text.len() - ws_index } else { 0 }
+}
+
+/// Strip a trailing COMPLETE bare header (`to=RECIPIENT<|message|>`) from a
+/// finished body when the buffer is at a legal bare-header position: the
+/// header opened a channel that never got a body, so it is dropped rather
+/// than flushed as text (Python parity: its header-bounded regexes drop it).
+/// Partial fragments still flush.
+fn strip_complete_bare_header(text: &str, anchor: BareHeaderAnchor) -> &str {
+    if anchor == BareHeaderAnchor::None {
+        return text;
+    }
+    let mut input = text;
+    let parsed: ModalResult<()> = seq!(
+        _: literal("to="),
+        _: complete_recipient_name,
+        _: literal(MESSAGE),
+        _: eof,
+    )
+    .void()
+    .parse_next(&mut input);
+    if parsed.is_ok() { "" } else { text }
 }
 
 /// Strip trailing truncated framing from a finished body: a partial structural
@@ -1461,6 +1490,31 @@ mod tests {
         );
         assert_eq!(output.normal_text(), "pre done");
         assert_eq!(first_call(&output).name.as_deref(), Some("calc"));
+    }
+
+    #[test]
+    fn muse_glimmer_finish_drops_complete_bare_header_without_body() {
+        // A complete bare header at stream end opened a channel that never got
+        // a body: it is dropped, not flushed as text (Python parity).
+        let mut parser = test_parser();
+        let mut output =
+            parser.parse_chunk(" to=self<|message|>thinking to=calc<|message|>").unwrap();
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.reasoning_text(), "thinking ");
+        assert!(output.calls().is_empty());
+
+        // A partial header fragment still flushes as text.
+        let mut parser = test_parser();
+        let mut output = parser.parse_chunk(" to=self<|message|>thinking to=calc").unwrap();
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.reasoning_text(), "thinking to=calc");
+
+        // A glued header was never a header: it is body text, flushed as such.
+        let mut parser = test_parser();
+        let mut output =
+            parser.parse_chunk(" to=self<|message|>thinking xto=calc<|message|>").unwrap();
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.reasoning_text(), "thinking xto=calc<|message|>");
     }
 
     #[test]
