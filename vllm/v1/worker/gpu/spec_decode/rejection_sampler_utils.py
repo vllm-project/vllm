@@ -718,6 +718,8 @@ def _seeded_resample_argmax(
         0,  # logits_cache_stride_0
         0,  # logits_cache_stride_1
         None,  # logits_cache_col_ptr
+        None,  # logits_cache_source_ptr
+        0,  # logits_cache_source_stride
         vocab_size,
         IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
