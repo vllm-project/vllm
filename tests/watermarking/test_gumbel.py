@@ -205,9 +205,9 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
 )
 def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
     torch.manual_seed(0)
-    num_rows, vocab_size, num_steps = 4, 4099, 3
+    num_rows, vocab_size, num_steps = 5, 4099, 3
     logits = torch.randn(num_rows, vocab_size, device="cuda", dtype=torch.float16)
-    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device="cuda")
+    temperatures = torch.tensor([0.0, 0.3, 0.5, 1.0, 2.0], device="cuda")
     processed_logits = logits / torch.where(
         temperatures == 0, 1, temperatures
     ).unsqueeze(-1)
@@ -215,7 +215,10 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
     idx_mapping = torch.arange(num_rows, dtype=torch.int32, device="cuda")
     seeds = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 10
     positions = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 20
-    skip_mask = torch.tensor([True, False, True, False], device="cuda")
+    # The skipped rows must divide by a temperature other than 1, or the
+    # unprocessed logits the cache stores are the logits the sampler sees.
+    # Row 0 keeps a greedy row in the skipped set.
+    skip_mask = torch.tensor([True, True, False, False, True], device="cuda")
     cols = torch.arange(num_rows, dtype=torch.int32, device="cuda") % num_steps
     cache = torch.zeros(
         num_rows, num_steps, vocab_size + 1, dtype=logits.dtype, device="cuda"

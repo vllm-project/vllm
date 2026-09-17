@@ -1008,47 +1008,75 @@ def test_speculative_context_repetition_accelerator_parity(
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-def test_draft_context_deduplication_accelerator_parity():
-    all_token_ids = torch.tensor([[10, 11, 20], [30, 31, 40]])
-    req_indices = torch.tensor([0, 1])
-    prompt_lens = torch.tensor([0, 0])
-    total_lens = torch.tensor([3, 3])
-    prior_contexts = torch.tensor(
-        [[[10, 11], [20, 21], [0, 0]], [[30, 31], [0, 0], [0, 0]]]
-    )
-    contexts = torch.tensor([[10, 11], [40, 41]])
-    steps = torch.tensor([2, 1])
-    enabled = torch.tensor([True, True])
+@pytest.mark.parametrize("steps_layout", ["per_row", "broadcast"])
+@pytest.mark.parametrize("req_indices_layout", ["contiguous", "column_view"])
+def test_draft_context_deduplication_accelerator_parity(
+    steps_layout, req_indices_layout
+):
+    """Parity with the CPU reference for the layouts the speculators pass.
 
-    expected_prior = prior_contexts.clone()
-    expected = draft_watermarking_mask(
+    A draft step is one 0-d tensor broadcast over the batch, and DSpark samples
+    a step at a time, so its request indices are an `idx_map[:, i]` column. Both
+    are read per row, so a row that ignores the layout consults another row's
+    step or another request's history.
+    """
+    num_rows, num_steps, step = 4, 3, 1
+    all_token_ids = torch.tensor([[10, 11, 20, 11], [30, 31, 11, 20]])
+    prompt_lens = torch.tensor([0, 0])
+    total_lens = torch.tensor([4, 4])
+    contexts = torch.tensor([[40, 41], [31, 11], [10, 11], [50, 51]])
+    prior_contexts = torch.zeros(num_rows, num_steps, 2, dtype=torch.int64)
+    prior_contexts[0, 0] = torch.tensor([40, 41])
+    enabled = torch.ones(num_rows, dtype=torch.bool)
+    req_indices = torch.tensor([0, 1, 0, 1])
+
+    def run(all_token_ids, req_indices, steps, prior):
+        return draft_watermarking_mask(
+            all_token_ids,
+            req_indices,
+            prompt_lens.to(all_token_ids.device),
+            total_lens.to(all_token_ids.device),
+            prior,
+            contexts.to(all_token_ids.device),
+            steps,
+            enabled.to(all_token_ids.device),
+            max_history=3,
+            include_prompt=False,
+        )
+
+    reference_prior = prior_contexts.clone()
+    reference = run(
         all_token_ids,
         req_indices,
-        prompt_lens,
-        total_lens,
-        expected_prior,
-        contexts,
-        steps,
-        enabled,
-        max_history=2,
-        include_prompt=False,
+        torch.full((num_rows,), step),
+        reference_prior,
     )
-    actual_prior = prior_contexts.cuda()
-    actual = draft_watermarking_mask(
-        all_token_ids.cuda(),
-        req_indices.cuda(),
-        prompt_lens.cuda(),
-        total_lens.cuda(),
-        actual_prior,
-        contexts.cuda(),
-        steps.cuda(),
-        enabled.cuda(),
-        max_history=2,
-        include_prompt=False,
-    ).cpu()
 
-    assert torch.equal(expected, torch.tensor([False, True]))
-    assert torch.equal(actual, expected)
+    # Row 0 repeats its own step-0 context, rows 1 and 2 repeat a committed
+    # context of their own request, row 3 repeats nothing.
+    assert torch.equal(reference, torch.tensor([False, False, False, True]))
+    expected_prior = prior_contexts.clone()
+    expected_prior[:, step] = contexts
+    assert torch.equal(reference_prior, expected_prior)
+
+    if steps_layout == "per_row":
+        steps = torch.full((num_rows,), step).cuda()
+    else:
+        steps = torch.tensor(step).cuda().expand(num_rows)
+        assert steps.stride(0) == 0
+
+    if req_indices_layout == "contiguous":
+        gpu_req_indices = req_indices.cuda()
+    else:
+        gpu_req_indices = (
+            req_indices.repeat_interleave(num_steps).view(num_rows, num_steps).cuda()
+        )[:, 1]
+        assert gpu_req_indices.stride(0) == num_steps
+
+    actual_prior = prior_contexts.cuda()
+    actual = run(all_token_ids.cuda(), gpu_req_indices, steps, actual_prior).cpu()
+
+    assert torch.equal(actual, reference)
     assert torch.equal(actual_prior.cpu(), expected_prior)
 
 
@@ -1366,6 +1394,99 @@ def test_draft_sampler_deduplicates_against_committed_history(monkeypatch):
     )
 
     assert sampled.item() == 4
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("idx_mapping_layout", ["contiguous", "column_view"])
+def test_draft_watermarker_deduplicates_across_a_block_on_cuda(
+    monkeypatch, idx_mapping_layout
+):
+    """Drive the whole draft sampler over a block with the production shapes.
+
+    `draft_step` is a 0-d tensor, and a speculator that samples one step at a
+    time hands over a column of its index map. Each step is checked against the
+    committed history the window still reaches and against the earlier steps of
+    the block.
+    """
+    num_reqs, num_steps, vocab_size = 2, 3, 16
+    watermarker = GumbelWatermarker(key=42, context_width=2)
+    draft_watermarker = DraftWatermarker(
+        watermarker,
+        max_num_reqs=num_reqs,
+        device=torch.device("cuda"),
+        num_speculative_steps=num_steps,
+        deduplicate_contexts="single_turn",
+        deduplicate_contexts_max_history=4,
+    )
+    draft_watermarker.prepare(
+        contexts=torch.tensor([[5, 6], [6, 3]]).cuda(),
+        enabled=torch.ones(num_reqs, dtype=torch.bool).cuda(),
+        all_token_ids=torch.tensor([[5, 6, 7, 5, 6], [8, 9, 6, 6, 3]]).cuda(),
+        prompt_lens=torch.zeros(num_reqs, dtype=torch.int64).cuda(),
+        total_lens=torch.full((num_reqs,), 5).cuda(),
+    )
+
+    if idx_mapping_layout == "contiguous":
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32).cuda()
+    else:
+        idx_mapping = (
+            torch.arange(num_reqs, dtype=torch.int32)
+            .repeat_interleave(num_steps)
+            .view(num_reqs, num_steps)
+            .cuda()
+        )[:, 1]
+        assert idx_mapping.stride(0) == num_steps
+
+    skip_masks: list[torch.Tensor] = []
+    original = philox_gumbel_sample
+
+    def spy(*args, **kwargs):
+        skip_masks.append(kwargs["skip_mask"].cpu())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("vllm.v1.worker.gpu.sample.watermark.philox_gumbel_sample", spy)
+
+    draft_logits = torch.zeros(num_reqs, num_steps, vocab_size + 1).cuda()
+    step_logits = []
+    for step in range(num_steps):
+        # Token 6 wins by a margin no Gumbel draw can close, on either path.
+        logits = torch.zeros(num_reqs, vocab_size).cuda()
+        logits[:, 6] = 100.0
+        logits[:, 0] = float(step) + 1.0
+        step_logits.append(logits)
+        sampled = draft_watermarker.sample(
+            logits,
+            idx_mapping=idx_mapping,
+            temperature=torch.ones(num_reqs).cuda(),
+            seeds=torch.zeros(num_reqs, dtype=torch.int64).cuda(),
+            positions=torch.full((num_reqs,), 5 + step, dtype=torch.int64).cuda(),
+            draft_step=torch.tensor(step).cuda(),
+            draft_logits=draft_logits,
+            use_fp64=False,
+        )
+        assert torch.equal(sampled.cpu(), torch.tensor([6, 6]))
+
+    # Step 0: request 0's [5, 6] is committed at position 2, request 1's [6, 3]
+    # is new. Step 1: [6, 6] and [3, 6] are both new. Step 2: request 0's
+    # [6, 6] repeats its own step-1 context and request 1's repeats position 4.
+    assert [mask.tolist() for mask in skip_masks] == [
+        [True, False],
+        [False, False],
+        [True, True],
+    ]
+    assert torch.equal(
+        draft_watermarker.prior_contexts[:num_reqs].cpu(),
+        torch.tensor([[[5, 6], [6, 6], [6, 6]], [[6, 3], [3, 6], [6, 6]]]),
+    )
+    assert torch.equal(
+        draft_watermarker.contexts[:num_reqs].cpu(), torch.tensor([[6, 6], [6, 6]])
+    )
+    for step, logits in enumerate(step_logits):
+        # The 0-d draft step selects the logits cache column.
+        assert torch.equal(draft_logits[:, step, :vocab_size], logits)
+    assert not draft_logits[:, :, -1].any()
 
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
