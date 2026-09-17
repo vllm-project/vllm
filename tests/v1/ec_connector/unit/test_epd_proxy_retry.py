@@ -463,7 +463,7 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
 
     video = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
     images = [{"type": "image_url", "image_url": {"url": key}} for key in ("A", "B")]
-    body = {
+    body: dict[str, Any] = {
         "messages": [{"content": [images[0], video, images[1]]}],
         "mm_processor_kwargs": {"use_audio_in_video": True},
     }
