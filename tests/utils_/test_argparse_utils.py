@@ -524,3 +524,20 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
+
+
+def test_group_description_is_summary_only():
+    """Group descriptions are config docstrings, too long for the terminal."""
+    parser = FlexibleArgumentParser()
+    group = parser.add_argument_group(
+        title="MyConfig",
+        description="Summary line.\n\nDetails which only belong in the docs.",
+    )
+    group.add_argument("--my-arg")
+
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()
+
+    parser._search_keyword = "myconfig"
+    assert "Summary line." in parser.format_help()
+    assert "only belong in the docs" not in parser.format_help()
