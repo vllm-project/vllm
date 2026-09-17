@@ -17,11 +17,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPUCacheOffloadingInfo,
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
@@ -43,11 +39,9 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
-    tier_info: CPUCacheOffloadingInfo | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
-        tier_info=tier_info,
         cache_policy=cache_policy,
         cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
@@ -241,55 +235,12 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def test_cpu_manager_publishes_the_cache_facts_as_config_info():
-    """The manager is the info source, so the facts must reach config_info().
-
-    The frontend turns these keys into Prometheus label names, so a renamed
-    key renames a label. The "cpu_" prefix keeps one name for the cache,
-    standalone or as the primary tier of a tiering manager.
-    """
-    manager = make_cpu_manager(
-        num_chunks=4,
-        tier_info=CPUCacheOffloadingInfo(
-            num_chunks=4,
-            blocks_per_chunk=2,
-            kv_bytes_per_chunk=16384,
-            capacity_tokens_at_max_len=128,
-        ),
-    )
-
-    assert manager.config_info() == {
-        "cpu_num_chunks": 4,
-        "cpu_blocks_per_chunk": 2,
-        "cpu_kv_bytes_per_chunk": 16384,
-        "cpu_capacity_tokens_at_max_len": 128,
-    }
-
-
-def test_cpu_manager_renders_an_unknown_token_capacity_as_none():
-    """An unknown capacity stays a label value, and drops no label.
-
-    A missing key would change the label set, and a Prometheus metric binds
-    its label names once.
-    """
-    manager = make_cpu_manager(
-        num_chunks=4,
-        tier_info=CPUCacheOffloadingInfo(
-            num_chunks=4,
-            blocks_per_chunk=1,
-            kv_bytes_per_chunk=16384,
-            capacity_tokens_at_max_len=None,
-        ),
-    )
-
-    assert manager.config_info()["cpu_capacity_tokens_at_max_len"] == "None"
-
-
-def test_cpu_manager_reports_no_config_info_without_the_cache_facts():
-    """A caller that passes no facts keeps the empty default.
+def test_cpu_manager_reports_no_config_info_without_a_configuration():
+    """A caller that passes no configuration keeps the empty default.
 
     The scheduler still sends an info payload, so the metric appears with the
-    engine labels alone.
+    engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
+    published labels, because a real spec supplies the configuration.
     """
     manager = make_cpu_manager(num_chunks=4)
 

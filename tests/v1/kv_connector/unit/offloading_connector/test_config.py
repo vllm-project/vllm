@@ -577,6 +577,25 @@ def test_group_carries_the_chunks_the_tier_keeps_per_request(
     assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
 
 
+def test_model_config_carries_the_longest_request():
+    """The capacity estimate of a tier holds at max_model_len, so it must travel.
+
+    _build_config_info in vllm/v1/kv_offload/cpu/manager.py reads it. A model
+    config without it leaves the estimate unknown.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.max_model_len = 32768
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], _full_attention_spec())],
+    )
+
+    offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+
+    assert offloading_config.model.max_model_len == 32768
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
