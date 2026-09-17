@@ -46,23 +46,26 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
+    def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
+        flat_input = input_.reshape(-1)
+        gathered = torch.empty(
+            (self.world_size, flat_input.numel()),
+            dtype=input_.dtype,
+            device=input_.device,
+        )
+        dist.all_gather_into_tensor(
+            gathered.view(-1), flat_input, group=self.device_group
+        )
+        output = gathered[0].clone()
+        for rank in range(1, self.world_size):
+            output.add_(gathered[rank])
+        return output.view(input_.shape)
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT:
             # XCCL changes its reduction order with message size. Gather first
             # and accumulate in rank order, independent of the token batch.
-            flat_input = input_.reshape(-1)
-            gathered = torch.empty(
-                (self.world_size, flat_input.numel()),
-                dtype=input_.dtype,
-                device=input_.device,
-            )
-            dist.all_gather_into_tensor(
-                gathered.view(-1), flat_input, group=self.device_group
-            )
-            output = gathered[0].clone()
-            for rank in range(1, self.world_size):
-                output.add_(gathered[rank])
-            return output.view(input_.shape)
+            return self._fixed_rank_sum(input_)
 
         output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
@@ -87,7 +90,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
+        if envs.VLLM_BATCH_INVARIANT:
+            reduced = self._fixed_rank_sum(input_tensor)
+            start = self.rank_in_group * chunk_size
+            output.copy_(reduced.narrow(0, start, chunk_size))
+        else:
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -117,7 +125,15 @@ class XpuCommunicator(DeviceCommunicatorBase):
         output = torch.empty(
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+        if envs.VLLM_BATCH_INVARIANT:
+            reduced = self._fixed_rank_sum(input_tensor)
+            start = (
+                self.rank_in_group * chunk_size
+                if sizes is None
+                else sum(sizes[: self.rank_in_group])
+            )
+            output.copy_(reduced.narrow(0, start, chunk_size))
+        elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
             # if inputs shape in different ranks is not the same using reduce_scatter
             input_splits = list(input_tensor.split(sizes, dim=0))
             dist.reduce_scatter(output, input_splits, group=self.device_group)
