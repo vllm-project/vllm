@@ -389,7 +389,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         )
                         self.xfer_stats.record_failed_notification()
 
-        # Notification-only requests have no transfer completion to drain metadata.
         if not meta.awaiting_kvs and not any(meta.local_block_ids):
             self._recving_metadata.pop(req_id, None)
 
