@@ -1619,6 +1619,32 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert [len(group) for group in cached_blocks.blocks] == [1, 4]
 
 
+@pytest.mark.parametrize("draft_backend", ["TRITON_ATTN", "ROCM_AITER_FA"])
+def test_dcp_aiter_mla_target_keeps_layer_contiguous_layout(monkeypatch, draft_backend):
+    """AITER MLA decode views each layer's cache as one run, so a replicated draft
+    must not pull a DCP target into a block-outer layout."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = SimpleNamespace(cache_config=CacheConfig(), kv_transfer_config=None)
+    draft = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+    backends = [AiterMLABackend, AttentionBackendEnum[draft_backend].get_class()]
+    supported = [layout.name for layout in get_supported_kv_cache_layouts(backends)]
+    layout = resolve_kv_cache_layout(config, [supported], [new_mla_spec(), draft])
+    assert layout.is_layer_compact
+
+
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))

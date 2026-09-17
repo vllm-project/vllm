@@ -36,7 +36,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
@@ -264,6 +268,12 @@ class AiterMLABackend(MLACommonBackend):
         # We support any kernel_block_size by expanding block-level indices
         # into per-token flat indices in the metadata builder.
         return [MultipleOf(1)]
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Decode flattens each layer's cache with .view(), so the layer's pages
+        # must be contiguous.
+        return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC)
 
     @staticmethod
     def get_name() -> str:
