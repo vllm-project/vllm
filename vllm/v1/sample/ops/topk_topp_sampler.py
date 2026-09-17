@@ -97,8 +97,7 @@ def xpu_sampler_supported() -> bool:
     """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
 
     Returns False (with appropriate logging) when the platform isn't XPU, when
-    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0, or when vllm-xpu-kernels was built
-    without the kernel.
+    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0.
 
     Note: callers must additionally ensure no request needs a per-request seed
     or greedy sampling, since the kernel draws from the device's default
@@ -112,14 +111,6 @@ def xpu_sampler_supported() -> bool:
         )
         return False
 
-    import vllm._xpu_ops  # noqa: F401  registers torch.ops.vllm.*
-
-    if not hasattr(torch.ops._xpu_C, "topk_topp_sampler"):
-        logger.warning_once(
-            "Fused XPU top-p/top-k sampling unavailable: vllm-xpu-kernels was "
-            "built without the sampler kernel; falling back."
-        )
-        return False
     logger.info_once("Using the fused XPU kernel for top-p & top-k sampling.")
     return True
 

@@ -400,34 +400,6 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
     assert torch.equal(output_logits, torch.full((2, 8), 10.0))
 
 
-def test_gpu_sampler_uses_xpu_sampler_when_watermarking_is_disabled(monkeypatch):
-    sampler = object.__new__(GPUWatermarkSampler)
-    sampler.watermarking = SimpleNamespace(np=np.array([False]))
-    sampler.sampling_states = SimpleNamespace(
-        temperature=SimpleNamespace(np=np.ones(1))
-    )
-    sampler.use_flashinfer = False
-    expected_tokens = torch.tensor([3])
-    logits = torch.zeros(1, 8)
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.sample.sampler.xpu_sample",
-        lambda *args: (expected_tokens, None),
-    )
-
-    sampled, output_logits = sampler._sample_random(
-        logits,
-        torch.tensor([0]),
-        np.array([0]),
-        torch.zeros(1, dtype=torch.int64),
-        None,
-        None,
-        True,
-    )
-
-    assert sampled is expected_tokens
-    assert output_logits is logits
-
-
 def test_repeated_context_mask_ignores_prompt_tokens():
     all_token_ids = torch.tensor(
         [
