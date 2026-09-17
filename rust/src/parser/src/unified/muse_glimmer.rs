@@ -171,7 +171,8 @@ pub struct MuseGlimmerUnifiedParser {
     reasoning_block_count: usize,
     /// Channel of a prompt tail `assistant to=RECIPIENT` prefilled without its
     /// `<|message|>`: the turn's first bare untagged header completes that
-    /// header, so it opens this kind instead of untagged content.
+    /// header, so it opens this kind instead of untagged content. A framed
+    /// header instead abandons the prefilled channel.
     prefilled_kind: Option<ChannelKind>,
     /// Names of the tools registered on the request (for name normalization).
     registered_names: Vec<String>,
@@ -271,8 +272,13 @@ impl MuseGlimmerUnifiedParser {
             // Marker and noise spans are drained and dropped with their tokens.
             MuseGlimmerEvent::Skip => {}
             MuseGlimmerEvent::ChannelOpen(kind) => {
+                // Only a bare header (no `<|start|>`) completes the prefill.
                 let kind = match (self.prefilled_kind.take(), kind) {
-                    (Some(prefilled), ChannelKind::Content { reclassify: true }) => prefilled,
+                    (Some(prefilled), ChannelKind::Content { reclassify: true })
+                        if !piece.text.starts_with(START) =>
+                    {
+                        prefilled
+                    }
                     (_, kind) => kind,
                 };
                 self.open_channel(kind, output);
@@ -1251,6 +1257,27 @@ mod tests {
         // is separated from it by "\n".
         assert_eq!(output.reasoning_text(), "thinking\nmore");
         assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_initialize_recipient_only_prefill_yields_to_framed_header() {
+        let mut parser = test_parser();
+        let prompt = tokenizer()
+            .encode(
+                "<|start|>user<|message|>hi<|eom|><|start|>assistant to=weather.get",
+                false,
+            )
+            .unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        // The model abandons the forced header; the framed one it emits
+        // instead is authoritative, not a completion of the prefill.
+        let output = parser
+            .parse_complete("<|start|>assistant<|message|>Sorry, I cannot do that.<|eot|>")
+            .unwrap();
+
+        assert_eq!(output.normal_text(), "Sorry, I cannot do that.");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
