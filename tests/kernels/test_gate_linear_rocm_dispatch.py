@@ -11,6 +11,8 @@ The ROCm branch is guarded on ``not bias`` because ``torch.mm`` has no bias
 term; a biased gate must fall back so the bias is not silently dropped.
 """
 
+import inspect
+
 import pytest
 import torch
 
@@ -241,3 +243,18 @@ def test_rocm_bf16x3_dispatch_is_a_custom_op():
     out = torch.ops.vllm.rocm_bf16x3_router_gemm_dispatch(x, w, split)
     assert out.shape == (8192, 128)
     assert out.dtype == torch.float32
+
+
+def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
+    """The gfx950 low-M fp32 tier claims these shapes too and returns
+    unconditionally, so bf16x3 is only reachable if checked first."""
+    gate = _make_bf16x3_gate(
+        monkeypatch, input_size=6144, output_size=128, on_gfx950=True
+    )
+    assert gate.allow_fp32_router_gemm
+    assert gate.allow_rocm_bf16x3_router_gemm
+
+    source = inspect.getsource(type(gate).forward)
+    assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
+        "allow_fp32_router_gemm"
+    )

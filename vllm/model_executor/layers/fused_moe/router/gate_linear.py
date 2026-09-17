@@ -4,11 +4,14 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.router import bf16x3_router_gemm_rocm
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 
 @PluggableLayer.register("gate_linear")
@@ -204,6 +207,23 @@ class GateLinear(ReplicatedLinear):
             output = ll_bf16_gemm(x, self.weight)
             return output, None
 
+        # Tier 4: ROCm bf16x3 router GEMM. Checked before tier 2 because both
+        # tiers claim the same gfx950 shapes and tier 2 returns
+        # unconditionally; the custom op below picks between them on the
+        # runtime num_tokens.
+        if self.allow_rocm_bf16x3_router_gemm and x.dtype == torch.bfloat16:
+            if self._bf16x3_weight is None:
+                logger.warning_once(
+                    "ROCm BF16x3 router GEMM is enabled for %s but its weight "
+                    "split is missing; falling back to fp32.",
+                    self.prefix,
+                )
+            else:
+                output = torch.ops.vllm.rocm_bf16x3_router_gemm_dispatch(
+                    x, self.weight, self._bf16x3_weight
+                )
+                return output, None
+
         # Tier 2: fp32 specialized kernel (model-specific shapes, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
         # capture does not freeze the runtime num_tokens branch.
@@ -224,21 +244,6 @@ class GateLinear(ReplicatedLinear):
 
             output = bf16x3_router_gemm(x, self.weight)
             return output, None
-
-        # Tier 4: ROCm bf16x3 router GEMM. As in tier 2, the runtime num_tokens
-        # dispatch lives inside a custom op.
-        if self.allow_rocm_bf16x3_router_gemm and x.dtype == torch.bfloat16:
-            if self._bf16x3_weight is None:
-                logger.warning_once(
-                    "ROCm BF16x3 router GEMM is enabled for %s but its weight "
-                    "split is missing; falling back to fp32.",
-                    self.prefix,
-                )
-            else:
-                output = torch.ops.vllm.rocm_bf16x3_router_gemm_dispatch(
-                    x, self.weight, self._bf16x3_weight
-                )
-                return output, None
 
         # Tier 5: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
@@ -301,6 +306,17 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
     """
     if bf16x3_router_gemm_rocm.is_supported(x, weight):
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
+    # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
+    # checked ahead of.
+    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+        from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+            can_use_rocm_fp32_router_gemm,
+            rocm_fp32_router_gemm,
+        )
+
+        x = x.contiguous()
+        if can_use_rocm_fp32_router_gemm(x, weight):
+            return rocm_fp32_router_gemm(x, weight)
     return torch.nn.functional.linear(x.float(), weight)
 
 
