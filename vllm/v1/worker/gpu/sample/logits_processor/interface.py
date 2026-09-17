@@ -102,6 +102,14 @@ class LogitsProcessor(ABC):
         processor may read. Treat it as read-only.
         """
 
+    @classmethod  # noqa: B027
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        """Raise ``ValueError`` for invalid per-request arguments.
+
+        Runs at request admission, so invalid arguments fail the request
+        with an error instead of reaching the sampler.
+        """
+
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         """Initialize per-slot state for a request entering the batch.
 

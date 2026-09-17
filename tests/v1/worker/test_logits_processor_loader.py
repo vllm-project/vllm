@@ -14,6 +14,8 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.sample.logits_processor as loader
+from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import (
     LogitsProcessor as V1LogitsProcessor,
 )
@@ -165,3 +167,26 @@ def test_pooling_model_rejects_custom_logitsprocs():
     with pytest.raises(ValueError, match="Pooling models do not support"):
         loader.build_custom_logits_processors(None, None, True, [DummyV2Processor])
     assert loader.build_custom_logits_processors(None, None, True, []) == []
+
+
+class ValidatingProcessor(DummyV2Processor):
+    """Rejects target_token=-1 via the optional validate_params hook."""
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        if (sampling_params.extra_args or {}).get("target_token") == -1:
+            raise ValueError("target_token must not be -1")
+
+
+def test_validate_params_runs_at_admission():
+    """The V2 entry runs validate_params once per loaded class and wraps
+    rejections as VLLMValidationError."""
+    loader._cached_load_v2_logitsprocs.cache_clear()
+    loader.validate_custom_logits_processors_params(
+        [ValidatingProcessor], SamplingParams(extra_args={"target_token": 1})
+    )
+    with pytest.raises(VLLMValidationError, match="target_token"):
+        loader.validate_custom_logits_processors_params(
+            [ValidatingProcessor],
+            SamplingParams(extra_args={"target_token": -1}),
+        )

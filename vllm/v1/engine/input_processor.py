@@ -51,6 +51,9 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        # use_v2_model_runner is a property; evaluate it once instead of per
+        # request.
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -100,6 +103,23 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+
+            if self.use_v2_model_runner:
+                from vllm.v1.worker.gpu.sample.logits_processor import (
+                    validate_custom_logits_processors_params,
+                )
+
+                validate_custom_logits_processors_params(
+                    self.model_config.logits_processors, params
+                )
+            else:
+                from vllm.v1.sample.logits_processor import (
+                    validate_logits_processors_parameters,
+                )
+
+                validate_logits_processors_parameters(
+                    self.model_config.logits_processors, params
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

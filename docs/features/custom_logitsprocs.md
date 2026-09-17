@@ -24,9 +24,9 @@ In vLLM, logits processors operate at batch granularity. During a given engine s
 
 Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
 
-* `__init__(self, vllm_config: VllmConfig, req_state: LogitsProcessorRequestState)`:
+* `__init__(self, vllm_config: VllmConfig, req_states: LogitsProcRequestState)`:
     * `vllm_config`: engine configuration data structure
-    * `req_state`: a narrow, read-only view of the persistent batch, exposing the on-device token history (`all_token_ids`, `prompt_len`, `prefill_len`, `total_len`) plus `device`, `max_num_reqs` and `vocab_size`
+    * `req_states`: a narrow, read-only view of the persistent batch, exposing the on-device token history (`all_token_ids`, `prompt_len`, `prefill_len`, `total_len`) plus `device`, `max_num_reqs` and `vocab_size`
 
 * `add_request(self, req_idx, sampling_params) -> bool`:
     * Initialize per-slot state for a request entering the batch. Slots are recycled through a free list, so per-slot state must be fully (re)initialized here; there is no removal hook, since freed slots are never read
@@ -34,6 +34,9 @@ Custom logits processors must subclass `vllm.v1.worker.gpu.sample.logits_process
 
 * `apply_staged_writes(self) -> None` (optional):
     * Flush host-side writes staged by `add_request()` to the device; called once per step before the forward pass
+
+* `validate_params(cls, sampling_params) -> None` (optional classmethod):
+    * Raise `ValueError` for invalid per-request arguments (especially custom arguments); runs at request admission, so invalid arguments fail the request instead of reaching the sampler
 
 * `apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor`:
     * Consume a `(num_logits_rows) x (vocab_size)` logits tensor and the step's batch layout (`ctx`: row-to-slot mappings, `input_ids`, positions)
@@ -55,7 +58,7 @@ The contrived example below implements a custom logits processor which masks out
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
     from vllm.v1.worker.gpu.sample.logits_processor import (
-        LogitsProcessorRequestState,
+        LogitsProcRequestState,
         LogitsContext,
         LogitsProcessor,
     )
@@ -65,14 +68,14 @@ The contrived example below implements a custom logits processor which masks out
         """Masks out all tokens except `target_token` (a per-request custom
         argument); requests without it are left alone."""
 
-        def __init__(self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState):
+        def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
             # Per-slot target; -1 means disabled. Staged on the host and
             # flushed to the device once per step in apply_staged_writes().
             self.target_token = torch.full(
-                (req_state.max_num_reqs,), -1, dtype=torch.int64
+                (req_states.max_num_reqs,), -1, dtype=torch.int64
             )
             self.target_token_dev = torch.full(
-                (req_state.max_num_reqs,), -1, dtype=torch.int64, device=req_state.device
+                (req_states.max_num_reqs,), -1, dtype=torch.int64, device=req_states.device
             )
 
         def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:

@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 from collections.abc import Sequence
+from functools import lru_cache
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor import STR_POOLING_REJECTS_LOGITSPROCS
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
@@ -25,6 +28,7 @@ __all__ = [
     "LogitsContext",
     "LogitsProcessor",
     "build_custom_logits_processors",
+    "validate_custom_logits_processors_params",
 ]
 
 
@@ -158,3 +162,27 @@ def build_custom_logits_processors(
     custom_logitsprocs_classes = _load_v2_logitsprocs(custom_logitsprocs)
     lp_req_state = LogitsProcRequestState.from_request_state(req_states)
     return [ctor(vllm_config, lp_req_state) for ctor in custom_logitsprocs_classes]
+
+
+@lru_cache
+def _cached_load_v2_logitsprocs(
+    custom_logitsprocs: tuple[str | type, ...],
+) -> list[type[LogitsProcessor]]:
+    return _load_v2_logitsprocs(list(custom_logitsprocs))
+
+
+def validate_custom_logits_processors_params(
+    custom_logitsprocs: Sequence[str | type] | None,
+    sampling_params: SamplingParams,
+) -> None:
+    """Run each loaded processor's validate_params at request admission.
+
+    Raises:
+        VLLMValidationError: if a processor rejects the params.
+
+    """
+    for cls in _cached_load_v2_logitsprocs(tuple(custom_logitsprocs or ())):
+        try:
+            cls.validate_params(sampling_params)
+        except ValueError as e:
+            raise VLLMValidationError(str(e)) from e
