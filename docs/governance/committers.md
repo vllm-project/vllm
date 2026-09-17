@@ -2,7 +2,7 @@
 
 This document lists the current committers of the vLLM project and the core areas they maintain.
 Committers have write access to the vLLM repository and are responsible for reviewing and merging PRs.
-You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers. Both this documents and the CODEOWNERS file are living documents and they complement each other.
+You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers. Both these documents and the CODEOWNERS file are living documents and they complement each other.
 
 ## Active Committers
 
