@@ -544,9 +544,10 @@ def _mock_config_for_cudagraph_sizes(
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [
-        # No speculation: the 2x headroom under the platform ceiling, unchanged.
+        # No speculation, including an off-stride scheduler capacity.
         (8, 0, True),
         (32, 0, True),
+        (100, 0, True),
         # Speculating, but the widest decode batch still fits under the ceiling.
         (64, 7, True),
         (256, 1, True),
