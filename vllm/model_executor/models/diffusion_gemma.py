@@ -1240,7 +1240,6 @@ class DiffusionSampler:
         # --- CPU/NumPy setup (outside compile): split decode vs prefill, init
         # canvas for any new prefills, and stage decode slot indices to GPU. ---
         states = self.diffusion_states
-        CL = self.canvas_length
         slots_np = input_batch.idx_mapping_np[:num_reqs]
         per_req_nlogits_np = np.diff(input_batch.cu_num_logits_np[: num_reqs + 1])
 
@@ -1283,18 +1282,10 @@ class DiffusionSampler:
             if top_k is not None or top_p is not None:
                 logits = apply_top_k_top_p(logits.float(), top_k, top_p)
 
-        # Pad any truncated canvas back to CL so the uniform-CL sampler math
-        # holds. Phantom (padded) positions are zeroed → uniform logits → high
-        # entropy (no premature convergence) and argmax 0 (stable); they are
-        # never committed (num_sampled == real length). masked_fill (not
-        # multiply) so -inf entries from top_k/top_p filtering above don't
-        # turn phantom rows into NaN.
-        if num_decode > 0 and valid_canvas_len_np.min() < CL:
-            ar = torch.arange(CL, device=device)
-            starts = valid_canvas_len.cumsum(0) - valid_canvas_len  # row offset per req
-            valid = ar.unsqueeze(0) < valid_canvas_len.unsqueeze(1)  # [num_decode, CL]
-            src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
-            logits = logits[src.reshape(-1)].masked_fill_(~valid.reshape(-1, 1), 0)
+        # Where each decode request's rows start in the flat logits. Tiles
+        # below gather and pad a request to the tile's width.
+        row_starts_np = np.concatenate(([0], np.cumsum(valid_canvas_len_np)[:-1])).astype(np.int64)
+        row_starts = async_tensor_h2d(row_starts_np, device=device)
 
         # Clear once: the tiled loop below only scatters its own decode slots,
         # so it must not re-clear earlier tiles' writes.
@@ -1317,107 +1308,134 @@ class DiffusionSampler:
         want_logprobs = max_num_logprobs >= 0 or max_token_ids > 0
         num_logprobs = max(max_num_logprobs, 0)
 
-        # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
-        # _compiled_sample_step keeps several live [group * CL, vocab] copies, so
-        # size each tile to a fraction of free memory to bound the transient at
-        # high concurrency. Tiling is bit-identical to a single pass.
-        group = max(num_decode, 1)
-        if num_decode > 0:
-            free, _ = current_platform.mem_get_info()
-            # ~10 transient fp32 copies of [group * CL, vocab] inside the step
+        # Sample per tile. Decode requests are grouped by canvas width and each
+        # tile runs the compiled step at that width over [:, :W] views of the
+        # state, so a narrow read pays for its own rows rather than the served
+        # canvas. Widths ascend, so the last tile's canvas-to-draft copy (over
+        # all slots) is the widest. The fp32 pipeline keeps several live
+        # [tile * W, vocab] copies, so a tile is also bounded by free memory.
+        widths_np = states.canvas_width_np[decode_slots_np]
+        order = np.argsort(widths_np, kind="stable")
+        free = current_platform.mem_get_info()[0] if num_decode > 0 else 0
+        run_start = 0
+        while run_start < num_decode:
+            W = int(widths_np[order[run_start]])
+            run_end = run_start
+            while run_end < num_decode and widths_np[order[run_end]] == W:
+                run_end += 1
+            # ~10 transient fp32 copies of [tile * W, vocab] inside the step
             # (eager peaks at ~8; pad for allocator overhead and small tensors).
-            bytes_per_req = CL * self.vocab_size * 4 * 10
-            budget = int(free * 0.5) // max(bytes_per_req, 1)
-            group = max(1, min(num_decode, budget))
+            budget = max(1, int(free * 0.5) // max(W * self.vocab_size * 4 * 10, 1))
+            for t0 in range(run_start, run_end, budget):
+                sel_np = order[t0 : min(t0 + budget, run_end)]
+                n = len(sel_np)
+                sel = async_tensor_h2d(sel_np.astype(np.int64), device=device)
+                tile_slots = decode_slots[sel]
+                tile_valid = valid_canvas_len[sel]
+                tile_valid_np = valid_canvas_len_np[sel_np]
+                contiguous = bool((sel_np == np.arange(sel_np[0], sel_np[0] + n)).all())
+                if contiguous and tile_valid_np.min() == W:
+                    r0 = int(row_starts_np[sel_np[0]])
+                    tile_logits = logits[r0 : r0 + n * W]
+                else:
+                    # Pad each request to W. Phantom positions are zeroed:
+                    # uniform logits, high entropy, argmax 0, never committed.
+                    # masked_fill, not multiply, so -inf from top_k/top_p
+                    # filtering above cannot turn a phantom row into NaN.
+                    ar = torch.arange(W, device=device)
+                    src = (row_starts[sel].unsqueeze(1) + ar.unsqueeze(0)).clamp_max(
+                        logits.shape[0] - 1
+                    )
+                    valid = ar.unsqueeze(0) < tile_valid.unsqueeze(1)
+                    tile_logits = logits[src.reshape(-1)].masked_fill_(
+                        ~valid.reshape(-1, 1), 0
+                    )
+                compute_sc = (
+                    not states.single_step_slots
+                    or not states.single_step_slots.issuperset(
+                        decode_slots_np[sel_np].tolist()
+                    )
+                )
 
-        for start_req in range(0, num_decode, group):
-            end_req = min(start_req + group, num_decode)
-            tile = slice(start_req, end_req)
-            tile_slots = decode_slots[tile]
-            compute_sc = not states.single_step_slots or not states.single_step_slots.issuperset(
-                decode_slots_np[tile].tolist()
-            )
+                scaled = _compiled_sample_step(
+                    tile_logits,
+                    tile_slots,
+                    decode_idx[sel],
+                    all_slots,
+                    tile_valid,
+                    # State, viewed at this tile's width
+                    states.canvas[:, :W],
+                    states.argmax_canvas[:, :W],
+                    states.step,
+                    states.is_encoder_phase,
+                    states.confident,
+                    states.self_conditioning_embeds[:, :W],
+                    self.embed_weight,
+                    self.normalizer,
+                    states.accepted_canvas_history[:, :, :W],
+                    states.accepted_canvas_history_len,
+                    states.max_steps,
+                    # Output
+                    sampled[:, :W],
+                    num_sampled,
+                    self.req_states.draft_tokens,
+                    # Config
+                    max_denoising_steps=float(states.max_denoising_steps),
+                    t_min=self.t_min,
+                    t_max=self.t_max,
+                    confidence_threshold=self.confidence_threshold,
+                    vocab_size=self.vocab_size,
+                    CL=W,
+                    ST=states.stability_threshold,
+                    entropy_bound=self.entropy_bound,
+                    sc_vocab_start=self.sc_vocab_start,
+                    sc_vocab_end=self.sc_vocab_end,
+                    tp_size=self.tp_size,
+                    tp_group_name=self.tp_group_name,
+                    compute_sc=compute_sc,
+                )
 
-            scaled = _compiled_sample_step(
-                logits[start_req * CL : end_req * CL],
-                tile_slots,
-                decode_idx[tile],
-                all_slots,
-                valid_canvas_len[tile],
-                # State
-                states.canvas,
-                states.argmax_canvas,
-                states.step,
-                states.is_encoder_phase,
-                states.confident,
-                states.self_conditioning_embeds,
-                self.embed_weight,
-                self.normalizer,
-                states.accepted_canvas_history,
-                states.accepted_canvas_history_len,
-                states.max_steps,
-                # Output
-                sampled,
-                num_sampled,
-                self.req_states.draft_tokens,
-                # Config
-                max_denoising_steps=float(states.max_denoising_steps),
-                t_min=self.t_min,
-                t_max=self.t_max,
-                confidence_threshold=self.confidence_threshold,
-                vocab_size=self.vocab_size,
-                CL=CL,
-                ST=states.stability_threshold,
-                entropy_bound=self.entropy_bound,
-                sc_vocab_start=self.sc_vocab_start,
-                sc_vocab_end=self.sc_vocab_end,
-                tp_size=self.tp_size,
-                tp_group_name=self.tp_group_name,
-                compute_sc=compute_sc,
-            )
-
-            # Logprobs for denoise steps that just converged (is_encoder_phase
-            # flipped False→True), stashed per tile so `scaled` is freed each tile.
-            if want_logprobs:
-                converged_mask = states.is_encoder_phase[tile_slots]
-                just_converged = converged_mask & ~is_committing[tile]
-                if just_converged.any():
-                    flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                    argmax_tokens = scaled.argmax(dim=-1)
-                    raw_flat: torch.Tensor | None = None
-                    for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                        li = local_idx.item()
-                        slot = tile_slots[local_idx].item()
-                        # Stash only the real canvas positions (== CL unless this
-                        # canvas was truncated near max_model_len); padded tail
-                        # positions are never emitted.
-                        k_i = int(valid_canvas_len_np[start_req + li])
-                        pos = li * CL
-                        src = flat_logits
-                        if slot in states.read_only_slots:
-                            # Read-only slots report logprobs at temperature 1.
-                            # The schedule-tempered logits share the argmax.
-                            if raw_flat is None:
-                                tile_rows = slice(start_req * CL, end_req * CL)
-                                raw_flat = logits[tile_rows].float()
-                            src = raw_flat
-                        per_req_ids = max_token_ids > 0
-                        self._pending_logprobs[slot] = compute_topk_scores(
-                            src[pos : pos + k_i],
-                            num_logprobs,
-                            argmax_tokens[local_idx][:k_i],
-                            logprob_token_ids_state=(
-                                self.logprob_token_ids_state if per_req_ids else None
-                            ),
-                            # every row of this stash belongs to one slot
-                            expanded_idx_mapping=(
-                                torch.full((k_i,), slot, dtype=torch.int32, device=device)
-                                if per_req_ids
-                                else None
-                            ),
-                            max_per_req_token_ids=max_token_ids,
-                            logits_mode=self.logits_mode,
-                        )
+                # Logprobs for denoise steps that just converged (is_encoder_phase
+                # flipped False→True), stashed per tile so `scaled` is freed each tile.
+                if want_logprobs:
+                    converged_mask = states.is_encoder_phase[tile_slots]
+                    just_converged = converged_mask & ~is_committing[sel]
+                    if just_converged.any():
+                        flat_logits = scaled.reshape(-1, scaled.shape[-1])
+                        argmax_tokens = scaled.argmax(dim=-1)
+                        raw_flat: torch.Tensor | None = None
+                        for local_idx in just_converged.nonzero(as_tuple=True)[0]:
+                            li = local_idx.item()
+                            slot = tile_slots[local_idx].item()
+                            # Stash only the real canvas positions; padded tail
+                            # positions are never emitted.
+                            k_i = int(tile_valid_np[li])
+                            pos = li * W
+                            src = flat_logits
+                            if slot in states.read_only_slots:
+                                # Read-only slots report logprobs at temperature 1.
+                                # The schedule-tempered logits share the argmax.
+                                if raw_flat is None:
+                                    raw_flat = tile_logits.float()
+                                src = raw_flat
+                            per_req_ids = max_token_ids > 0
+                            self._pending_logprobs[slot] = compute_topk_scores(
+                                src[pos : pos + k_i],
+                                num_logprobs,
+                                argmax_tokens[local_idx][:k_i],
+                                logprob_token_ids_state=(
+                                    self.logprob_token_ids_state if per_req_ids else None
+                                ),
+                                # every row of this stash belongs to one slot
+                                expanded_idx_mapping=(
+                                    torch.full((k_i,), slot, dtype=torch.int32, device=device)
+                                    if per_req_ids
+                                    else None
+                                ),
+                                max_per_req_token_ids=max_token_ids,
+                                logits_mode=self.logits_mode,
+                            )
+            run_start = run_end
 
         # Read-only slots that converged this step emit their argmax canvas
         # now, skip the encoder phase, and hand out their logprobs below.
