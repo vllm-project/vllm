@@ -744,14 +744,15 @@ def test_partial_tier_backpressure_inherits_top_level_defaults():
     assert resolved["low_water_s"] == 0.05
 
 
-def test_partial_tier_backpressure_precedence_over_env(monkeypatch):
-    """Precedence is tier override > env default > top-level default."""
-    monkeypatch.setattr(
-        "vllm.envs.VLLM_KV_BACKPRESSURE_CONFIG",
-        {"example": {"high_water_s": 0.2, "low_water_s": 0.02}},
-    )
+def test_tier_override_wins_over_top_level():
+    """Precedence is tier override > top-level default, field-by-field."""
     spec = _build_tiering_spec(
-        [{"type": "example", "backpressure": {"high_water_s": 0.1}}],
+        [
+            {
+                "type": "example",
+                "backpressure": {"high_water_s": 0.1, "low_water_s": 0.02},
+            }
+        ],
         top_level_backpressure={
             "backpressure_cls": "EMABackpressureDetector",
             "high_water_s": 0.5,
@@ -760,9 +761,8 @@ def test_partial_tier_backpressure_precedence_over_env(monkeypatch):
     )
 
     resolved = spec.secondary_tier_configs[0]["backpressure"]
-    # Tier override beats both env and top-level.
+    # Tier override wins for the fields it sets.
     assert resolved["high_water_s"] == 0.1
-    # Env default beats top-level default.
     assert resolved["low_water_s"] == 0.02
     # Fields only in top-level still fill in.
     assert resolved["backpressure_cls"] == "EMABackpressureDetector"

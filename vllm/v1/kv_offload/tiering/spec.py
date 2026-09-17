@@ -290,27 +290,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Backpressure config is merged field-by-field in priority order
         # (highest first):
         #   1. Per-tier ``backpressure`` dict in the tier config
-        #   2. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
-        #   3. Top-level ``backpressure`` in kv_connector_extra_config
+        #   2. Top-level ``backpressure`` in kv_connector_extra_config
         # Merging per field (rather than per whole dict) means a partial
-        # tier override still inherits missing fields from the lower-precedence
-        # sources, so the resolved dict reaching the factory is complete.
+        # tier override still inherits missing fields from the top-level
+        # default, so the resolved dict reaching the factory is complete.
         # Within each tier's resolved dict, tier-type-aware water marks
         # are filled in last so a bare ``"backpressure": {}`` picks up
         # sensible thresholds for the storage medium.
-        import vllm.envs as envs
-
-        bp_env = envs.VLLM_KV_BACKPRESSURE_CONFIG or {}
         bp_defaults = self.extra_config.get("backpressure")
 
         for tier_cfg in self.secondary_tier_configs:
-            tier_type = tier_cfg.get("type", "")
             tier_override = tier_cfg.get("backpressure")
-            env_default = bp_env.get(tier_type)
             # Overlay from lowest to highest precedence so higher-precedence
             # fields win while lower-precedence ones fill in the gaps.
             merged: dict[str, Any] = {}
-            for source in (bp_defaults, env_default, tier_override):
+            for source in (bp_defaults, tier_override):
                 if source:
                     merged.update(source)
             # Only set a resolved dict when at least one source contributed

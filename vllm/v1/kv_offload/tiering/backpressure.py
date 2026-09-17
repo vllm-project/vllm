@@ -81,11 +81,16 @@ class ThrottledDropPolicy(DropAccountingPolicy):
         self._ramp_factor = ramp_factor
 
     def should_store(self, detector: BackpressureDetector) -> bool:
+        # Proportional throttling needs the EMA and high watermark, which
+        # only the EMA detector exposes.
+        assert isinstance(detector, EMABackpressureDetector), (
+            "ThrottledDropPolicy requires an EMABackpressureDetector"
+        )
         if not detector.is_under_pressure():
             return True
-        ema = getattr(detector, "store_latency_ema", None)
-        high = getattr(detector, "_high", None)
-        if ema is None or high is None or high <= 0:
+        ema = detector.store_latency_ema
+        high = detector._high
+        if high <= 0:
             return False
         overshoot = max(0.0, ema - high) / high
         drop_rate = min(1.0, overshoot / self._ramp_factor)
