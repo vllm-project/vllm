@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-disagg_encoder_proxy.py
+"""disagg_encoder_proxy.py
 
 Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
 clusters:
@@ -205,8 +204,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
-    """
-    Return *all* image/audio/video items that appear anywhere in `messages`.
+    """Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
@@ -229,8 +227,7 @@ async def fanout_encoder_primer(
     req_id: str,
     consumer_zmq: str | None = None,
 ) -> tuple[dict[int, dict], dict[str, Any]]:
-    """
-    1. Group images by encoder, retaining per-item round-robin assignment.
+    """1. Group images by encoder, retaining per-item round-robin assignment.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
 
@@ -437,8 +434,7 @@ async def maybe_prefill(
     p_url: str,
     req_id: str,
 ) -> dict:
-    """
-    - Do prefill-only task if p_url exist;
+    """- Do prefill-only task if p_url exist;
     - Return a new body carrying kv transfer params (for nixl connector)
     - Else, skip and return the original request data for decode
 
@@ -884,14 +880,14 @@ async def _post_if_available(
     payload: dict,
     headers: dict,
 ) -> dict | None:
-    """
-    POST `payload` to `url`.
+    """POST `payload` to `url`.
 
     Returns
     -------
     • The decoded JSON body on success (2xx)
     • None if the endpoint does not exist (404)
     • Raises for anything else.
+
     """
     try:
         resp = await session.post(url, json=payload, headers=headers)
@@ -912,9 +908,7 @@ async def _post_if_available(
 
 
 async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: str):
-    """
-    Fire & forget to both clusters, tolerate 404.
-    """
+    """Fire & forget to both clusters, tolerate 404."""
     headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
 
     encode_task = _post_if_available(
