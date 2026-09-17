@@ -1037,8 +1037,7 @@ def _expand_page_indices_kernel(
 
 
 class AiterMLAHelper:
-    """
-    AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
+    """AITER MLA persistent (asm) decode requires a multiple of 16 heads. Unaligned
     head counts through 128 are padded to the next multiple of 16 by tiling the
     query heads and slicing to the padded size. Native H24 AITER builds bypass
     that padding. Small divisors of 16 retain the existing repeat_interleave and

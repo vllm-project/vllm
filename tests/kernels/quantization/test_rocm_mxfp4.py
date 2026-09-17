@@ -504,7 +504,7 @@ def test_aiter_fp4_gemm_a4w4_determinism():
     ],
 )
 def test_aiter_hardware_fp4_dynamic_quant_format(shape):
-    """aiter hardware FP4 dynamic quant produces correct output format.
+    """Aiter hardware FP4 dynamic quant produces correct output format.
 
     Tests gfx950 hardware-accelerated FP4 quantization (OCP MXFP4 E2M1).
     Parity with B200 scaled_fp4_quant: block_size=32, packed uint8 output.

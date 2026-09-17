@@ -68,6 +68,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
 
         Raises:
             ValueError: If Backend.CUSTOM is used without being registered
+
         """
         path = _MLA_PREFILL_OVERRIDES.get(self, self.value)
         if not path:
@@ -88,6 +89,7 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         Raises:
             ImportError: If the backend class cannot be imported
             ValueError: If CUSTOM is used without being registered
+
         """
         return resolve_obj_by_qualname(self.get_path())
 
@@ -133,6 +135,7 @@ def register_mla_prefill_backend(
             MLAPrefillBackendEnum.CUSTOM,
             "my.module.MyCustomPrefillBackend"
         )
+
     """
 
     def decorator(cls: type) -> type:

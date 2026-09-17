@@ -522,6 +522,7 @@ def create_and_prepopulate_kv_cache(
 
     Returns:
         MLA KV cache tensor
+
     """
     batch_size = len(kv_c_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -1314,7 +1315,6 @@ def run_attention_backend(
     chunked_prefill_workspace_size: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
     builder_cls, impl_cls = try_get_attention_backend(backend)
 
     # Force the prefill backend selection (None means auto-select).
@@ -1441,8 +1441,7 @@ def _run_backend_correctness(
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
+    """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
 
     This test works by:
@@ -1461,7 +1460,6 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
