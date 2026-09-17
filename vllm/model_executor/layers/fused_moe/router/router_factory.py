@@ -66,8 +66,7 @@ def create_fused_moe_router(
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
 ) -> FusedMoERouter:
-    """
-    Factory function to create the appropriate FusedMoERouter subclass based on
+    """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
 
     The selection logic follows this priority order:
@@ -114,8 +113,8 @@ def create_fused_moe_router(
 
     Returns:
         An instance of the appropriate FusedMoERouter subclass
-    """
 
+    """
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         return RoutingSimulatorRouter(

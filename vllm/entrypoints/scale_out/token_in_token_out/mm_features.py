@@ -145,6 +145,29 @@ def rebuild_mm_placeholders(
     }
 
 
+def placeholder_ranges_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[PlaceholderRangeInfo]] | None:
+    """Return per-modality placeholder ranges, or ``None`` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    raw_placeholders: MultiModalPlaceholders = cast(MultiModalInput, engine_input)[
+        "mm_placeholders"
+    ]
+    return {
+        modality: [
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in raw_placeholders.items()
+    }
+
+
 def extract_mm_features(
     engine_input: EngineInput,
     *,
@@ -162,19 +185,8 @@ def extract_mm_features(
 
     mm_engine_input = cast(MultiModalInput, engine_input)
     mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
-    raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
-
-    mm_placeholders = {
-        modality: [
-            PlaceholderRangeInfo(
-                offset=p.offset,
-                length=p.length,
-                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
-            )
-            for p in ranges
-        ]
-        for modality, ranges in raw_placeholders.items()
-    }
+    mm_placeholders = placeholder_ranges_from_engine_input(engine_input)
+    assert mm_placeholders is not None
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
