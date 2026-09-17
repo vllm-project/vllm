@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -31,6 +32,8 @@ class UMBPStoreConnectorWorker:
         self.runtime = runtime
         self.layout = layout
         self._load_jobs: dict[str, TransferJobState] = {}
+        self._layer_load_jobs: dict[str, dict[str, TransferJobState]] = {}
+        self._pending_load_layers: dict[str, set[str]] = {}
         self._store_jobs: dict[str, TransferJobState] = {}
         self._worker_meta = UMBPConnectorWorkerMetadata()
         self._finished_sending: set[str] = set()
@@ -65,12 +68,35 @@ class UMBPStoreConnectorWorker:
         del forward_context
         for request_id, plans in metadata.load_requests.items():
             if plans:
-                self._load_jobs[request_id] = self.runtime.load(
-                    self._materialize_plans(plans)
-                )
+                self._submit_layer_loads(request_id, plans)
         if metadata.load_plans and not metadata.load_requests:
-            self._load_jobs["__umbp_batch__"] = self.runtime.load(
-                self._materialize_plans(metadata.load_plans)
+            self._submit_layer_loads("__umbp_batch__", metadata.load_plans)
+
+    def _submit_layer_loads(
+        self, request_id: str, plans: list[BlockTransferPlan]
+    ) -> None:
+        materialized = self._materialize_plans(plans)
+        plans_by_layer: dict[str, list[BlockTransferPlan]] = {}
+        for plan in materialized:
+            layer_names = {item.layer_name for item in plan.ranges}
+            if not layer_names:
+                plans_by_layer.setdefault("__bulk__", []).append(plan)
+                continue
+            for layer_name in layer_names:
+                plans_by_layer.setdefault(layer_name, []).append(
+                    replace(
+                        plan,
+                        ranges=tuple(
+                            item
+                            for item in plan.ranges
+                            if item.layer_name == layer_name
+                        ),
+                    )
+                )
+        self._pending_load_layers[request_id] = set(plans_by_layer)
+        for layer_name, layer_plans in plans_by_layer.items():
+            self._layer_load_jobs.setdefault(layer_name, {})[request_id] = (
+                self.runtime.load(layer_plans)
             )
 
     def _finish_job(
@@ -79,11 +105,13 @@ class UMBPStoreConnectorWorker:
         job: TransferJobState,
         *,
         is_load: bool,
+        mark_finished: bool = True,
     ) -> None:
         result = self.runtime.wait(job)
         if is_load:
             self._worker_meta.completed_loads.update(result.completed_keys)
-            self._finished_recving.add(request_id)
+            if mark_finished:
+                self._finished_recving.add(request_id)
             if result.status != TransferJobStatus.COMPLETED:
                 self._failed_recving.add(request_id)
                 for key in result.failed_keys:
@@ -130,7 +158,40 @@ class UMBPStoreConnectorWorker:
         self._worker_meta.failed_block_ids.update(result.failed_block_ids)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        del layer_name
+        if self._layer_load_jobs:
+            selected_layers = (
+                set(self._layer_load_jobs)
+                if not layer_name
+                else (
+                    {layer_name}
+                    if layer_name in self._layer_load_jobs
+                    else (
+                        {"__bulk__"}
+                        if "__bulk__" in self._layer_load_jobs
+                        else set(self._layer_load_jobs)
+                    )
+                )
+            )
+            affected: set[str] = set()
+            for selected_layer in selected_layers:
+                jobs = self._layer_load_jobs.pop(selected_layer, {})
+                for request_id, job in jobs.items():
+                    affected.add(request_id)
+                    self._finish_job(
+                        request_id,
+                        job,
+                        is_load=True,
+                        mark_finished=False,
+                    )
+                    pending = self._pending_load_layers.get(request_id)
+                    if pending is not None:
+                        pending.discard(selected_layer)
+            for request_id in affected:
+                if not self._pending_load_layers.get(request_id):
+                    self._pending_load_layers.pop(request_id, None)
+                    self._finished_recving.add(request_id)
+            return
+
         for request_id, job in self._load_jobs.items():
             self._finish_job(request_id, job, is_load=True)
         self._load_jobs.clear()
