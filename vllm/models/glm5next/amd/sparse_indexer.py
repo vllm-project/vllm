@@ -665,9 +665,10 @@ class SparseAttnIndexerKpool(CustomOp):
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
 
-    # CustomOp dispatches to forward_hip on ROCm, which falls back to
-    # forward_cuda; the AMD implementation is native-only.
-    forward_cuda = None  # assigned to forward_native after the class body
+    def forward_cuda(self, *args, **kwargs):
+        """ROCm dispatch: CustomOp.forward_hip falls back to forward_cuda;
+        the AMD implementation is native-only."""
+        return self.forward_native(*args, **kwargs)
 
     def forward_native(
         self,
@@ -731,6 +732,3 @@ class SparseAttnIndexerKpool(CustomOp):
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
         )
-
-
-SparseAttnIndexerKpool.forward_cuda = SparseAttnIndexerKpool.forward_native
