@@ -54,6 +54,8 @@ class UMBPStoreConnectorWorker:
         self._finished_sending: set[str] = set()
         self._finished_recving: set[str] = set()
         self._failed_recving: set[str] = set()
+        self._report_load_completions = False
+        self._report_store_completions: set[str] = set()
         self._stats = UMBPStoreConnectorStats()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -84,6 +86,7 @@ class UMBPStoreConnectorWorker:
         self, forward_context: ForwardContext, metadata: UMBPConnectorMetadata
     ) -> None:
         del forward_context
+        self._report_load_completions = metadata.async_load
         for request_id, plans in metadata.load_requests.items():
             if plans:
                 self._submit_layer_loads(request_id, plans)
@@ -151,7 +154,7 @@ class UMBPStoreConnectorWorker:
                 ),
             )
             self._worker_meta.completed_loads.update(result.completed_keys)
-            if mark_finished:
+            if mark_finished and self._report_load_completions:
                 self._finished_recving.add(request_id)
             if result.status != TransferJobStatus.COMPLETED:
                 self._failed_recving.add(request_id)
@@ -227,7 +230,7 @@ class UMBPStoreConnectorWorker:
                     self._worker_meta.failed_store_errors[key] = (
                         result.error or "store failed"
                     )
-            if mark_finished:
+            if mark_finished and request_id in self._report_store_completions:
                 self._finished_sending.add(request_id)
         self._worker_meta.failed_block_ids.update(result.failed_block_ids)
 
@@ -263,7 +266,8 @@ class UMBPStoreConnectorWorker:
             for request_id in affected:
                 if not self._pending_load_layers.get(request_id):
                     self._pending_load_layers.pop(request_id, None)
-                    self._finished_recving.add(request_id)
+                    if self._report_load_completions:
+                        self._finished_recving.add(request_id)
             return
 
         for request_id, job in self._load_jobs.items():
@@ -340,7 +344,10 @@ class UMBPStoreConnectorWorker:
                     plan.request_id for plan in job.plans if plan.request_id is not None
                 )
         self._store_jobs.clear()
-        self._finished_sending.update(finished_requests)
+        self._finished_sending.update(
+            finished_requests & self._report_store_completions
+        )
+        self._report_store_completions.clear()
 
     def _materialize_layer_plans(
         self, plans: Sequence[BlockTransferPlan], layer_name: str
@@ -378,6 +385,9 @@ class UMBPStoreConnectorWorker:
         self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
+        self._report_store_completions = set(
+            metadata.deferred_store_requests
+        )
         store_requests = {
             request_id: list(plans)
             for request_id, plans in metadata.store_requests.items()

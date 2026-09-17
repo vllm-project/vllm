@@ -750,6 +750,7 @@ class TransferJobState:
 class UMBPConnectorMetadata(KVConnectorMetadata):
     """Scheduler-to-worker metadata for one engine step."""
 
+    async_load: bool = False
     load_plans: list[BlockTransferPlan] = field(default_factory=list)
     store_plans: list[BlockTransferPlan] = field(default_factory=list)
     load_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
@@ -760,6 +761,7 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
     store_plans_by_layer: dict[str, list[BlockTransferPlan]] = field(
         default_factory=dict
     )
+    deferred_store_requests: set[str] = field(default_factory=set)
     partial_tail_plans: list[PartialTailPlan] = field(default_factory=list)
     lookup_states: dict[str, LookupState] = field(default_factory=dict)
     preempted_block_ids: set[int] = field(default_factory=set)

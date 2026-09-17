@@ -518,7 +518,7 @@ def test_scheduler_lazy_offload_stores_only_when_request_finishes():
     )
 
     assert scheduler.build_connector_meta(active_output).store_plans == []
-    assert scheduler.request_finished(request, ([4, 5],)) == (False, None)
+    assert scheduler.request_finished(request, ([4, 5],)) == (True, None)
     finished_output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -746,6 +746,7 @@ def test_worker_waits_for_layers_independently():
     worker.start_load_kv(
         None,
         UMBPConnectorMetadata(
+            async_load=True,
             load_plans=[plan],
             load_requests={"req": [plan]},
         ),
@@ -775,6 +776,7 @@ def test_worker_falls_back_to_bulk_when_layerwise_is_unsupported():
     worker.start_load_kv(
         None,
         UMBPConnectorMetadata(
+            async_load=True,
             load_plans=[plan],
             load_requests={"req": [plan]},
         ),
@@ -839,6 +841,8 @@ class _EmbeddedRuntime:
 def test_worker_reports_load_and_store_completion():
     worker = UMBPStoreConnectorWorker(_WorkerHandle())
     metadata = UMBPConnectorMetadata(
+        async_load=True,
+        deferred_store_requests={"req"},
         load_plans=[BlockTransferPlan("load", 3)],
         store_plans=[BlockTransferPlan("store", 4)],
         load_requests={"req": [BlockTransferPlan("load", 3)]},
@@ -1031,9 +1035,7 @@ def test_embedded_connector_core_flow(monkeypatch):
     worker_connector.wait_for_layer_load("layer0")
 
     assert worker_connector.get_block_ids_with_load_errors() == set()
-    assert worker_connector.get_transfer_results({"consumer"}).finished_recving == {
-        "consumer"
-    }
+    assert not worker_connector.get_transfer_results({"consumer"}).finished_recving
 
 
 def test_embedded_tp_dcp_pp_rank_local_store_flow(monkeypatch):
@@ -1250,6 +1252,7 @@ def test_worker_submits_layerwise_stores_per_layer():
         ),
     )
     metadata = UMBPConnectorMetadata(
+        deferred_store_requests={"req"},
         store_plans=[plan],
         store_requests={"req": [plan]},
         store_plans_by_layer={"layer1": [plan], "layer2": [plan]},
