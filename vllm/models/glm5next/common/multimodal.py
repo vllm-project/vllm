@@ -671,14 +671,14 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 
         image_processor = self.get_hf_processor().image_processor
         factor = patch_size * merge_size * image_processor.patch_expand_factor
-        # Keep the profiling search viable when the caller's budget is below
-        # one aligned canvas of the requested duration.
+        # `smart_resize` denominates its bounds in vision tokens. Round down,
+        # but keep the profiling search viable when the caller's budget is
+        # below one aligned canvas of the requested duration.
         pixels_per_token = temporal_patch_size * factor * factor
-        max_image_pixels = max(max_image_pixels, pixels_per_token)
+        max_image_tokens = max(max_image_pixels // pixels_per_token, 1)
 
         if do_resize:
             t = num_frames if num_frames > temporal_patch_size else temporal_patch_size
-            # `smart_resize` denominates its bounds in vision tokens.
             resized_height, resized_width = smart_resize(
                 num_frames=t,
                 height=image_height,
@@ -686,7 +686,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
                 temporal_factor=temporal_patch_size,
                 factor=factor,
                 min_pixels=1,
-                max_pixels=max_image_pixels // pixels_per_token,
+                max_pixels=max_image_tokens,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
