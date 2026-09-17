@@ -447,7 +447,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
-        {"tiny": "TitanML/tiny-mixtral"},
+        {
+            "tiny": "axolotl-ai-co/tiny-mixtral-30m",
+            "tiny-random": "TitanML/tiny-mixtral",
+        },
     ),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo(
