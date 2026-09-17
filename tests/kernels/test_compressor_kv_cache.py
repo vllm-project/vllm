@@ -405,6 +405,80 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("gather_len", [None, 70, 200])
+@pytest.mark.parametrize("one_pass", [False, True])
+def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatch):
+    """The gather grid only partitions tokens, so its width cannot move the
+    result, and the rows it writes must match a host-side dequantization.
+
+    Covers the fp8_ds_mla record (584 B); the MXFP8 one is covered below.
+    Both dequantization forms are checked against the same host reference on
+    whatever device is present: the wrapper picks the one-pass form on ROCm
+    alone, so otherwise each platform would only ever see one of them.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: one_pass)
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    block_size, num_blocks = 64, 6
+    num_tokens = block_size * num_blocks
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    # insert takes [num_blocks, block_bytes]; gather takes the record view.
+    cache = torch.zeros(num_blocks, block_size * 584, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(k, cache, slot_mapping, block_size=block_size)
+    cache_view = cache.view(num_blocks, block_size, 584)
+
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    gls = (
+        None
+        if gather_len is None
+        else torch.tensor([gather_len], dtype=torch.int32, device=device)
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(1, -1)
+
+    def gather(bound):
+        out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache_triton(
+            out,
+            cache_view,
+            seq_lens,
+            gls,
+            block_table,
+            block_size,
+            0,
+            max_gather_len=bound,
+        )
+        return out
+
+    # None keeps the historical 128; the rest make the wrapper pick other widths
+    # for the same work, and the output must not notice.
+    baseline = gather(None)
+    for bound in (8, num_tokens, 1 << 20):
+        torch.testing.assert_close(gather(bound), baseline, rtol=0, atol=0)
+
+    n = num_tokens if gather_len is None else gather_len
+    start = num_tokens - n
+    for i in (0, 1, n // 2, n - 1):
+        values, scales = _ue8m0_reference(k[start + i, :448], 64, 448.0)
+        nope = (values.to(torch.float32).view(7, 64) * scales.view(7, 1)).reshape(448)
+        torch.testing.assert_close(
+            baseline[0, i, :448], nope.to(torch.bfloat16), rtol=4e-3, atol=1e-6
+        )
+        # The RoPE dims are stored verbatim, so they come back exactly.
+        torch.testing.assert_close(
+            baseline[0, i, 448:], k[start + i, 448:], rtol=0, atol=0
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
