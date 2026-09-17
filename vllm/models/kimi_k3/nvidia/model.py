@@ -309,7 +309,7 @@ class KimiMLP(nn.Module):
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
-            return self.gemm_rs_ar(x, self.down_proj.weight)
+            return self.gemm_rs_ar.apply(x, self.down_proj)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:

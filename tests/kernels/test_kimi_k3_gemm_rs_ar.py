@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.utils import ensure_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -101,7 +101,7 @@ def _run_mode(
     rank: int,
     world_size: int,
     weights: dict[int, torch.Tensor],
-    mxfp8: bool,
+    backend: str,
 ) -> None:
     # cute_dsl is unavailable off CUDA, so import it only inside the GPU worker.
     from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
@@ -111,14 +111,37 @@ def _run_mode(
         N=_N,
         all_reduce=all_reduce,
     )
-    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-        mxfp8_e4m3_quantize,
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
     )
 
-    operands: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {
-        K: mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=True) if mxfp8 else (w, None)
-        for K, w in weights.items()
-    }
+    quant_config = (
+        None
+        if backend == "bf16"
+        else OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+    )
+    projections = {}
+    operands = {}
+    for K, w in weights.items():
+        with torch.device(device):
+            linear = RowParallelLinear(
+                K * world_size,
+                _N,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+            )
+        # Select the fused path before online quantization replaces meta weights.
+        assert gemm_rs_ar.can_run(linear)
+        linear.weight = torch.nn.Parameter(w.clone(), requires_grad=False)
+        linear.quant_method.process_weights_after_loading(linear)
+        projections[K] = linear
+        weight = linear.weight
+        if backend == "flashinfer_cutedsl":
+            weight = weight.t()
+        operands[K] = (weight, getattr(linear, "weight_scale", None))
 
     input_generator = torch.Generator(device=device)
 
@@ -134,7 +157,7 @@ def _run_mode(
             generator=input_generator,
         )
         expected = _reference(x, *operands[K], world_size, group, all_reduce)
-        actual = gemm_rs_ar(x, *operands[K])
+        actual = gemm_rs_ar.apply(x, projections[K])
         torch.accelerator.synchronize(device)
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
 
@@ -149,9 +172,9 @@ def _run_mode(
             device=device,
             generator=input_generator,
         )
-        first_output = gemm_rs_ar(lifetime_x, *operands[lifetime_K])
+        first_output = gemm_rs_ar.apply(lifetime_x, projections[lifetime_K])
         first_snapshot = first_output.clone()
-        second_output = gemm_rs_ar(-lifetime_x, *operands[lifetime_K])
+        second_output = gemm_rs_ar.apply(-lifetime_x, projections[lifetime_K])
         torch.accelerator.synchronize(device)
         assert first_output.data_ptr() != second_output.data_ptr()
         torch.testing.assert_close(first_output, first_snapshot, rtol=0, atol=0)
@@ -178,13 +201,13 @@ def _run_mode(
     capture_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(capture_stream):
         for _ in range(3):
-            graph_output.copy_(gemm_rs_ar(graph_x, *operands[graph_K]))
+            graph_output.copy_(gemm_rs_ar.apply(graph_x, projections[graph_K]))
     capture_stream.synchronize()
     dist.barrier(group=group)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        graph_output.copy_(gemm_rs_ar(graph_x, *operands[graph_K]))
+        graph_output.copy_(gemm_rs_ar.apply(graph_x, projections[graph_K]))
     torch.cuda.current_stream().wait_stream(capture_stream)
     dist.barrier(group=group)
 
@@ -203,7 +226,7 @@ def _run_mode(
     del gemm_rs_ar, capture_stream, graph, graph_output
 
 
-def _worker(local_rank: int, world_size: int, master_port: int, mxfp8: bool) -> None:
+def _worker(local_rank: int, world_size: int, master_port: int, backend: str) -> None:
     # This module pulls in cute_dsl, which is unavailable off CUDA, so importing
     # it at module level would fail collection. Import it where it is used, as
     # `kda.py` does.
@@ -221,7 +244,10 @@ def _worker(local_rank: int, world_size: int, master_port: int, mxfp8: bool) -> 
     )
 
     init_distributed_environment()
-    with ensure_current_vllm_config():
+    config = VllmConfig()
+    config.model_config = ModelConfig(dtype="bfloat16")
+    config.kernel_config.linear_backend = "auto" if backend == "bf16" else backend
+    with set_current_vllm_config(config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     group = dist.group.WORLD
@@ -241,26 +267,29 @@ def _worker(local_rank: int, world_size: int, master_port: int, mxfp8: bool) -> 
 
     # Production binds one mode per worker; exercise both mode-bound instances
     # sequentially in this test without implying that both are initialized.
-    for all_reduce in (False, True):
-        _run_mode(
-            all_reduce=all_reduce,
-            device=device,
-            group=group,
-            rank=rank,
-            world_size=world_size,
-            weights=weights,
-            mxfp8=mxfp8,
-        )
+    with set_current_vllm_config(config):
+        for all_reduce in (False, True):
+            _run_mode(
+                all_reduce=all_reduce,
+                device=device,
+                group=group,
+                rank=rank,
+                world_size=world_size,
+                weights=weights,
+                backend=backend,
+            )
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("mxfp8", [False, True], ids=["bf16", "mxfp8"])
+@pytest.mark.parametrize(
+    "backend", ["bf16", "flashinfer_cutlass", "flashinfer_cutedsl"]
+)
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Kimi-K3 GEMM-RS/AR requires SM100",
 )
-def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, mxfp8: bool) -> None:
+def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     world_size = 2
     if torch.accelerator.device_count() < world_size:
         pytest.skip("GEMM-RS/AR requires two GPUs")
@@ -270,7 +299,7 @@ def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, mxfp8: bool) -> Non
     try:
         mp.spawn(
             _worker,
-            args=(world_size, get_open_port(), mxfp8),
+            args=(world_size, get_open_port(), backend),
             nprocs=world_size,
         )
     finally:

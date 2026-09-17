@@ -887,6 +887,7 @@ class GemmRsAr:
         self.N = N
         self.device = device
         self.all_reduce = all_reduce
+        self.dtypes: set[str] = set()
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
@@ -926,20 +927,54 @@ class GemmRsAr:
         tp_group.barrier()
 
     def can_run(self, linear: LinearBase) -> bool:
-        # Validate projection-invariant requirements once during model init.
-        if not isinstance(linear.quant_method, UnquantizedLinearMethod):
-            return False
-        w = linear.weight
-        if w.ndim != 2:
-            return False
-        K = w.shape[1]
-        return (
-            w.shape == (self.N, K)
-            and K % 64 == 0
-            and w.dtype == torch.bfloat16
-            and w.device == self.device
-            and w.is_contiguous()
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+            FlashInferCutlassMxfp8LinearKernel,
         )
+
+        # Called before weight loading; online quantization starts on meta.
+        if isinstance(linear.quant_method, UnquantizedLinearMethod):
+            dtype, k_alignment = "bf16", 64
+            if linear.weight.dtype != torch.bfloat16:
+                return False
+        else:
+            method = getattr(linear, "scheme", linear.quant_method)
+            kernel = getattr(method, "kernel", None)
+            if not isinstance(
+                kernel,
+                (
+                    FlashInferCutedslMxfp8LinearKernel,
+                    FlashInferCutlassMxfp8LinearKernel,
+                ),
+            ):
+                return False
+            dtype, k_alignment = "mxfp8", 128
+
+        w = linear.weight
+        if (
+            w.ndim != 2
+            or w.shape[0] != self.N
+            or w.shape[1] % k_alignment != 0
+            or (w.device != self.device and not w.is_meta)
+            or not w.is_contiguous()
+        ):
+            return False
+        self.dtypes.add(dtype)
+        return True
+
+    def apply(self, x: torch.Tensor, linear: LinearBase) -> torch.Tensor:
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+        )
+
+        method = getattr(linear, "scheme", linear.quant_method)
+        w = linear.weight
+        if isinstance(
+            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+        ):
+            # This backend stores a column-major [K, N] view after loading.
+            w = w.t()
+        return self(x, w, getattr(linear, "weight_scale", None))
 
     def warn_incompatible_projection(self) -> None:
         logger.warning_once(
@@ -1061,14 +1096,16 @@ def warmup_gemm_rs_ar() -> int:
     if _gemm_rs_ar is None:
         return 0
 
-    for cta_group in (1, 2):
-        Sm100GemmRsAr.compile(
-            _gemm_rs_ar.rank,
-            _gemm_rs_ar.world_size,
-            cta_group,
-            _gemm_rs_ar.all_reduce,
-        )
-    return 2
+    for dtype in sorted(_gemm_rs_ar.dtypes):
+        for cta_group in (1, 2):
+            Sm100GemmRsAr.compile(
+                _gemm_rs_ar.rank,
+                _gemm_rs_ar.world_size,
+                cta_group,
+                _gemm_rs_ar.all_reduce,
+                dtype=dtype,
+            )
+    return 2 * len(_gemm_rs_ar.dtypes)
 
 
 def get_gemm_rs_ar() -> GemmRsAr:
