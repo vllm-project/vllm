@@ -293,7 +293,6 @@ def test_draft_model_moe_backend_default_auto():
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
     """The user should pass "draft_tensor_parallel_size" rather than
     "tensor_parallel_size". We enforce this with validation."""
-
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,

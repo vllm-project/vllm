@@ -161,7 +161,7 @@ def test_gfx950_picks_aiter():
 
 
 def test_gfx942_picks_emulation():
-    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
+    """Flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
     dot_scaled backend wins instead."""
     with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
         backend, experts_cls = select_mxfp8_moe_backend(_config())

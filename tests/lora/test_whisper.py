@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Integration tests for Whisper models with LoRA adapters.
+"""Integration tests for Whisper models with LoRA adapters.
 
 These tests verify that Whisper models can correctly load and use LoRA adapters
 for speech-to-text transcription tasks.
