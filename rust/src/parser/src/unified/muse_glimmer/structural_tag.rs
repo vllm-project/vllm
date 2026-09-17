@@ -209,8 +209,11 @@ fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
             "{FUNCTION_CALLS_OPEN}\n{}",
             invoke_begin(&tool.name)
         )),
+        // The body absorbs the newline before the invoke close, so an
+        // empty-args call keeps the canonical `<atem:invoke name="N">\n`
+        // `</atem:invoke>` shape the template renders.
         Format::any_text_excluding(&[INVOKE_CLOSE, EOM, EOT, START]),
-        Format::const_string(format!("\n{INVOKE_CLOSE}\n{FUNCTION_CALLS_CLOSE}")),
+        Format::const_string(format!("{INVOKE_CLOSE}\n{FUNCTION_CALLS_CLOSE}")),
     ])
 }
 
@@ -514,7 +517,7 @@ mod tests {
         assert!(json.contains(
             r#"{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]}"#
         ));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -663,6 +666,39 @@ mod tests {
             .unwrap();
 
         assert!(!json.contains("<atem:parameter"));
+    }
+
+    #[test]
+    fn free_form_empty_invoke_keeps_the_canonical_shape() {
+        // The minimal accepted invoke body is empty: a call with no arguments
+        // stays `<atem:invoke name="N">\n</atem:invoke>`, with no blank line.
+        let tools = vec![loose_tool("ping")];
+        let json: serde_json::Value = serde_json::from_str(
+            &MuseGlimmerStructuralTagBuilder
+                .build_scoped(
+                    &tools,
+                    Some(ScopedToolChoice::Required),
+                    None,
+                    &StructuralTagOptions::default(),
+                )
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+        )
+        .unwrap();
+
+        let content = &json["format"]["elements"][1]["tags"][0]["content"];
+        let elements = content["elements"].as_array().unwrap();
+        assert_eq!(elements[1]["type"], "any_text");
+        let minimal = format!(
+            "{}{}",
+            elements[0]["value"].as_str().unwrap(),
+            elements[2]["value"].as_str().unwrap()
+        );
+        assert_eq!(
+            minimal,
+            "<atem:function_calls>\n<atem:invoke name=\"ping\">\n</atem:invoke>\n</atem:function_calls>"
+        );
     }
 
     #[test]
