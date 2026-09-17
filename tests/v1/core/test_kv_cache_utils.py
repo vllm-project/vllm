@@ -34,6 +34,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -4283,3 +4284,153 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def _mamba_scratch_vllm_config(
+    max_num_seqs: int, max_model_len: int = 32768
+) -> VllmConfig:
+    """A config whose Mamba groups run in `align` mode, as GLM-5.3-Flash does."""
+    model_config = ModelConfig(
+        "Qwen/Qwen1.5-7B",
+        runner="generate",
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=2048,
+        enable_chunked_prefill=True,
+        max_model_len=max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+        async_scheduling=False,
+    )
+    cache_config = CacheConfig(block_size=16, mamba_cache_mode="align")
+    return VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+        cache_config=cache_config,
+    )
+
+
+def _mamba_scratch_kv_cache_config(
+    num_blocks: int, num_speculative_blocks: int, num_mamba_groups: int = 3
+) -> KVCacheConfig:
+    """One attention group aliased with `num_mamba_groups` Mamba groups."""
+    block_size = 1152
+    attn_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    groups = [KVCacheGroupSpec([f"attn_{i}" for i in range(12)], attn_spec)]
+    for group_id in range(num_mamba_groups):
+        mamba_spec = MambaSpec(
+            block_size=block_size,
+            shapes=((8, 128),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=num_speculative_blocks,
+        )
+        groups.append(
+            KVCacheGroupSpec([f"mamba_{group_id}_{i}" for i in range(12)], mamba_spec)
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=groups
+    )
+
+
+def _blocks_per_group(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> list[int]:
+    return [
+        cdiv(
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_config.kv_cache_groups
+    ]
+
+
+def test_mamba_speculative_scratch_excluded_from_concurrency():
+    """Speculative scratch is charged once per running slot, not per slot."""
+    max_num_seqs = 8
+    num_blocks = 873
+    num_speculative_blocks = 3
+    num_mamba_groups = 3
+    vllm_config = _mamba_scratch_vllm_config(max_num_seqs)
+    config = _mamba_scratch_kv_cache_config(
+        num_blocks, num_speculative_blocks, num_mamba_groups
+    )
+
+    per_group = _blocks_per_group(vllm_config, config)
+    # align mode: 2 live state blocks + num_speculative_blocks scratch blocks.
+    assert per_group[1:] == [2 + num_speculative_blocks] * num_mamba_groups
+    total_per_request = sum(per_group)
+    scratch_per_request = num_mamba_groups * num_speculative_blocks
+    resident_per_request = total_per_request - scratch_per_request
+
+    # Old accounting: every concurrency slot paid for the scratch.
+    old_concurrency = num_blocks / total_per_request
+    # New accounting: one scratch pool of max_num_seqs * scratch blocks.
+    expected = (num_blocks - max_num_seqs * scratch_per_request) / resident_per_request
+    assert expected > old_concurrency
+
+    actual = get_max_concurrency_for_kv_cache_config(vllm_config, config)
+    assert actual == expected
+
+    # The reserved pool is exactly what a full batch of running requests holds.
+    reserved = num_blocks - actual * resident_per_request
+    assert reserved == max_num_seqs * scratch_per_request
+
+    num_tokens, reported = get_kv_cache_capacity(vllm_config, config)
+    assert reported == actual
+    assert num_tokens == int(actual * vllm_config.model_config.max_model_len)
+
+
+def test_mamba_concurrency_unchanged_without_spec_decode():
+    """With speculative decoding off the accounting is bit-identical."""
+    max_num_seqs = 8
+    num_blocks = 873
+    vllm_config = _mamba_scratch_vllm_config(max_num_seqs)
+    config = _mamba_scratch_kv_cache_config(num_blocks, num_speculative_blocks=0)
+
+    per_group = _blocks_per_group(vllm_config, config)
+    assert per_group[1:] == [2, 2, 2]
+    assert get_max_concurrency_for_kv_cache_config(
+        vllm_config, config
+    ) == num_blocks / sum(per_group)
+
+
+def test_mamba_scratch_not_discounted_below_max_num_seqs():
+    """A pool that holds fewer requests than max_num_seqs keeps the old cost."""
+    max_num_seqs = 64
+    num_blocks = 873
+    vllm_config = _mamba_scratch_vllm_config(max_num_seqs)
+    config = _mamba_scratch_kv_cache_config(num_blocks, num_speculative_blocks=3)
+
+    total_per_request = sum(_blocks_per_group(vllm_config, config))
+    # 873 / 45 = 19.4 resident requests < 64 running slots: every resident
+    # request may be running, so it is charged its scratch.
+    assert (
+        get_max_concurrency_for_kv_cache_config(vllm_config, config)
+        == num_blocks / total_per_request
+    )
+
+
+def test_pool_concurrency_limit_edge_cases():
+    limit = kv_cache_utils._pool_concurrency_limit
+    # No scratch at all -> the plain ratio.
+    assert limit(873, 45, 0, 8) == 873 / 45
+    # Scratch, but the pool holds fewer requests than max_num_seqs.
+    assert limit(360, 45, 9, 8) == 8.0
+    # Continuous at the crossover: both branches agree at exactly max_num_seqs.
+    assert limit(45 * 8, 45, 9, 8) == 8.0
+    # Above the crossover the scratch pool is reserved only once.
+    assert limit(873, 45, 9, 8) == (873 - 72) / 36
+    # Monotone in the pool size and never below the old formula.
+    for blocks in range(1, 2000):
+        new = limit(blocks, 45, 9, 8)
+        assert new >= blocks / 45
+    # Degenerate spec whose footprint is entirely scratch.
+    assert limit(100, 4, 4, 8) == 25.0

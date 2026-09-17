@@ -208,6 +208,23 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    def speculative_scratch_bytes(self, vllm_config: VllmConfig) -> int:
+        """The scratch part of `max_memory_usage_bytes`.
+
+        Scratch space is held only by a *running* (i.e. currently
+        speculating) request, rather than being a per-request working set
+        that every resident request keeps.
+
+        Such scratch is bounded by `max_num_seqs`, not by the number of
+        requests the KV cache pool could hold, so capacity planning reserves
+        it once for the whole engine instead of once per concurrency slot.
+
+        Returns:
+            The scratch size in bytes (0 for specs without such scratch).
+
+        """
+        return 0
+
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         """The number of block table entries needed per request, i.e. the row
         length of the worker-side block table for this cache group.
@@ -1043,6 +1060,13 @@ class MambaSpec(KVCacheSpec):
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
+    def speculative_scratch_bytes(self, vllm_config: VllmConfig) -> int:
+        # `num_speculative_blocks` extra state pages are allocated by
+        # `MambaManager` when a request first gets blocks and are then
+        # relocated in place for the rest of its life (never re-allocated),
+        # so at most `max_num_seqs` requests hold them at the same time.
+        return self.page_size_bytes * self.num_speculative_blocks
+
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         # Mamba state is replicated across DCP/PCP ranks, never sharded, so
         # no CP scaling applies.
@@ -1210,6 +1234,13 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
+
+    def speculative_scratch_bytes(self, vllm_config: VllmConfig) -> int:
+        max_scratch_pages = max(
+            cdiv(spec.speculative_scratch_bytes(vllm_config), spec.page_size_bytes)
+            for spec in self.kv_cache_specs.values()
+        )
+        return max_scratch_pages * self.page_size_bytes
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         # Metadata builders are constructed from the per-layer spec, so the base

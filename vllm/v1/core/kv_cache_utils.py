@@ -1088,25 +1088,83 @@ def get_max_concurrency_for_kv_cache_config(
     call sites agree.
 
     Host groups use a separate pool; the smaller concurrency limit applies.
+
+    Speculative scratch (`KVCacheSpec.speculative_scratch_bytes`, currently
+    only the extra Mamba state pages a linear-attention model needs while
+    drafting) is not part of that per-request total. Only a *running* request
+    speculates, so the engine never needs more than `max_num_seqs` copies of
+    it no matter how many requests the pool can hold; see
+    `_pool_concurrency_limit`.
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
+    scratch_blocks_per_request = 0
+    host_scratch_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        required = cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
+        spec = group.kv_cache_spec
+        required = cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
+        scratch = cdiv(
+            spec.speculative_scratch_bytes(vllm_config), spec.page_size_bytes
         )
+        # The scratch is a subset of the per-request footprint; never let a
+        # spec claim more scratch than it claims memory.
+        scratch = min(scratch, required)
         if group.host_resident:
             host_blocks_per_request += required
+            host_scratch_blocks_per_request += scratch
         else:
             num_blocks_per_request += required
-    limits = [kv_cache_config.num_blocks / num_blocks_per_request]
+            scratch_blocks_per_request += scratch
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    limits = [
+        _pool_concurrency_limit(
+            kv_cache_config.num_blocks,
+            num_blocks_per_request,
+            scratch_blocks_per_request,
+            max_num_seqs,
+        )
+    ]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(
-            kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request
+            _pool_concurrency_limit(
+                kv_cache_config.hisparse_host_num_blocks,
+                host_blocks_per_request,
+                host_scratch_blocks_per_request,
+                max_num_seqs,
+            )
         )
     return min(limits)
+
+
+def _pool_concurrency_limit(
+    num_blocks: int,
+    blocks_per_request: int,
+    scratch_blocks_per_request: int,
+    max_num_seqs: int,
+) -> float:
+    """How many max_model_len requests one block pool holds.
+
+    `blocks_per_request` includes `scratch_blocks_per_request`, the part of
+    the footprint only a running request holds. At most `max_num_seqs`
+    requests run at a time, so the pool sets aside
+    `max_num_seqs * scratch_blocks_per_request` blocks once and divides what
+    is left by the resident (scratch-free) per-request cost.
+
+    Below `max_num_seqs` every resident request may also be running, so the
+    whole footprint is charged per request -- which is the historical
+    formula, and also what happens whenever there is no scratch at all.
+    """
+    resident_blocks_per_request = blocks_per_request - scratch_blocks_per_request
+    if scratch_blocks_per_request <= 0 or resident_blocks_per_request <= 0:
+        return num_blocks / blocks_per_request
+    all_running = num_blocks / blocks_per_request
+    if all_running <= max_num_seqs:
+        # Fewer resident requests than running slots: nothing to save, and the
+        # two branches agree exactly at all_running == max_num_seqs.
+        return all_running
+    usable_blocks = num_blocks - max_num_seqs * scratch_blocks_per_request
+    return usable_blocks / resident_blocks_per_request
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
