@@ -60,11 +60,6 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         is_supported, reason = super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
-        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
-            reason = (
-                f"{reason}. AITER MoE is not enabled — set "
-                "VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 to enable it"
-            )
         if (
             is_supported
             and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE

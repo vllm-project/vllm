@@ -114,7 +114,12 @@ def test_ep_supported(ep_size):
     [
         (True, 1, True, None),  # gfx950 + aiter MoE + TP -> selectable
         (True, 2, True, None),  # gfx950 + aiter MoE + EP -> selectable (expert_mask)
-        (False, 1, False, "AITER MoE is not enabled"),  # disabled -> clear reason
+        (
+            False,
+            1,
+            False,
+            "does not support current device",
+        ),  # disabled -> not selected
     ],
 )
 def test_is_supported_config(present, ep_size, supported, reason_substr):
@@ -146,7 +151,7 @@ def test_explicit_moe_backend_aiter():
     with (
         _gfx950(),
         _aiter_moe_enabled(False),
-        pytest.raises(ValueError, match="AITER MoE is not enabled"),
+        pytest.raises(ValueError, match="does not support current device"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
 
