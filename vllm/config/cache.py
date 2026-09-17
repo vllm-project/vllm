@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
@@ -56,15 +56,6 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
 ]
-
-
-def _get_prefix_cache_retention_interval() -> int | None:
-    env_value = get_from_deprecated_env_if_set(
-        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
-        "v0.29",
-        "prefix_cache_retention_interval",
-    )
-    return 0 if env_value is None else int(env_value)
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
@@ -154,9 +145,7 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
-    prefix_cache_retention_interval: int | None = Field(
-        default_factory=_get_prefix_cache_retention_interval, ge=0
-    )
+    prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. ``0`` retains only semantic checkpoints, including the latest
     replay boundary and shared-prefix junctions. Positive values additionally
@@ -222,6 +211,8 @@ class CacheConfig:
     """The number of blocks to allocate for CPU memory."""
 
     # Set after KV cache initialization.
+    effective_attention_block_size: int | None = field(default=None, init=False)
+    """Full-attention block size in tokens, including DCP, or None if unavailable."""
     kv_cache_size_tokens: int | None = field(default=None, init=False)
     """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
     group-aware capacity since num_gpu_blocks * block_size can be wrong
@@ -257,8 +248,7 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -288,6 +278,7 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape

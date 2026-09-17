@@ -8,12 +8,15 @@ use serde_json::{Value, json};
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
-use crate::event::AssistantContentBlock;
+use crate::EffortValue;
+use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ReasoningEffort};
+use crate::request::{
+    ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
+};
 
 fn render(request: &ChatRequest) -> String {
-    DeepSeekV41ChatRenderer::new()
+    DeepSeekV41ChatRenderer::default()
         .render(request)
         .unwrap()
         .prompt
@@ -62,7 +65,7 @@ fn inlines_image_placeholder_at_image_part_positions() {
     // The placeholder is unconditional (matching the Python encoding's
     // `IMAGE_PLACEHOLDER`); requests to a multimodal-less backend fail later,
     // at media preparation.
-    let renderer = DeepSeekV41ChatRenderer::new();
+    let renderer = DeepSeekV41ChatRenderer::default();
     let request = ChatRequest {
         messages: vec![ChatMessage::User {
             content: ChatContent::Parts(vec![
@@ -84,13 +87,90 @@ fn inlines_image_placeholder_at_image_part_positions() {
 }
 
 #[test]
+fn media_order_follows_reordered_tool_results() {
+    let renderer = DeepSeekV41ChatRenderer::default();
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-a".to_string(),
+                    name: "tool-a".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-b".to_string(),
+                    name: "tool-b".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("result-b"), image_part("image-b")],
+                "call-b",
+            ),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("result-a"), image_part("image-a")],
+                "call-a",
+            ),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+
+    assert!(prompt.find("result-a").unwrap() < prompt.find("result-b").unwrap());
+    expect![[r#"
+        [
+            MediaPartSource {
+                message_index: 2,
+                content_part_index: 1,
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1,
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&media_order);
+}
+
+#[test]
+fn media_order_excludes_dropped_historical_developer_content() {
+    let renderer = DeepSeekV41ChatRenderer::default();
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::developer(vec![image_part("historical-image")], None),
+            ChatMessage::user("question"),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+
+    assert!(!prompt.contains("<｜deepseek_image｜>"));
+    assert!(media_order.is_empty());
+}
+
+fn image_part(uuid: &str) -> ChatContentPart {
+    ChatContentPart::ImageUrl {
+        image_url: format!("data:image/png;base64,{uuid}"),
+        detail: None,
+        uuid: Some(uuid.to_string()),
+    }
+}
+
+#[test]
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
         (None, 50),
-        (Some(ReasoningEffort::Low), 25),
-        (Some(ReasoningEffort::High), 50),
-        (Some(ReasoningEffort::XHigh), 75),
-        (Some(ReasoningEffort::Max), 100),
+        (Some(EffortValue::from("low")), 25),
+        (Some(EffortValue::from("high")), 50),
+        (Some(EffortValue::from("xhigh")), 75),
+        (Some(EffortValue::from("max")), 100),
+        (Some(EffortValue::Number(37.into())), 37),
     ] {
         let mut request = request();
         request.chat_options.reasoning_effort = effort;
@@ -115,9 +195,41 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
         assert!(render(&request).contains(&format!("Reasoning Effort: {budget} (range 1-100")));
 
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::XHigh);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("xhigh"));
         assert!(render(&request).contains("Reasoning Effort: 75 (range 1-100"));
     }
+}
+
+#[test]
+fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
+    let renderer =
+        DeepSeekV41ChatRenderer::new([("reasoning_effort".to_string(), json!(37))].into());
+    let mut request = request();
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
+    request
+        .chat_options
+        .template_kwargs
+        .insert("enable_thinking".into(), json!(true));
+    let rendered = renderer.render(&request).unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+    assert!(prompt.contains("Reasoning Effort: 37 (range 1-100"));
+    assert!(prompt.ends_with("<think>"));
+    assert_eq!(rendered.effective_template_kwargs["reasoning_effort"], 37);
+    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], true);
+
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".into(), json!(101));
+    request.chat_options.reasoning_effort = None;
+    let rendered = renderer.render(&request).unwrap();
+    assert!(rendered.prompt.into_text().unwrap().ends_with("</think>"));
+    assert_eq!(
+        rendered.effective_template_kwargs["reasoning_effort"],
+        "none"
+    );
+    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], false);
 }
 
 #[test]
@@ -133,13 +245,13 @@ fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
-        let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
-    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Medium] {
+    for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = request();
         request.chat_options.reasoning_effort = Some(effort);
-        let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
 }
@@ -151,8 +263,8 @@ fn chat_mode_and_none_effort_use_closed_thinking_prefix() {
     let expected = expect!["<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>"];
     expected.assert_eq(&render(&request));
 
-    request.chat_options.template_kwargs.insert("thinking".into(), json!(true));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.template_kwargs.remove("thinking");
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     expected.assert_eq(&render(&request));
 }
 
@@ -203,6 +315,49 @@ fn mid_system_advances_last_user_boundary_and_drops_old_reasoning() {
         .insert("reasoning_effort".into(), json!(88));
     expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 88 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜System｜>mid sys<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn last_user_turn_omits_generation_prompt_when_disabled() {
+    let mut request = request();
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
+        .assert_eq(&render(&request));
+}
+
+#[test]
+fn last_mid_system_omits_generation_prompt_when_disabled() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("q1"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning { text: "r1".into() },
+                AssistantContentBlock::Text { text: "a1".into() },
+            ]),
+            ChatMessage::developer("old policy", None),
+            ChatMessage::system("mid sys"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".into(), json!(88));
+
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 88 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜System｜>mid sys"]
+        .assert_eq(&render(&request));
+}
+
+#[test]
+fn chat_mode_omits_generation_prompt_when_disabled() {
+    let mut request = request();
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>question"].assert_eq(&render(&request));
 }
 
 #[test]

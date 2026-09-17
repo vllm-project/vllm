@@ -340,8 +340,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_warmup_future = None
 
     def warmup(self, chat_params: ChatParams) -> None:
-        """
-        Warm up this renderer to avoid first-request latency.
+        """Warm up this renderer to avoid first-request latency.
 
         For chat requests:
         - Jinja2 template compilation
@@ -408,8 +407,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return self.tokenizer.eos_token_id
 
     def get_dec_start_token_id(self) -> int:
-        """
-        Obtain the decoder start token id employed by an encoder/decoder model,
+        """Obtain the decoder start token id employed by an encoder/decoder model,
         raising an error if it is not available.
         """
         dec_start_token_id = getattr(
@@ -824,20 +822,22 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> MultiModalUUIDItems:
         model_config = self.model_config
 
-        # NOTE: When users explicitly turn off BOTH prefix caching and input
-        # processing caching, no multimodal features or embeddings will be
-        # reused across requests, therefore identifying multimodal data items
-        # by their content is no longer necessary, and we create uuids with
-        # `<mm_req_id>-<modality>-<index>`, overriding even user-provided ones.
+        # Skip content hashing when both caches are disabled, but preserve
+        # explicit UUIDs used to identify embeddings across EC instances.
         if (
             model_config.multimodal_config
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
         ):
-            mm_uuid_items = {
-                modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
-                for modality, data_count in mm_data_items.get_all_counts().items()
-            }
+            mm_uuid_items = dict(mm_uuid_items)
+            for modality, data_count in mm_data_items.get_all_counts().items():
+                uuids = mm_uuid_items.get(modality)
+                if uuids is None:
+                    uuids = [None] * data_count
+                mm_uuid_items[modality] = [
+                    uuid if uuid is not None else f"{mm_req_id}-{modality}-{i}"
+                    for i, uuid in enumerate(uuids)
+                ]
 
         self._validate_mm_uuids(mm_data, mm_data_items, mm_uuid_items)
 
