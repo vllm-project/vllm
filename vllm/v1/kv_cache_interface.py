@@ -529,10 +529,21 @@ class AttentionSpec(KVCacheSpec):
         """
         return self.unpadded_page_size_bytes
 
+    def dcp_shard_count(self, vllm_config: VllmConfig) -> int:
+        """How many ways DCP splits this cache.
+
+        A replicated cache stays 1 however large the DCP group is. Every rank
+        holds the whole sequence, so it has to be budgeted for the whole
+        sequence; dividing by the world size under-provisions the pool and the
+        block table, and the failure looks like a capacity problem rather than
+        a sharding one.
+        """
+        if getattr(self, "dcp_transparent", False):
+            return 1
+        return vllm_config.parallel_config.decode_context_parallel_size
+
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        parallel_config = vllm_config.parallel_config
-        kv_shard_count = parallel_config.decode_context_parallel_size
-        return cdiv(max_len, self.block_size * kv_shard_count)
+        return cdiv(max_len, self.block_size * self.dcp_shard_count(vllm_config))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -563,7 +574,7 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        dcp_world_size = self.dcp_shard_count(vllm_config)
         if dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
@@ -692,6 +703,9 @@ class MLAAttentionSpec(FullAttentionSpec):
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         storage_block_size_set = set(spec.storage_block_size for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        # A group gets one ownership policy, so a replicated and a sharded cache
+        # cannot share one. Mixing them silently shards the replicated cache.
+        dcp_transparent_set = {spec.dcp_transparent for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -700,10 +714,12 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(index_group_leader_set) == 1
             and len(storage_block_size_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(dcp_transparent_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size and block stride alignment."
+            "index-sharing role, storage block size, block stride alignment and "
+            "DCP ownership."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -724,6 +740,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
+            dcp_transparent=dcp_transparent_set.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
