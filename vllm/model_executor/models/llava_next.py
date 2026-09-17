@@ -47,8 +47,7 @@ from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaNextImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - np: Number of patches + 1
         - c: Number of channels (3)
@@ -70,11 +69,10 @@ class LlavaNextImagePixelInputs(TensorSchema):
 
 
 class LlavaNextImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -211,7 +209,7 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
 
 class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
@@ -578,9 +576,12 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`LlavaNextImageInputs`][vllm.model_executor.models.llava_next.LlavaNextImageInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -601,9 +602,7 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

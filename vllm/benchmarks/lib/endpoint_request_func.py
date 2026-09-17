@@ -167,10 +167,12 @@ async def async_request_openai_completions(
 
     Args:
         request_func_input: The input for the request function.
+        session: The aiohttp session used to issue the request.
         pbar: The progress bar to display the progress.
 
     Returns:
         The output of the request function.
+
     """
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Completions API", "completions")
