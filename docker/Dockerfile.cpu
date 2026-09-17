@@ -465,6 +465,7 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+COPY tools/check_area_test_coverage.py tools/check_area_test_coverage.py
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
