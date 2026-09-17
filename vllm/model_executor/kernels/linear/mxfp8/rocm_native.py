@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -124,7 +123,12 @@ def _mxfp8_dot_scaled_linear(
 # buffer leaves no room for num_stages=3 at BLOCK_K=256.
 # TODO(rasmith)(Rohan138): Remove the 3.8 check once
 # https://github.com/vllm-project/vllm/pull/50605 merges.
-_BK256_STAGES = 2 if triton.__version__.startswith("3.8") and on_gfx950() else 3
+_BK256_STAGES = 3
+if triton.__version__.startswith("3.8") and current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        _BK256_STAGES = 2
 
 
 def _select_cfg(M, N, K):
