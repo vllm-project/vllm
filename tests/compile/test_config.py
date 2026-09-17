@@ -23,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.compilation import CompilationMode, PassConfig
+from vllm.config.vllm import enable_rope_kvcache_fusion
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -93,6 +94,21 @@ def test_custom_op():
     for custom_ops in (["quant_fp8"], ["+"], ["-"]):
         with pytest.raises(ValueError, match="Invalid syntax '"):
             CompilationConfig(custom_ops=custom_ops)
+
+
+def test_rope_kvcache_fusion_enabled_on_cuda(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            custom_ops=["+rotary_embedding"],
+            use_inductor_graph_partition=True,
+            pass_config=PassConfig(fuse_rope_kvcache=True),
+        )
+    )
+
+    assert config.compilation_config.pass_config.fuse_rope_kvcache
+    assert enable_rope_kvcache_fusion(config)
 
 
 @pytest.mark.parametrize(
