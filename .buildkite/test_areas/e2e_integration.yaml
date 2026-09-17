@@ -71,3 +71,27 @@ steps:
       - .buildkite/scripts/scheduled_integration_test/
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+
+- label: ":amd: (MI300) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy"
+  key: amd-qwen3-next-mtp-async-eplb-accuracy
+  dind: false
+  device: mi300_4
+  timeout_in_minutes: 45
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/spec_decode/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  num_devices: 4
+  commands:
+  - VLLM_ENGINE_READY_TIMEOUT_S=1800 bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040

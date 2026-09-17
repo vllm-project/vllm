@@ -57,3 +57,23 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
+  mirror:
+    amd:
+      label: ':amd: (MI300) Elastic EP Scaling'
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 55
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/compilation/
+      - tests/distributed/
+      - vllm/platforms/rocm.py
+      - requirements/kv_connectors_rocm.txt
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - pytest -v -s distributed/test_elastic_ep.py
