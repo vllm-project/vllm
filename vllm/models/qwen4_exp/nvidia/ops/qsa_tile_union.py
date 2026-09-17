@@ -111,8 +111,8 @@ _TILE_UNION_SENTINEL = tl.constexpr(_SENTINEL_VALUE)
 
 
 def _parse_tile_union_config(spec: str) -> QSATileUnionConfig:
-    """ "R,BNB,warps,min_rows[,min_rows_per_request]", e.g. "2,8,4,1024" (the
-    SM121 tile)."""
+    """Parse "R,BNB,warps,min_rows[,min_rows_per_request]", e.g. "2,8,4,1024"
+    (the SM121 tile)."""
     try:
         parts = [int(part) for part in spec.split(",")]
         if len(parts) not in (4, 5):
@@ -620,7 +620,7 @@ def _qsa_tile_union_attn_kernel(
 def qsa_tile_union_layout(
     query_start_loc: torch.Tensor, num_rows: int, num_requests: int, R: int
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """row -> (tile, slot) from the batch layout alone: rows are contiguous per
+    """Row -> (tile, slot) from the batch layout alone: rows are contiguous per
     request and each request starts a fresh tile, so tiles never straddle
     requests. Rows past query_start_loc[-1] (padding) belong structurally to
     the last request and are masked by token_to_req in the kernels.

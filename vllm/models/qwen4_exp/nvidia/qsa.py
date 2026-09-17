@@ -509,7 +509,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
             config = qsa_tile_union_config()
             block_indices = qsa_tile_union_workspace(
-                *self._tile_union_workspace_shape, hidden_states.device
+                *self._tile_union_workspace_shape, projected_qk.device
             )[:num_tokens]
             compressed_metadata = cast(
                 QSAForwardMetadata,

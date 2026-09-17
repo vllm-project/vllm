@@ -262,7 +262,7 @@ class QSAIndexer(nn.Module):
         """
         block_topk = self.token_topk // self.compress_ratio
         if block_indices_out is not None and block_indices_out.shape != (
-            hidden_states.shape[0],
+            projected_qk.shape[0],
             block_topk,
         ):
             raise ValueError("QSA block-index output has an invalid shape")

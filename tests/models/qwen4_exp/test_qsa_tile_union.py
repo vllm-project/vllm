@@ -398,7 +398,7 @@ def test_tile_union_gate(monkeypatch: pytest.MonkeyPatch, tile_union_forced) -> 
 
 
 def test_tile_union_config_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """auto / 0 / 1 / an explicit "R,BNB,warps,min_rows" tile for bring-up."""
+    """Auto / 0 / 1 / an explicit "R,BNB,warps,min_rows" tile for bring-up."""
     monkeypatch.setenv("VLLM_QSA_TILE_UNION", "0")
     tile_union.qsa_tile_union_config.cache_clear()
     assert tile_union.qsa_tile_union_config() is None
