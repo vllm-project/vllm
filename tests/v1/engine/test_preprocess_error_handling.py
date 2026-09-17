@@ -39,7 +39,6 @@ def test_uno_adapter_validation_precedes_engine_submission(use_uno, with_adapter
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
-
     if current_platform.is_rocm() or current_platform.is_xpu():
         pytest.skip(
             "Skipped on ROCm/XPU: this test only works with 'fork', "
