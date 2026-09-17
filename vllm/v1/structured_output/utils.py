@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, TypeVar
 import regex as re
 import torch
 from cachetools import LRUCache
-from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -46,6 +45,20 @@ _T = TypeVar("_T")
 CACHE = None
 
 
+def strip_speculative_padding(token_ids: list[int]) -> list[int]:
+    """Drop speculative-decoding padding from a token block.
+
+    ngram and other speculative backends pad rejected draft positions with a
+    -1 sentinel. Structured-output grammars treat every entry as a real token
+    id, so the sentinels (and everything after the first one) are removed here,
+    before tokens reach any backend, rather than inside a single backend.
+    """
+    for i, token_id in enumerate(token_ids):
+        if token_id < 0:
+            return token_ids[:i]
+    return token_ids
+
+
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
@@ -61,6 +74,7 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
 
     Raises:
         ValueError: If compilation exceeds the configured timeout.
+
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
@@ -90,13 +104,14 @@ def apply_grammar_bitmask(
     input_batch: InputBatch,
     logits: torch.Tensor,
 ) -> None:
-    """
-    Apply grammar bitmask to output logits of the model with xgrammar function.
+    """Apply grammar bitmask to output logits of the model with xgrammar function.
 
     Args:
         scheduler_output (SchedulerOutput): The result of engine scheduling.
+        grammar_output (GrammarOutput): The grammar bitmask to apply.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
+
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
@@ -177,8 +192,7 @@ def apply_grammar_bitmask(
 
 
 class OutlinesVocabulary:
-    """
-    Wrapper class for `outlines_core.Vocabulary`,
+    """Wrapper class for `outlines_core.Vocabulary`,
     which allows us to store a hash with the vocabulary
     """
 
@@ -193,7 +207,7 @@ class OutlinesVocabulary:
 
 
 def get_outlines_cache_path() -> str:
-    """Get the context object that contains previously-computed return values"""
+    """Get the context object that contains previously-computed return values."""
     outlines_cache_dir = os.getenv("OUTLINES_CACHE_DIR")
     xdg_cache_home = os.getenv("XDG_CACHE_HOME")
     home_dir = os.path.expanduser("~")
@@ -281,8 +295,7 @@ class OutlinesDiskCache:
 
 
 def get_outlines_cache():
-    """Get the Cache instance to be used for index caching"""
-
+    """Get the Cache instance to be used for index caching."""
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
         logger.warning(
@@ -306,23 +319,12 @@ re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
-    """The grammar backends cannot consume a `MistralCommonBackend` directly."""
-    if not isinstance(tokenizer, MistralCommonBackend):
-        return tokenizer
-
-    # Deferred: `vllm.tokenizers.mistral` pulls in a large dependency tree, and
-    # this module is imported by `vllm.v1.worker.gpu_model_runner`.
-    from vllm.tokenizers.mistral import MistralTokenizer
-
-    return MistralTokenizer(tokenizer)
-
-
 def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
+
     """
     eos_token_id = tokenizer.eos_token_id
 
@@ -402,8 +404,7 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:
-    """
-    Check if grammar appears to use Lark syntax.
+    """Check if grammar appears to use Lark syntax.
 
     Args:
         grammar_str: Input grammar string
@@ -416,6 +417,7 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
         True
         >>> grammar_is_likely_lark("rule ::= 'abc'")
         False
+
     """
     if not grammar_str or not isinstance(grammar_str, str):
         return False
@@ -434,8 +436,7 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
 
 
 def convert_lark_to_ebnf(grammar_str: str) -> str:
-    """
-    Convert a Lark grammar string to EBNF format.
+    """Convert a Lark grammar string to EBNF format.
 
     EBNF reference:
     https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
@@ -452,6 +453,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
         >>> print(convert_lark_to_ebnf("rule: 'hello'"))
         root ::= rule
         rule ::= "hello"
+
     """
     if not isinstance(grammar_str, str):
         raise ValueError(f"Grammar must be a string, got {type(grammar_str)}")

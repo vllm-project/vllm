@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Minimal Gradio demo for real-time speech transcription using the vLLM Realtime API.
+"""Minimal Gradio demo for real-time speech transcription using the vLLM Realtime API.
 
 Start the vLLM server first:
 

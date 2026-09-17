@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -108,6 +110,13 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+
+    # Arms the KV-sharing fast prefill path for this step. Absent for dummy
+    # (cudagraph capture) batches, which run the KV-sharing layers in full.
+    fast_prefill: "FastPrefillBatchMetadata | None" = None
+
+    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
     @classmethod
     def make_dummy(
@@ -209,9 +218,12 @@ def set_dummy_context(
     context_len: int,
     num_kv_blocks: int,
     max_model_len: int,
+    input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
     """Give each dummy request context_len of context, used when profiling step cost."""
-    if not block_tables.input_block_tables:
+    if input_block_tables is None:
+        input_block_tables = block_tables.input_block_tables
+    if not input_block_tables:
         # Attention-free models have no KV context to fabricate.
         return
     num_reqs = input_batch.num_reqs
@@ -233,7 +245,7 @@ def set_dummy_context(
 
     seq_len = context_len + query_len
     for block_table, block_size, bpk in zip(
-        block_tables.input_block_tables,
+        input_block_tables,
         block_tables.kernel_block_sizes,
         block_tables.blocks_per_kv_block,
     ):

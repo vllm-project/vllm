@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for ApplyRotaryEmb CustomOp dispatch behavior.
+"""Tests for ApplyRotaryEmb CustomOp dispatch behavior.
 
 This test ensures that RotaryEmbedding classes correctly call the appropriate
 ApplyRotaryEmb methods based on the calling context:
@@ -46,7 +45,6 @@ def get_test_cases() -> list[RotaryEmbeddingTestCase]:
         Ernie4_5_VLRotaryEmbedding,
     )
     from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
-    from vllm.model_executor.layers.rotary_embedding.xdrope import XDRotaryEmbedding
 
     common_kwargs = {
         "head_size": 128,
@@ -74,20 +72,6 @@ def get_test_cases() -> list[RotaryEmbeddingTestCase]:
             rope_kwargs={**common_kwargs, "mrope_section": [16, 24, 24]},
             method_name="forward_cuda",
             positions_shape=(32,),  # 1D triggers apply_rotary_emb path
-            expect_forward_native=False,
-            expect_forward=True,
-        ),
-        # XDRotaryEmbedding tests
-        RotaryEmbeddingTestCase(
-            name="XDRotaryEmbedding.forward",
-            rope_class=XDRotaryEmbedding,
-            rope_kwargs={
-                **common_kwargs,
-                "scaling_alpha": 1.0,
-                "xdrope_section": [16, 16, 16, 16],
-            },
-            method_name="forward",
-            positions_shape=(4, 32),  # 4D for P/W/H/T
             expect_forward_native=False,
             expect_forward=True,
         ),
@@ -194,8 +178,7 @@ def test_rotary_embedding_dispatch(
     test_case: RotaryEmbeddingTestCase,
     device: str,
 ):
-    """
-    Test that RotaryEmbedding classes dispatch to the correct ApplyRotaryEmb method.
+    """Test that RotaryEmbedding classes dispatch to the correct ApplyRotaryEmb method.
 
     - forward_native methods should call ApplyRotaryEmb.forward_native()
     - forward_cuda/forward methods should call ApplyRotaryEmb.forward()
