@@ -34,6 +34,7 @@ def human_readable_int(value: str) -> int:
     - '1k' -> 1,000
     - '1K' -> 1,024
     - '25.6k' -> 25,600
+
     """
     value = value.strip()
 
@@ -82,6 +83,7 @@ def human_readable_int_or_auto(value: str) -> int:
     - '1K' -> 1,024
     - '25.6k' -> 25,600
     - '-1' or 'auto' -> -1 (special value for auto-detection)
+
     """
     value = value.strip()
 
@@ -91,12 +93,16 @@ def human_readable_int_or_auto(value: str) -> int:
     return human_readable_int(value)
 
 
+def summary_line(description: str | None) -> str:
+    """Return the first paragraph of a config docstring as a single line."""
+    return " ".join((description or "").split("\n\n", 1)[0].split())
+
+
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
-        """
-        1. Sentences split across lines have their single newlines removed.
+        """1. Sentences split across lines have their single newlines removed.
         2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
@@ -202,7 +208,7 @@ class FlexibleArgumentParser(ArgumentParser):
             for group in self._action_groups:
                 if group.title and group.title.lower() == search_keyword:
                     formatter.start_section(group.title)
-                    formatter.add_text(group.description)
+                    formatter.add_text(summary_line(group.description))
                     formatter.add_arguments(group._group_actions)
                     formatter.end_section()
                     formatter.add_text(self._json_tip)
@@ -241,12 +247,18 @@ class FlexibleArgumentParser(ArgumentParser):
         # positionals, optionals and user-defined groups
         formatter.start_section("Config Groups")
         config_groups = ""
-        for group in self._action_groups:
-            if not group._group_actions:
-                continue
-            title = group.title
-            description = group.description or ""
-            config_groups += f"{title: <24}{description}\n"
+        groups = [g for g in self._action_groups if g._group_actions]
+        titles = [g.title or "" for g in groups]
+        title_width = max((len(title) for title in titles), default=0) + 1
+        width = max(formatter._width - formatter._current_indent, title_width + 20)
+        for title, group in zip(titles, groups):
+            lines = textwrap.wrap(
+                summary_line(group.description),
+                width,
+                initial_indent=f"{title: <{title_width}}",
+                subsequent_indent=" " * title_width,
+            )
+            config_groups += ("\n".join(lines) or title) + "\n"
         formatter.add_text(config_groups)
         formatter.end_section()
 
@@ -466,7 +478,7 @@ class FlexibleArgumentParser(ArgumentParser):
         The arguments in config file will be inserted between
         the argument list.
 
-        example:
+        Example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
@@ -492,6 +504,7 @@ class FlexibleArgumentParser(ArgumentParser):
         Please note how the config args are inserted after the sub command.
         this way the order of priorities is maintained when these are args
         parsed by super().
+
         """
         assert args.count("--config") <= 1, "More than one config file specified!"
 

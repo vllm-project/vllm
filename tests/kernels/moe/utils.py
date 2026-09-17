@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant,
 )
@@ -63,8 +64,7 @@ def make_dummy_moe_config(
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface
+    """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
     do not actually use this config.
 
@@ -271,11 +271,10 @@ def moe_quantize_weights_2d(
     per_token_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    assert (
-        quant_dtype == torch.float8_e4m3fn
-        or quant_dtype == torch.int8
-        or quant_dtype == "nvfp4"
-    ), "only fp8/int8/nvfp4 supported"
+    is_fp8_dtype = is_fp8(quant_dtype)
+    assert is_fp8_dtype or quant_dtype == torch.int8 or quant_dtype == "nvfp4", (
+        "only fp8/int8/nvfp4 supported"
+    )
 
     w_gs = None
 
@@ -283,7 +282,7 @@ def moe_quantize_weights_2d(
         assert not per_token_quant
         if quant_dtype == torch.int8:
             w, w_s = per_block_cast_to_int8(w, block_shape)
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = per_block_cast_to_fp8(w, block_shape)
         elif quant_dtype == "nvfp4":
             raise RuntimeError("blocked quantization not supported for nvfp4")
@@ -294,7 +293,7 @@ def moe_quantize_weights_2d(
             w, w_s = ops.scaled_int8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = ops.scaled_fp8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
@@ -706,3 +705,27 @@ def check_accuracy(a, b, atol, rtol, percent):
             f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
             f"(threshold: {1 - percent:.4f})"
         )
+
+
+def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):
+    """Weight/scale layouts for mxfp4 MoE, as (layout, opts) pairs.
+
+    triton_kernels 3.8 returns layout instances; earlier versions return a
+    (layout, opts) tuple.
+    """
+    from triton_kernels.tensor_details import layout
+
+    from vllm.utils.import_utils import get_triton_kernels_version
+
+    if get_triton_kernels_version() == "3.8":
+        w = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+        s = layout.make_default_matmul_mxfp4_w_scale_layout(
+            mx_axis=mx_axis, num_warps=num_warps
+        )
+        return w, {}, s, {}
+
+    w, w_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=mx_axis)
+    s, s_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+        mx_axis=mx_axis, num_warps=num_warps
+    )
+    return w, w_opts, s, s_opts

@@ -43,6 +43,13 @@ def _xpress_add_argmax_partial_kernel(
         bias_ptr: [rows, V] refiner bias, same layout.
         out_val_ptr: [rows, num_chunks] fp32 chunk maxima (written).
         out_idx_ptr: [rows, num_chunks] int64 chunk argmax, in vocab ids (written).
+        V: vocabulary size; the last chunk is masked to it.
+        stride_base_r: row stride of ``base_ptr``.
+        stride_bias_r: row stride of ``bias_ptr``.
+        stride_ov_r: row stride of ``out_val_ptr``.
+        stride_oi_r: row stride of ``out_idx_ptr``.
+        BLOCK_V: vocab chunk width per program.
+
     """
     pid_v = tl.program_id(0)
     row = tl.program_id(1).to(tl.int64)
@@ -94,11 +101,15 @@ def _xpress_latent_kernel(
         w1_ptr: [V, R] token embedding.
         wlat_ptr: [R, R] embedding-to-latent projection (transposed).
         mixl_ptr: [B, B, R] folded mixer ``L * tril + I``, per channel.
-        wg_ptr, wu_ptr: [R, H] SwiGLU gate / up (transposed).
+        wg_ptr: [R, H] SwiGLU gate (transposed).
+        wu_ptr: [R, H] SwiGLU up (transposed).
         wd_ptr: [H, R] SwiGLU down (transposed).
-        B, R, H: block size, latent rank, MLP hidden.
+        B: block size.
+        R: latent rank.
+        H: MLP hidden size.
         BP: B rounded up to a power of two (tile size).
         HT: MLP hidden tile size.
+
     """
     n = tl.program_id(0).to(tl.int64)
     offs_b = tl.arange(0, BP)
@@ -244,6 +255,8 @@ def fused_add_argmax_to_blk(
         out_val: [rows, ceil(V / block_v)] fp32 scratch for the chunk maxima.
         out_idx: [rows, ceil(V / block_v)] int64 scratch for the chunk argmax.
         blk: [N, B] int64 block buffer; slots 1..B-1 are written.
+        block_v: vocab chunk width for stage 1; sets the scratch width.
+
     """
     rows, v = base.shape
     num_v_blocks = (v + block_v - 1) // block_v
