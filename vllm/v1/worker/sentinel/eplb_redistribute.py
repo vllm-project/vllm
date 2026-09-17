@@ -75,6 +75,7 @@ def redistribute_expert_placement(
 
     Raises:
         RuntimeError: If not enough slots to cover missing experts.
+
     """
     num_layers = physical_to_logical_map.shape[0]
     all_logical = set(range(num_logical))
@@ -176,8 +177,11 @@ def reload_experts_from_disk(
     """Reload specific (moe_layer_idx, logical_expert) weights from disk.
 
     Args:
+        model: The model whose FusedMoE layers receive the reloaded weights.
+        vllm_config: Engine config, used for the model loader and model config.
         reload_set: {(moe_layer_idx, logical_expert_id), ...} from
-        redistribute_expert_placement.
+            redistribute_expert_placement.
+
     """
     if not reload_set:
         return
