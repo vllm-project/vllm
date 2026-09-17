@@ -1464,17 +1464,34 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
-            mixed_qkv_non_spec = causal_conv1d_update(
-                mixed_qkv_non_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
-                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
-                ],
-                validate_data=True,
-            )
+            if envs.VLLM_BATCH_INVARIANT:
+                dec_conv_outs: list[torch.Tensor] = []
+                for _di in range(attn_metadata.num_decodes):
+                    _si_dec = non_spec_state_indices_tensor[_di : _di + 1]
+                    dec_conv_outs.append(
+                        causal_conv1d_update(
+                            mixed_qkv_non_spec[_di : _di + 1],
+                            conv_state,
+                            conv_weights,
+                            self.conv1d.bias,
+                            self.activation,
+                            conv_state_indices=_si_dec,
+                            validate_data=True,
+                        )
+                    )
+                mixed_qkv_non_spec = torch.cat(dec_conv_outs, dim=0)
+            else:
+                mixed_qkv_non_spec = causal_conv1d_update(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                        : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
+                    ],
+                    validate_data=True,
+                )
         else:
             mixed_qkv_non_spec = None
 

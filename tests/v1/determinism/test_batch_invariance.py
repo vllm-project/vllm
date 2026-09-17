@@ -204,6 +204,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
         enforce_eager=backend == "GDN_ATTN",
+        enable_prefix_caching=backend != "GDN_ATTN",
         attention_config=_attn_cfg,
     )
 
