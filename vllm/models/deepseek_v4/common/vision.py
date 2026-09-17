@@ -255,11 +255,16 @@ def build_packed_vit_metadata(
 
     Args:
         grids: ``[n_vit_h, n_vit_w]`` per image, in packing order.
+        rope_dim: RoPE embedding dimension of the ViT.
+        rope_theta: RoPE base frequency of the ViT.
+        device: Device for the returned tensors (except ``max_seqlen``,
+            which stays on the host).
         max_seqlen_override: Worst-case value baked in at CUDA graph capture
             (the attention wrapper reads ``max_seqlen`` on the host, so the
             capture-time value becomes a graph constant).
         cached: Use the shared ``lru_cache`` for RoPE tables. Capture-time
             dummy grids pass ``False`` to avoid evicting real entries.
+
     """
     cos_sin = get_vision_cos_sin if cached else _compute_vision_cos_sin
     cos_list: list[torch.Tensor] = []
