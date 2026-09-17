@@ -1123,6 +1123,7 @@ def compute_mamba_prefill_checkpoints(
     Returns:
         ``(offsets, cols)``: the checkpoint's offset into each row's query and
         its block-table column. ``0`` and ``-1`` mean the row has none.
+
     """
     offsets: list[int] = []
     cols: list[int] = []
