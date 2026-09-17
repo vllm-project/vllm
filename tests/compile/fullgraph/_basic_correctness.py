@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 
-import pytest
-
 from vllm.config import CompilationMode
 from vllm.platforms import current_platform
 
@@ -22,41 +20,35 @@ class TestSetting:
     method: str
 
 
-# we cannot afford testing the full Cartesian product
-# of all models and all modes
-@pytest.mark.parametrize(
-    "test_setting",
-    [
-        # MoE model
-        TestSetting(
-            model="ibm-granite/granite-3.0-1b-a400m-instruct",
-            model_args=["--max-model-len", "2048"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend=ATTN_BACKEND,
-            method="generate",
-        ),
-        # embedding model
-        TestSetting(
-            model="BAAI/bge-multilingual-gemma2",
-            model_args=[
-                "--runner",
-                "pooling",
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--gpu-memory-utilization",
-                "0.98",
-            ],
-            pp_size=1,
-            tp_size=1,
-            attn_backend=ATTN_BACKEND,
-            method="encode",
-        ),
-    ],
+GRANITE_SETTING = TestSetting(
+    model="ibm-granite/granite-3.0-1b-a400m-instruct",
+    model_args=["--max-model-len", "2048"],
+    pp_size=1,
+    tp_size=1,
+    attn_backend=ATTN_BACKEND,
+    method="generate",
 )
-def test_compile_correctness(
+
+BGE_MULTILINGUAL_GEMMA2_SETTING = TestSetting(
+    model="BAAI/bge-multilingual-gemma2",
+    model_args=[
+        "--runner",
+        "pooling",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.98",
+    ],
+    pp_size=1,
+    tp_size=1,
+    attn_backend=ATTN_BACKEND,
+    method="encode",
+)
+
+
+def run_compile_correctness(
     test_setting: TestSetting,
 ):
     model = test_setting.model
