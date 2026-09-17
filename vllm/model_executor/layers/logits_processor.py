@@ -256,6 +256,8 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         k: int,
         embedding_bias: torch.Tensor | None = None,
+        *,
+        return_log_probs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vocab-parallel top-k without all-gathering full logits.
 
@@ -263,7 +265,9 @@ class LogitsProcessor(PluggableLayer):
         the values as well as the global ids. Communication is
         O(batch * 2k * tp_size) rather than O(batch * vocab_size).
 
-        Scale and soft cap are applied to the k selected values rather than
+        With return_log_probs, values use the full-vocabulary log-partition.
+
+        Otherwise scale and soft cap are applied to the k selected values rather than
         the whole vocabulary; both are monotonic, so the selection is the same
         and only k entries are touched.
         """
@@ -274,11 +278,26 @@ class LogitsProcessor(PluggableLayer):
             )
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if return_log_probs:
+            if self.soft_cap is not None:
+                logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+            if self.scale != 1.0:
+                logits = logits * self.scale
 
         # Mask out padding entries beyond org_vocab_size on this shard.
         num_pad = lm_head.shard_indices.num_org_vocab_padding
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
+
+        log_partition = None
+        if return_log_probs:
+            log_partition = torch.logsumexp(logits.float(), dim=-1, keepdim=True)
+            if lm_head.tp_size > 1:
+                log_partition = torch.logsumexp(
+                    tensor_model_parallel_all_gather(log_partition, dim=-1),
+                    dim=-1,
+                    keepdim=True,
+                )
 
         values, ids = _topk(logits, k)
         # Convert shard-local indices to global vocab indices.
@@ -291,6 +310,8 @@ class LogitsProcessor(PluggableLayer):
             ids = ids.gather(-1, selected)
 
         values = values.float()
+        if log_partition is not None:
+            return ids, values - log_partition
         if self.scale != 1.0:
             values = values * self.scale
         if self.soft_cap is not None:

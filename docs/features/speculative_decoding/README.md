@@ -233,3 +233,26 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 - [What is Lookahead Scheduling in vLLM?](https://docs.google.com/document/d/1Z9TvqzzBPnh5WHcRwjvK2UEeFeq5zMZb5mFE8jR0HCs/edit#heading=h.1fjfb0donq5a)
 - [Information on batch expansion](https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit#heading=h.kk7dq05lc6q8)
 - [Dynamic speculative decoding](https://github.com/vllm-project/vllm/issues/4565)
+
+## LiLiCorr
+
+LiLiCorr checkpoints use the DFlash backbone and rerank its per-position candidates
+with a learned correlator. Model Runner V2 is required and selected automatically.
+Both plain and grouped-convolution checkpoints are supported, with the geometry
+read from the checkpoint's `dflash_config`. The draft token count must equal the
+trained `block_size - 1`.
+
+For a checkpoint trained with block size 16:
+
+```bash
+vllm serve /path/to/target --dtype bfloat16 \
+    --speculative-config '{"method":"dflash","model":"/path/to/lilicorr","num_speculative_tokens":15,"draft_sample_method":"probabilistic"}'
+```
+
+Use `"draft_sample_method":"greedy"` for deterministic proposals. Probabilistic
+proposals use each request's temperature and the existing rejection sampler.
+The checkpoint must declare `LiLiCorrDraftModel` and include all `lilicorr_*`
+geometry fields and trained head weights. Convolution tensors must match the
+configured `conv_kernel_size` and `conv_group_size`. Target input embeddings and
+the target LM head must be available on the draft rank; quantized LiLiCorr weights
+are not supported in this initial implementation.

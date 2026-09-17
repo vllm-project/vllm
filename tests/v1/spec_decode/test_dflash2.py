@@ -169,14 +169,17 @@ def test_selector_asks_for_fp32_proposal_logits():
 
 
 @pytest.mark.skip_global_cleanup
-def test_dflash2_model_decoder_layer_cls(monkeypatch):
+@pytest.mark.parametrize("variant", ["dflash2", "lilicorr", "lilicorr_plain"])
+def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
     from types import SimpleNamespace
 
     from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer
     from vllm.model_executor.models.qwen3_dflash2 import (
         DFlash2Qwen3DecoderLayer,
         DFlash2Qwen3Model,
     )
+    from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrQwen3Model
 
     # 1. Mock get_current_vllm_config and TP groups
     mock_current_vllm_config = SimpleNamespace(
@@ -249,8 +252,17 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
         dflash_config={
             "selector_rank": 4,
             "selector_top_k": 3,
-            "conv_kernel_size": 3,
-            "conv_group_size": 2,
+            "conv_kernel_size": 0 if variant == "lilicorr_plain" else 3,
+            "conv_group_size": 0 if variant == "lilicorr_plain" else 2,
+            "block_size": 5,
+            "lilicorr_candidate_topk": 4,
+            "lilicorr_hidden_size": 8,
+            "lilicorr_num_layers": 2,
+            "lilicorr_num_heads": 2,
+            "lilicorr_mlp_ratio": 2.0,
+            "lilicorr_factor_dim": 4,
+            "lilicorr_vector_eps": 1e-6,
+            "lilicorr_logit_scale": 3.0,
             "use_aux_hidden_state": False,
         },
     )
@@ -277,8 +289,14 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
 
     # 3. Instantiate the model under meta device to avoid parameter allocation issues
     with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
-        model = DFlash2Qwen3Model(vllm_config=vllm_config)
+        model_cls = DFlash2Qwen3Model if variant == "dflash2" else LiLiCorrQwen3Model
+        model = model_cls(vllm_config=vllm_config)
 
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
-    assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+    expected = (
+        DFlashQwen3DecoderLayer
+        if variant == "lilicorr_plain"
+        else DFlash2Qwen3DecoderLayer
+    )
+    assert type(model.layers[0]) is expected

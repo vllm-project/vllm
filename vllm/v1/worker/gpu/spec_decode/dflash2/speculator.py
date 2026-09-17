@@ -108,6 +108,83 @@ def _cache_draft_logits_kernel(
     tl.store(cached_candidate_ptr + cache_base + offsets, token_ids, mask=mask)
 
 
+class CandidateSampler:
+    """The shared DFlash2/LiLiCorr candidate walk and realized proposal cache."""
+
+    def __init__(
+        self, max_num_reqs: int, num_steps: int, top_k: int, device: torch.device
+    ):
+        self.num_steps = num_steps
+        self.top_k = top_k
+        self.scores = torch.empty(
+            max_num_reqs, num_steps, top_k, dtype=torch.float32, device=device
+        )
+        self.cached_candidate_ids = torch.zeros(
+            self.scores.shape, dtype=torch.int64, device=device
+        )
+
+    def sample(
+        self,
+        candidate_ids: torch.Tensor,
+        scores: torch.Tensor,
+        num_reqs: int,
+        sample_pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+        use_fp64: bool,
+    ) -> None:
+        candidate_ids = candidate_ids.contiguous()
+        sample_pos = sample_pos.contiguous()
+        idx_mapping = idx_mapping.contiguous()
+        block_k = triton.next_power_of_2(self.top_k)
+        _selector_walk_kernel[(num_reqs,)](
+            scores.contiguous(),
+            candidate_ids.contiguous(),
+            sample_pos,
+            idx_mapping,
+            temperature,
+            seeds,
+            draft_tokens,
+            self.scores,
+            num_steps=self.num_steps,
+            top_k=self.top_k,
+            BLOCK_K=block_k,
+            SAMPLE_PROBABILISTIC=draft_logits is not None,
+            USE_FP64=use_fp64,
+            num_warps=1,
+        )
+
+        if draft_logits is not None:
+            self._cache_draft_logits(
+                candidate_ids, num_reqs * self.num_steps, idx_mapping, draft_logits
+            )
+
+    def _cache_draft_logits(
+        self,
+        candidate_ids: torch.Tensor,
+        num_sample: int,
+        idx_mapping: torch.Tensor,
+        draft_logits: torch.Tensor,
+    ) -> None:
+        block_k = triton.next_power_of_2(self.top_k)
+        _cache_draft_logits_kernel[(num_sample,)](
+            draft_logits,
+            self.cached_candidate_ids,
+            candidate_ids,
+            self.scores,
+            idx_mapping,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            num_steps=self.num_steps,
+            top_k=self.top_k,
+            BLOCK_K=block_k,
+            num_warps=1,
+        )
+
+
 class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
 
@@ -119,15 +196,8 @@ class DFlash2Speculator(DFlashSpeculator):
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
         )
-        self._selector_scores = torch.empty(
-            self.max_num_reqs,
-            self.num_speculative_steps,
-            self.selector_top_k,
-            dtype=torch.float32,
-            device=device,
-        )
-        self._cached_candidate_ids = torch.zeros(
-            self._selector_scores.shape, dtype=torch.int64, device=device
+        self.candidate_sampler = CandidateSampler(
+            self.max_num_reqs, self.num_speculative_steps, self.selector_top_k, device
         )
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
@@ -135,48 +205,6 @@ class DFlash2Speculator(DFlashSpeculator):
         # distribution; -inf because the cache kernel writes only the K
         # candidates.
         return torch.float32, -float("inf")
-
-    def _sample_path(
-        self,
-        candidate_ids: torch.Tensor,
-        scores: torch.Tensor,
-        num_reqs: int,
-    ) -> None:
-        block_k = triton.next_power_of_2(self.selector_top_k)
-        _selector_walk_kernel[(num_reqs,)](
-            scores.contiguous(),
-            candidate_ids.contiguous(),
-            self.sample_pos,
-            self.sample_idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.draft_tokens,
-            self._selector_scores,
-            num_steps=self.num_speculative_steps,
-            top_k=self.selector_top_k,
-            BLOCK_K=block_k,
-            SAMPLE_PROBABILISTIC=self.draft_logits is not None,
-            USE_FP64=self.use_fp64_gumbel,
-            num_warps=1,
-        )
-
-    def _cache_draft_logits(self, candidate_ids: torch.Tensor, num_sample: int) -> None:
-        draft_logits = self.draft_logits
-        assert draft_logits is not None
-        block_k = triton.next_power_of_2(self.selector_top_k)
-        _cache_draft_logits_kernel[(num_sample,)](
-            draft_logits,
-            self._cached_candidate_ids,
-            candidate_ids,
-            self._selector_scores,
-            self.sample_idx_mapping,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
-            num_steps=self.num_speculative_steps,
-            top_k=self.selector_top_k,
-            BLOCK_K=block_k,
-            num_warps=1,
-        )
 
     def _generate_draft(
         self,
@@ -212,12 +240,21 @@ class DFlash2Speculator(DFlashSpeculator):
             hidden_states,
             anchor_token_ids,
         )
-        self._sample_path(candidate_ids, scores, num_reqs)
+        self.candidate_sampler.sample(
+            candidate_ids,
+            scores,
+            num_reqs,
+            self.sample_pos,
+            self.sample_idx_mapping,
+            self.temperature,
+            self.seeds,
+            self.draft_tokens,
+            self.draft_logits,
+            self.use_fp64_gumbel,
+        )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(
-                self._selector_scores[:num_reqs].flatten(0, 1),
+                self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
             )
-        if self.draft_logits is not None:
-            self._cache_draft_logits(candidate_ids, num_sample)
