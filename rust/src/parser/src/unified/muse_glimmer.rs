@@ -31,12 +31,11 @@ mod structural_tag;
 
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
-use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, not, opt, peek, preceded, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
-use winnow::token::{literal, rest, take_till, take_until, take_while};
+use winnow::token::{literal, rest, take_until, take_while};
 
 use self::structural_tag::MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER;
 use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutput, token_id};
@@ -92,6 +91,42 @@ const TOOL_NOISE_MARKERS: &[&str] = &[
 const INVOKE_BODY_STOP_MARKERS: &[&str] = &[INVOKE_CLOSE, EOM, EOT, START];
 
 type MuseGlimmerInput<'i> = Partial<&'i str>;
+
+/// Maximum length in bytes of a header-candidate run held across deltas: a
+/// recipient name, the whitespace inside a header, or an ATEM attribute run.
+/// A run that outgrows the cap can never be a header, so the candidate fails
+/// definitively (Backtrack, not Incomplete) and the body-text fallback
+/// consumes it — deterministic per content, so chunking invariance holds, and
+/// no unbounded run is held and re-scanned on every delta.
+const MAX_CANDIDATE_LEN: usize = 1024;
+
+/// Parse a run of at least `min` `pred` chars like `take_while`, but fail
+/// definitively once the run exceeds [`MAX_CANDIDATE_LEN`] bytes instead of
+/// waiting for a terminator that may never come.
+fn capped_run<'i>(
+    min: usize,
+    pred: impl Fn(char) -> bool + 'i,
+) -> impl Parser<MuseGlimmerInput<'i>, &'i str, ErrMode<ContextError>> + 'i {
+    move |input: &mut MuseGlimmerInput<'i>| {
+        let text = **input;
+        let mut len = 0;
+        for c in text.chars() {
+            if !pred(c) {
+                if len < min {
+                    return Err(ErrMode::Backtrack(ContextError::new()));
+                }
+                input.next_slice(len);
+                return Ok(&text[..len]);
+            }
+            len += c.len_utf8();
+            if len > MAX_CANDIDATE_LEN {
+                return Err(ErrMode::Backtrack(ContextError::new()));
+            }
+        }
+        // The run reached the end of the partial input and may still grow.
+        incomplete()
+    }
+}
 
 /// Which channel a header recipient opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -637,7 +672,15 @@ fn parse_done_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmer
 /// Parse a framed channel header: `<|start|>` + `\s*` + `assistant` + the
 /// bare header tail (see [`bare_header_event`]).
 fn framed_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    preceded((literal(START), ws0, literal(ASSISTANT)), bare_header_event).parse_next(input)
+    preceded(
+        (
+            literal(START),
+            capped_run(0, is_ascii_multispace),
+            literal(ASSISTANT),
+        ),
+        bare_header_event,
+    )
+    .parse_next(input)
 }
 
 /// Parse a bare channel header at channel boundaries: `[^\S\n]*` + optional
@@ -647,7 +690,7 @@ fn framed_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlim
 /// [`MuseGlimmerUnifiedParser::bare_header_anchor`]); a framed-header tail
 /// needs no gate because a framed header is authoritative anywhere.
 fn bare_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    preceded(take_while(0.., is_inline_ws), bare_header_tail_event).parse_next(input)
+    preceded(capped_run(0, is_inline_ws), bare_header_tail_event).parse_next(input)
 }
 
 /// Parse a bare channel header without its leading-whitespace run: after body
@@ -717,7 +760,7 @@ fn atem_tool_channel_event(
 ) -> ModalResult<MuseGlimmerEvent> {
     let ((name, arguments),) = seq!(
         _: opt(literal(FUNCTION_CALLS_OPEN)),
-        _: ws0,
+        _: capped_run(0, is_ascii_multispace),
         |input: &mut MuseGlimmerInput<'_>| invoke_block(input, invoke_scan),
     )
     .parse_next(input)?;
@@ -749,7 +792,7 @@ fn invoke_block(
     let (attrs, body) = seq!(
         _: literal(INVOKE_OPEN),
         // `\b` after `invoke`: the tag name must not run into an identifier.
-        _: peek(not(take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_'))),
+        _: peek(not(capped_run(1, |c: char| c.is_ascii_alphanumeric() || c == '_'))),
         atem_tag_attrs,
         _: literal(">"),
         // Stops at the close or at a framing marker; only the close may follow.
@@ -763,7 +806,7 @@ fn invoke_block(
 /// Parse an ATEM opener tag's attributes up to `>`, rejecting `<` so a framing
 /// marker cannot be swallowed into a tag.
 fn atem_tag_attrs<'i>(input: &mut MuseGlimmerInput<'i>) -> ModalResult<&'i str> {
-    take_till(0.., |c: char| c == '>' || c == '<').parse_next(input)
+    capped_run(0, |c: char| c != '>' && c != '<').parse_next(input)
 }
 
 /// Parse safe text while waiting for the next channel header.
@@ -900,7 +943,7 @@ fn strip_trailing_truncated_framing(text: &str) -> &str {
 
 /// Parse a channel recipient name (`[A-Za-z0-9_.\-]+`) from streaming input.
 fn recipient_name(input: &mut MuseGlimmerInput<'_>) -> ModalResult<String> {
-    take_while(1.., is_recipient_char).map(str::to_string).parse_next(input)
+    capped_run(1, is_recipient_char).map(str::to_string).parse_next(input)
 }
 
 /// Parse a channel recipient name from a complete (non-streaming) input.
@@ -922,6 +965,11 @@ fn classify_recipient(recipient: Option<&str>) -> ChannelKind {
 /// Whether `c` is whitespace other than a newline (`[^\S\n]` in the grammar).
 fn is_inline_ws(c: char) -> bool {
     c.is_whitespace() && c != '\n'
+}
+
+/// Whether `c` is ASCII whitespace (winnow's `multispace0` charset).
+fn is_ascii_multispace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
 /// Whether `c` is a channel recipient character (`[A-Za-z0-9_.\-]`).
@@ -1302,6 +1350,69 @@ mod tests {
         let mut output = parser.parse_chunk(" to=user<|message|>v to=skill<|").unwrap();
         output.append(parser.finish().unwrap());
         assert_eq!(output.normal_text(), "v to=skill");
+    }
+
+    #[test]
+    fn muse_glimmer_overlong_recipient_is_body_text() {
+        // A recipient run longer than the candidate cap can never be a header.
+        let text = format!(" to={}<|message|>x<|eot|>", "a".repeat(2048));
+        let output = assert_chunking_invariant(&text);
+
+        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.normal_text(),
+            format!(" to={}<|message|>x", "a".repeat(2048))
+        );
+    }
+
+    #[test]
+    fn muse_glimmer_overlong_invoke_attribute_is_content() {
+        let body = format!(
+            "<atem:invoke name=\"{}\">unclosed</atem:invoke>",
+            "a".repeat(2048)
+        );
+        let output = assert_chunking_invariant(&format!("<|message|>{body}<|eot|>"));
+
+        assert!(output.calls().is_empty());
+        assert_eq!(output.normal_text(), body);
+    }
+
+    #[test]
+    fn muse_glimmer_overlong_invoke_word_is_content() {
+        let body = format!("<atem:invoke{}></atem:invoke>", "a".repeat(2048));
+        let output = assert_chunking_invariant(&format!("<|message|>x{body}<|eot|>"));
+
+        assert!(output.calls().is_empty());
+        assert_eq!(output.normal_text(), format!("x{body}"));
+    }
+
+    #[test]
+    fn muse_glimmer_overlong_whitespace_run_is_text() {
+        let text = format!(
+            " to=user<|message|>a<|eom|>{}to=self<|message|>r<|eom|>\
+             <|start|>assistant to=user<|message|>b<|eot|>",
+            " ".repeat(2048)
+        );
+        let output = assert_chunking_invariant(&text);
+
+        assert_eq!(output.normal_text(), format!("a{}b", " ".repeat(2048)));
+        assert_eq!(output.reasoning_text(), "r");
+    }
+
+    #[test]
+    fn muse_glimmer_overlong_candidate_streams_instead_of_holding() {
+        // Once a candidate run exceeds the cap it is text and streams out; it
+        // is not held (and re-scanned per delta) waiting for a terminator
+        // that may never come.
+        let mut parser = test_parser();
+        let output = parser
+            .parse_chunk(&format!(
+                "<|message|><atem:invoke name=\"{}\"",
+                "a".repeat(4096)
+            ))
+            .unwrap();
+
+        assert!(!output.normal_text().is_empty());
     }
 
     #[test]
