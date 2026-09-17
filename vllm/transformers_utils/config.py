@@ -162,12 +162,6 @@ _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
-# Model types whose checkpoints store shared RoPE parameters alongside the
-# per-layer-type dicts (e.g. Laguna's `original_max_position_embeddings`).
-# Since transformers 5.17, `validate_rope` treats every top-level value of such
-# a dict as a layer's parameters and raises on the shared ones.
-_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna"}
-
 # Model types whose checkpoints declare `layer_types` entries that upstream
 # transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
 # validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
@@ -224,6 +218,35 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+def _install_hf_config_validator(
+    name: str, validator: Callable, supersedes: Callable
+) -> None:
+    """Replace a ``PretrainedConfig`` validator on every ``@strict`` snapshot.
+
+    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
+    at class creation and automatic post-``__init__`` validation dispatches off
+    that frozen list, so assigning the class attribute alone only affects
+    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
+    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    identity to leave a genuine per-model override in place.
+    """
+    setattr(PretrainedConfig, name, validator)
+
+    seen: set[int] = set()
+    stack = [PretrainedConfig]
+    while stack:
+        cls = stack.pop()
+        if id(cls) in seen:
+            continue
+        seen.add(id(cls))
+        validators = cls.__dict__.get("__class_validators__")
+        if isinstance(validators, list) and any(v is supersedes for v in validators):
+            cls.__class_validators__ = [
+                validator if v is supersedes else v for v in validators
+            ]
+        stack.extend(cls.__subclasses__())
+
+
 def _patch_hf_transformers_validate_rope():
     """Transformers v5 moved the ignore_keys option from the method signature of
     validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
@@ -250,7 +273,9 @@ def _patch_hf_transformers_validate_rope():
         return result
 
     patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
@@ -284,7 +309,9 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
         return _original_validate_rope(self, *args, **kwargs)
 
     patched_validate_rope.__vllm_nested_rope_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_allowed_layer_types(
@@ -347,8 +374,7 @@ class HFConfigParser(ConfigParserBase):
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
 
-        if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
-            _patch_hf_transformers_nested_rope_validation()
+        _patch_hf_transformers_nested_rope_validation()
 
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
