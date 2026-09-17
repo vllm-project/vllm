@@ -515,23 +515,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         if self._transformed_l1_weights is None:
             self._check_runtime_supported()
-            # MegaMoE's 1x32 activation scales need 16-byte TMA rows, so
-            # pad each gate/up half and the down projection to a multiple of 512.
-            padded_size = (self.intermediate_size + 511) // 512 * 512
-            padding = padded_size - self.intermediate_size
-            if padding:
-                for param in (self.w13_weight, self.w13_weight_scale):
-                    gate_up = param.data.unflatten(1, (2, self.intermediate_size))
-                    param.data = torch.nn.functional.pad(
-                        gate_up, (0, 0, 0, padding)
-                    ).flatten(1, 2)
-                self.w2_weight.data = torch.nn.functional.pad(
-                    self.w2_weight.data, (0, padding // 2)
-                )
-                self.w2_weight_scale.data = torch.nn.functional.pad(
-                    self.w2_weight_scale.data, (0, padding // 32)
-                )
-                self.intermediate_size = padded_size
             w13_scale = deep_gemm.transform_sf_into_required_layout(
                 self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
                 2 * self.intermediate_size,

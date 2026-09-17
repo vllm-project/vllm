@@ -17,7 +17,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_c
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
-def _copy_to_cpu(value, out=None, device=None):
+def _copy_to_cpu(value, device=None, dtype=None, out=None):
     tensor = torch.from_numpy(value) if isinstance(value, np.ndarray) else value
     if out is not None:
         return out.copy_(tensor)
@@ -83,7 +83,7 @@ def test_replicated_decode_piecewise_graph_padding(monkeypatch):
         device=torch.device("cpu"),
         dcp_world_size=1,
     )
-    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
 
     segments_by_rank, per_rank_num_tokens = manager._build_batch_layout(
         num_scheduled_tokens=np.ones(3, dtype=np.int32),
@@ -158,7 +158,7 @@ def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
         device=torch.device("cpu"),
         dcp_world_size=1,
     )
-    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
 
     with pytest.raises(ValueError, match="smaller than the largest rank-local batch"):
         manager._build_batch_layout(
