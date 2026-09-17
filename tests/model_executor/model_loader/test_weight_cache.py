@@ -209,6 +209,90 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     assert restart_outputs == baseline_outputs
 
 
+def _parallel(**kw):
+    from types import SimpleNamespace
+
+    base = dict(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_rank=0,
+        nnodes=1,
+        node_rank=0,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
+    """Local GPU i is TP rank r*local+i without DP, and DP rank start+i//tp,
+    TP rank i%tp with DP, matching the engine's placement on both nodes."""
+    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+
+    tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
+    assert plan_local_ranks(tp_second_node) == [(i, 0, 4 + i) for i in range(4)]
+
+    dp_third_node = _parallel(
+        data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
+    )
+    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0) for i in range(4)]
+
+    dp_tp = _parallel(
+        tensor_parallel_size=2,
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_rank=2,
+    )
+    assert plan_local_ranks(dp_tp) == [(0, 2, 0), (1, 2, 1), (2, 3, 0), (3, 3, 1)]
+
+
+def test_daemon_rejects_unmappable_parallelism():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        _reject_unsupported_parallelism,
+    )
+
+    _reject_unsupported_parallelism(
+        _parallel(
+            data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=12
+        )
+    )
+    with pytest.raises(ValueError, match="pipeline"):
+        _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
+    with pytest.raises(ValueError, match="--nnodes"):
+        _reject_unsupported_parallelism(
+            _parallel(data_parallel_size=4, data_parallel_size_local=2, nnodes=2)
+        )
+    with pytest.raises(ValueError, match="exceeds"):
+        _reject_unsupported_parallelism(
+            _parallel(
+                data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=13
+            )
+        )
+
+
+def test_weight_cache_key_distinguishes_dp_ranks():
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    key = WeightCacheKey(
+        checkpoint="ckpt",
+        model_arch="Arch",
+        tp_size=1,
+        tp_rank=0,
+        dtype="bf16",
+        quantization=None,
+        quant_config_hash="h",
+        revision=None,
+        vllm_version="v",
+        dp_size=16,
+        dp_rank=3,
+    )
+    assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
+    assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
+
+
 def test_weight_cache_caches_mtp_and_eagle_drafts():
     from types import SimpleNamespace
 

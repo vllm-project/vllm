@@ -327,6 +327,8 @@ class WeightCacheKey:
     vllm_version: str
     is_draft_model: bool = False
     draft_model_idx: int = -1
+    dp_size: int = 1
+    dp_rank: int = 0
 
     @classmethod
     def from_model_config(
@@ -335,6 +337,8 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        dp_size: int = 1,
+        dp_rank: int = 0,
         is_draft_model: bool = False,
         draft_model_idx: int | None = None,
     ) -> "WeightCacheKey":
@@ -365,6 +369,8 @@ class WeightCacheKey:
             vllm_version=vllm.version.__version__,
             is_draft_model=is_draft_model,
             draft_model_idx=normalize_draft_model_idx(draft_model_idx),
+            dp_size=dp_size,
+            dp_rank=dp_rank,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:

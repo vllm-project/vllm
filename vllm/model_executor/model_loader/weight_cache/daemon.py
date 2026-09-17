@@ -17,8 +17,8 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor and expert parallelism are supported; pipeline and data parallelism
-are rejected at launch.
+Tensor, expert and data parallelism are supported; pipeline parallelism is
+rejected at launch.
 
 For multi-node tensor parallelism, run one launcher per node with a shared
 rendezvous so the global TP group forms across nodes (CUDA IPC handles are
@@ -41,6 +41,21 @@ The global TP rank of local GPU ``i`` on node ``r`` is
 ``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
 assignment, so each engine worker maps its shard from the daemon on its own
 node.
+
+For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
+node with the engine's DP placement flags. Local GPU ``i`` serves DP rank
+``start_rank + i // tp_size`` and TP rank ``i % tp_size``, and all
+``dp_size * tp_size`` daemons form one world group on
+``--data-parallel-address``/``--weight-cache-master-port`` so the expert
+shards are laid out exactly as in the engine. ``--nnodes`` (tensor parallelism
+across nodes) cannot be combined with data parallelism:
+
+    # node r (4 local GPUs)
+    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+        --model /path/to/model --tensor-parallel-size 1 --enable-expert-parallel \\
+        --data-parallel-size 16 --data-parallel-size-local 4 \\
+        --data-parallel-start-rank 4r --data-parallel-address 10.0.0.1 \\
+        --weight-cache-master-port 29600
 
 With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
 starts a draft daemon group that caches the draft model. It uses its own cache
@@ -97,6 +112,7 @@ from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
@@ -164,6 +180,9 @@ def get_daemon_model(
     target_device = torch.device(
         device_config.device if load_config.device is None else load_config.device
     )
+    # Attention backends may take workspace at construction, like in the
+    # engine's worker init.
+    init_workspace_manager(target_device)
     with set_default_torch_dtype(model_config.dtype):
         with target_device:
             model = loader.create_model(vllm_config, model_config)
@@ -186,12 +205,28 @@ class WeightCacheDaemon:
         is_draft_model: bool = False,
         draft_model_idx: int | None = None,
         model_config: ModelConfig | None = None,
+        dp_rank: int = 0,
     ):
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.data_parallel_size > 1:
+            # The engine sets these on each DP rank's workers; the MoE/EP
+            # layers read them to place their expert shards.
+            parallel_config = replace(
+                parallel_config,
+                data_parallel_rank=dp_rank,
+                data_parallel_rank_local=dp_rank - parallel_config.data_parallel_rank,
+            )
+            vllm_config = replace(vllm_config, parallel_config=parallel_config)
         self.vllm_config = vllm_config
         # A draft daemon builds the draft with the target's VllmConfig, like
         # the engine does; only the ModelConfig differs.
         self.model_config = model_config or vllm_config.model_config
         self.tp_rank = tp_rank
+        self.dp_rank = dp_rank
+        self.tp_size = parallel_config.tensor_parallel_size
+        self.dp_size = parallel_config.data_parallel_size
+        self.global_rank = dp_rank * self.tp_size + tp_rank
+        self.world_size = self.dp_size * self.tp_size
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
@@ -203,29 +238,33 @@ class WeightCacheDaemon:
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
             self.model_config,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=self.tp_size,
             tp_rank=tp_rank,
+            dp_size=self.dp_size,
+            dp_rank=dp_rank,
             is_draft_model=is_draft_model,
             draft_model_idx=draft_model_idx,
         )
 
     def load_model(self) -> None:
-        tp_size = self.cache_config.tp_size
         torch.accelerator.set_device_index(self.local_rank)
+        # Outside the config context so the daemon keeps its own rendezvous
+        # instead of the engine's; model parallel groups (TP/DP/EP) are then
+        # carved out of this world group like in the engine.
         init_distributed_environment(
-            world_size=tp_size,
-            rank=self.tp_rank,
+            world_size=self.world_size,
+            rank=self.global_rank,
             distributed_init_method=self.distributed_init_method,
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
         with set_current_vllm_config(self.vllm_config):
-            ensure_model_parallel_initialized(tp_size, 1)
+            ensure_model_parallel_initialized(self.tp_size, 1)
             self.model = get_daemon_model(self.vllm_config, self.model_config)
         logger.info(
             "Weight cache %s daemon rank %d loaded model",
             self.role,
-            self.tp_rank,
+            self.global_rank,
         )
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
@@ -256,7 +295,7 @@ class WeightCacheDaemon:
         logger.info(
             "Weight cache %s daemon rank %d serving on %s",
             self.role,
-            self.tp_rank,
+            self.global_rank,
             socket_path,
         )
         if ready_callback is not None:
@@ -349,7 +388,7 @@ class WeightCacheDaemon:
         logger.info_once(
             "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
             self.role,
-            self.tp_rank,
+            self.global_rank,
             len(entries),
             len(aliases),
         )
@@ -360,7 +399,7 @@ class WeightCacheDaemon:
         logger.info(
             "Weight cache %s daemon rank %d released cached weights",
             self.role,
-            self.tp_rank,
+            self.global_rank,
         )
         send_msg(conn, {"status": "ok"})
 
@@ -375,6 +414,7 @@ def _run_daemon(
     is_draft_model: bool = False,
     draft_model_idx: int | None = None,
     model_config: ModelConfig | None = None,
+    dp_rank: int = 0,
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config,
@@ -385,9 +425,32 @@ def _run_daemon(
         is_draft_model,
         draft_model_idx,
         model_config,
+        dp_rank,
     )
     daemon.load_model()
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put((daemon.role, tp_rank)))
+    daemon.serve_forever(
+        ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
+    )
+
+
+def plan_local_ranks(parallel_config: ParallelConfig) -> list[tuple[int, int, int]]:
+    """``(local_rank, dp_rank, tp_rank)`` for every GPU this launcher serves.
+
+    Without DP the TP group may span nodes: local GPU ``i`` on node ``r`` is TP
+    rank ``r * (tp_size // nnodes) + i``. With DP every DP rank is node-local:
+    local GPU ``i`` is DP rank ``data_parallel_rank + i // tp_size`` (the
+    engine's ``--data-parallel-start-rank``) and TP rank ``i % tp_size``.
+    """
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.data_parallel_size == 1:
+        local_world_size = tp_size // parallel_config.nnodes
+        base = parallel_config.node_rank * local_world_size
+        return [(i, 0, base + i) for i in range(local_world_size)]
+    start_rank = parallel_config.data_parallel_rank
+    local_world_size = parallel_config.data_parallel_size_local * tp_size
+    return [
+        (i, start_rank + i // tp_size, i % tp_size) for i in range(local_world_size)
+    ]
 
 
 def get_draft_daemon_config(
@@ -429,17 +492,29 @@ def get_draft_daemon_config(
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
-    """Reject parallelism modes other than tensor/expert parallelism."""
-    unsupported = {
-        "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
-        "data parallelism": parallel_config.data_parallel_size > 1,
-    }
-    for name, enabled in unsupported.items():
-        if enabled:
-            raise ValueError(
-                f"The weight cache daemon only supports tensor and expert "
-                f"parallelism; {name} is not supported"
-            )
+    """Reject pipeline parallelism and DP placements the daemon cannot map."""
+    if parallel_config.pipeline_parallel_size > 1:
+        raise ValueError(
+            "The weight cache daemon only supports tensor, expert and data "
+            "parallelism; pipeline parallelism is not supported"
+        )
+    dp_size = parallel_config.data_parallel_size
+    if dp_size == 1:
+        return
+    if parallel_config.nnodes > 1:
+        raise ValueError(
+            "The weight cache daemon cannot combine data parallelism with "
+            "--nnodes; place whole DP ranks on each node with "
+            "--data-parallel-size-local and --data-parallel-start-rank"
+        )
+    end_rank = (
+        parallel_config.data_parallel_rank + parallel_config.data_parallel_size_local
+    )
+    if end_rank > dp_size:
+        raise ValueError(
+            "--data-parallel-start-rank + --data-parallel-size-local "
+            f"({end_rank}) exceeds --data-parallel-size ({dp_size})"
+        )
 
 
 def main() -> None:
@@ -484,18 +559,29 @@ def main() -> None:
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
+    dp_size = parallel_config.data_parallel_size
 
-    nnodes = parallel_config.nnodes
-    node_rank = parallel_config.node_rank
-    local_world_size = tp_size // nnodes
+    placements = plan_local_ranks(parallel_config)
+    local_world_size = len(placements)
+    if dp_size == 1:
+        nnodes = parallel_config.nnodes
+        node_rank = parallel_config.node_rank
+        master_addr = parallel_config.master_addr
+    else:
+        nnodes = dp_size // parallel_config.data_parallel_size_local
+        node_rank = parallel_config.data_parallel_rank // (
+            parallel_config.data_parallel_size_local
+        )
+        master_addr = parallel_config.data_parallel_master_ip
 
-    # The daemon forms its own TP group and holds it open while serving, so it
-    # needs a rendezvous port distinct from the engine's --master-port. All
-    # nodes must agree on it; single-node can auto-pick a free port. The master
-    # address is reused from the engine's --master-addr (node_rank 0).
-    master_addr = parallel_config.master_addr
+    # The daemon forms its own world group and holds it open while serving, so
+    # it needs a rendezvous port distinct from the engine's. All nodes must
+    # agree on it; single-node can auto-pick a free port. The master address is
+    # the engine's --master-addr (TP across nodes) or --data-parallel-address.
     if nnodes > 1 and args.weight_cache_master_port is None:
-        raise ValueError("--weight-cache-master-port is required when --nnodes > 1")
+        raise ValueError(
+            "--weight-cache-master-port is required when the daemons span nodes"
+        )
     master_port = args.weight_cache_master_port or get_open_port()
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
@@ -528,23 +614,20 @@ def main() -> None:
 
     ctx = multiprocessing.get_context("spawn")
     ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-    # Global TP rank of local GPU i on this node; local index == device index.
-    global_ranks = [
-        node_rank * local_world_size + local_rank
-        for local_rank in range(local_world_size)
-    ]
     procs = []
     expected_ready: set[tuple[str, int]] = set()
     for is_draft_model, draft_model_idx, config, model_config, init_method in groups:
         role = "draft" if is_draft_model else "target"
         suffix = format_daemon_role(is_draft_model, draft_model_idx)
-        for local_rank, global_rank in enumerate(global_ranks):
+        # Local index == device index.
+        for local_rank, dp_rank, tp_rank in placements:
+            global_rank = dp_rank * tp_size + tp_rank
             expected_ready.add((role, global_rank))
             procs.append(
                 ctx.Process(
                     target=_run_daemon,
                     args=(
-                        global_rank,
+                        tp_rank,
                         local_rank,
                         config,
                         init_method,
@@ -553,6 +636,7 @@ def main() -> None:
                         is_draft_model,
                         draft_model_idx,
                         model_config,
+                        dp_rank,
                     ),
                     name=f"vllm-weight-cache-{role}{suffix}-{global_rank}",
                 )
