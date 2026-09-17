@@ -666,12 +666,24 @@ def hash_block_tokens(
 
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the token span of a cache block under DCP."""
+    """Return the token span of a cache block under DCP.
+
+    A sharded group's block holds ``block_size`` slots drawn from
+    ``block_size * world`` consecutive positions, so its span is the scaled
+    one. A replicated group's block holds ``block_size`` consecutive positions
+    and its span is unscaled.
+
+    Ask the same question the ownership resolver answers, not whether the spec
+    is an attention spec. A replicated cache can be one -- the QSA raw key ring
+    and any ``dcp_transparent`` cache both are -- and scaling its span there
+    puts the scheduler's block accounting on boundaries the group does not
+    have.
+    """
     layer_specs = iter_layer_specs(spec)
     if len(layer_specs) > 0 and all(
         isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
     ):
-        return spec.block_size * dcp_world_size
+        return spec.block_size * dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
     return spec.block_size
 
 

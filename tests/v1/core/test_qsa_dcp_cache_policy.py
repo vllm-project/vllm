@@ -256,3 +256,34 @@ def test_the_raw_ring_is_placed_rather_than_rejected() -> None:
     assert isinstance(_raw_ring_spec(), DCP_AWARE_SPECS)
     assert isinstance(_main_kv_spec(), DCP_AWARE_SPECS)
     assert dcp_world_size_for_kv_cache_spec(_raw_ring_spec(), 2) == 1
+
+
+# --- the two DCP resolvers must agree ---------------------------------------
+
+
+def test_block_span_follows_ownership_not_spec_type() -> None:
+    """A replicated cache's block spans what it holds, not twice that.
+
+    Both the raw ring and the selector are AttentionSpec subclasses, so a rule
+    keyed on the type scales their span even though neither is sharded. The
+    scheduler then rounds block boundaries the group does not have.
+    """
+    from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
+
+    sharded, replicated, ring = _main_kv_spec(), _compressed_spec(), _raw_ring_spec()
+
+    assert resolve_dcp_kv_block_size(sharded, 2) == 784 * 2
+    assert resolve_dcp_kv_block_size(replicated, 2) == 784
+    assert resolve_dcp_kv_block_size(ring, 2) == 4
+
+    # And the span must match what the ownership resolver says, for every spec.
+    for spec in (sharded, replicated, ring):
+        expected = spec.block_size * dcp_world_size_for_kv_cache_spec(spec, 2)
+        assert resolve_dcp_kv_block_size(spec, 2) == expected
+
+
+def test_one_rank_scales_nothing() -> None:
+    from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size
+
+    for spec in (_main_kv_spec(), _compressed_spec(), _raw_ring_spec()):
+        assert resolve_dcp_kv_block_size(spec, 1) == spec.block_size
