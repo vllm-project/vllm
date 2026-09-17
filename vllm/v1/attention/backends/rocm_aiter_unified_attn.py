@@ -8,6 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -30,6 +31,14 @@ from vllm.v1.attention.backends.rocm_attn import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
+
+
+def _kv_connector_enabled() -> bool:
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return False
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
 
 
 class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -84,6 +93,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_non_causal(cls) -> bool:
         return False
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        return True
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -110,6 +123,9 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         # K and V come out of the content dim as transposed views rather than
         # copies, so the head dim may sit on either side of the block dim, but
         # the layer must stay outermost.
+        if _kv_connector_enabled():
+            # Connectors like MoRI assume contiguous blocks
+            return (KVCacheLayout.LBHNC,)
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @staticmethod
@@ -191,14 +207,21 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(
