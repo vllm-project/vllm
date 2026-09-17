@@ -1253,9 +1253,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs: int,
         page_size: int,
     ) -> torch.Tensor:
-        """
-        Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
-        attention.
+        """Compute paged_kv_indptr, paged_kv_indices and paged_kv_last_page_len.
 
         Results are stored in self.paged_kv_indptr,
         self.paged_kv_indices, self.paged_kv_last_page_len buffers.
@@ -1264,15 +1262,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
-            num_blocks_np,
-            dtype=np.int32,
-            out=self.paged_kv_indptr.np[1 : num_reqs + 1],
+            num_blocks_np, dtype=np.int32, out=self.paged_kv_indptr.np[1 : num_reqs + 1]
         )
-        paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
-        paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_reqs + 1]
-        if PIN_MEMORY:
-            paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
-        paged_kv_indptr.copy_(paged_kv_indptr_cpu, non_blocking=True)
+        paged_kv_indptr = self.paged_kv_indptr.copy_to_gpu(num_reqs + 1)
 
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
@@ -1292,12 +1284,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             page_size,
             paged_kv_last_page_len_np,
         )
-        paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
-        if PIN_MEMORY:
-            paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu.pin_memory()
-        self.paged_kv_last_page_len.gpu[:num_reqs].copy_(
-            paged_kv_last_page_len_cpu, non_blocking=True
-        )
+        self.paged_kv_last_page_len.copy_to_gpu(num_reqs)
         return paged_kv_indices
 
     def build(
@@ -1975,6 +1962,7 @@ class FlashInferImpl(AttentionImpl):
         """Forward pass with FlashInfer.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size], or None for a
                 KV-sharing decoder layer.
@@ -1982,8 +1970,15 @@ class FlashInferImpl(AttentionImpl):
                 KV-sharing decoder layer.
             kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization. Enables the
+                attention+quantization fusion path when provided.
+            output_block_scale: Block scale for fused output quantization,
+                required for nvfp4 output and rejected for fp8 output.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if attn_metadata is None:
             # Profiling run.
@@ -2649,8 +2644,7 @@ def fast_plan_decode(
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
 ) -> None:
-    """
-    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+    """A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
     cudagraph capture/replay, while the no cudagraph version turns back
     to the original plan.
     using original plan after passing host-side buffers:
