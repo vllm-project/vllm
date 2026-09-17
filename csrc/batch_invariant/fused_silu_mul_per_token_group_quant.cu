@@ -30,6 +30,7 @@ limitations under the License.
 #include <cuda_fp8.h>
 #include <torch/extension.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
@@ -236,6 +237,7 @@ struct NaiveScheduler {
   static void compute_exec_config(int threads_per_subwarp,
                                   int num_local_experts,
                                   int hidden_dim_num_groups, int num_groups,
+                                  int num_tokens_per_expert,
                                   int& subwarps_per_block, dim3& grid,
                                   dim3& block) {
     subwarps_per_block = ([=]() -> int {
@@ -290,20 +292,23 @@ struct NaiveScheduler {
 };
 
 struct MaskedLayoutScheduler {
-  // TODO can be dynamically determined (which may be good when num rank is
-  // small)
-  static constexpr int TOKEN_DIM_BLOCK_NUM_PER_EXPERT = 1024;
+  // Blocks grid-stride over tokens. A fixed 128 avoids launching mostly-empty
+  // blocks when masked_m is far below the padded capacity (decode).
+  static constexpr int DEFAULT_TOKEN_DIM_BLOCKS = 128;
   static constexpr int SUBWARPS_PER_BLOCK = 16;
 
   static void compute_exec_config(int threads_per_subwarp,
                                   int num_local_experts,
                                   int hidden_dim_num_groups, int num_groups,
+                                  int num_tokens_per_expert,
                                   int& subwarps_per_block, dim3& grid,
                                   dim3& block) {
     subwarps_per_block = SUBWARPS_PER_BLOCK;
     TORCH_CHECK(hidden_dim_num_groups % subwarps_per_block == 0);
-    grid = dim3(hidden_dim_num_groups / subwarps_per_block,
-                TOKEN_DIM_BLOCK_NUM_PER_EXPERT, num_local_experts);
+    const int token_dim_blocks =
+        std::min(DEFAULT_TOKEN_DIM_BLOCKS, num_tokens_per_expert);
+    grid = dim3(hidden_dim_num_groups / subwarps_per_block, token_dim_blocks,
+                num_local_experts);
     block = dim3(subwarps_per_block * threads_per_subwarp);
   }
 
@@ -324,7 +329,7 @@ struct MaskedLayoutScheduler {
     const int curr_expert_token_num = masked_m[expert_idx];
 
     for (int token_idx = token_idx_start; token_idx < curr_expert_token_num;
-         token_idx += TOKEN_DIM_BLOCK_NUM_PER_EXPERT) {
+         token_idx += gridDim.y) {
       const int hidden_size = hidden_dim_num_groups * GROUP_SIZE;
       const int64_t input_group_start_offset =
           compute_input_group_start_offset<FUSE_SILU_AND_MUL>(
@@ -590,9 +595,9 @@ void fused_silu_mul_per_token_group_quant(
   do {                                                                       \
     int subwarps_per_block;                                                  \
     dim3 grid, block;                                                        \
-    SCHEDULER::compute_exec_config(THREADS_PER_SUBWARP, num_local_experts,   \
-                                   hidden_dim_num_groups, num_groups,        \
-                                   subwarps_per_block, grid, block);         \
+    SCHEDULER::compute_exec_config(                                          \
+        THREADS_PER_SUBWARP, num_local_experts, hidden_dim_num_groups,       \
+        num_groups, num_tokens_per_expert, subwarps_per_block, grid, block); \
                                                                              \
     cudaLaunchConfig_t config;                                               \
     config.gridDim = grid;                                                   \
