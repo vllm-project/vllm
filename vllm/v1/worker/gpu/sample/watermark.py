@@ -327,6 +327,17 @@ def repeated_context_mask(
 
     if contexts.stride(-1) != 1:
         contexts = contexts.contiguous()
+    # The kernel reads these flat, one element per row. `history_offsets` is
+    # not in the list because the kernel reads it as
+    # `history_offsets_ptr + row * history_offsets_stride`, so a stride-0
+    # broadcast row needs no copy. `local_positions` is read flat and is packed
+    # even when the caller passes the same tensor for both.
+    req_indices = req_indices.contiguous()
+    if local_positions is not None:
+        local_positions = local_positions.contiguous()
+    # `prompt_lens` and `total_lens` are indexed flat by request slot, and
+    # `all_token_ids` takes a row stride but is read flat within the row. Those
+    # three are contiguous by contract; every caller owns them outright.
     repeated = torch.empty(len(req_indices), dtype=torch.bool, device=contexts.device)
     _repeated_context_mask_kernel[(len(req_indices),)](
         repeated,
@@ -396,6 +407,16 @@ def draft_watermarking_mask(
         prior_contexts.index_put_((row_indices, steps), contexts)
         return enabled & ~repeated
 
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    # The kernel indexes these by row without a stride. `steps` is left alone:
+    # the kernel takes its stride, so a broadcast row needs no copy.
+    req_indices = req_indices.contiguous()
+    enabled = enabled.contiguous()
+    # `prompt_lens`, `total_lens` and the last dimension of `all_token_ids` and
+    # of `prior_contexts` are read flat and contiguous by contract:
+    # `prior_contexts` is allocated by the draft watermarker and the other
+    # three come from the runner's request state, which owns them outright.
     active = torch.empty(len(contexts), dtype=torch.bool, device=contexts.device)
     _repeated_context_mask_kernel[(len(contexts),)](
         active,

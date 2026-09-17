@@ -1276,6 +1276,53 @@ def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
     assert repeated.item() == 4
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_draft_context_deduplication_reads_strided_request_indices():
+    """DSpark samples a step at a time, so req_indices is an `idx_map[:, i]` column."""
+    num_reqs = 4
+    num_speculative_steps = 3
+    all_token_ids = torch.tensor(
+        [[3, 4, 3, 4], [9, 9, 9, 9], [3, 4, 3, 4], [9, 9, 9, 9]]
+    ).cuda()
+    prompt_lens = torch.zeros(num_reqs, dtype=torch.int64).cuda()
+    total_lens = torch.full((num_reqs,), 4).cuda()
+    contexts = torch.tensor([[3, 4]]).expand(num_reqs, 2).contiguous().cuda()
+    steps = torch.zeros(num_reqs, dtype=torch.int64).cuda()
+    enabled = torch.ones(num_reqs, dtype=torch.bool).cuda()
+
+    idx_map = (
+        torch.arange(num_reqs)
+        .repeat_interleave(num_speculative_steps)
+        .view(num_reqs, num_speculative_steps)
+        .cuda()
+    )
+    column = idx_map[:, 1]
+    assert column.stride(0) == num_speculative_steps
+
+    def run(req_indices):
+        prior = torch.zeros(
+            num_reqs, num_speculative_steps, 2, dtype=torch.int64, device="cuda"
+        )
+        return draft_watermarking_mask(
+            all_token_ids,
+            req_indices,
+            prompt_lens,
+            total_lens,
+            prior,
+            contexts,
+            steps,
+            enabled,
+            max_history=None,
+            include_prompt=False,
+        ).cpu()
+
+    expected = torch.tensor([False, True, False, True])
+    assert torch.equal(run(column.contiguous()), expected)
+    assert torch.equal(run(column), expected)
+
+
 def test_draft_sampler_deduplicates_against_committed_history(monkeypatch):
     class StubWatermarker:
         context_width = 1
