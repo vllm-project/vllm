@@ -117,7 +117,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries, _ = self._fetch_entries(model_config)
+        entries, _, _ = self._fetch_entries(model_config)
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -137,10 +137,10 @@ class IpcModelLoader(BaseModelLoader):
         check_ipc_platform_support()
         state_fetched = False
         try:
-            entries, aliases = self._fetch_entries(model_config)
+            entries, aliases, attrs = self._fetch_entries(model_config)
             state_fetched = True
             return self._build_model(
-                vllm_config, model_config, prefix, entries, aliases
+                vllm_config, model_config, prefix, entries, aliases, attrs
             )
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
@@ -174,6 +174,7 @@ class IpcModelLoader(BaseModelLoader):
         prefix: str,
         entries: dict[str, TensorEntry],
         aliases: dict[str, str],
+        attrs: dict[str, bool],
     ) -> nn.Module:
         device_config = vllm_config.device_config
         load_device = (
@@ -196,6 +197,10 @@ class IpcModelLoader(BaseModelLoader):
                 )
             check_ipc_quant_support(model)
             self._apply_entries(model, entries, aliases, device_index)
+            # Flags that load_weights would have set (e.g. EAGLE ownership of
+            # embed_tokens / lm_head); the daemon ran it, this process did not.
+            for name, value in attrs.items():
+                setattr(model, name, value)
             # The daemon exports tensors that already went through
             # process_weights_after_loading; re-run it in pre-processed mode
             # so quant methods only rebuild Python-side state (e.g. the MoE
@@ -273,7 +278,7 @@ class IpcModelLoader(BaseModelLoader):
 
     def _fetch_entries(
         self, model_config: ModelConfig
-    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+    ) -> tuple[dict[str, TensorEntry], dict[str, str], dict[str, bool]]:
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -285,7 +290,7 @@ class IpcModelLoader(BaseModelLoader):
 
     def _request_state(
         self, cache_config: WeightCacheKey
-    ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+    ) -> tuple[dict[str, TensorEntry], dict[str, str], dict[str, bool]]:
         with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
             response = recv_msg(conn)
@@ -299,7 +304,11 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
-        return response["entries"], response.get("aliases", {})
+        return (
+            response["entries"],
+            response.get("aliases", {}),
+            response.get("attrs", {}),
+        )
 
     def _connect(self, timeout: float) -> socket.socket:
         socket_path = self._resolve_socket_path()

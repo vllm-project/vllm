@@ -209,7 +209,7 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     assert restart_outputs == baseline_outputs
 
 
-def test_weight_cache_caches_only_mtp_drafts():
+def test_weight_cache_caches_mtp_and_eagle_drafts():
     from types import SimpleNamespace
 
     from vllm.model_executor.model_loader.weight_cache.protocol import (
@@ -217,14 +217,32 @@ def test_weight_cache_caches_only_mtp_drafts():
     )
 
     draft = object()
-    assert caches_draft_model(SimpleNamespace(method="mtp", draft_model_config=draft))
+    for method in ("mtp", "eagle", "eagle3"):
+        assert caches_draft_model(
+            SimpleNamespace(method=method, draft_model_config=draft)
+        )
     assert not caches_draft_model(
-        SimpleNamespace(method="eagle3", draft_model_config=draft)
+        SimpleNamespace(method="dflash", draft_model_config=draft)
     )
     assert not caches_draft_model(
         SimpleNamespace(method="mtp", draft_model_config=None)
     )
     assert not caches_draft_model(None)
+
+
+def test_weight_cache_exports_eagle_ownership_flags():
+    """The engine never runs load_weights for cached drafts, so the flags that
+    decide whether to share the target's embed/lm_head travel with the state."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        export_model_attrs,
+    )
+
+    model = torch.nn.Module()
+    assert export_model_attrs(model) == {}
+    model.has_own_lm_head = True
+    assert export_model_attrs(model) == {"has_own_lm_head": True}
 
 
 def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
@@ -238,7 +256,7 @@ def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
 
 
 def test_draft_load_config_under_ipc_cache():
-    """An MTP draft is routed to the daemon's draft group; any other draft
+    """A cached draft is routed to the daemon's draft group; any other draft
     falls back to disk instead of hitting the target daemon; an explicit
     draft_load_config always wins."""
     from types import SimpleNamespace
@@ -268,9 +286,13 @@ def test_draft_load_config_under_ipc_cache():
     assert mtp.model_loader_extra_config == {"fallback": False}
 
     eagle = get_draft_load_config(cfg("eagle3"))
-    assert eagle.load_format == "auto"
-    assert not eagle.weight_cache_is_draft_model
-    assert eagle.model_loader_extra_config == {}
+    assert eagle.load_format == "ipc_cache"
+    assert eagle.weight_cache_is_draft_model
+
+    dflash = get_draft_load_config(cfg("dflash"))
+    assert dflash.load_format == "auto"
+    assert not dflash.weight_cache_is_draft_model
+    assert dflash.model_loader_extra_config == {}
 
     assert get_draft_load_config(cfg("mtp", explicit)) is explicit
     disk = LoadConfig(load_format="fastsafetensors")

@@ -42,13 +42,12 @@ The global TP rank of local GPU ``i`` on node ``r`` is
 assignment, so each engine worker maps its shard from the daemon on its own
 node.
 
-With MTP speculative decoding (``--speculative-config`` with ``method=mtp``)
-the launcher additionally starts a draft daemon group that caches the MTP
-draft model. It uses its own cache key, Unix sockets (``*_draft0.sock``) and
-rendezvous port (``--weight-cache-draft-master-port``, default
-``--weight-cache-master-port + 1``), so each process serves exactly one model
-role. Other draft types (e.g. EAGLE3 heads) are not cached and keep loading
-from disk in the engine.
+With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
+starts a draft daemon group that caches the draft model. It uses its own cache
+key, Unix sockets (``*_draft0.sock``) and rendezvous port
+(``--weight-cache-draft-master-port``, default ``--weight-cache-master-port +
+1``), so each process serves exactly one model role. Other draft types are not
+cached and keep loading from disk in the engine.
 """
 
 import contextlib
@@ -64,6 +63,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.config import (
+    ModelConfig,
     ParallelConfig,
     VllmConfig,
     replace,
@@ -85,6 +85,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
+    export_model_attrs,
     format_daemon_role,
     get_current_device_uuid,
     get_socket_path,
@@ -145,7 +146,9 @@ def export_entries(
     return entries, aliases
 
 
-def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
+def get_daemon_model(
+    vllm_config: VllmConfig, model_config: ModelConfig | None = None
+) -> torch.nn.Module:
     """Load the daemon's model, composed from the configured loader.
 
     Runs the quantization check after model creation but before the slow
@@ -153,7 +156,8 @@ def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
     always fails the check, so load_model's finalize step for it is
     unnecessary here.
     """
-    model_config = vllm_config.model_config
+    if model_config is None:
+        model_config = vllm_config.model_config
     load_config = vllm_config.load_config
     loader = get_model_loader(load_config)
     device_config = vllm_config.device_config
@@ -181,8 +185,12 @@ class WeightCacheDaemon:
         socket_dir: str | None = None,
         is_draft_model: bool = False,
         draft_model_idx: int | None = None,
+        model_config: ModelConfig | None = None,
     ):
         self.vllm_config = vllm_config
+        # A draft daemon builds the draft with the target's VllmConfig, like
+        # the engine does; only the ModelConfig differs.
+        self.model_config = model_config or vllm_config.model_config
         self.tp_rank = tp_rank
         self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
@@ -194,7 +202,7 @@ class WeightCacheDaemon:
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
-            vllm_config.model_config,
+            self.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
             is_draft_model=is_draft_model,
@@ -213,7 +221,7 @@ class WeightCacheDaemon:
         )
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
-            self.model = get_daemon_model(self.vllm_config)
+            self.model = get_daemon_model(self.vllm_config, self.model_config)
         logger.info(
             "Weight cache %s daemon rank %d loaded model",
             self.role,
@@ -334,6 +342,7 @@ class WeightCacheDaemon:
                 "status": "ok",
                 "entries": entries,
                 "aliases": aliases,
+                "attrs": export_model_attrs(self.model),
                 "gpu_uuid": gpu_uuid,
             },
         )
@@ -365,6 +374,7 @@ def _run_daemon(
     ready_queue: "multiprocessing.Queue[tuple[str, int]]",
     is_draft_model: bool = False,
     draft_model_idx: int | None = None,
+    model_config: ModelConfig | None = None,
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config,
@@ -374,35 +384,48 @@ def _run_daemon(
         socket_dir,
         is_draft_model,
         draft_model_idx,
+        model_config,
     )
     daemon.load_model()
     daemon.serve_forever(ready_callback=lambda: ready_queue.put((daemon.role, tp_rank)))
 
 
-def get_cached_draft_vllm_config(vllm_config: VllmConfig) -> VllmConfig | None:
-    """Config for the draft daemon group, or None when the draft is not cached.
+def get_draft_daemon_config(
+    vllm_config: VllmConfig,
+) -> tuple[VllmConfig, ModelConfig] | None:
+    """Configs for the draft daemon group, or None when the draft is not cached.
 
-    Only MTP drafts are cached (see ``caches_draft_model``). The draft group
-    reuses the target's parallel topology, so the draft must be sharded with
-    the same tensor parallel size.
+    Mirrors how the engine loads a draft: the target's VllmConfig with the
+    speculative kernel overrides, plus the draft's ModelConfig passed
+    separately, because draft classes read the target from
+    ``vllm_config.model_config``.
     """
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not caches_draft_model(speculative_config):
+    if not caches_draft_model(speculative_config):
         return None
-    draft_parallel_config = speculative_config.draft_parallel_config
-    target_tp = vllm_config.parallel_config.tensor_parallel_size
-    if draft_parallel_config.tensor_parallel_size != target_tp:
-        raise ValueError(
-            "The weight cache daemon requires the MTP draft and the target to "
-            f"use the same tensor parallel size, got "
-            f"{draft_parallel_config.tensor_parallel_size} != {target_tp}"
+    if speculative_config.moe_backend is not None:
+        vllm_config = replace(
+            vllm_config,
+            kernel_config=replace(
+                vllm_config.kernel_config, moe_backend=speculative_config.moe_backend
+            ),
         )
-    _reject_unsupported_parallelism(draft_parallel_config)
-    return replace(
-        vllm_config,
-        model_config=speculative_config.draft_model_config,
-        parallel_config=draft_parallel_config,
-    )
+    if speculative_config.attention_backend is not None:
+        vllm_config = replace(
+            vllm_config,
+            attention_config=replace(
+                vllm_config.attention_config,
+                backend=speculative_config.attention_backend,
+            ),
+        )
+    if speculative_config.kv_cache_dtype is not None:
+        vllm_config = replace(
+            vllm_config,
+            cache_config=replace(
+                vllm_config.cache_config, cache_dtype=speculative_config.kv_cache_dtype
+            ),
+        )
+    return vllm_config, speculative_config.draft_model_config
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
@@ -477,11 +500,14 @@ def main() -> None:
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
     # (is_draft_model, draft_model_idx, config, rendezvous) per daemon group.
-    groups: list[tuple[bool, int | None, VllmConfig, str]] = [
-        (False, None, vllm_config, distributed_init_method)
+    # (is_draft_model, draft_model_idx, vllm_config, model_config, rendezvous)
+    # per daemon group; model_config is None for the target.
+    groups: list[tuple[bool, int | None, VllmConfig, ModelConfig | None, str]] = [
+        (False, None, vllm_config, None, distributed_init_method)
     ]
-    draft_vllm_config = get_cached_draft_vllm_config(vllm_config)
-    if draft_vllm_config is not None:
+    draft = get_draft_daemon_config(vllm_config)
+    if draft is not None:
+        draft_vllm_config, draft_model_config = draft
         draft_master_port = args.weight_cache_draft_master_port
         if draft_master_port is None:
             draft_master_port = master_port + 1 if nnodes > 1 else get_open_port()
@@ -495,6 +521,7 @@ def main() -> None:
                 True,
                 0,
                 draft_vllm_config,
+                draft_model_config,
                 get_distributed_init_method(master_addr, draft_master_port),
             )
         )
@@ -508,7 +535,7 @@ def main() -> None:
     ]
     procs = []
     expected_ready: set[tuple[str, int]] = set()
-    for is_draft_model, draft_model_idx, config, init_method in groups:
+    for is_draft_model, draft_model_idx, config, model_config, init_method in groups:
         role = "draft" if is_draft_model else "target"
         suffix = format_daemon_role(is_draft_model, draft_model_idx)
         for local_rank, global_rank in enumerate(global_ranks):
@@ -525,6 +552,7 @@ def main() -> None:
                         ready_queue,
                         is_draft_model,
                         draft_model_idx,
+                        model_config,
                     ),
                     name=f"vllm-weight-cache-{role}{suffix}-{global_rank}",
                 )

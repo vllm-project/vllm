@@ -20,14 +20,14 @@ import stat
 import struct
 import tempfile
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, TypeGuard
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SpeculativeConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
@@ -129,11 +129,25 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
 
 
 # Speculative methods whose draft model the daemon caches in its own group.
-# Other drafts (e.g. EAGLE3 heads) keep loading from disk in the engine.
-WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp"})
+# Other drafts keep loading from disk in the engine.
+WEIGHT_CACHE_DRAFT_METHODS = frozenset({"mtp", "eagle", "eagle3"})
+
+# Python-side flags that weight loading sets on EAGLE-style drafts; the engine
+# never runs load_weights for cached models, so the daemon ships them.
+EXPORTED_MODEL_ATTRS = ("has_own_embed_tokens", "has_own_lm_head")
 
 
-def caches_draft_model(speculative_config: Any) -> bool:
+def export_model_attrs(model: Any) -> dict[str, bool]:
+    return {
+        name: bool(getattr(model, name))
+        for name in EXPORTED_MODEL_ATTRS
+        if hasattr(model, name)
+    }
+
+
+def caches_draft_model(
+    speculative_config: SpeculativeConfig | None,
+) -> TypeGuard[SpeculativeConfig]:
     """Whether the daemon serves the speculative draft as a separate role."""
     return (
         speculative_config is not None

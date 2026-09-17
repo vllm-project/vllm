@@ -44,10 +44,10 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     """Load config for the speculative draft model.
 
     An explicit ``draft_load_config`` always wins. Otherwise the draft inherits
-    the target's load config, except under ``ipc_cache``: an MTP draft is
-    routed to the daemon's draft group, and any other draft (which the daemon
-    does not cache) falls back to disk loading instead of being sent to the
-    target daemon with a mismatching fingerprint.
+    the target's load config, except under ``ipc_cache``: a cached draft
+    (MTP, EAGLE, EAGLE3) is routed to the daemon's draft group, and any other
+    draft falls back to disk loading instead of being sent to the target
+    daemon with a mismatching fingerprint.
     """
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         caches_draft_model,
