@@ -633,6 +633,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 for segment_parts in chunk_segment_parts
                 for segment in segment_parts
             ]
+            for segment_id, segment in enumerate(total_segments):
+                segment.id = segment_id
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
             if self.task_type == "transcribe":
