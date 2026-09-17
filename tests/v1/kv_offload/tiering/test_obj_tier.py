@@ -546,7 +546,9 @@ class TestMockObjTierFailures:
             num_blocks=num_blocks, primary_kv_view=primary_kv_view
         )
         manager = TieringOffloadingManager(
-            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+            primary_tier=primary_tier,
+            secondary_tiers=[obj_tier],
+            control_plane_thread=False,
         )
 
         keys = [key(1)]

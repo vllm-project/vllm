@@ -902,7 +902,9 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         root_dir=str(tmp_path),
         enable_kv_events=True,
     )
-    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[tier], control_plane_thread=False
+    )
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)

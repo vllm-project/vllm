@@ -19,8 +19,10 @@ Key Design Principles:
    protecting chunks from eviction until complete_read() is called
 """
 
+import contextlib
+import threading
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -56,6 +58,23 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
 logger = init_logger(__name__)
+
+# Sleep between control-plane sweeps. A tier's poll is non-blocking (the p2p
+# tier's ZMQ transport returns immediately when there is no traffic), so the
+# thread has to pace itself. Small enough to be irrelevant next to a step,
+# large enough not to fight the scheduler thread for the GIL.
+_CONTROL_POLL_INTERVAL_S = 0.001
+
+# How long a sweep waits for the step lock before looping. Bounded so the stop
+# event is always observed promptly, and so a step that never reached
+# on_schedule_end is reported instead of silently wedging the control plane.
+_CONTROL_LOCK_TIMEOUT_S = 1.0
+
+# Warn once the control plane has been unable to run for this long.
+_CONTROL_STARVATION_WARN_S = 10.0
+
+# How long shutdown waits for the control thread to finish its current sweep.
+_CONTROL_THREAD_JOIN_TIMEOUT_S = 2.0
 
 
 @dataclass
@@ -143,7 +162,14 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
 class _SecondaryTierFacingParent(ParentManager):
     """Wrapper that implements ParentManager by delegating to the
-    TieringOffloadingManager with exclude_tier_idx set to the origin tier."""
+    TieringOffloadingManager with exclude_tier_idx set to the origin tier.
+
+    Handed to a tier only for the duration of serve_external_requests(), whose
+    caller — the control-plane thread, or on_schedule_end when that thread is
+    disabled — already holds the manager lock. So every method here delegates
+    to the *_unlocked variant: taking the lock again would deadlock, since it
+    is not reentrant.
+    """
 
     __slots__ = ("_m", "_origin_idx")
 
@@ -156,20 +182,18 @@ class _SecondaryTierFacingParent(ParentManager):
         self._origin_idx = tier_idx
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return self._m.on_new_request(req_context, exclude_tier_idx=self._origin_idx)
+        return self._m._on_new_request_unlocked(req_context, self._origin_idx)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        return self._m.lookup(key, req_context, exclude_tier_idx=self._origin_idx)
+        return self._m._lookup_unlocked(key, req_context, self._origin_idx)
 
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> TransferJob:
-        return self._m.create_store_job(keys, req_context, self._origin_idx)
+        return self._m._create_store_job_unlocked(keys, req_context, self._origin_idx)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        return self._m.on_request_finished(
-            req_context, exclude_tier_idx=self._origin_idx
-        )
+        return self._m._on_request_finished_unlocked(req_context, self._origin_idx)
 
 
 class TieringOffloadingManager(OffloadingManager):
@@ -185,12 +209,43 @@ class TieringOffloadingManager(OffloadingManager):
       - Secondary tiers return JobResult objects containing all necessary
         information
       - job_id_counter: monotonically increasing counter for job IDs
+
+    Threading
+    ---------
+    Two threads touch this manager, serialized by ``_lock``:
+
+    * The scheduler thread runs every public method. It takes ``_lock`` on its
+      first call of a scheduler step and drops it at the end of
+      ``on_schedule_end`` — step granularity, not per call. That matters: the
+      connector learns a chunk is a HIT from ``lookup()`` and only reads it in
+      a later ``prepare_load()`` hook, and in between the chunk is still
+      evictable. A promotion started while serving a peer lookup in that window
+      could evict it out from under the pending load.
+    * The control-plane thread (``_control_plane_loop``) polls tiers for
+      finished jobs and lets them serve inbound peer requests. It holds
+      ``_lock`` for a whole sweep, so it runs only between steps — in practice
+      during model execution, which is exactly the time a rank busy with a long
+      prefill has to spare. Without it, a peer's control-plane round trip costs
+      a full step boundary.
+
+    The read-mostly hooks (``has_pending_work``, ``get_stats``,
+    ``take_events``) are the exception: they hold the lock only for their own
+    duration, via ``_observation_lock``. The engine calls them on every tick,
+    so folding them into the step-wide hold would leave an idle engine with no
+    gap between steps at all.
+
+    Tiers re-enter the manager from that thread through
+    ``_SecondaryTierFacingParent``, which calls the ``*_unlocked`` variants
+    because its caller already holds the lock.
     """
 
     def __init__(
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        *,
+        control_plane_thread: bool = True,
+        control_poll_interval_s: float = _CONTROL_POLL_INTERVAL_S,
     ):
         """Initialize the TieringOffloadingManager.
 
@@ -198,6 +253,12 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            control_plane_thread: Whether to poll tiers and serve their inbound
+                            peer requests from a dedicated thread rather than
+                            from the per-step hooks. Pass False to keep all of
+                            it on the calling thread, which is what
+                            step-driven tests need.
+            control_poll_interval_s: Sleep between control-plane sweeps.
 
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
@@ -238,6 +299,84 @@ class TieringOffloadingManager(OffloadingManager):
             for tier_idx, tier in enumerate(self.secondary_tiers)
         }
 
+        # Serializes the scheduler thread against the control-plane thread. See
+        # the class docstring for why it is held for a whole step.
+        self._lock = threading.Lock()
+        # True while the scheduler side holds _lock for the current step. Only
+        # scheduler-side callers read or write it, and that side is
+        # single-threaded, so it needs no protection of its own; the
+        # control-plane thread never touches it.
+        self._step_locked: bool = False
+
+        self._control_thread_enabled: bool = control_plane_thread and bool(
+            self.secondary_tiers
+        )
+        self._control_poll_interval_s: float = control_poll_interval_s
+        self._control_thread: threading.Thread | None = None
+        self._control_thread_stop = threading.Event()
+        # Exception raised inside the control-plane thread, re-raised on the
+        # next scheduler-side call. These failures used to happen on the
+        # scheduler thread and take the engine down with a real traceback;
+        # swallowing them here would instead leave the control plane silently
+        # dead, which looks like a hang.
+        self._control_thread_exc: BaseException | None = None
+
+    # ------------------------------------------------------------------
+    # Step lock
+    # ------------------------------------------------------------------
+
+    def _enter_step(self, *, raise_control_error: bool = True) -> None:
+        """Take the manager lock for the current scheduler step.
+
+        Idempotent within a step: the first scheduler-side call acquires, later
+        ones are no-ops, and on_schedule_end releases. Never called from the
+        control-plane thread, which holds _lock around its whole sweep and
+        re-enters the manager through the *_unlocked helpers.
+
+        Args:
+            raise_control_error: Whether to re-raise a control-plane thread
+                failure. Only shutdown passes False, so a failed sweep cannot
+                mask teardown.
+
+        Raises:
+            BaseException: Whatever the control-plane thread failed with.
+
+        """
+        if raise_control_error and self._control_thread_exc is not None:
+            raise self._control_thread_exc
+        if self._step_locked:
+            return
+        self._lock.acquire()
+        self._step_locked = True
+
+    def _exit_step(self) -> None:
+        """Release the manager lock, letting the control plane run."""
+        if not self._step_locked:
+            return
+        self._step_locked = False
+        self._lock.release()
+
+    @contextlib.contextmanager
+    def _observation_lock(self) -> Iterator[None]:
+        """Hold the manager lock only for the duration of one observation.
+
+        For the read-mostly hooks (has_pending_work, get_stats, take_events).
+        They take no part in the lookup()->prepare_load() invariant that makes
+        the step-wide hold necessary, and the engine calls them on every tick,
+        including ticks that schedule nothing and run no model. Letting them
+        extend a step's hold would leave almost no gap between one step and the
+        next on an idle engine — exactly the state a producer waiting for a
+        consumer to connect is in, and exactly when the control plane matters.
+        """
+        if self._control_thread_exc is not None:
+            raise self._control_thread_exc
+        if self._step_locked:
+            # Already held for this step; the step's release point owns it.
+            yield
+            return
+        with self._lock:
+            yield
+
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
         return self._jobs
@@ -262,7 +401,13 @@ class TieringOffloadingManager(OffloadingManager):
         Guarded by _processed_jobs_this_step: the first call in an engine step
         does the actual polling; subsequent calls are no-ops. The flag is reset
         in on_schedule_end() at the end of each step.
+
+        A no-op once the control-plane thread is running: that thread owns tier
+        polling, and repeating it here would put the very transport polls we
+        moved off the scheduler thread straight back onto it.
         """
+        if self._control_thread is not None:
+            return
         if self._processed_jobs_this_step:
             return
         self._processed_jobs_this_step = True
@@ -339,14 +484,23 @@ class TieringOffloadingManager(OffloadingManager):
                     )
 
     @override
-    def lookup(
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        """Check whether a single chunk is offloaded and ready.
+
+        See _lookup_unlocked for the algorithm and the return values.
+        """
+        self._enter_step()
+        return self._lookup_unlocked(key, req_context)
+
+    def _lookup_unlocked(
         self,
         key: OffloadKey,
         req_context: ReqContext,
-        *,
         exclude_tier_idx: int | None = None,
     ) -> LookupResult:
         """Check whether a single chunk is offloaded and ready.
+
+        The caller must hold the manager lock.
 
         Algorithm:
             1. Process any completed async jobs first.
@@ -518,6 +672,7 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
 
         """
+        self._enter_step()
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
@@ -529,6 +684,7 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         """
+        self._enter_step()
         self.primary_tier.touch(keys, req_context)
         for tier in self.secondary_tiers:
             tier.touch(keys, req_context)
@@ -545,6 +701,7 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         """
+        self._enter_step()
         self.primary_tier.complete_load(keys, req_context)
 
     @override
@@ -579,6 +736,7 @@ class TieringOffloadingManager(OffloadingManager):
         #    not-yet-ready chunk's ref_cnt from -1 to 0 via complete_write(),
         #    making it evictable for the first time.
         # Both must be accounted for before the eviction decision below.
+        self._enter_step()
         self._maybe_process_finished_jobs()
 
         # Step 2: Store to primary tier (new chunks only).
@@ -643,7 +801,9 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier_idx in request_level_tiers:
-            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
+            job_metadata = self._create_store_job_unlocked(
+                ready_keys, req_context, tier_idx
+            )
             tier = self.secondary_tiers[tier_idx]
             tier.submit_store(job_metadata)
 
@@ -688,6 +848,7 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context forwarded to primary.prepare_read().
 
         """
+        self._enter_step()
         # Step 1: Complete store in primary tier (makes chunks loadable)
         self.primary_tier.complete_store(keys, req_context, success)
 
@@ -698,7 +859,9 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier_idx, tier in enumerate(self.secondary_tiers):
-                job_metadata = self.create_store_job(keys, req_context, tier_idx)
+                job_metadata = self._create_store_job_unlocked(
+                    keys, req_context, tier_idx
+                )
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -717,9 +880,22 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> TransferJob:
         """Pin chunks in the primary tier and create a tracked store job.
 
+        See _create_store_job_unlocked.
+        """
+        self._enter_step()
+        return self._create_store_job_unlocked(keys, req_context, tier_idx)
+
+    def _create_store_job_unlocked(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        tier_idx: int = 0,
+    ) -> TransferJob:
+        """Pin chunks in the primary tier and create a tracked store job.
+
         Calls prepare_read() to increment ref_cnt (protecting chunks
         from eviction during the async transfer), allocates a job ID,
-        and registers the job in _jobs.
+        and registers the job in _jobs. The caller must hold the manager lock.
 
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
@@ -738,16 +914,24 @@ class TieringOffloadingManager(OffloadingManager):
         return job_metadata
 
     @override
-    def on_new_request(
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """Query each secondary tier for its offload policy preference.
+
+        See _on_new_request_unlocked.
+        """
+        self._enter_step()
+        return self._on_new_request_unlocked(req_context)
+
+    def _on_new_request_unlocked(
         self,
         req_context: ReqContext,
-        *,
         exclude_tier_idx: int | None = None,
     ) -> RequestOffloadingContext:
         """Query each secondary tier for its offload policy preference.
 
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
+        The caller must hold the manager lock.
         """
         state = RequestState(req_context=req_context)
         self._metrics.on_new_request(req_context)
@@ -769,12 +953,16 @@ class TieringOffloadingManager(OffloadingManager):
         return RequestOffloadingContext(policy=policy)
 
     @override
-    def on_request_finished(
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        self._enter_step()
+        self._on_request_finished_unlocked(req_context)
+
+    def _on_request_finished_unlocked(
         self,
         req_context: ReqContext,
-        *,
         exclude_tier_idx: int | None = None,
     ) -> None:
+        """Finalize a finished request. The caller must hold the manager lock."""
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
@@ -812,52 +1000,170 @@ class TieringOffloadingManager(OffloadingManager):
 
         Called once per scheduler step from
         OffloadingConnectorScheduler.build_connector_meta().
-        """
-        # Catch-all poll: guarantees jobs are processed even on steps where
-        # lookup()/prepare_store() were never called (e.g. no requests
-        # scheduled but a tier still has_pending_work()).
-        self._maybe_process_finished_jobs()
 
+        Also where the step's hold on the manager lock is released, handing the
+        control-plane thread the model-execution window.
+        """
+        self._enter_step()
+        try:
+            self._start_control_thread()
+
+            if self._control_thread is None:
+                # Catch-all poll: guarantees jobs are processed even on steps
+                # where lookup()/prepare_store() were never called (e.g. no
+                # requests scheduled but a tier still has_pending_work()).
+                # Once the control thread runs, both of these are its job.
+                self._maybe_process_finished_jobs()
+
+                for tier in self.secondary_tiers:
+                    tier.serve_external_requests(self._tier_parents[tier])
+
+            # Reset the per-step gate AFTER serve_external_requests so that
+            # lookup() calls within it skip redundant _process_finished_jobs().
+            self._processed_jobs_this_step = False
+
+            self._flush_pending_promotions()
+            self._flush_pending_cascades()
+            for tier in self.secondary_tiers:
+                tier.on_schedule_end(context)
+
+            for req_id in context.new_req_ids:
+                state = self._req_state.get(req_id)
+                if state is None:
+                    continue
+                self._metrics.on_request_allocated(state.req_context)
+        finally:
+            self._exit_step()
+
+    # ------------------------------------------------------------------
+    # Control plane
+    # ------------------------------------------------------------------
+
+    def _start_control_thread(self) -> None:
+        """Start the control-plane thread, on the first scheduler step.
+
+        Deferred out of __init__ so no sweep runs before the engine is
+        stepping: accepting a peer builds a session, and a tier may need state
+        that is only set up after this manager is constructed (the p2p tier
+        resolves the block-hash seed, which init_none_hash() sets). It also
+        keeps the thread out of the spec's partial-construction cleanup path.
+        """
+        if self._control_thread is not None or not self._control_thread_enabled:
+            return
+        self._control_thread = threading.Thread(
+            target=self._control_plane_loop,
+            name="vllm_tiering_control_plane",
+            daemon=True,
+        )
+        self._control_thread.start()
+        logger.info(
+            "Tiering control-plane thread started for %d secondary tier(s), "
+            "polling every %.3fs",
+            len(self.secondary_tiers),
+            self._control_poll_interval_s,
+        )
+
+    def _stop_control_thread(self) -> None:
+        """Signal the control-plane thread and wait out its current sweep.
+
+        Releases the step lock first: the thread may be blocked on it, and it
+        only observes the stop event once it is no longer waiting. Because the
+        loop re-checks that event after acquiring, a straggler outliving the
+        join can no longer start a sweep against a torn-down tier.
+        """
+        thread = self._control_thread
+        self._control_thread_stop.set()
+        self._exit_step()
+        if thread is None:
+            return
+        thread.join(timeout=_CONTROL_THREAD_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            logger.error(
+                "Tiering control-plane thread did not stop within %.1fs; "
+                "continuing with tier shutdown under the manager lock.",
+                _CONTROL_THREAD_JOIN_TIMEOUT_S,
+            )
+        self._control_thread = None
+
+    def _control_plane_loop(self) -> None:
+        """Sweep the secondary tiers' control plane until shutdown.
+
+        Runs between scheduler steps, holding the manager lock for each sweep.
+        """
+        stop = self._control_thread_stop
+        starved_since: float | None = None
+        while not stop.is_set():
+            if not self._lock.acquire(timeout=_CONTROL_LOCK_TIMEOUT_S):
+                now = time.monotonic()
+                if starved_since is None:
+                    starved_since = now
+                elif now - starved_since >= _CONTROL_STARVATION_WARN_S:
+                    logger.warning(
+                        "Tiering control plane has not run for %.0fs: the "
+                        "scheduler still holds the manager lock, so a step "
+                        "never reached on_schedule_end.",
+                        now - starved_since,
+                    )
+                    starved_since = now
+                continue
+            starved_since = None
+            try:
+                if stop.is_set():
+                    # Shutdown began while we waited for the lock.
+                    return
+                self._sweep_control_plane()
+            except BaseException as exc:
+                # This work used to run on the scheduler thread, where a
+                # failure took the engine down with a real traceback. Hand it
+                # back there rather than leaving the control plane dead, which
+                # from the outside is indistinguishable from a hang.
+                logger.exception("Tiering control-plane sweep failed")
+                self._control_thread_exc = exc
+                return
+            finally:
+                self._lock.release()
+            stop.wait(self._control_poll_interval_s)
+
+    def _sweep_control_plane(self) -> None:
+        """Poll tiers for finished jobs, then let them serve inbound peers.
+
+        Same order as the on_schedule_end path this replaces: polling binds a
+        fetch that just arrived and enqueues inbound lookups, so serving
+        resolves them within the same sweep.
+        """
+        self._process_finished_jobs()
         for tier in self.secondary_tiers:
             tier.serve_external_requests(self._tier_parents[tier])
-
-        # Reset the per-step gate AFTER serve_external_requests so that
-        # lookup() calls within it skip redundant _process_finished_jobs().
-        self._processed_jobs_this_step = False
-
-        self._flush_pending_promotions()
-        self._flush_pending_cascades()
-        for tier in self.secondary_tiers:
-            tier.on_schedule_end(context)
-
-        for req_id in context.new_req_ids:
-            state = self._req_state.get(req_id)
-            if state is None:
-                continue
-            self._metrics.on_request_allocated(state.req_context)
 
     @override
     def has_pending_work(self) -> bool:
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        return (
-            bool(self._jobs)
-            or any(state.pending_cascade_keys for state in self._req_state.values())
-            or any(tier.has_pending_work() for tier in self.secondary_tiers)
-        )
+        with self._observation_lock():
+            return (
+                bool(self._jobs)
+                or any(state.pending_cascade_keys for state in self._req_state.values())
+                or any(tier.has_pending_work() for tier in self.secondary_tiers)
+            )
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        """Yield events owned by the primary and secondary tiers.
+        """Collect events owned by the primary and secondary tiers.
 
-        Yields:
+        Materialized rather than generated: a generator body would not run
+        until the caller iterates, so the step lock would be taken (and the
+        tiers drained) at some later, unrelated point.
+
+        Returns:
             New OffloadingEvents collected by each tier since the last call.
 
         """
-        yield from self.primary_tier.take_events()
-        for tier in self.secondary_tiers:
-            yield from tier.take_events()
+        with self._observation_lock():
+            events = list(self.primary_tier.take_events())
+            for tier in self.secondary_tiers:
+                events.extend(tier.take_events())
+        return events
 
     @override
     def reset_cache(self) -> None:
@@ -873,7 +1179,19 @@ class TieringOffloadingManager(OffloadingManager):
         (FS, network) keep their data across resets. Active request state is
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
+
+        Runs outside a scheduler step, so it takes and drops the manager lock
+        itself. The control-plane thread is locked out for the whole reset;
+        drain_jobs() polls the tiers itself and does not need it.
         """
+        self._enter_step()
+        try:
+            self._reset_cache_unlocked()
+        finally:
+            self._exit_step()
+
+    def _reset_cache_unlocked(self) -> None:
+        """Body of reset_cache(). The caller must hold the manager lock."""
         for tier in self.secondary_tiers:
             tier.drain_jobs()
         # All tier I/O has stopped; consume their completion notifications
@@ -906,26 +1224,27 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
-        stats = self.primary_tier.get_stats()
+        with self._observation_lock():
+            stats = self.primary_tier.get_stats()
 
-        if stats is not None and stats.is_empty():
-            stats = None
+            if stats is not None and stats.is_empty():
+                stats = None
 
-        metrics_stats = self._metrics.take_stats()
-        if metrics_stats is not None:
-            if stats is None:
-                stats = metrics_stats
-            else:
-                stats.aggregate(metrics_stats)
+            metrics_stats = self._metrics.take_stats()
+            if metrics_stats is not None:
+                if stats is None:
+                    stats = metrics_stats
+                else:
+                    stats.aggregate(metrics_stats)
 
-        for tier in self.secondary_tiers:
-            tier_stats = tier.get_stats()
-            if tier_stats is None or tier_stats.is_empty():
-                continue
-            if stats is None:
-                stats = tier_stats
-            else:
-                stats.aggregate(tier_stats)
+            for tier in self.secondary_tiers:
+                tier_stats = tier.get_stats()
+                if tier_stats is None or tier_stats.is_empty():
+                    continue
+                if stats is None:
+                    stats = tier_stats
+                else:
+                    stats.aggregate(tier_stats)
 
         return stats
 
@@ -935,7 +1254,20 @@ class TieringOffloadingManager(OffloadingManager):
 
         Every secondary tier is given a shutdown attempt. If any shutdown
         fails, preserve the primary mmap because a failed tier may still use it.
+
+        The control-plane thread is stopped first, so nothing sweeps a tier
+        while it is being torn down. A sweep that failed earlier is not
+        re-raised here: it must not mask the teardown.
         """
+        self._stop_control_thread()
+        self._enter_step(raise_control_error=False)
+        try:
+            self._shutdown_unlocked()
+        finally:
+            self._exit_step()
+
+    def _shutdown_unlocked(self) -> None:
+        """Body of shutdown(). The caller must hold the manager lock."""
         shutdown_error: Exception | None = None
         for tier_idx, tier in enumerate(self.secondary_tiers):
             try:

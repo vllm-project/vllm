@@ -10,6 +10,8 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import threading
+import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
@@ -199,6 +201,7 @@ def test_tiering_manager_aggregates_secondary_stats():
     manager = TieringOffloadingManager(
         primary_tier=primary_tier,
         secondary_tiers=[secondary_tier],
+        control_plane_thread=False,
     )
 
     stats = manager.get_stats()
@@ -306,6 +309,7 @@ class TestTieringOffloadingManager:
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
+            control_plane_thread=False,
         )
 
     def _simulate_on_schedule_end(self, new_req_ids: list[str] | None = None):
@@ -1504,6 +1508,228 @@ def test_parse_tier_filter_skips_bad_entries():
         TierMatcher(medium=Medium.STORAGE),
         TierMatcher(medium=Medium.CPU),
     )
+
+
+class _ControlPlaneTier(SecondaryTierManager):
+    """Test-only tier that records how the control plane drives it."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Bumped once per get_finished_jobs() / serve_external_requests() call.
+        # Read from the test thread; int writes are atomic under the GIL.
+        self.polls = 0
+        self.serves = 0
+        self.swept = threading.Event()
+        self.serve_idents: set[int] = set()
+        self.poll_error: Exception | None = None
+        self.finished_jobs: list[JobResult] = []
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return LookupResult.MISS
+
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        return
+
+    def submit_load(self, job_metadata: TransferJob) -> None:
+        return
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        if self.poll_error is not None:
+            raise self.poll_error
+        self.polls += 1
+        results = self.finished_jobs
+        self.finished_jobs = []
+        return results
+
+    def serve_external_requests(self, parent) -> None:
+        self.serves += 1
+        self.serve_idents.add(threading.get_ident())
+        self.swept.set()
+
+    def drain_jobs(self) -> None:
+        return
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    def has_pending_work(self) -> bool:
+        return True
+
+
+def _make_threaded_manager(**kwargs):
+    """Build a manager with one _ControlPlaneTier and the control thread on."""
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=4, mmap_region=_mock_mmap_region(4)
+    )
+    tier = _ControlPlaneTier(
+        _MOCK_OFFLOADING_SPEC, primary_tier.get_kv_memoryview(), "control_plane_test"
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier],
+        control_poll_interval_s=0.001,
+        **kwargs,
+    )
+    return manager, tier
+
+
+def _step(manager) -> None:
+    manager.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
+
+
+class TestControlPlaneThread:
+    """The control plane must advance between steps, and only between steps."""
+
+    def test_sweeps_without_further_scheduler_steps(self):
+        """One step starts the thread; it then sweeps on its own."""
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0), "control thread never swept"
+            assert tier.polls > 0
+            assert tier.serves > 0
+        finally:
+            manager.shutdown()
+
+    def test_sweeps_run_off_the_scheduler_thread(self):
+        """Serving happens on the control thread, not the caller's."""
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0)
+            assert threading.get_ident() not in tier.serve_idents
+            assert len(tier.serve_idents) == 1
+        finally:
+            manager.shutdown()
+
+    def test_step_locks_out_the_control_thread(self):
+        """A sweep cannot interleave with a step in progress.
+
+        The window between lookup() and prepare_load() is exactly where a
+        sweep-initiated promotion could evict a chunk the scheduler was just
+        told is a HIT, so the lock has to span the whole step.
+        """
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0)
+
+            # Any scheduler-side call takes the step lock and holds it until
+            # on_schedule_end.
+            manager.lookup(to_keys([1])[0], _CTX)
+            before = tier.serves
+            time.sleep(0.05)
+            assert tier.serves == before, "control thread ran mid-step"
+
+            tier.swept.clear()
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0), "control thread stayed blocked"
+        finally:
+            manager.shutdown()
+
+    def test_idle_engine_hooks_do_not_block_the_control_thread(self):
+        """The read-mostly hooks must not hold the lock until the next step.
+
+        An engine with nothing scheduled still ticks has_pending_work(),
+        get_stats() and take_events() every iteration and runs no model, so if
+        those joined the step-wide hold the control plane would never get in —
+        which is the state a producer waiting for a consumer sits in.
+        """
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0)
+
+            for _ in range(20):
+                manager.has_pending_work()
+                manager.get_stats()
+                list(manager.take_events())
+            before = tier.serves
+            tier.swept.clear()
+            assert tier.swept.wait(timeout=5.0), "control thread starved when idle"
+            assert tier.serves > before
+        finally:
+            manager.shutdown()
+
+    def test_on_schedule_end_does_not_serve_when_threaded(self):
+        """The per-step hook stops serving once the thread owns it."""
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)  # starts the thread; must not serve inline
+            assert threading.get_ident() not in tier.serve_idents
+        finally:
+            manager.shutdown()
+
+    def test_sweep_failure_reraises_on_scheduler_thread(self):
+        """A failed sweep surfaces on the next scheduler call, not silently."""
+        manager, tier = _make_threaded_manager()
+        try:
+            tier.poll_error = RuntimeError("tier exploded")
+            _step(manager)
+            thread = manager._control_thread
+            assert thread is not None
+            thread.join(timeout=5.0)
+            assert not thread.is_alive(), "thread should stop after a failure"
+
+            with pytest.raises(RuntimeError, match="tier exploded"):
+                manager.lookup(to_keys([1])[0], _CTX)
+        finally:
+            tier.poll_error = None
+            manager.shutdown()
+
+    def test_shutdown_joins_the_control_thread(self):
+        manager, tier = _make_threaded_manager()
+        _step(manager)
+        assert tier.swept.wait(timeout=5.0)
+        thread = manager._control_thread
+        assert thread is not None
+
+        manager.shutdown()
+
+        assert not thread.is_alive()
+        assert manager._control_thread is None
+        # Nothing may touch a torn-down tier afterwards.
+        quiesced = tier.polls
+        time.sleep(0.02)
+        assert tier.polls == quiesced
+
+    def test_reset_cache_runs_with_the_control_thread_live(self):
+        manager, tier = _make_threaded_manager()
+        try:
+            _step(manager)
+            assert tier.swept.wait(timeout=5.0)
+            manager.reset_cache()
+            assert not manager._jobs
+            # reset_cache releases the lock, so sweeps resume.
+            tier.swept.clear()
+            assert tier.swept.wait(timeout=5.0)
+        finally:
+            manager.shutdown()
+
+    def test_disabled_by_request(self):
+        """control_plane_thread=False keeps everything on the caller."""
+        manager, tier = _make_threaded_manager(control_plane_thread=False)
+        try:
+            _step(manager)
+            assert manager._control_thread is None
+            # The per-step hook is still the driver.
+            assert tier.serve_idents == {threading.get_ident()}
+            assert tier.polls > 0
+        finally:
+            manager.shutdown()
+
+    def test_no_thread_without_secondary_tiers(self):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=4, mmap_region=_mock_mmap_region(4)
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier, secondary_tiers=[]
+        )
+        try:
+            _step(manager)
+            assert manager._control_thread is None
+        finally:
+            manager.shutdown()
 
 
 if __name__ == "__main__":
