@@ -97,6 +97,14 @@ impl CallerResponseSchema {
     fn extract(request: &ChatRequest) -> Option<Self> {
         let params = request.sampling_params.structured_outputs.as_ref()?;
         Some(match &params.constraint {
+            // The Json constraint also carries JSON-encoded schema *strings*
+            // (validated upstream); the tag needs the schema value itself.
+            StructuredOutputConstraint::Json(Value::String(raw)) => {
+                match serde_json::from_str::<Value>(raw) {
+                    Ok(schema) => Self::Scopable(schema),
+                    Err(_) => Self::NotScopable,
+                }
+            }
             StructuredOutputConstraint::Json(schema) => Self::Scopable(schema.clone()),
             StructuredOutputConstraint::JsonObject => Self::Scopable(json!({"type": "object"})),
             _ => Self::NotScopable,
@@ -110,6 +118,14 @@ fn apply_scoped_structural_tag_constraint(
     request: &mut ChatRequest,
     builder: &dyn ScopedStructuralTagBuilder,
 ) -> ChatResult<()> {
+    // A whole-generation grammar is anchored at a fresh turn's first channel
+    // header; with `continue_final_message` generation resumes mid-channel,
+    // where the grammar would force a spurious header. Leave the request
+    // unconstrained (the parser still handles the prefilled channel).
+    if request.chat_options.continue_final_message() {
+        return Ok(());
+    }
+
     let tool_choice = scoped_tool_choice(request);
     // `required` and named choices always generate tool channels; `auto` does
     // only with at least one strict tool (the same gating as the legacy path).
@@ -222,7 +238,7 @@ mod tests {
     use xgrammar_structural_tag::format::{Format, StructuralTag};
 
     use super::*;
-    use crate::request::{ChatMessage, ResolvedToolContext};
+    use crate::request::{ChatMessage, GenerationPromptMode, ResolvedToolContext};
 
     fn chat_tool(name: &str, strict: Option<bool>) -> Tool {
         Tool {
@@ -702,5 +718,36 @@ mod tests {
             structured_outputs(&request).constraint.as_json(),
             Some(&schema)
         );
+    }
+
+    #[test]
+    fn scoped_builder_parses_string_form_caller_schema() {
+        let mut request = request(ChatToolChoice::None, vec![]);
+        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
+            backend: StructuredOutputBackend::Xgrammar,
+            ..StructuredOutputsParams::json(json!(r#"{"type":"object"}"#))
+        });
+        let builder = MockScopedBuilder::default();
+
+        apply_structural_tag_constraint(&mut request, None, Some(&builder))
+            .expect("scoped structural tag should build");
+
+        assert_eq!(
+            builder.calls()[0].caller_schema,
+            Some(json!({"type": "object"}))
+        );
+    }
+
+    #[test]
+    fn scoped_builder_leaves_continued_final_message_unconstrained() {
+        let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+        let builder = MockScopedBuilder::default();
+
+        apply_structural_tag_constraint(&mut request, None, Some(&builder))
+            .expect("structural tag decision should succeed");
+
+        assert!(request.sampling_params.structured_outputs.is_none());
+        assert!(builder.calls().is_empty());
     }
 }

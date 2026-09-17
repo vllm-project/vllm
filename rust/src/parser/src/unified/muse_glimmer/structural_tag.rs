@@ -65,27 +65,10 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
         options: &StructuralTagOptions,
     ) -> XgrammarResult<StructuralTag> {
         match tool_choice {
-            // Reasoning, answer, and tool channels are all optional, in any
-            // order; an empty generation stays valid.
-            None | Some(ScopedToolChoice::Auto) => {
-                let mut tags = vec![reasoning_tag()];
-                for tool in tools {
-                    tags.extend(tool_tags(tool));
-                }
-                Ok(StructuralTag::new(Format::sequence(vec![
-                    Format::tags_with_separator(tags, CHANNEL_SEPARATOR, false, false),
-                    // The answer channel, when present, is always LAST.
-                    // `<|eot|>` is a pure stop token (never grammar content),
-                    // and the model was never trained to emit it right after
-                    // `<|eom|>` — if the answer could be followed by more
-                    // channels, the model keeps re-opening answer channels
-                    // forever instead of stopping.
-                    Format::optional(Format::sequence(vec![
-                        Format::optional(Format::const_string(CHANNEL_SEPARATOR)),
-                        Format::Tag(answer_tag(caller_schema, options)),
-                    ])),
-                ])))
-            }
+            // Tools absent or disabled (`"none"`): the grammar must not
+            // sanction tool channels the request forbade.
+            None => auto_turn(&[], caller_schema, options),
+            Some(ScopedToolChoice::Auto) => auto_turn(tools, caller_schema, options),
             Some(ScopedToolChoice::Required) => required_turn(tools),
             Some(ScopedToolChoice::Function(name)) => {
                 let tool = tools
@@ -96,6 +79,64 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
             }
         }
     }
+}
+
+/// Reasoning, answer, and tool channels in any order; an empty generation
+/// stays valid unless a caller schema must be honored.
+fn auto_turn(
+    tools: &[Tool],
+    caller_schema: Option<&Value>,
+    options: &StructuralTagOptions,
+) -> XgrammarResult<StructuralTag> {
+    validate_tool_names(tools)?;
+    let mut tags = vec![reasoning_tag()];
+    for tool in tools {
+        tags.extend(tool_tags(tool));
+    }
+    // The answer channel, when present, is always LAST. `<|eot|>` is a pure
+    // stop token (never grammar content), and the model was never trained to
+    // emit it right after `<|eom|>` — if the answer could be followed by more
+    // channels, the model keeps re-opening answer channels forever instead of
+    // stopping.
+    let answer = Format::sequence(vec![
+        Format::optional(Format::const_string(CHANNEL_SEPARATOR)),
+        Format::Tag(answer_tag(caller_schema, options)),
+    ]);
+    // Without tool channels, a caller schema makes the answer mandatory:
+    // `response_format` must guarantee schema-conforming output. With tool
+    // channels it stays optional — a turn may end on a tool call instead.
+    let answer = if caller_schema.is_some() && tools.is_empty() {
+        answer
+    } else {
+        Format::optional(answer)
+    };
+    Ok(StructuralTag::new(Format::sequence(vec![
+        Format::tags_with_separator(tags, CHANNEL_SEPARATOR, false, false),
+        answer,
+    ])))
+}
+
+/// Reject tool names the streaming parser could not round-trip as channel
+/// recipients (`[A-Za-z0-9_.\-]+`): the grammar interpolates them verbatim
+/// into channel begins and invoke wrappers.
+fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
+    for tool in tools {
+        let valid = !tool.name.is_empty()
+            && tool
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+        if !valid {
+            return Err(XgrammarError::Custom(
+                format!(
+                    "tool name {:?} cannot be a Muse Glimmer channel recipient",
+                    tool.name
+                )
+                .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl StructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
@@ -130,6 +171,7 @@ fn required_turn(tools: &[Tool]) -> XgrammarResult<StructuralTag> {
     if tools.is_empty() {
         return Err(XgrammarError::RequiredWithoutTools);
     }
+    validate_tool_names(tools)?;
     let tool_tags = tools.iter().flat_map(tool_tags).collect();
     Ok(StructuralTag::new(Format::sequence(vec![
         Format::star(Format::sequence(vec![
@@ -190,12 +232,14 @@ fn tool_tags(tool: &Tool) -> Vec<TagFormat> {
 }
 
 /// The ATEM body of a tool channel, whitespace-exact as the chat template
-/// renders it. A tool with no declared parameters or `strict: false` keeps
-/// the channel and invoke framing but leaves the invoke body free-form.
+/// renders it. A tool with no declared parameters, `strict: false`, or a
+/// schema the fixed-order typed encoding cannot express faithfully keeps the
+/// channel and invoke framing but leaves the invoke body free-form.
 fn tool_channel_content(tool: &Tool) -> Format {
     if tool.strict != Some(false)
         && let Some(properties) = tool.parameters.get("properties").and_then(Value::as_object)
         && !properties.is_empty()
+        && typed_encoding_is_faithful(&tool.parameters, properties)
     {
         return typed_invokes(&tool.name, properties, required_names(&tool.parameters));
     }
@@ -204,9 +248,25 @@ fn tool_channel_content(tool: &Tool) -> Format {
             "<atem:function_calls>\n<atem:invoke name=\"{}\">\n",
             tool.name
         )),
-        Format::any_text_excluding(&[INVOKE_CLOSE]),
+        Format::any_text_excluding(&[INVOKE_CLOSE, END_OF_MESSAGE, END_OF_TURN, CHANNEL_START]),
         Format::const_string("\n</atem:invoke>\n</atem:function_calls>"),
     ])
+}
+
+/// Whether the typed encoding can express every schema-valid call: no
+/// extra properties admitted (an explicit `additionalProperties`/
+/// `patternProperties` allowance cannot be rendered), every `required` name
+/// declared, and every key safe inside `<atem:parameter name="…">`. Anything
+/// else stays free-form rather than silently narrowing the schema.
+fn typed_encoding_is_faithful(parameters: &Value, properties: &Map<String, Value>) -> bool {
+    let extra_properties_allowed = match parameters.get("additionalProperties") {
+        None | Some(Value::Bool(false)) => false,
+        Some(_) => true,
+    };
+    !extra_properties_allowed
+        && parameters.get("patternProperties").is_none()
+        && required_names(parameters).iter().all(|name| properties.contains_key(*name))
+        && properties.keys().all(|key| !key.contains(['"', '<']))
 }
 
 /// One or more typed invokes: `invoke (\n invoke)*`, newline-separated.
@@ -260,7 +320,19 @@ fn parameter_value(schema: &Value) -> Format {
     if let Some(pattern) = scalar_enum_pattern(schema) {
         return Format::regex(pattern);
     }
-    let text = || Format::any_text_excluding(&[PARAMETER_CLOSE]);
+    // Framing markers and the invoke close stay excluded: the streaming
+    // parser cuts the invoke body at the first `</atem:invoke>` and treats
+    // quoted framing as a channel boundary, so the grammar must never force
+    // bytes the parser cannot round-trip.
+    let text = || {
+        Format::any_text_excluding(&[
+            PARAMETER_CLOSE,
+            INVOKE_CLOSE,
+            END_OF_MESSAGE,
+            END_OF_TURN,
+            CHANNEL_START,
+        ])
+    };
     let Some(json_type) = schema.get("type").and_then(Value::as_str) else {
         return text();
     };
@@ -288,7 +360,16 @@ fn scalar_enum_pattern(schema: &Value) -> Option<String> {
             Value::Bool(boolean) => boolean.to_string(),
             _ => return None,
         };
-        if literal.contains(PARAMETER_CLOSE) || literal.contains(CHANNEL_START) {
+        if [
+            PARAMETER_CLOSE,
+            INVOKE_CLOSE,
+            END_OF_MESSAGE,
+            END_OF_TURN,
+            CHANNEL_START,
+        ]
+        .iter()
+        .any(|marker| literal.contains(marker))
+        {
             return None;
         }
         literals.push(escape_regex(&literal));
@@ -369,7 +450,9 @@ mod tests {
         assert!(json.contains(r#""begin":" to=self<|message|>""#));
         assert!(json.contains(r#""type":"json_schema""#));
         assert!(!json.contains("atem:invoke"));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"json_schema","json_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        // With no tool channels the schema-bearing answer is mandatory.
+        assert!(json.contains(r#""stop_after_first":false},{"type":"sequence""#));
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"json_schema","json_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|eom|>"}]}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -420,7 +503,7 @@ mod tests {
         assert!(json.contains(r#""begin":" to=get_weather.get_weather<|message|>""#));
         assert!(json.contains(r#""begin":" to=loose.loose<|message|>""#));
         assert!(json.contains(r#"(celsius|fahrenheit)"#));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"get_weather\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"regex","pattern":"(celsius|fahrenheit)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"regex","pattern":"-?(0|[1-9][0-9]*)"},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"\n</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"]},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -446,7 +529,7 @@ mod tests {
         assert!(json.contains(r#""at_least_one":true"#));
         assert!(json.contains(r#""separator":"<|start|>assistant""#));
         assert!(!json.contains(" to=user<|message|>"));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"begin":" to=search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=search.search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"begin":" to=search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=search.search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"search\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -500,6 +583,73 @@ mod tests {
     }
 
     #[test]
+    fn none_tool_choice_generates_no_tool_channels() {
+        let tools = vec![tool("search", json!({"type": "object"}))];
+        let json = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                None,
+                Some(&json!({"type": "object"})),
+                &StructuralTagOptions::default(),
+            )
+            .unwrap()
+            .to_json_string()
+            .unwrap();
+
+        assert!(!json.contains(" to=search"));
+        assert!(json.contains(r#""begin":" to=user<|message|>""#));
+    }
+
+    #[test]
+    fn unfaithful_schemas_keep_invoke_body_free_form() {
+        let extra_properties = tool(
+            "open",
+            json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } },
+                "additionalProperties": true
+            }),
+        );
+        let undeclared_required = tool(
+            "lookup",
+            json!({
+                "type": "object",
+                "properties": { "a": { "type": "string" } },
+                "required": ["a", "b"]
+            }),
+        );
+
+        for tool in [extra_properties, undeclared_required] {
+            let json = MuseGlimmerStructuralTagBuilder
+                .build_scoped(
+                    std::slice::from_ref(&tool),
+                    Some(ScopedToolChoice::Required),
+                    None,
+                    &StructuralTagOptions::default(),
+                )
+                .unwrap()
+                .to_json_string()
+                .unwrap();
+            assert!(!json.contains("<atem:parameter"), "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn tool_name_outside_recipient_charset_is_rejected() {
+        let tools = vec![tool("my tool", json!({"type": "object"}))];
+        let error = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Auto),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, xgrammar_structural_tag::Error::Custom(_)));
+    }
+
+    #[test]
     fn legacy_build_maps_choices_and_tools() {
         let tools = vec![ToolParam::Function(FunctionToolParam::new(
             FunctionDefinition::new("ping").with_parameters(json!({
@@ -519,6 +669,6 @@ mod tests {
 
         assert!(json.contains(r#""begin":" to=ping.ping<|message|>""#));
         assert!(json.contains(r#""at_least_one":true"#));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"begin":" to=ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=ping.ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"]},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"begin":" to=ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"begin":" to=ping.ping<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\"ping\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"host\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"const_string","value":"</atem:invoke>"}]}]}},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
     }
 }
