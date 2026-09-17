@@ -25,6 +25,7 @@ from .data import (
     UMBPNamespace,
 )
 from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
+from .stats import UMBPStoreConnectorStats
 
 __all__ = [
     "UMBPStoreConnector",
@@ -51,4 +52,5 @@ __all__ = [
     "UMBPNamespace",
     "UMBPRuntimeConfig",
     "UMBPRuntimeFactory",
+    "UMBPStoreConnectorStats",
 ]

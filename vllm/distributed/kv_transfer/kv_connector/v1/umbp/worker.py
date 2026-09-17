@@ -23,6 +23,7 @@ from .data import (
     UMBPConnectorWorkerMetadata,
 )
 from .runtime import UMBPWorkerHandle
+from .stats import UMBPStoreConnectorStats
 
 
 class UMBPStoreConnectorWorker:
@@ -41,6 +42,7 @@ class UMBPStoreConnectorWorker:
         self._finished_sending: set[str] = set()
         self._finished_recving: set[str] = set()
         self._failed_recving: set[str] = set()
+        self._stats = UMBPStoreConnectorStats()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.layout is not None and self.layout.regions:
@@ -97,6 +99,15 @@ class UMBPStoreConnectorWorker:
                 )
         self._pending_load_layers[request_id] = set(plans_by_layer)
         for layer_name, layer_plans in plans_by_layer.items():
+            self._stats.record(
+                "load",
+                submitted=len(layer_plans),
+                num_bytes=sum(
+                    item.length
+                    for plan in layer_plans
+                    for item in plan.ranges
+                ),
+            )
             self._layer_load_jobs.setdefault(layer_name, {})[request_id] = (
                 self.runtime.load(layer_plans)
             )
@@ -111,6 +122,17 @@ class UMBPStoreConnectorWorker:
     ) -> None:
         result = self.runtime.wait(job)
         if is_load:
+            self._stats.record(
+                "load",
+                completed=len(result.completed_keys),
+                failed=len(result.failed_keys),
+                num_bytes=sum(
+                    item.length
+                    for plan in result.plans
+                    for item in plan.ranges
+                    if plan.key in result.completed_keys
+                ),
+            )
             self._worker_meta.completed_loads.update(result.completed_keys)
             if mark_finished:
                 self._finished_recving.add(request_id)
@@ -121,6 +143,17 @@ class UMBPStoreConnectorWorker:
                         result.error or "load failed"
                     )
         else:
+            self._stats.record(
+                "store",
+                completed=len(result.completed_keys),
+                failed=len(result.failed_keys),
+                num_bytes=sum(
+                    item.length
+                    for plan in result.plans
+                    for item in plan.ranges
+                    if plan.key in result.completed_keys
+                ),
+            )
             if result.status == TransferJobStatus.COMPLETED:
                 self.runtime.publish(result)
             self._worker_meta.completed_stores.update(result.completed_keys)
@@ -235,12 +268,31 @@ class UMBPStoreConnectorWorker:
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
         for request_id, plans in metadata.store_requests.items():
             if plans:
+                self._stats.record(
+                    "store",
+                    submitted=len(plans),
+                    num_bytes=sum(
+                        item.length
+                        for plan in self._materialize_plans(plans)
+                        for item in plan.ranges
+                    ),
+                )
                 self._store_jobs[request_id] = self.runtime.store(
                     self._materialize_plans(plans)
                 )
         if metadata.store_plans and not metadata.store_requests:
+            materialized = self._materialize_plans(metadata.store_plans)
+            self._stats.record(
+                "store",
+                submitted=len(materialized),
+                num_bytes=sum(
+                    item.length
+                    for plan in materialized
+                    for item in plan.ranges
+                ),
+            )
             self._store_jobs["__umbp_batch__"] = self.runtime.store(
-                self._materialize_plans(metadata.store_plans)
+                materialized
             )
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
@@ -282,6 +334,13 @@ class UMBPStoreConnectorWorker:
         failed = self._worker_meta.failed_block_ids
         self._worker_meta.failed_block_ids = set()
         return failed
+
+    def get_kv_connector_stats(self) -> UMBPStoreConnectorStats | None:
+        if self._stats.is_empty():
+            return None
+        result = UMBPStoreConnectorStats(data=dict(self._stats.data))
+        self._stats.reset()
+        return result
 
     def close(self) -> None:
         self.runtime.close()

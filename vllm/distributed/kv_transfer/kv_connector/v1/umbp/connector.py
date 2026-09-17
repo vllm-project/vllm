@@ -31,6 +31,7 @@ from .data import (
 )
 from .runtime import UMBPRuntimeFactory, UMBPRuntimeConfig
 from .scheduler import UMBPStoreConnectorScheduler
+from .stats import UMBPStoreConnectorStats
 from .worker import UMBPStoreConnectorWorker
 
 if TYPE_CHECKING:
@@ -228,6 +229,17 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_stats(self) -> UMBPStoreConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> UMBPStoreConnectorStats | None:
+        return UMBPStoreConnectorStats(data=data or {})
 
     def get_kv_connector_kv_cache_events(self) -> UMBPStoreKVEvents | None:
         assert self.connector_worker is not None
