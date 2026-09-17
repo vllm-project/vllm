@@ -181,23 +181,34 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
 def test_mixed_warmup_reserves_lookahead_blocks_and_synchronizes(monkeypatch):
     num_lookahead_tokens = NUM_SPEC_STEPS + 1
     recorder = _StepRecorder()
-    synchronize_calls = 0
+    work_in_flight = False
 
     def synchronize():
-        nonlocal synchronize_calls
-        synchronize_calls += 1
+        nonlocal work_in_flight
+        assert work_in_flight
+        work_in_flight = False
 
     monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
 
+    def execute_model(scheduler_output):
+        nonlocal work_in_flight
+        work_in_flight = True
+        recorder.execute_model(scheduler_output)
+
+    def sample_tokens(grammar_output=None):
+        nonlocal work_in_flight
+        work_in_flight = True
+        recorder.sample_tokens(grammar_output)
+
     assert run_mixed_prefill_decode_warmup(
         _make_runner([_attention_group()], num_lookahead_tokens),
-        worker_execute_model=recorder.execute_model,
-        worker_sample_tokens=recorder.sample_tokens,
+        worker_execute_model=execute_model,
+        worker_sample_tokens=sample_tokens,
         num_tokens=128,
     )
 
+    assert not work_in_flight
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
-    assert synchronize_calls == 1
 
 
 @_requires_accelerator
