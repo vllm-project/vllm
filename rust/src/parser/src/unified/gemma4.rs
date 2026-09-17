@@ -15,7 +15,7 @@ use crate::reasoning::last_reasoning_boundary;
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::recursion::ParserRecursionGuard;
-use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
+use crate::utils::{incomplete, max_partial_prefix_len, parse_buffered_event, safe_text_len_mul};
 
 const REASONING_START: &str = "<|channel>thought\n";
 const CHANNEL_START: &str = "<|channel>";
@@ -368,12 +368,7 @@ fn gemma4_raw_args_until_tool_call_end<'i>(
 
 /// Return the scan length while holding back a split marker prefix.
 fn safe_scan_len(text: &str, start: usize, markers: &[&str]) -> usize {
-    let max_partial = markers
-        .iter()
-        .map(|marker| partial_prefix_len(&text[start..], marker))
-        .max()
-        .unwrap_or(0);
-    text.len() - max_partial
+    text.len() - max_partial_prefix_len(&text[start..], markers)
 }
 
 /// Parse complete Gemma4 custom key-value arguments.

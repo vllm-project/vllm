@@ -43,8 +43,8 @@ use super::{Result, ScopedStructuralTagBuilder, UnifiedParser, UnifiedParserOutp
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{
-    MarkerScanState, incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul,
-    take_until_marker_mul,
+    MarkerScanState, incomplete, max_partial_prefix_len, parse_buffered_event, partial_prefix_len,
+    safe_text_len_mul, take_until_marker_mul,
 };
 
 const START: &str = "<|start|>";
@@ -398,12 +398,8 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
             // already emitted. Anything more is an incomplete call.
             MuseGlimmerMode::Tool { strict: true } => {
                 let text = &self.buffer.text;
-                let held = TOOL_NOISE_MARKERS
-                    .iter()
-                    .chain([&INVOKE_CLOSE])
-                    .map(|marker| partial_prefix_len(text, marker))
-                    .max()
-                    .unwrap_or(0);
+                let held = max_partial_prefix_len(text, TOOL_NOISE_MARKERS)
+                    .max(partial_prefix_len(text, INVOKE_CLOSE));
                 if !text[..text.len() - held].trim().is_empty() {
                     return Err(parsing_failed!("incomplete Muse Glimmer tool call"));
                 }
@@ -724,11 +720,7 @@ fn safe_body_text_len(
     // a trailing ` to=…` fragment (" to=skill<") and vice versa.
     let mut emit_len = text.len();
     loop {
-        let marker_hold = hold_markers
-            .iter()
-            .map(|marker| partial_prefix_len(&text[..emit_len], marker))
-            .max()
-            .unwrap_or(0);
+        let marker_hold = max_partial_prefix_len(&text[..emit_len], hold_markers);
         let mut new_len = emit_len - marker_hold;
         new_len -= open_tail_to_fragment_len(&text[..new_len]);
         if new_len == emit_len {
@@ -760,20 +752,11 @@ fn open_tail_to_fragment_len(text: &str) -> usize {
     if holds { text.len() - ws_index } else { 0 }
 }
 
-/// Length of a trailing partial structural marker (truncated framing).
-fn trailing_partial_marker_len(text: &str) -> usize {
-    BODY_HOLD_BACK_MARKERS
-        .iter()
-        .map(|marker| partial_prefix_len(text, marker))
-        .max()
-        .unwrap_or(0)
-}
-
 /// Strip trailing truncated framing from a finished body: a partial structural
 /// marker, or a complete `<|start|>` whose framed header was cut off before
 /// its `<|message|>` (e.g. `<|start|>assist` at a max_tokens stop).
 fn strip_trailing_truncated_framing(text: &str) -> &str {
-    let text = &text[..text.len() - trailing_partial_marker_len(text)];
+    let text = &text[..text.len() - max_partial_prefix_len(text, BODY_HOLD_BACK_MARKERS)];
     let Some(start) = text.rfind(START) else {
         return text;
     };

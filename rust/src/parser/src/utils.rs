@@ -48,6 +48,18 @@ pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
     0
 }
 
+/// Return the longest [`partial_prefix_len`] of `buffer` over `markers`.
+///
+/// Streaming parsers hold back this many trailing bytes when none of
+/// `markers` is complete yet, as the fragment may still grow into any of them.
+pub fn max_partial_prefix_len(buffer: &str, markers: &[&str]) -> usize {
+    markers
+        .iter()
+        .map(|marker| partial_prefix_len(buffer, marker))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Parse a safe text run before the next marker.
 /// This is the single-marker variant of [`safe_text_len_mul`].
 ///
@@ -88,7 +100,7 @@ pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalRe
         return Ok(start_idx);
     }
 
-    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
+    let keep_len = max_partial_prefix_len(text, markers);
     let emit_len = text.len().saturating_sub(keep_len);
     if emit_len == 0 {
         return incomplete();
@@ -181,7 +193,7 @@ fn take_until_marker_mul_<'i>(
         return Ok(body);
     }
 
-    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
+    let keep_len = max_partial_prefix_len(text, markers);
     state.scan_start = text.len() - keep_len;
     incomplete()
 }
@@ -443,9 +455,10 @@ mod tests {
     use winnow::stream::{Offset, Partial, Stream};
 
     use super::{
-        JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
-        partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
-        take_until_marker, take_until_marker_mul,
+        JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str,
+        max_partial_prefix_len, parse_buffered_event, partial_prefix_len, safe_text_len,
+        safe_text_len_mul, take_json_object, take_json_string, take_until_marker,
+        take_until_marker_mul,
     };
 
     #[test]
@@ -470,6 +483,17 @@ mod tests {
             "<｜DSML｜fun".len()
         );
         assert_eq!(partial_prefix_len("prefix <｜DSML", token), "<｜DSML".len());
+    }
+
+    #[test]
+    fn max_partial_prefix_len_keeps_longest_marker_fragment() {
+        let markers = &["<|eom|>", "<atem:invoke", "</atem:invoke>"];
+        assert_eq!(
+            max_partial_prefix_len("text <atem:inv", markers),
+            "<atem:inv".len()
+        );
+        assert_eq!(max_partial_prefix_len("text <", markers), 1);
+        assert_eq!(max_partial_prefix_len("text <", &[]), 0);
     }
 
     #[test]

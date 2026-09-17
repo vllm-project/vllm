@@ -4,7 +4,7 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 
 use super::{ReasoningDelta, ReasoningError, Result};
-use crate::utils::partial_prefix_len;
+use crate::utils::max_partial_prefix_len;
 
 /// Build a delimited reasoning parser with fixed text at each boundary.
 pub(crate) struct DelimitedReasoningParserBuilder {
@@ -176,9 +176,9 @@ impl DelimitedReasoningParser {
             }
 
             let (marker, framed_marker) = if self.current_in_reasoning {
-                (&self.end_token, &self.framed_end_token)
+                (self.end_token.as_str(), self.framed_end_token.as_str())
             } else {
-                (&self.start_token, &self.framed_start_token)
+                (self.start_token.as_str(), self.framed_start_token.as_str())
             };
             if let Some(index) = self.buffer.text.find(marker) {
                 let before = &framed_marker[..framed_marker.len() - marker.len()];
@@ -203,8 +203,7 @@ impl DelimitedReasoningParser {
             let keep_len = if finishing {
                 0
             } else {
-                partial_prefix_len(&self.buffer.text, marker)
-                    .max(partial_prefix_len(&self.buffer.text, framed_marker))
+                max_partial_prefix_len(&self.buffer.text, &[marker, framed_marker])
             };
             let body = self.buffer.drain_prefix(self.buffer.text.len() - keep_len);
             self.push_body(&mut delta, body);
