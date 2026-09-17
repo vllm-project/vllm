@@ -896,8 +896,16 @@ class Platform:
             # TODO(tdoublep): this constraint can be relaxed fairly
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            assert base_chunk_size is not None
+            model_chunk_size = model_config.get_mamba_chunk_size()
+            # The "all" write-back reads the states it caches off chunk ends,
+            # so a block boundary that is not also a chunk boundary has no
+            # state to read. An explicit --mamba-block-size therefore only
+            # widens the alignment; it cannot replace the chunk size.
+            base_chunk_size = (
+                lcm(mamba_block_size, model_chunk_size)
+                if mamba_block_size is not None
+                else model_chunk_size
+            )
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)

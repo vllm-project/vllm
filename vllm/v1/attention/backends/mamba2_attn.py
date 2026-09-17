@@ -128,6 +128,14 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        if vllm_config.cache_config.mamba_cache_mode == "all":
+            # "all" mode caches states read off chunk ends, so a block boundary
+            # that is not also a chunk boundary has no state to read from.
+            assert kv_cache_spec.block_size % chunk_size == 0, (
+                f"mamba_cache_mode 'all' needs the mamba block size "
+                f"({kv_cache_spec.block_size}) to be a multiple of the mamba "
+                f"chunk size ({chunk_size})"
+            )
 
     def build(
         self,
