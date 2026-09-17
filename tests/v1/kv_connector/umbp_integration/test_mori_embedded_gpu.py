@@ -4,6 +4,7 @@
 
 import multiprocessing as mp
 import time
+from typing import Any
 
 import pytest
 import torch
@@ -45,9 +46,9 @@ def _gpu_worker(
     rank: int,
     lookup_dir: str,
     ready: mp.Queue,
-    release: mp.Event,
+    release: Any,
 ) -> None:
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     topology = _topology(rank)
     layout = KVLayoutDescriptor(
         regions=(KVRegion("layer0", 0, _SIZE, _SIZE, 0),),
@@ -75,9 +76,7 @@ def _gpu_worker(
     store_plan = BlockTransferPlan(
         key,
         0,
-        ranges=(
-            KVRange("layer0", 0, 0, source.data_ptr(), _SIZE, _SIZE, 0),
-        ),
+        ranges=(KVRange("layer0", 0, 0, source.data_ptr(), _SIZE, _SIZE, 0),),
     )
     stored = worker.wait(worker.store([store_plan]))
     assert stored.status is TransferJobStatus.COMPLETED
@@ -87,13 +86,11 @@ def _gpu_worker(
     load_plan = BlockTransferPlan(
         key,
         1,
-        ranges=(
-            KVRange("layer0", 0, 1, destination.data_ptr(), _SIZE, _SIZE, 0),
-        ),
+        ranges=(KVRange("layer0", 0, 1, destination.data_ptr(), _SIZE, _SIZE, 0),),
     )
     loaded = worker.wait(worker.load([load_plan]))
     assert loaded.status is TransferJobStatus.COMPLETED
-    torch.cuda.synchronize(rank)
+    torch.accelerator.synchronize()
     assert torch.equal(source, destination)
     ready.put((rank, key))
     release.wait(60)
@@ -101,7 +98,7 @@ def _gpu_worker(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < 4,
+    not torch.accelerator.is_available() or torch.accelerator.device_count() < 4,
     reason="requires four ROCm GPUs",
 )
 def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
@@ -136,3 +133,74 @@ def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
         assert process.exitcode == 0
     scheduler.close()
     assert all(hits)
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(),
+    reason="requires a ROCm GPU",
+)
+def test_mori_store_overlaps_gpu_compute(tmp_path):
+    torch.accelerator.set_device_index(0)
+    size = 64 << 20
+    topology = RankTopology()
+    layout = KVLayoutDescriptor(
+        regions=(KVRegion("layer0", 0, size, size, 0),),
+        topology=topology,
+    )
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig(
+            "embedded",
+            {
+                "capacity_bytes": 256 << 20,
+                "lookup_dir": str(tmp_path),
+                "num_workers": 2,
+                "timeout_ms": 60000,
+            },
+        )
+    )
+    worker = runtime.create_worker_handle(
+        "mori-compute-store-overlap", topology, layout
+    )
+    source = torch.arange(size, dtype=torch.uint8, device="cuda:0")
+    worker.register_buffers({"layer0": source})
+    plan = BlockTransferPlan(
+        "overlap-key",
+        0,
+        ranges=(KVRange("layer0", 0, 0, source.data_ptr(), size, size, 0),),
+    )
+    left = torch.randn((4096, 4096), dtype=torch.float16, device="cuda:0")
+    right = torch.randn_like(left)
+    compute_stream = torch.Stream(device="cuda:0")
+    torch.mm(left, right)
+    torch.accelerator.synchronize()
+
+    store_start = time.perf_counter()
+    store_job = worker.store([plan])
+    compute_start = time.perf_counter()
+    with compute_stream:
+        compute_begin = torch.Event(enable_timing=True)
+        compute_end = torch.Event(enable_timing=True)
+        compute_begin.record()
+        for _ in range(32):
+            output = torch.mm(left, right)
+        compute_end.record()
+    stored = worker.wait(store_job)
+    store_end = time.perf_counter()
+    compute_stream.synchronize()
+    compute_end_time = time.perf_counter()
+
+    overlap_seconds = min(store_end, compute_end_time) - max(store_start, compute_start)
+    print(
+        "store_s=",
+        store_end - store_start,
+        "compute_ms=",
+        compute_begin.elapsed_time(compute_end),
+        "overlap_s=",
+        overlap_seconds,
+    )
+    assert stored.status is TransferJobStatus.COMPLETED
+    assert output.is_cuda
+    assert compute_begin.elapsed_time(compute_end) > 0
+    assert overlap_seconds > 0
+    worker.publish(stored)
+    worker.close()

@@ -9,16 +9,17 @@ Python dictionary is a GPU-capable MORI-UMBP backend.
 
 from __future__ import annotations
 
-import ctypes
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
 import socket
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
+from typing import Any, Protocol
 
 import torch
 
@@ -35,6 +36,24 @@ from .base import (
     UMBPWorkerHandle,
 )
 from .factory import UMBPRuntimeConfig
+
+
+class _LookupClient(Protocol):
+    def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]: ...
+
+    def clear(self) -> bool: ...
+
+
+class _MoriClient(_LookupClient, Protocol):
+    def register_memory(self, *args: Any) -> bool: ...
+
+    def deregister_memory(self, *args: Any) -> bool: ...
+
+    def batch_get_ranges_into_ptr(self, *args: Any) -> Sequence[bool]: ...
+
+    def batch_put_ranges_from_ptr(self, *args: Any) -> Sequence[bool]: ...
+
+    def flush(self) -> bool: ...
 
 
 class _EmbeddedStore:
@@ -123,7 +142,7 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
         payload = bytearray(self._object_size(plan))
         for item in plan.ranges:
             end = item.object_offset + item.length
-            payload[item.object_offset:end] = self._read_range(
+            payload[item.object_offset : end] = self._read_range(
                 item.base_address, item.length
             )
         return bytes(payload)
@@ -137,7 +156,7 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
                 raise ValueError(f"stored object is too small for key {plan.key}")
             self._write_range(
                 item.base_address,
-                payload[item.object_offset:end],
+                payload[item.object_offset : end],
             )
 
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
@@ -193,6 +212,9 @@ class EmbeddedWorkerHandle(UMBPWorkerHandle):
             job.cancel("preempted")
         return job
 
+    def take_evicted_keys(self) -> Sequence[str]:
+        return ()
+
     def close(self) -> None:
         return
 
@@ -208,7 +230,7 @@ class _MemoryEmbeddedRuntime(IUMBPRuntime):
     _store = _EmbeddedStore()
 
     @classmethod
-    def from_config(cls, config: UMBPRuntimeConfig) -> "_MemoryEmbeddedRuntime":
+    def from_config(cls, config: UMBPRuntimeConfig) -> _MemoryEmbeddedRuntime:
         del config
         return cls()
 
@@ -236,16 +258,14 @@ def _lookup_socket_path(
     rank_namespace: tuple[int, int, int, int],
     lookup_dir: str,
 ) -> str:
-    digest = hashlib.sha256(
-        f"{namespace}:{rank_namespace}".encode()
-    ).hexdigest()[:24]
+    digest = hashlib.sha256(f"{namespace}:{rank_namespace}".encode()).hexdigest()[:24]
     return str(Path(lookup_dir) / f"vllm-umbp-{digest}.sock")
 
 
 class _MoriLookupServer:
     """Small worker-local lookup bridge for the scheduler process."""
 
-    def __init__(self, path: str, client: object) -> None:
+    def __init__(self, path: str, client: _LookupClient) -> None:
         self.path = path
         self.client = client
         self._stop = threading.Event()
@@ -371,7 +391,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
 class _MoriWorkerHandle(UMBPWorkerHandle):
     def __init__(
         self,
-        client: object,
+        client: _MoriClient,
         namespace: str,
         topology: RankTopology,
         lookup_dir: str,
@@ -460,22 +480,16 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             )
             for plan in plans
         ]
-        pointers = [
-            [item.base_address for item in plan.ranges] for plan in plans
-        ]
+        pointers = [[item.base_address for item in plan.ranges] for plan in plans]
         sizes = [[item.length for item in plan.ranges] for plan in plans]
-        offsets = [
-            [item.object_offset for item in plan.ranges] for plan in plans
-        ]
+        offsets = [[item.object_offset for item in plan.ranges] for plan in plans]
         return keys, object_sizes, pointers, sizes, offsets
 
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         plans = tuple(plans)
         job = TransferJobState(plans)
         job.start()
-        self._futures[id(job)] = self._executor.submit(
-            self._load_sync, job, plans
-        )
+        self._futures[id(job)] = self._executor.submit(self._load_sync, job, plans)
         return job
 
     def _load_sync(
@@ -485,9 +499,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             job.complete()
             return job
         keys, _, pointers, sizes, offsets = self._range_args(plans)
-        results = self.client.batch_get_ranges_into_ptr(
-            keys, pointers, sizes, offsets
-        )
+        results = self.client.batch_get_ranges_into_ptr(keys, pointers, sizes, offsets)
         completed = [plan.key for plan, ok in zip(plans, results, strict=True) if ok]
         failed = [plan.key for plan, ok in zip(plans, results, strict=True) if not ok]
         if completed:
@@ -500,11 +512,11 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         plans = tuple(plans)
         job = TransferJobState(plans)
         job.start()
-        ready_events: list[torch.cuda.Event] = []
+        ready_events: list[torch.Event] = []
         for device in self._gpu_devices:
-            with torch.cuda.device(device):
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
+            with torch.device(f"cuda:{device}"):
+                event = torch.Event()
+                event.record(torch.accelerator.current_stream())
                 ready_events.append(event)
         self._futures[id(job)] = self._executor.submit(
             self._store_sync, job, plans, ready_events
@@ -515,7 +527,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self,
         job: TransferJobState,
         plans: tuple[BlockTransferPlan, ...],
-        ready_events: list[torch.cuda.Event],
+        ready_events: list[torch.Event],
     ) -> TransferJobState:
         for event in ready_events:
             event.synchronize()
@@ -603,6 +615,8 @@ class EmbeddedRuntime(IUMBPRuntime):
     capabilities = UMBPRuntimeCapabilities(
         ranged_io=True,
         layerwise_load=True,
+        layerwise_store=True,
+        partial_hash_hits=True,
         cancellation=True,
         async_transfer=True,
     )
@@ -634,13 +648,15 @@ class _MoriEmbeddedRuntime(IUMBPRuntime):
     capabilities = UMBPRuntimeCapabilities(
         ranged_io=True,
         layerwise_load=True,
+        layerwise_store=True,
+        partial_hash_hits=True,
         cancellation=True,
         async_transfer=True,
     )
 
     def __init__(
         self,
-        client: object,
+        client: _MoriClient,
         lookup_dir: str,
         max_workers: int,
         timeout_s: float,
