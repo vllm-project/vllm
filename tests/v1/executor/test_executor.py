@@ -3,25 +3,31 @@
 
 import asyncio
 import os
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVConnectorOutput,
+    KVOutputAggregator,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
     UniProcExecutor,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 
 
 class Mock: ...
@@ -205,3 +211,69 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
+
+
+class _FakeResponseMQ:
+    """Stands in for a worker response MessageQueue."""
+
+    def __init__(self, responses: list[tuple[Any, Any]]):
+        self._responses = list(responses)
+
+    def dequeue(self, timeout: float | None = None):
+        return self._responses.pop(0)
+
+
+def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
+    executor = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_fault_tolerance=enable_ft)
+    )
+    executor.is_failed = False
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda *_: None)
+    executor.response_mqs = [
+        _FakeResponseMQ(
+            [
+                (
+                    WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
+                    KVConnectorOutput(finished_recving={"req1"}, invalid_block_ids={7}),
+                )
+            ]
+        ),
+        _FakeResponseMQ(
+            [
+                (
+                    WorkerProc.ResponseStatus.SUCCESS,
+                    ModelRunnerOutput(
+                        req_ids=[],
+                        req_id_to_index={},
+                        kv_connector_output=KVConnectorOutput(
+                            finished_recving={"req1"}
+                        ),
+                    ),
+                )
+            ]
+        ),
+    ]
+    executor.futures_queue = deque()
+    return executor
+
+
+@pytest.mark.parametrize("enable_ft", [True, False])
+def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
+    """A worker failing with KV output must not lose KV progress (FT only)."""
+    executor = _make_failed_step_executor(enable_ft)
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    future = executor.collective_rpc(
+        "sample_tokens", non_block=True, kv_output_aggregator=aggregator
+    )
+    with pytest.raises(RuntimeError, match="[Ww]orker"):
+        future.result()
+
+    if enable_ft:
+        # req1's recv votes are complete; surfaced at the next aggregate().
+        assert aggregator._pending_finished_recving == {"req1"}
+        assert aggregator._pending_invalid_block_ids == {7}
+    else:
+        assert aggregator._recv_remaining_count == {}
+        assert aggregator._pending_invalid_block_ids == set()
