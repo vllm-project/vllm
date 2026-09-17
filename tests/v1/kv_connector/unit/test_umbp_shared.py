@@ -337,6 +337,53 @@ def test_scheduler_tracks_consecutive_load_plan():
     ]
 
 
+def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {
+                "mode": "embedded",
+                "load_async": False,
+                "save_decode_cache": True,
+            }
+        ),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("decode")),
+    )
+    request = SimpleNamespace(
+        request_id="decode",
+        req_id="decode",
+        num_tokens=48,
+        block_hashes=[b"a", b"b", b"c"],
+        block_ids=([1, 2, 3],),
+        num_computed_tokens=32,
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2],)),
+        0,
+    )
+
+    def output(num_computed_tokens, new_block_ids):
+        return SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["decode"],
+                new_block_ids=[new_block_ids],
+                num_computed_tokens=[num_computed_tokens],
+            ),
+            num_scheduled_tokens={"decode": 1},
+        )
+
+    first = scheduler.build_connector_meta(output(32, ([3],)))
+    assert [plan.block_id for plan in first.store_plans] == [1, 2]
+
+    second = scheduler.build_connector_meta(output(48, ()))
+    assert [plan.block_id for plan in second.store_plans] == [3]
+
+
 class _WorkerHandle:
     def register_buffers(self, kv_caches):
         self.kv_caches = kv_caches
