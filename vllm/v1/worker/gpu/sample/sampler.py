@@ -312,8 +312,9 @@ class Sampler:
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
-        use_flashinfer = self.use_flashinfer and fused_sampler_eligible
-        use_xpu_sampler = self.use_xpu_sampler and fused_sampler_eligible
+        use_fused_sampler = (
+            self.use_flashinfer or self.use_xpu_sampler
+        ) and fused_sampler_eligible
 
         return self._sample_random(
             processed_logits,
@@ -322,8 +323,7 @@ class Sampler:
             pos,
             top_k,
             top_p,
-            use_flashinfer,
-            use_xpu_sampler,
+            use_fused_sampler,
         )
 
     def _sample_random(
@@ -334,13 +334,15 @@ class Sampler:
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        use_flashinfer: bool,
-        use_xpu_sampler: bool,
+        use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if use_flashinfer:
-            sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
-        elif use_xpu_sampler:
-            sampled, _ = xpu_sample(processed_logits, top_k, top_p)
+        if use_fused_sampler:
+            if self.use_flashinfer:
+                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
+                    torch.int64
+                )
+            else:  # Use XPU sampler
+                sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
             sampled = gumbel_sample(
