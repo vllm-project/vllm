@@ -58,6 +58,7 @@ def fused_save_compress_norm(
         rms_norm_eps: RMSNorm epsilon.
         compress_ratio: Group size, either 1 or 2.
         latent_out: BF16 [tokens, 512], written only at valid group boundaries.
+
     """
     assert compress_ratio in (1, 2)
     assert kv_score.dtype == torch.float32
