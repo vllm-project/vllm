@@ -107,11 +107,11 @@ class InputProcessor:
         return partial(validate_logits_processors_parameters, custom_logitsprocs)
 
     def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
-        """Resolve the tri-state `watermarking` against the engine config.
+        """Return whether watermarking will be applied to this request.
 
-        `params` is not mutated: it may be shared across prompts, requests and
-        even engines by the caller, and the tri-state must stay inheritable.
-        Callers that own a private copy assign the returned value to it.
+        ``None`` and ``True`` request watermarking, while ``False`` opts out.
+        If watermarking is unavailable or incompatible with the request, emit
+        a warning and return ``False``.
         """
         return self.vllm_config._check_supports_watermarking(params)
 
