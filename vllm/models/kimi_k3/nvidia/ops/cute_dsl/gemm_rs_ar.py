@@ -962,20 +962,6 @@ class GemmRsAr:
         self.dtypes.add(dtype)
         return True
 
-    def apply(self, x: torch.Tensor, linear: LinearBase) -> torch.Tensor:
-        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-            FlashInferCutedslMxfp8LinearKernel,
-        )
-
-        method = getattr(linear, "scheme", linear.quant_method)
-        w = linear.weight
-        if isinstance(
-            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
-        ):
-            # This backend stores a column-major [K, N] view after loading.
-            w = w.t()
-        return self(x, w, getattr(linear, "weight_scale", None))
-
     def warn_incompatible_projection(self) -> None:
         logger.warning_once(
             "Some projections are incompatible with GEMM-RS/AR; using the "
@@ -988,12 +974,20 @@ class GemmRsAr:
         # supported but faster on the existing LL path.
         return x.shape[0] >= 128
 
-    def __call__(
-        self,
-        x: torch.Tensor,
-        w: torch.Tensor,
-        w_sf: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, linear: LinearBase) -> torch.Tensor:
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+        )
+
+        method = getattr(linear, "scheme", linear.quant_method)
+        w = linear.weight
+        if isinstance(
+            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+        ):
+            # This backend stores a column-major [K, N] view after loading.
+            w = w.t()
+        w_sf = getattr(linear, "weight_scale", None)
+
         assert x.ndim == 2
         M, K = x.shape
         assert 0 < M <= self.max_M

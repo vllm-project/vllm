@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
 
 # Shared-expert down-proj and attention O-proj.
@@ -231,8 +232,15 @@ def benchmark_shape(
     def make_fused_gemm_collective(
         x: torch.Tensor, weight: torch.Tensor
     ) -> Callable[[], torch.Tensor]:
+        with torch.device("meta"):
+            linear = RowParallelLinear(
+                K * world_size, N, bias=False, params_dtype=weight.dtype
+            )
+        linear.weight = torch.nn.Parameter(weight, requires_grad=False)
+        assert gemm_rs_ar.can_run(linear)
+
         def run() -> torch.Tensor:
-            return gemm_rs_ar(x, weight)
+            return gemm_rs_ar.apply(x, linear)
 
         return run
 
