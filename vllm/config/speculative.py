@@ -1545,9 +1545,13 @@ class SpeculativeConfig:
                     )
                 )
 
+                # Use the final draft config, after any architecture overrides,
+                # so EP agrees with ModelConfig's expert-count validation.
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        draft_model_config=self.draft_model_config,
                     )
                 )
 
@@ -1743,15 +1747,21 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        draft_model_config: ModelConfig | None = None,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config, except the tp_size.
+        Use the draft TP size and disable inherited EP for known dense drafts.
+        Without a draft model config, preserve the previous EP inheritance.
         """
+        enable_ep = target_parallel_config.enable_expert_parallel
+        if draft_model_config is not None:
+            enable_ep = enable_ep and draft_model_config.is_moe
+
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
-            enable_expert_parallel=target_parallel_config.enable_expert_parallel,
+            enable_expert_parallel=enable_ep,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
