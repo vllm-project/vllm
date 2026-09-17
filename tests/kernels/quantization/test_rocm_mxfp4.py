@@ -156,22 +156,26 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
+    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
     assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
 
 
 @pytest.mark.parametrize(
     (
         "use_aiter",
+        "use_fp4_asm_gemm",
         "use_fp4bmm",
     ),
     [
-        (True, True),
-        (True, False),
-        (False, True),
+        (True, True, True),
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
     ],
 )
 def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     use_aiter,
+    use_fp4_asm_gemm,
     use_fp4bmm,
     monkeypatch,
 ):
@@ -187,11 +191,15 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     _assert_aiter_supported()
 
     on_gfx950_value = on_gfx950()
-    expected_asm_gemm = use_aiter and on_gfx950_value
+    expected_asm_gemm = use_aiter and use_fp4_asm_gemm and on_gfx950_value
     expected_fp4bmm = use_aiter and use_fp4bmm and on_gfx950_value
 
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
+        mp.setenv(
+            "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
+            "1" if use_fp4_asm_gemm else "0",
+        )
         mp.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1" if use_fp4bmm else "0")
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
@@ -504,7 +512,7 @@ def test_aiter_fp4_gemm_a4w4_determinism():
     ],
 )
 def test_aiter_hardware_fp4_dynamic_quant_format(shape):
-    """aiter hardware FP4 dynamic quant produces correct output format.
+    """Aiter hardware FP4 dynamic quant produces correct output format.
 
     Tests gfx950 hardware-accelerated FP4 quantization (OCP MXFP4 E2M1).
     Parity with B200 scaled_fp4_quant: block_size=32, packed uint8 output.
