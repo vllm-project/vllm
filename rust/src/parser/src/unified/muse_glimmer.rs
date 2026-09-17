@@ -32,7 +32,7 @@ mod structural_tag;
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, not, opt, peek, preceded, seq};
+use winnow::combinator::{alt, eof, not, opt, peek, preceded, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
@@ -169,6 +169,10 @@ pub struct MuseGlimmerUnifiedParser {
     /// Number of `to=self` blocks opened in the current response; later blocks
     /// are separated from earlier reasoning by `"\n"`.
     reasoning_block_count: usize,
+    /// Channel of a prompt tail `assistant to=RECIPIENT` prefilled without its
+    /// `<|message|>`: the turn's first bare untagged header completes that
+    /// header, so it opens this kind instead of untagged content.
+    prefilled_kind: Option<ChannelKind>,
     /// Names of the tools registered on the request (for name normalization).
     registered_names: Vec<String>,
     tokenizer: DynTokenizer,
@@ -186,6 +190,7 @@ impl MuseGlimmerUnifiedParser {
             invoke_scan: MarkerScanState::default(),
             emitted_call_count: 0,
             reasoning_block_count: 0,
+            prefilled_kind: None,
             registered_names: tools.iter().map(|tool| tool.name.clone()).collect(),
             tokenizer,
             start_token_id,
@@ -205,6 +210,7 @@ impl MuseGlimmerUnifiedParser {
     /// documented limitation.
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
         self.mode = MuseGlimmerMode::Idle;
+        self.prefilled_kind = None;
 
         let Some(start_pos) = prompt_token_ids.iter().rposition(|&id| id == self.start_token_id)
         else {
@@ -218,17 +224,22 @@ impl MuseGlimmerUnifiedParser {
         };
 
         let mut tail_input = tail.as_str();
-        let parsed: ModalResult<(Option<String>, &str)> = seq!(
+        let parsed: ModalResult<(Option<String>, Option<&str>)> = seq!(
             _: take_while(0.., char::is_whitespace),
             _: literal(ASSISTANT),
             _: take_while(0.., is_inline_ws),
             opt(preceded(literal("to="), complete_recipient_name)),
-            _: literal(MESSAGE),
-            rest,
+            alt((preceded(literal(MESSAGE), rest).map(Some), eof.value(None))),
         )
         .parse_next(&mut tail_input);
         // Exactly `assistant` (plus optional whitespace) or no header at all.
         let Ok((recipient, body)) = parsed else {
+            return;
+        };
+        // A header cut before `<|message|>` only fixes the recipient: the
+        // generation completes it with a bare `<|message|>`.
+        let Some(body) = body else {
+            self.prefilled_kind = recipient.as_deref().map(|name| classify_recipient(Some(name)));
             return;
         };
         // A channel already closed in the prompt does not seed a mode: the
@@ -259,7 +270,13 @@ impl MuseGlimmerUnifiedParser {
             MuseGlimmerEvent::Reasoning => output.push_reasoning(piece),
             // Marker and noise spans are drained and dropped with their tokens.
             MuseGlimmerEvent::Skip => {}
-            MuseGlimmerEvent::ChannelOpen(kind) => self.open_channel(kind, output),
+            MuseGlimmerEvent::ChannelOpen(kind) => {
+                let kind = match (self.prefilled_kind.take(), kind) {
+                    (Some(prefilled), ChannelKind::Content { reclassify: true }) => prefilled,
+                    (_, kind) => kind,
+                };
+                self.open_channel(kind, output);
+            }
             MuseGlimmerEvent::ChannelClose => self.mode = MuseGlimmerMode::Idle,
             MuseGlimmerEvent::TurnEnd => self.mode = MuseGlimmerMode::Done,
             MuseGlimmerEvent::Invoke { name, arguments } => {
@@ -314,6 +331,7 @@ impl MuseGlimmerUnifiedParser {
         self.invoke_scan.reset();
         self.emitted_call_count = 0;
         self.reasoning_block_count = 0;
+        self.prefilled_kind = None;
         self.buffer.take().text
     }
 }
@@ -1277,6 +1295,63 @@ mod tests {
         let call = first_call(&output);
         assert_eq!(call.name.as_deref(), Some("weather.get"));
         assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn muse_glimmer_initialize_recipient_only_tool_prefill_opens_strict_tool_channel() {
+        let prompt = tokenizer()
+            .encode(
+                "<|start|>user<|message|>hi<|eom|><|start|>assistant to=weather.get",
+                false,
+            )
+            .unwrap();
+        let body = "<|message|><atem:function_calls>\n<atem:invoke name=\"weather.get\">\n";
+
+        let mut parser = test_parser();
+        parser.initialize(&prompt).unwrap();
+        let output = parser
+            .parse_complete(&format!(
+                "{body}</atem:invoke>\n</atem:function_calls><|eot|>"
+            ))
+            .unwrap();
+
+        // The bare `<|message|>` completes the prefilled tool header rather
+        // than opening untagged content.
+        let call = first_call(&output);
+        assert_eq!(call.name.as_deref(), Some("weather.get"));
+        assert_eq!(call.arguments, "{}");
+        assert!(output.normal_text().is_empty());
+
+        // Strict, unlike a reclassified channel: truncation mid-call is an error.
+        let mut parser = test_parser();
+        parser.initialize(&prompt).unwrap();
+        parser.parse_chunk(body).unwrap();
+        let error = parser.finish().unwrap_err();
+        assert!(error.to_report_string().contains("incomplete Muse Glimmer tool call"));
+    }
+
+    #[test]
+    fn muse_glimmer_initialize_recipient_only_reasoning_prefill_opens_reasoning() {
+        let mut parser = test_parser();
+        let prompt = tokenizer()
+            .encode(
+                "<|start|>user<|message|>hi<|eom|><|start|>assistant to=self",
+                false,
+            )
+            .unwrap();
+        parser.initialize(&prompt).unwrap();
+
+        let output = parser
+            .parse_complete(
+                "<|message|>thinking<|eom|><|start|>assistant to=self<|message|>more<|eom|>\
+                 <|start|>assistant to=user<|message|>done<|eot|>",
+            )
+            .unwrap();
+
+        // The completed prefill is the first reasoning block, so the next one
+        // is separated from it by "\n".
+        assert_eq!(output.reasoning_text(), "thinking\nmore");
+        assert_eq!(output.normal_text(), "done");
     }
 
     #[test]
