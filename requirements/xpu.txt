@@ -3,6 +3,7 @@
 --extra-index-url=https://wheels.vllm.ai/xpu/
 triton==3.8.0+xpu
 
+ray>=2.9
 cmake>=3.26.1
 packaging>=24.2
 setuptools-scm>=8
