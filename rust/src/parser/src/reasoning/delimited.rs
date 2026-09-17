@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
+use xgrammar_structural_tag::format::Format;
 
 use super::{ReasoningDelta, ReasoningError, Result};
 use crate::utils::partial_prefix_len;
@@ -146,6 +147,31 @@ impl DelimitedReasoningParser {
     /// Return whether the parser is currently inside a reasoning section.
     pub(crate) fn in_reasoning(&self) -> bool {
         self.current_in_reasoning
+    }
+
+    /// Wrap visible output from the initialized reasoning and framing state.
+    pub(crate) fn wrap_visible_format(&self, visible: &Format) -> Format {
+        let begin = if self.current_in_reasoning {
+            "".to_string()
+        } else {
+            self.start_token.clone()
+        };
+        let mut reasoning = Format::tag(begin, Format::any_text(), self.end_token.clone());
+        if !self.after_end.is_empty() {
+            reasoning = Format::sequence(vec![reasoning, Format::const_string(self.after_end)]);
+        }
+        if !self.current_in_reasoning {
+            reasoning = Format::optional(reasoning);
+            if !self.pending_after.is_empty() {
+                return Format::sequence(vec![
+                    Format::const_string(self.pending_after),
+                    reasoning,
+                    visible.clone(),
+                ]);
+            }
+        }
+
+        Format::sequence(vec![reasoning, visible.clone()])
     }
 
     /// Parse one decoded text delta and return its reasoning/content split.
