@@ -74,6 +74,7 @@ def _routed_matmul_kernel(
         + output_offsets * output_stride_n
     )
     if add_output:
+        accumulator = accumulator.to(output.dtype.element_ty)
         accumulator += tl.load(output_ptr, mask=output_mask, other=0.0)
     tl.store(output_ptr, accumulator, mask=output_mask)
 

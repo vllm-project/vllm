@@ -700,27 +700,20 @@ def test_mla_kv_b_lora_uses_explicit_token_mapping(dtype):
             continue
         a = lora_a[lora_id, 0]
         b = lora_b[lora_id, 0]
-        expected_linear[token_idx] = (
-            expected_linear[token_idx].float()
-            + x[token_idx].float() @ a.float().T @ b.float().T
+        expected_linear[token_idx] += (
+            x[token_idx].float() @ a.float().T @ b.float().T
         ).to(dtype)
-        expected_q[token_idx] = (
-            expected_q[token_idx].float()
-            + torch.einsum(
-                "hp,hpr,rl->hl",
-                q_nope[token_idx].float(),
-                b_by_head[lora_id, :, :qk_nope_head_dim].float(),
-                a.float(),
-            )
+        expected_q[token_idx] += torch.einsum(
+            "hp,hpr,rl->hl",
+            q_nope[token_idx].float(),
+            b_by_head[lora_id, :, :qk_nope_head_dim].float(),
+            a.float(),
         ).to(dtype)
-        expected_v[token_idx] = (
-            expected_v[token_idx].float()
-            + torch.einsum(
-                "hl,rl,hvr->hv",
-                latent_output[token_idx].float(),
-                a.float(),
-                b_by_head[lora_id, :, qk_nope_head_dim:].float(),
-            )
+        expected_v[token_idx] += torch.einsum(
+            "hl,rl,hvr->hv",
+            latent_output[token_idx].float(),
+            a.float(),
+            b_by_head[lora_id, :, qk_nope_head_dim:].float(),
         ).to(dtype)
 
     triton_ops.mla_kv_b_lora_linear(
@@ -869,3 +862,23 @@ def test_mla_kv_b_lora_q_composes_dcp_local_heads(dtype):
     )
 
     torch.testing.assert_close(gathered_output, expected, rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+def test_mla_kv_b_lora_rounds_delta_before_adding_bf16_base():
+    device = f"{DEVICE_TYPE}:0"
+    x = torch.ones((1, 2), dtype=torch.bfloat16, device=device)
+    lora_a = torch.tensor([[[[2**-8, 2**-17]]]], dtype=torch.bfloat16, device=device)
+    lora_b = torch.ones((1, 1, 1, 1), dtype=torch.bfloat16, device=device)
+    output = torch.ones((1, 1), dtype=torch.bfloat16, device=device)
+    mapping = torch.zeros(1, dtype=torch.long, device=device)
+    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, output, mapping, no_lora_flag_cpu
+    )
+
+    # The delta rounds to 2**-8; adding it to 1 is a BF16 tie that rounds to 1.
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
