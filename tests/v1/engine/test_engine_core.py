@@ -23,6 +23,7 @@ from vllm.config import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
@@ -665,6 +666,29 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
+
+
+@pytest.mark.parametrize(
+    "pause_state,has_requests,has_batches",
+    [
+        pytest.param(PauseState.UNPAUSED, False, False, id="not-paused"),
+        pytest.param(PauseState.PAUSED_ALL, True, False, id="pending-requests"),
+        pytest.param(PauseState.PAUSED_ALL, False, True, id="pending-batches"),
+    ],
+)
+def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_batches):
+    """Reject release before touching caches or memory if work can still use KV."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = pause_state
+    core.scheduler.has_requests.return_value = has_requests
+    core.batch_queue = [object()] if has_batches else None
+    core._reset_caches = MagicMock()
+
+    with pytest.raises(RuntimeError, match="requires a completed pause"):
+        core.release_kv_cache_memory()
+
+    core._reset_caches.assert_not_called()
+    core.model_executor.discard.assert_not_called()
 
 
 @pytest.mark.parametrize("deferred", [False, True])
