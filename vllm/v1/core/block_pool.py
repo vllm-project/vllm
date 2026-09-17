@@ -5,10 +5,10 @@ from typing import Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
-    AllBlocksCleared,
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    TierBlocksCleared,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -855,7 +855,7 @@ class BlockPool:
         logger.info("Successfully reset prefix cache")
 
         if self.enable_kv_cache_events:
-            self.kv_event_queue.append(AllBlocksCleared())
+            self.kv_event_queue.append(TierBlocksCleared(medium=MEDIUM_GPU))
 
         return True
 
