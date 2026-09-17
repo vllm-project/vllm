@@ -3278,7 +3278,8 @@ class NixlBaseConnectorWorker:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
 
         if num_computed_blocks is not None:
             assert num_remote_blocks is not None
