@@ -16,11 +16,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     KVRange,
     KVRegion,
     RankTopology,
+    TransferJobState,
     UMBPConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     EmbeddedRuntime,
     UMBPRuntimeConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
+    _MoriWorkerHandle,
 )
 
 from .test_umbp_shared import _kv_cache_config, _vllm_config
@@ -228,3 +232,34 @@ def test_embedded_partial_tail_round_trip():
     assert torch.equal(destination[0], torch.zeros(16, dtype=torch.uint8))
     worker.close()
     scheduler.close()
+
+
+def test_mori_worker_reports_published_key_eviction(tmp_path):
+    class _Client:
+        def flush(self):
+            return True
+
+        def batch_exists(self, keys):
+            return [False] * len(keys)
+
+        def close(self):
+            pass
+
+    handle = _MoriWorkerHandle(
+        _Client(),
+        "eviction",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        1,
+    )
+    plan = BlockTransferPlan("evicted-key", 0)
+    job = TransferJobState((plan,))
+    job.start()
+    job.complete()
+    handle.publish(job)
+
+    assert handle.batch_exists(["evicted-key"]) == [False]
+    assert handle.take_evicted_keys() == ("evicted-key",)
+    assert handle.take_evicted_keys() == ()
+    handle.close()
