@@ -304,6 +304,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
+                # EngineCore constructs this scheduler-side mapping only after
+                # synchronous worker initialize_from_config RPCs complete, so
+                # every TP worker has already mapped this generation.
+                scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(

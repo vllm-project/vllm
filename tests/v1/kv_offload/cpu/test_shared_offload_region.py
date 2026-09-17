@@ -469,10 +469,18 @@ def test_creator_flag_set_on_first_open(iid):
 
 
 def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False."""
+    """A second worker opening the same file must have _creator == False.
+
+    A joiner (the scheduler-side mapping) may still drop the pathname once
+    every worker has mapped it; the mappings stay valid afterwards.
+    """
     with _multi_region(iid, num_workers=2) as (r0, r1):
         assert r0._creator is True
         assert r1._creator is False
+        assert r1.unlink()
+        assert not os.path.exists(r0.mmap_path)
+        r0.mmap_obj[0:1] = b"\xab"
+        assert memoryview(r1.mmap_obj)[0:1] == b"\xab"
 
 
 def test_file_exists_after_construction(iid):
@@ -985,9 +993,13 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_open = MagicMock(return_value=9999)
     mock_unlink = MagicMock()
     mock_close = MagicMock()
+    monkeypatch.setattr(region.fcntl, "flock", MagicMock())
     monkeypatch.setattr(region.os, "open", mock_open)
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    identity = MagicMock(st_dev=1, st_ino=2)
+    monkeypatch.setattr(region.os, "fstat", MagicMock(return_value=identity))
+    monkeypatch.setattr(region.os, "stat", MagicMock(return_value=identity))
     mock_check = MagicMock(
         side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
     )
@@ -1023,8 +1035,12 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     mock_unlink = MagicMock()
     mock_close = MagicMock()
     monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region.fcntl, "flock", MagicMock())
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    identity = MagicMock(st_dev=1, st_ino=2)
+    monkeypatch.setattr(region.os, "fstat", MagicMock(return_value=identity))
+    monkeypatch.setattr(region.os, "stat", MagicMock(return_value=identity))
     monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
     monkeypatch.setattr(
         region.os,
@@ -1067,6 +1083,13 @@ def test_backing_file_unlinked_after_barrier(iid):
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
+        # A stale generation must not unlink the path of its replacement.
+        replacement = _make_region(iid)
+        try:
+            assert not region.unlink()
+            assert os.stat(path).st_ino == os.fstat(replacement.fd).st_ino
+        finally:
+            replacement.cleanup()
     finally:
         region.cleanup()
         _cleanup_file(path)
