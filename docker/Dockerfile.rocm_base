@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="0d63183" # release/internal/3.8.x as of 08/25 (incl. #963 direct-to-lds fixes)
+ARG TRITON_BRANCH="669b31a" # release/internal/3.8.x as of 09/17
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="c8c29f3" # release/2.13 as of 08/25
+ARG PYTORCH_BRANCH="733fca1" # release/2.13 as of 09/17
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_BRANCH="v0.28.0"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
