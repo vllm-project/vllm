@@ -98,6 +98,7 @@ def graph_capture_profiler(
     """Bind a graph-capture profiler for one subsystem's capture.
 
     Args:
+        vllm_config: Engine config; used for profiler settings and device type.
         subsystem: Suffix for the trace file name. ``"encoder"`` writes
             ``graph_capture_rank_0_encoder.<timestamp>.pt.trace.json.gz``;
             the main decoder passes ``None`` and keeps the unsuffixed name.
@@ -105,6 +106,7 @@ def graph_capture_profiler(
             block, so that e.g. speculator graphs are labelled
             ``capture_32_draft_FULL`` rather than reusing the decoder's
             ``capture_32_FULL``.
+
     """
     if _skip_capture_tracing.get() or _active_binding.get() is not None:
         yield
