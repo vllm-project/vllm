@@ -7,6 +7,8 @@ from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
 from transformers.models.pixtral import PixtralProcessor
 
@@ -54,6 +56,10 @@ from .utils import (
     get_layer_index,
     init_vllm_registered_model,
     maybe_prefix,
+)
+
+TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY = Version(transformers.__version__) >= Version(
+    "5.15.0"
 )
 
 
@@ -283,8 +289,12 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str | None:
+        # PixtralProcessor supports image-only calls starting in transformers 5.15.
+        # Older releases need dummy text and take the slower tokenization path.
+        if not TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY:
+            return self.dummy_inputs.get_dummy_text(mm_counts)
+        return None
 
     def _postprocess_hf_mm_data(
         self,
