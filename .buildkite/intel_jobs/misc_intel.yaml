@@ -26,7 +26,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_BATCH_INVARIANT=1 &&
       cd tests &&
-      pytest -v -s "v1/determinism/test_xpu_batch_invariant.py::test_seeded_sampler_preserves_full_distribution_and_rng[0]"'
+      pytest -v -s v1/determinism/test_xpu_batch_invariant.py'
 
 - label: V1 Core + KV + Metrics
   key: v1-core-kv-metrics-intel
