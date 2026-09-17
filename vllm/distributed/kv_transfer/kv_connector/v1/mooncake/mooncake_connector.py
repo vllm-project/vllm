@@ -643,7 +643,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MooncakeConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(
         self,
@@ -756,8 +756,7 @@ class MooncakeConnectorScheduler:
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
-        """
-        For remote prefill, pull all prompt blocks from remote
+        """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
         Args:
@@ -769,8 +768,8 @@ class MooncakeConnectorScheduler:
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
-        """
 
+        """
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector get_num_new_matched_tokens: "
@@ -881,11 +880,9 @@ class MooncakeConnectorScheduler:
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Once a request is finished, determine whether request blocks
+        """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished, req_id=%s, request_status=%s, "
@@ -934,7 +931,7 @@ class MooncakeConnectorScheduler:
 
 
 class MooncakeConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
@@ -1176,11 +1173,9 @@ class MooncakeConnectorWorker:
                 raise e
 
     async def _mooncake_sender_listener(self, ready_event: threading.Event):
-        """
-        Background thread that listens for Mooncake requests, dispatches them
+        """Background thread that listens for Mooncake requests, dispatches them
         to a thread pool, and sends acknowledgments upon completion.
         """
-
         sock = self.async_zmq_ctx.socket(zmq.ROUTER)
         self.side_channel_port = sock.bind_to_random_port(f"tcp://{self.hostname}")
         logger.debug(
@@ -1716,7 +1711,6 @@ class MooncakeConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
-
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
         kv_data_ptrs: list[int] = []
@@ -1853,8 +1847,7 @@ class MooncakeConnectorWorker:
         return finished_sending_reqs
 
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Get requests that are done sending or recving on this specific worker.
+        """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
@@ -1885,8 +1878,7 @@ class MooncakeConnectorWorker:
         return finished_sending_reqs or None, finished_recving_reqs or None
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        """
-        Get transfers that completed on this specific worker, including
+        """Get transfers that completed on this specific worker, including
         requests whose remote KV load failed.
 
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -2321,8 +2313,7 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
 
 
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
-    """
-    Returns the address of the Mooncake bootstrap server.
+    """Returns the address of the Mooncake bootstrap server.
     This is only used by prefillers to register workers.
     Decoders should get addr from kv_transfer_params.
     """
