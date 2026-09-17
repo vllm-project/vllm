@@ -8,6 +8,10 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -18,6 +22,16 @@ from .qwen3_dflash import (
     DFlashQwen3Model,
 )
 from .utils import maybe_prefix
+
+
+def _reduce_norm(
+    norm: nn.Module,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if get_tensor_model_parallel_world_size() > 1:
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+    return norm(hidden_states, residual)
 
 
 def _grouped_conv(
@@ -137,6 +151,8 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         self.mlp_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "mlp_conv")
         )
+        self.self_attn.o_proj.reduce_results = False
+        self.mlp.down_proj.reduce_results = False
 
     def forward(
         self,
@@ -148,13 +164,17 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = _reduce_norm(
+                self.input_layernorm, hidden_states, residual
+            )
 
         hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states = self.attention_conv.finish(hidden_states, coefficients)
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = _reduce_norm(
+            self.post_attention_layernorm, hidden_states, residual
+        )
         hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
@@ -261,6 +281,14 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 params_dtype=vllm_config.model_config.dtype,
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
+
+    def final_norm(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            return self.norm(hidden_states)
+        hidden_states, _ = _reduce_norm(self.norm, hidden_states, residual)
+        return hidden_states
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().embed_input_ids(input_ids) * self.input_embedding_scale
