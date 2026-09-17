@@ -308,8 +308,8 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            enable_mamba_fine_grained_prefix_cache=(
-                self.cache_config.enable_mamba_fine_grained_prefix_cache
+            enable_mamba_shared_prefix_checkpoint=(
+                self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
         # Bind after construction so connectors can access the cache manager.
@@ -364,9 +364,9 @@ class Scheduler(SchedulerInterface):
         # manager decides whether it can check-point there (per-group eagle bit,
         # no MTP re-prefill tail); splitting for a stop it would refuse costs a
         # forward pass and displaces the block-boundary stop.
-        self.mamba_fine_grained_prefix_cache = (
+        self.mamba_shared_prefix_checkpoint = (
             self.mamba_partial_cache_hit
-            and self.kv_cache_manager.mamba_fine_grained_prefix_cache
+            and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -497,7 +497,7 @@ class Scheduler(SchedulerInterface):
         # output tokens can still observe a junction there.
         junction_stop = (
             junction
-            if self.mamba_fine_grained_prefix_cache
+            if self.mamba_shared_prefix_checkpoint
             and junction <= request.num_prompt_tokens
             else block_floored
         )
