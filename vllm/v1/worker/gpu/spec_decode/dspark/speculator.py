@@ -36,6 +36,7 @@ backbone forward AND the sequential Markov sampling.
 from typing import Any
 
 import torch
+from flashinfer import top_k as _flashinfer_topk
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -369,13 +370,12 @@ class DSparkSpeculator(DFlashSpeculator):
         base_values = self._base_cand_values[:num_reqs]
         base_ids = self._base_cand_ids[:num_reqs]
         # Candidate order is irrelevant (the walk re-argmaxes inside the union).
-        torch.topk(
-            base_logits,
-            self.markov_topk,
-            dim=-1,
-            sorted=False,
-            out=(base_values, base_ids),
-        )
+        # flashinfer top_k is ~6x faster than torch.topk for large vocabularies
+        # but requires 2D input; reshape is zero-copy.
+        flat_logits = base_logits.view(-1, base_logits.shape[-1])
+        fi_vals, fi_ids = _flashinfer_topk(flat_logits, self.markov_topk)
+        base_values.copy_(fi_vals.view(num_reqs, n_spec, -1))
+        base_ids.copy_(fi_ids.view(num_reqs, n_spec, -1))
         static_ids = self._markov_static_ids
         union_ids = (
             self._union_cand_ids[:num_reqs]
