@@ -26,7 +26,10 @@ use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, T
 use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
-use super::{EOM, EOT, INVOKE_CLOSE, PARAMETER_CLOSE, START};
+use super::{
+    EOM, EOT, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN, INVOKE_CLOSE, INVOKE_OPEN, MESSAGE,
+    PARAMETER_CLOSE, PARAMETER_OPEN, START,
+};
 use crate::tool::Tool;
 
 pub(super) static MUSE_GLIMMER_STRUCTURAL_TAG_BUILDER: MuseGlimmerStructuralTagBuilder =
@@ -172,9 +175,9 @@ fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> 
 /// name `ns` the model is also known to emit the doubled `ns.ns`.
 fn tool_tags(tool: &Tool, options: &StructuralTagOptions) -> Vec<TagFormat> {
     let content = tool_channel_content(tool, options);
-    let mut begins = vec![format!(" to={}<|message|>", tool.name)];
+    let mut begins = vec![format!(" to={}{MESSAGE}", tool.name)];
     if !tool.name.contains('.') {
-        begins.push(format!(" to={0}.{0}<|message|>", tool.name));
+        begins.push(format!(" to={0}.{0}{MESSAGE}", tool.name));
     }
     begins
         .into_iter()
@@ -203,11 +206,11 @@ fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
     }
     Format::sequence(vec![
         Format::const_string(format!(
-            "<atem:function_calls>\n<atem:invoke name=\"{}\">\n",
-            tool.name
+            "{FUNCTION_CALLS_OPEN}\n{}",
+            invoke_begin(&tool.name)
         )),
         Format::any_text_excluding(&[INVOKE_CLOSE, EOM, EOT, START]),
-        Format::const_string("\n</atem:invoke>\n</atem:function_calls>"),
+        Format::const_string(format!("\n{INVOKE_CLOSE}\n{FUNCTION_CALLS_CLOSE}")),
     ])
 }
 
@@ -237,14 +240,14 @@ fn typed_invokes(
     options: &StructuralTagOptions,
 ) -> Format {
     Format::sequence(vec![
-        Format::const_string("<atem:function_calls>\n"),
+        Format::const_string(format!("{FUNCTION_CALLS_OPEN}\n")),
         Format::tags_with_separator(
             vec![typed_invoke(name, properties, &required, options)],
             "\n",
             true,
             false,
         ),
-        Format::const_string("\n</atem:function_calls>"),
+        Format::const_string(format!("\n{FUNCTION_CALLS_CLOSE}")),
     ])
 }
 
@@ -266,11 +269,12 @@ fn typed_invoke(
     for (key, schema) in optional_props {
         lines.push(Format::optional(parameter_line(key, schema, options)));
     }
-    TagFormat::new(
-        format!("<atem:invoke name=\"{name}\">\n"),
-        Format::sequence(lines),
-        INVOKE_CLOSE,
-    )
+    TagFormat::new(invoke_begin(name), Format::sequence(lines), INVOKE_CLOSE)
+}
+
+/// `<atem:invoke name="NAME">` plus the newline the template emits after it.
+fn invoke_begin(name: &str) -> String {
+    format!("{INVOKE_OPEN} name=\"{name}\">\n")
 }
 
 /// One parameter plus the newline the template emits after it.
@@ -284,7 +288,7 @@ fn parameter_line(key: &str, schema: &Value, options: &StructuralTagOptions) -> 
 /// `<atem:parameter name="KEY">VALUE</atem:parameter>` with a typed value.
 fn parameter(key: &str, schema: &Value, options: &StructuralTagOptions) -> Format {
     Format::sequence(vec![
-        Format::const_string(format!("<atem:parameter name=\"{key}\">")),
+        Format::const_string(format!("{PARAMETER_OPEN} name=\"{key}\">")),
         parameter_value(schema, options),
         Format::const_string(PARAMETER_CLOSE),
     ])
@@ -361,10 +365,10 @@ mod tests {
     use serde_json::json;
     use xgrammar_structural_tag::builders::StructuralTagOptions;
 
-    use super::super::{ASSISTANT, MESSAGE, START};
+    use super::super::ASSISTANT;
     use super::{
-        ANSWER_BEGIN, CHANNEL_SEPARATOR, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
-        ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
+        ANSWER_BEGIN, CHANNEL_SEPARATOR, MESSAGE, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
+        START, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
     };
 
     fn tool(name: &str, parameters: serde_json::Value) -> Tool {
