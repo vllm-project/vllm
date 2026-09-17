@@ -55,6 +55,18 @@ class LogprobsLists(NamedTuple):
             None,
         )
 
+    def sampled_logprobs(self, req_idx: int, num_positions: int) -> list[float]:
+        """The sampled token's logprob at each of a request's new positions.
+
+        Column 0 of ``logprobs`` is the sampled token (the sampler stores it
+        first). This is the whole transport for ``sampled_logprobs_only``
+        requests: no token ids, no ranks, no per-request ``LogprobsLists``.
+        """
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        rows = np.asarray(self.logprobs[req_idx : req_idx + num_positions])
+        return rows[:, 0].tolist() if rows.ndim == 2 else rows.tolist()
+
 
 class SamplingMaskLists(NamedTuple):
     """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
