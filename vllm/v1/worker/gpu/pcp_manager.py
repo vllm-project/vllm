@@ -10,9 +10,9 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -358,13 +358,13 @@ class PCPManager:
                     dtype=np.int64,
                 )
 
-        self._hidden_restore_idx = async_copy_to_gpu(
+        self._hidden_restore_idx = async_tensor_h2d(
             hidden_restore_idx, device=self.device
         )
-        self._padded_gather_idx = async_copy_to_gpu(
+        self._padded_gather_idx = async_tensor_h2d(
             padded_gather_idx, device=self.device
         )
-        self._gathered_kv_write_mask = async_copy_to_gpu(
+        self._gathered_kv_write_mask = async_tensor_h2d(
             gathered_kv_write_mask, device=self.device
         )
         return segments_by_rank, per_rank_num_tokens
@@ -536,12 +536,12 @@ class PCPManager:
         local_query_start_loc_out = local_query_start_loc_np[1 : num_local_reqs + 1]
         np.cumsum(local_num_scheduled_tokens, out=local_query_start_loc_out)
         local_query_start_loc_np[num_local_reqs + 1 :] = num_local_tokens
-        async_copy_to_gpu(local_query_start_loc_np, out=input_buffers.query_start_loc)
+        async_tensor_h2d(local_query_start_loc_np, out=input_buffers.query_start_loc)
         local_query_start_loc = input_buffers.query_start_loc[
             : num_reqs_after_padding + 1
         ]
 
-        local_to_global_req_idx = async_copy_to_gpu(
+        local_to_global_req_idx = async_tensor_h2d(
             local_to_global_req_idx_np, device=self.device
         )
         seq_lens = input_buffers.seq_lens[:num_reqs_after_padding]

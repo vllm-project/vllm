@@ -137,6 +137,7 @@ def FusedMoEFactory(
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    skip_padding: bool = False,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -151,6 +152,11 @@ def FusedMoEFactory(
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
     copy that naming convention here and handle any remapping in the
     load_weights function in each model implementation.
+
+    Args:
+        intermediate_pad: Padding added to the intermediate size, if any.
+        swiglu_alpha: Optional alpha parameter for the SwiGLU activation.
+        swiglu_beta: Optional beta parameter for the SwiGLU activation.
 
     Args:
         num_experts: Number of experts in the model (global count)
@@ -208,9 +214,11 @@ def FusedMoEFactory(
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
+        skip_padding: Whether grouped routing should invalidate padding rows.
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 
@@ -302,6 +310,7 @@ def FusedMoEFactory(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
