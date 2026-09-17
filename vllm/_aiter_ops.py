@@ -3289,16 +3289,6 @@ class rocm_aiter_ops:
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
-    @functools.cache
-    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
-        if not current_platform.is_rocm():
-            return False
-        return _ck_gemm_shape_is_tuned(
-            n, k, None, "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE"
-        )
-
-    @staticmethod
     def shuffle_weight(
         tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
