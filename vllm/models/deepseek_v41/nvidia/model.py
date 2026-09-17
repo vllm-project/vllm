@@ -217,8 +217,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             self.attn.wo_b.reduce_results = False
             self.attn.project_before_all_gather = (
-                envs.VLLM_DSV41_PROJECT_BEFORE_AG
-                and not vllm_config.parallel_config.use_ubatching
+                not vllm_config.parallel_config.use_ubatching
                 and vllm_config.lora_config is None
                 and vllm_config.speculative_config is None
                 and not envs.VLLM_BATCH_INVARIANT
