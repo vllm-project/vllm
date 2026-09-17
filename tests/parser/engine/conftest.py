@@ -30,6 +30,7 @@ def make_mock_tokenizer(
     The returned mock supports get_vocab(), encode(), and decode().
     decode() maps known token IDs back to their text and falls back to
     chr(id) for ASCII IDs or ``<id>`` for others.
+
     """
     id_to_text = {v: k for k, v in vocab.items()}
     tokenizer = MagicMock()

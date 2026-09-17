@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Producer side of the QuantizedActivation contract for activation layers.
+"""Producer side of the QuantizedActivation contract for activation layers.
 
 Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
