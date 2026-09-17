@@ -87,7 +87,12 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        # DeepSeek V4 sparse MLA pages the KV cache at 64 tokens on Hopper
+        # (SM90) and Blackwell client (SM120); SM100 uses 128.
+        is_page_64_family = current_platform.is_device_capability_family(
+            90
+        ) or current_platform.is_device_capability_family(120)
+        return [64 if is_page_64_family else 128]
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:

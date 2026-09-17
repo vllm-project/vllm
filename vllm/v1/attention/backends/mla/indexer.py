@@ -260,7 +260,12 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        # The V4.1 indexer pages the cache at 64 tokens on SM90 and SM120;
+        # SM100 uses 128.
+        is_page_64_family = current_platform.is_device_capability_family(
+            90
+        ) or current_platform.is_device_capability_family(120)
+        return [64 if is_page_64_family else 128]
 
 
 @dataclass(frozen=True)
