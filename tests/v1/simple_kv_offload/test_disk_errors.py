@@ -3,6 +3,7 @@
 """Disk failures must drain DMA, fail transfers and allow subsequent work."""
 
 import errno
+import os
 import threading
 from unittest.mock import MagicMock
 
@@ -91,6 +92,121 @@ def join_failed_thread(backend, is_store):
     thread.join(timeout=5)
     assert not thread.is_alive(), "I/O thread did not exit after the injected failure"
     assert not backend._shutdown
+
+
+@pytest.fixture
+def real_io_disk_worker(disk_worker, monkeypatch):
+    """Use real buffered file I/O and CPU copies; CUDA remains simulated."""
+    if not all(hasattr(os, name) for name in ("preadv", "pwritev")):
+        pytest.skip("Vectored file I/O is unavailable on this platform")
+    worker, backend = disk_worker
+    cache = (torch.arange(8192) % 119).to(torch.int8).reshape(2, 4096)
+    monkeypatch.setattr(
+        backend, "_store_params", (cache, backend._store_buffer_caches["k"])
+    )
+    monkeypatch.setattr(
+        backend, "_load_params", (backend._load_buffer_caches["k"], cache)
+    )
+
+    def cpu_copy(src_blocks, dst_blocks, params):
+        src, dst = params
+        for src_id, dst_id in zip(src_blocks, dst_blocks, strict=True):
+            dst[dst_id].copy_(src[src_id])
+
+    monkeypatch.setattr(disk_module, "copy_blocks", cpu_copy)
+    return worker, backend, cache
+
+
+def _complete_disk_transfer(worker, is_store, event_idx):
+    events = worker._store_events if is_store else worker._load_events
+    events.ready.clear()
+    submit(worker, is_store, event_idx)
+    assert events.ready.wait(timeout=5), "Disk transfer did not complete"
+    assert worker.get_finished(set()) == (
+        None,
+        None if is_store else {"request-0"},
+    )
+    return worker.get_block_ids_with_load_errors(), worker.build_connector_worker_meta()
+
+
+def _assert_disk_round_trip(worker, backend, cache, event_idx):
+    expected = cache.clone()
+    invalid, meta = _complete_disk_transfer(worker, True, event_idx)
+    assert invalid == set()
+    assert meta.completed_store_events == {event_idx: 1}
+    assert meta.failed_store_events == set()
+    assert os.pread(backend._fd, cache.numel(), 0) == expected.numpy().tobytes()
+    cache.fill_(-128)
+    assert _complete_disk_transfer(worker, False, event_idx + 1) == (set(), None)
+    assert torch.equal(cache, expected)
+    assert backend._store_thread.is_alive() and backend._load_thread.is_alive()
+
+
+def test_disk_real_file_round_trip(real_io_disk_worker):
+    """Store actual bytes and reload them through the staging pipeline."""
+    worker, backend, cache = real_io_disk_worker
+    _assert_disk_round_trip(worker, backend, cache, event_idx=1)
+
+
+@pytest.mark.parametrize("failure", ["truncated_file", "injected_eio"])
+def test_disk_real_read_failure_allows_later_transfers(
+    real_io_disk_worker, monkeypatch, failure
+):
+    """A failed real-file read skips stale data and permits subsequent I/O."""
+    worker, backend, cache = real_io_disk_worker
+    _assert_disk_round_trip(worker, backend, cache, event_idx=1)
+    expected = cache.clone()
+    threads = (backend._load_thread, backend._store_thread)
+    injected: list[int] = []
+    if failure == "truncated_file":
+        # Prior transfers have finished. The second slot now produces real EOF.
+        os.truncate(backend._disk_path, 4096)
+    else:
+        original_read = os.preadv
+
+        def read_once(fd, buffers, offset, *args):
+            if fd == backend._fd and offset == 4096 and not injected:
+                injected.append(offset)
+                raise OSError(errno.EIO, "test injection")
+            return original_read(fd, buffers, offset, *args)
+
+        monkeypatch.setattr(disk_module.os, "preadv", read_once)
+    cache.fill_(-128)
+    assert _complete_disk_transfer(worker, False, 3) == ({1}, None)
+    assert torch.equal(cache[0], expected[0])
+    assert (cache[1] == -128).all(), "Failed read must not copy stale bytes"
+    if failure == "injected_eio":
+        assert injected == [4096]
+
+    cache.copy_(expected.flip(1))
+    _assert_disk_round_trip(worker, backend, cache, event_idx=4)
+    assert threads == (backend._load_thread, backend._store_thread)
+
+
+def test_disk_real_write_failure_allows_later_transfers(
+    real_io_disk_worker, monkeypatch
+):
+    """One injected ENOSPC reports failure; later real stores and loads succeed."""
+    worker, backend, cache = real_io_disk_worker
+    original_write = os.pwritev
+    threads = (backend._load_thread, backend._store_thread)
+    injected: list[int] = []
+
+    def write_once(fd, buffers, offset, *args):
+        if fd == backend._fd and offset == 4096 and not injected:
+            injected.append(offset)
+            raise OSError(errno.ENOSPC, "test injection")
+        return original_write(fd, buffers, offset, *args)
+
+    monkeypatch.setattr(disk_module.os, "pwritev", write_once)
+    invalid, meta = _complete_disk_transfer(worker, True, 1)
+    assert injected == [4096]
+    assert invalid == set()
+    assert meta.completed_store_events == {1: 1}
+    assert meta.failed_store_events == {1}
+    assert os.pread(backend._fd, 4096, 0) == cache[0].numpy().tobytes()
+    _assert_disk_round_trip(worker, backend, cache, event_idx=2)
+    assert threads == (backend._load_thread, backend._store_thread)
 
 
 @pytest.mark.parametrize("is_store", [False, True], ids=["load", "store"])
