@@ -494,20 +494,41 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # uniform-q batches, and this avoids flattening mixed batches into one call.
         if num_decode_tokens > 0:
             decode_cu = query_start_loc[: num_decodes + 1]
+            decode_seq_lens = seq_lens[:num_decodes]
+            decode_topk_lens = sparse_topk_lens[:num_decode_tokens]
+            max_decode_query_len = swa_metadata.max_decode_query_len
+            if swa_metadata.decode_swa_width > self.window_size:
+                # DSpark's non-causal window extends past the fixed 128 SWA
+                # columns into the aliased compressed pool. Exclude padding,
+                # and expose the full block to each query instead of letting
+                # TRTLLM derive a causal SWA length from its query position.
+                assert swa_only
+                assert swa_metadata.decode_swa_lens is not None
+                assert swa_metadata.token_to_req_indices is not None
+                decode_topk_lens = swa_metadata.decode_swa_lens[
+                    :num_decode_tokens
+                ].clamp_min(self.window_size)
+                decode_seq_lens = seq_lens.index_select(
+                    0, swa_metadata.token_to_req_indices[:num_decode_tokens].long()
+                )
+                decode_cu = torch.arange(
+                    num_decode_tokens + 1, dtype=torch.int32, device=q.device
+                )
+                max_decode_query_len = 1
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=query[:num_decode_tokens],
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[:num_decode_tokens],
                 compressed_kv_cache=compressed_kv_cache,
-                sparse_topk_lens=sparse_topk_lens[:num_decode_tokens],
-                seq_lens=seq_lens[:num_decodes],
+                sparse_topk_lens=decode_topk_lens,
+                seq_lens=decode_seq_lens,
                 out=output[:num_decode_tokens],
                 bmm1_scale=bmm1_scale,
                 bmm2_scale=bmm2_scale,
                 sinks=self.attn_sink,
                 cum_seq_lens_q=decode_cu,
-                max_q_len=swa_metadata.max_decode_query_len,
+                max_q_len=max_decode_query_len,
             )
 
         if num_prefill_tokens > 0:
