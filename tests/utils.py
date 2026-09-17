@@ -87,6 +87,21 @@ def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
             )
 
 
+@contextmanager
+def skip_on_hf_hub_download_error():
+    """Convert HF Hub download failures into pytest skips.
+
+    Hub outages, rate limits, and gated-repo auth errors are infrastructure
+    issues, not correctness regressions, and must not fail a test.
+    """
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    try:
+        yield
+    except (HfHubHTTPError, LocalEntryNotFoundError, httpx.HTTPError) as e:
+        pytest.skip(f"HF Hub download failed: {e}")
+
+
 if current_platform.is_rocm():
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
