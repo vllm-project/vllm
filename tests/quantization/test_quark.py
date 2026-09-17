@@ -965,9 +965,7 @@ def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
             torch.nn.Module.__init__(self)
 
     # get_quant_method_target now routes MXFP8 through the matcher chain.
-    wk, ak, mcls = config.get_quant_method_target(
-        "layers.0.attn.wkv", LinearBase
-    )
+    wk, ak, mcls = config.get_quant_method_target("layers.0.attn.wkv", LinearBase)
     assert wk == kMxfp8Static
     assert mcls is QuarkLinearMethod
 
@@ -2493,3 +2491,110 @@ def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric)
     )
 
     assert torch.equal(actual, expected)
+
+
+# ---------------------------------------------------------------------------
+# override_quantization_method: Quark always delegates to QuarkConfig
+# ---------------------------------------------------------------------------
+
+_QUARK_MXFP4_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+}
+
+_QUARK_MXFP8_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "scale_type": "float8_e8m0fnu",
+            "symmetric": True,
+        },
+    },
+}
+
+_QUARK_MIXED_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+    "layer_quant_config": {"layers.0.attn": {"weight": {"dtype": "fp8_e4m3"}}},
+}
+
+_FP8_CFG = {"quant_method": "fp8"}
+
+_DSV4_FP8_CFG = {"quant_method": "deepseek_v4_fp8"}
+
+
+@pytest.mark.parametrize(
+    "quant_config_cls",
+    [
+        "deepseek_v41",
+        "deepseek_v4",
+    ],
+)
+@pytest.mark.parametrize(
+    "hf_quant_cfg, expect_none",
+    [
+        (_QUARK_MXFP4_CFG, True),
+        (_QUARK_MXFP8_CFG, True),
+        (_QUARK_MIXED_CFG, True),
+        (_FP8_CFG, False),
+        (_DSV4_FP8_CFG, False),
+    ],
+    ids=[
+        "quark-mxfp4",
+        "quark-mxfp8",
+        "quark-mixed",
+        "native-fp8",
+        "deepseek-v4-fp8",
+    ],
+)
+def test_quark_override_delegates_to_quark_config(
+    quant_config_cls, hf_quant_cfg, expect_none
+):
+    """Any quant_method=='quark' must return None (delegate to QuarkConfig).
+
+    Native FP8 configs should still be claimed by the model-specific config.
+    """
+    import importlib
+
+    if quant_config_cls == "deepseek_v41":
+        # Module was renamed from deepseek_v4_1 to deepseek_v41 upstream.
+        for mod_name in (
+            "vllm.models.deepseek_v41.quant_config",
+            "vllm.models.deepseek_v4_1.quant_config",
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+                DeepseekV4FP8Config = mod.DeepseekV4FP8Config
+                break
+            except ModuleNotFoundError:
+                continue
+        else:
+            pytest.skip("deepseek_v41 quant_config not found")
+        model_type = "deepseek_v41"
+    else:
+        from vllm.models.deepseek_v4.quant_config import (
+            DeepseekV4FP8Config,
+        )
+
+        model_type = "deepseek_v4"
+
+    hf_config = SimpleNamespace(model_type=model_type)
+    result = DeepseekV4FP8Config.override_quantization_method(
+        hf_quant_cfg, None, hf_config=hf_config
+    )
+
+    if expect_none:
+        assert result is None, (
+            f"Quark config should delegate to QuarkConfig (return None), got {result!r}"
+        )
+    else:
+        assert result == "deepseek_v4_fp8", (
+            f"Native FP8 should be claimed by DeepseekV4FP8Config, got {result!r}"
+        )

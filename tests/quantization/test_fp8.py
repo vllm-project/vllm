@@ -265,11 +265,11 @@ def test_deepseek_v41_engram_scale_accepts_quark_name():
     ]
 
 
-def test_deepseek_v41_declines_mixed_precision_quark_config():
-    """A Quark export with per-layer specs is mixed precision (MXFP4 experts +
-    2-D block MXFP8 attention in DeepSeek-V4.1-Flash). ``from_config`` rewrites
-    the config into a single global FP8 scheme, so claiming such a checkpoint
-    would discard the per-layer specs; QuarkConfig must handle it instead."""
+def test_deepseek_v41_declines_quark_configs():
+    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    which would discard the per-layer specs of a mixed-precision export (MXFP4
+    experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
+    knows how to dispatch each scheme, so it must handle every Quark export."""
     from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 
     hf_config = SimpleNamespace(model_type="deepseek_v41")
@@ -280,12 +280,11 @@ def test_deepseek_v41_declines_mixed_precision_quark_config():
         "quant_method": "quark",
     }
 
-    # Single-scheme Quark MXFP4 exports (DeepSeek V4) are still claimed.
     assert (
         DeepseekV4FP8Config.override_quantization_method(
             mxfp4_global, None, hf_config=hf_config
         )
-        == "deepseek_v4_fp8"
+        is None
     )
 
     mixed = {
