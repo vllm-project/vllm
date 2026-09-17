@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Unit tests for presence_penalty / frequency_penalty resolution from
+"""Unit tests for presence_penalty / frequency_penalty resolution from
 default_sampling_params in ChatCompletionRequest and CompletionRequest.
 
 Regression test for https://github.com/vllm-project/vllm/issues/50767:
