@@ -17,7 +17,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -83,6 +83,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             (e.g. partial boolean parsed as bare string).
 
     Returns a dict ready for ``json.dumps()``.
+
     """
     if not args_str or not args_str.strip():
         return {}
@@ -285,7 +286,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
     """Convert Gemma4 custom arg format to a JSON string."""
     text = raw_args.strip()
-    if text.endswith("}"):
+    if text.endswith("}") or text.endswith(")") and text.count("(") < text.count(")"):
         text = text[:-1]
 
     parsed = _parse_gemma4_args(text, partial=partial)
@@ -293,17 +294,23 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def gemma4_config() -> ParserEngineConfig:
+def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
+        # Decides a silent tail: the E-series HF templates write no marker
+        # with thinking off, and no template does after a tool response.
+        wait_for_reasoning=thinking,
+        turn_boundary_tokens=frozenset({"<|turn>", "<|tool_response>"}),
         terminals={
             "THINK_START": CHANNEL_START,
             "THINK_END": CHANNEL_END,
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
             "CALL_PREFIX": "call:",
+            "COLON": ":",
             "OPEN_BRACE": "{",
+            "OPEN_PAREN": "(",
         },
         token_id_terminals={
             "THINK_START": CHANNEL_START,
@@ -347,9 +354,24 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (),
             ),
+            # Bare opener: some checkpoints emit "<|tool_call>:name{...}"
+            # without the "call" prefix.  Match the colon directly so the
+            # tool call is not silently dropped.
+            (ParserState.TOOL_PREAMBLE, "COLON"): Transition(
+                ParserState.TOOL_NAME,
+                (),
+            ),
             (ParserState.TOOL_NAME, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
+            ),
+            (ParserState.TOOL_NAME, "OPEN_PAREN"): Transition(
+                ParserState.TOOL_ARGS,
+                (),
+            ),
+            (ParserState.TOOL_NAME, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
@@ -400,11 +422,11 @@ class Gemma4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        thinking = chat_kwargs.get("enable_thinking", False)
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=gemma4_config(),
+            parser_engine_config=gemma4_config(thinking=thinking),
             **kwargs,
         )
         vocab = self.vocab
@@ -454,30 +476,6 @@ class Gemma4Parser(ParserEngine):
             delta_token_ids = [self._reasoning_start_token_id, *delta_token_ids]
 
         return delta_text, delta_token_ids
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        end_id = self._reasoning_end_token_id
-        start_id = self._reasoning_start_token_id
-        tool_call_id = self._tool_call_token_id
-        new_turn_id = self._new_turn_token_id
-        tool_response_id = self._tool_response_token_id
-
-        if end_id is not None and not input_ids:
-            return self.parser_engine_config.initial_state != ParserState.REASONING
-
-        for i in range(len(input_ids) - 1, -1, -1):
-            tid = input_ids[i]
-            if start_id is not None and tid == start_id:
-                return False
-            if tool_call_id is not None and tid == tool_call_id:
-                return True
-            if new_turn_id is not None and tid == new_turn_id:
-                return not self._thinking_enabled
-            if tool_response_id is not None and tid == tool_response_id:
-                return not self._thinking_enabled
-            if end_id is not None and tid == end_id:
-                return True
-        return True
 
     def _prompt_ends_in_open_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
         """Whether the prompt tail is inside an open ``<|channel>`` block.

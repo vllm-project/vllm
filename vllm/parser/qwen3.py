@@ -42,6 +42,7 @@ THINK_START = "<think>"
 THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
+CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
@@ -94,10 +95,13 @@ def qwen3_config(
     think_end: str = THINK_END,
     tool_start: str = TOOL_CALL_START,
     tool_end: str = TOOL_CALL_END,
+    turn_boundary_tokens: frozenset[str] = frozenset(),
 ) -> ParserEngineConfig:
     return ParserEngineConfig(
         name=name,
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        wait_for_reasoning=thinking,
+        turn_boundary_tokens=turn_boundary_tokens,
         terminals={
             # Reasoning terminals
             "THINK_START": think_start,
@@ -202,8 +206,8 @@ class Qwen3Parser(ParserEngine):
     """Qwen3 parser: ``<think>``/``</think>`` reasoning +
     ``<tool_call>`` XML tool calls in a single engine.
 
-    - ``<tool_call>`` as implicit reasoning end
-    - Unpaired ``<tool_call>`` token ID detection for ``is_reasoning_end``
+    - ``<tool_call>`` as implicit reasoning end (a grammar transition, so it
+      also feeds ``is_reasoning_end`` and the structured-output gate)
 
     Subclasses that share the grammar but differ only in the four wrapper
     token strings (reasoning + tool-call) override the class attributes
@@ -215,6 +219,7 @@ class Qwen3Parser(ParserEngine):
     THINK_END = THINK_END
     TOOL_START = TOOL_CALL_START
     TOOL_END = TOOL_CALL_END
+    TURN_BOUNDARIES: frozenset[str] = CHATML_TURN_BOUNDARIES
 
     def __init__(
         self,
@@ -233,6 +238,7 @@ class Qwen3Parser(ParserEngine):
                 think_end=self.THINK_END,
                 tool_start=self.TOOL_START,
                 tool_end=self.TOOL_END,
+                turn_boundary_tokens=self.TURN_BOUNDARIES,
             ),
         )
         super().__init__(
@@ -240,9 +246,6 @@ class Qwen3Parser(ParserEngine):
             tools,
             **kwargs,
         )
-        vocab = self.vocab
-        self._tool_call_token_id: int | None = vocab.get(self.TOOL_START)
-        self._tool_call_end_token_id: int | None = vocab.get(self.TOOL_END)
 
     def extract_reasoning(
         self,
@@ -252,25 +255,3 @@ class Qwen3Parser(ParserEngine):
         if not self.thinking_enabled:
             return None, model_output
         return super().extract_reasoning(model_output, request)
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if super().is_reasoning_end(input_ids):
-            return True
-        tool_call_id = self._tool_call_token_id
-        tool_call_end_id = self._tool_call_end_token_id
-        reasoning_start_id = self._reasoning_start_token_id
-        if tool_call_id is not None:
-            for i in range(len(input_ids) - 1, -1, -1):
-                if (
-                    reasoning_start_id is not None
-                    and input_ids[i] == reasoning_start_id
-                ):
-                    return False
-                if input_ids[i] == tool_call_id:
-                    if tool_call_end_id is not None and any(
-                        input_ids[j] == tool_call_end_id
-                        for j in range(i + 1, len(input_ids))
-                    ):
-                        continue
-                    return True
-        return False

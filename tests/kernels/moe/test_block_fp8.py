@@ -11,10 +11,7 @@ from tests.kernels.moe.utils import (
     make_test_weights,
     modular_triton_fused_moe,
 )
-from tests.kernels.quant_utils import (
-    native_per_token_group_quant_fp8,
-    native_w8a8_block_matmul,
-)
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -33,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -105,8 +105,16 @@ TOP_KS = [1, 2, 6]
 SEEDS = [0]
 
 
-def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape):
-    """Fused moe with block-wise quantization using native torch."""
+def torch_w8a8_block_fp8_moe(
+    a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape, silu_fp32=False
+):
+    """Fused MoE with block-wise fp8 quantization using native torch.
+
+    silu_fp32=True computes the intermediate SiLU in fp32 and quantizes it
+    directly, matching the modular Helion silu_and_mul_per_block_quant kernel;
+    False rounds the SiLU output to bf16 first, matching fused_experts. Each
+    kernel is checked against the reference variant matching its precision.
+    """
     B, D = a.shape
     topk = topk_ids.size(1)
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
@@ -116,7 +124,10 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block
     topk_ids = topk_ids.view(-1)
 
     _, block_k = block_shape[0], block_shape[1]
-    a_q, a_s = native_per_token_group_quant_fp8(a, block_k)
+    # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
+    # kernels use) so the reference is bit-identical here; removes ~0.06-0.10% fp8
+    # boundary-flip divergence that otherwise accumulates over K. Matmul stays fp32.
+    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=current_platform.fp8_dtype())
     a_q = a_q.to(torch.float32)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
@@ -124,8 +135,12 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block
             inter_out = native_w8a8_block_matmul(
                 a_q[mask], w1[i], a_s[mask], w1_s[i], block_shape, output_dtype=a.dtype
             )
-            act_out = SiluAndMul().forward_native(inter_out)
-            act_out_q, act_out_s = native_per_token_group_quant_fp8(act_out, block_k)
+            act_out = SiluAndMul().forward_native(
+                inter_out.float() if silu_fp32 else inter_out
+            )
+            act_out_q, act_out_s = per_token_group_quant_fp8(
+                act_out, block_k, dtype=current_platform.fp8_dtype()
+            )
             out[mask] = native_w8a8_block_matmul(
                 act_out_q, w2[i], act_out_s, w2_s[i], block_shape, output_dtype=a.dtype
             )
@@ -206,8 +221,29 @@ def test_w8a8_block_fp8_fused_moe(
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
+
+    # The modular path fuses SiLU+quant in fp32 (silu_and_mul_per_block_quant),
+    # while fused_experts/the reference round SiLU to bf16 first. On large K/N this
+    # ~1-ULP gap pushes m_out past the base tol, so validate m_out against an
+    # fp32-SiLU reference — keeping the tight base tolerance, no widened override.
+    if current_platform.is_rocm() and K >= 4096 and N >= 1024:
+        with set_current_vllm_config(vllm_config):
+            ref_out_m = torch_w8a8_block_fp8_moe(
+                a,
+                w1,
+                w2,
+                quant_config.w1_scale,
+                quant_config.w2_scale,
+                topk_weights,
+                topk_ids,
+                block_size,
+                silu_fp32=True,
+            )
+    else:
+        ref_out_m = ref_out
+
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
-    torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
+    torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
@@ -313,5 +349,109 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             torch.accelerator.synchronize()
             graph.replay()
             torch.accelerator.synchronize()
+
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+
+
+def _dequant_block_fp8(
+    w_fp8: torch.Tensor, w_s: torch.Tensor, block_shape: list[int]
+) -> torch.Tensor:
+    """Dequantize a [N, K] fp8 weight with [Nb, Kb] block scales to fp32."""
+    n, k = w_fp8.shape
+    bn, bk = block_shape
+    s = w_s.repeat_interleave(bn, dim=0).repeat_interleave(bk, dim=1)
+    return w_fp8.to(torch.float32) * s[:n, :k]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1, 2, 3])
+@torch.inference_mode()
+def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
+    """TP-misaligned blockwise FP8 MoE (e.g. Qwen4Exp, intermediate
+    640 at TP=4 -> 160 per rank, not divisible by the checkpoint's 128 block).
+
+    The per-rank scale grid is refined from 128 to 32 (lossless: each 32-block
+    lies inside one global 128-block) so the Triton kernel can consume exact
+    per-shard scales. Simulates one TP rank's shard and checks:
+      1. the refined+sharded scales dequantize exactly like the global scales;
+      2. the Triton fused MoE kernel with block_shape=[32, 32] matches the
+         native-torch blockwise reference on the same shard.
+    """
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    M, E, topk = 8, 4, 2
+    hidden = 256
+    inter_full = 640
+    tp_size = 4
+    n_shard = inter_full // tp_size  # 160
+    ckpt_block = [128, 128]
+    refined_block = [32, 32]
+    factor = ckpt_block[0] // refined_block[0]  # 4
+
+    a = torch.randn((M, hidden), dtype=dtype) / 10
+    score = torch.randn((M, E), dtype=dtype)
+
+    (_, w1_full, w1_s_full, _), (_, w2_full, w2_s_full, _) = make_test_weights(
+        E,
+        inter_full,
+        hidden,
+        dtype,
+        torch.float8_e4m3fn,
+        per_out_ch_quant=False,
+        block_shape=ckpt_block,
+    )
+    assert w1_s_full is not None
+    assert w2_s_full is not None
+
+    # TP shard the weights (exact slicing, no scale involvement).
+    lo, hi = tp_rank * n_shard, (tp_rank + 1) * n_shard
+    w1 = torch.cat(
+        [w1_full[:, lo:hi], w1_full[:, inter_full + lo : inter_full + hi]], dim=1
+    )
+    w2 = w2_full[:, :, lo:hi]
+
+    # Refine the global 128-block scales to 32 blocks, then take the shard's
+    # slice -- mirrors the Fp8MoEMethod/RoutedExperts loading path.
+    w1_s32 = w1_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    nb = n_shard // refined_block[0]  # 5 local 32-blocks per projection
+    gate_hi = w1_s32.shape[1] // 2
+    w1_s = torch.cat(
+        [
+            w1_s32[:, tp_rank * nb : (tp_rank + 1) * nb],
+            w1_s32[:, gate_hi + tp_rank * nb : gate_hi + (tp_rank + 1) * nb],
+        ],
+        dim=1,
+    )
+    w2_s32 = w2_s_full.repeat_interleave(factor, dim=-2).repeat_interleave(
+        factor, dim=-1
+    )
+    w2_s = w2_s32[:, :, tp_rank * nb : (tp_rank + 1) * nb]
+
+    # The refined per-shard scales must reproduce the global-scale dequant
+    # exactly (dequant full-width, then slice to the shard).
+    for e in range(E):
+        d32 = _dequant_block_fp8(w1[e, :n_shard], w1_s[e, :nb], refined_block)
+        d128 = _dequant_block_fp8(w1_full[e], w1_s_full[e], ckpt_block)[lo:hi]
+        assert torch.equal(d32, d128)
+        d32 = _dequant_block_fp8(w2[e], w2_s[e], refined_block)
+        d128 = _dequant_block_fp8(w2_full[e], w2_s_full[e], ckpt_block)[:, lo:hi]
+        assert torch.equal(d32, d128)
+
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=refined_block,
+    )
+
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = torch_w8a8_block_fp8_moe(
+            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, refined_block
+        )
+        out = fused_experts(
+            a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
+        )
 
     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

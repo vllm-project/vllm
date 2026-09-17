@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import importlib.machinery
 import inspect
+import sys
+import types
+from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm.config import ModelConfig
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    initialize_online_processing,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -99,6 +109,39 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
 
 
+class _ReloadableMMEncoderAttention(MMEncoderAttention):
+    """Minimal stand-in to test reload lifecycle without encoder initialization."""
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.post_load_called = False
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        self.post_load_called = True
+
+
+class _ReloadableAttentionLayer(
+    torch.nn.Module,
+    AttentionLayerBase,
+):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.post_load_called = False
+
+    def get_attn_backend(self):
+        raise NotImplementedError
+
+    def get_kv_cache_spec(self, vllm_config):
+        return None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        self.post_load_called = True
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -111,6 +154,47 @@ def test_move_metatensors():
     assert tensor.shape == meta_tensor.shape == materialized_tensor.shape
     assert tensor.__class__ == meta_tensor.__class__ == materialized_tensor.__class__
     assert tensor.__dict__ == meta_tensor.__dict__ == materialized_tensor.__dict__
+
+
+@pytest.mark.parametrize(
+    "layer_cls",
+    [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
+)
+def test_attention_reload_defers_post_load(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
+    layer = layer_cls()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+
+    assert not layer.post_load_called
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
+
+
+@pytest.mark.parametrize(
+    "layer_cls",
+    [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
+)
+def test_attention_first_load_processes_weights(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
+    layer = layer_cls()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    initialize_online_processing(layer)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
 
 
 def test_reload_lifecycle():
@@ -135,6 +219,21 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_restore_layer_replaces_postprocessed_tensor_attribute():
+    layer = torch.nn.Linear(2, 3, bias=False)
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
+    del layer.weight
+    layer.weight = torch.empty(3, 2)
+
+    restore_layer_on_meta(layer, info)
+
+    assert isinstance(layer.weight, torch.nn.Parameter)
+    assert layer.weight.is_meta
 
 
 def test_materialize_layer_preserves_non_meta_tensors():
@@ -163,6 +262,188 @@ def test_materialize_layer_preserves_non_meta_tensors():
     # Ensure that the bias is (still) not meta and values are unchanged
     assert not layer.bias.is_meta
     assert torch.equal(layer.bias.data, bias_values)
+
+
+_MARLIN_SIZE_K, _MARLIN_SIZE_N, _MARLIN_GROUP_SIZE = 128, 64, 64
+
+
+def _stub_marlin_ops(monkeypatch):
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    monkeypatch.setattr(
+        ops,
+        "gptq_marlin_repack",
+        lambda w, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+            size_k // 16, size_n * 2, dtype=torch.int32
+        ),
+    )
+
+
+def _make_marlin_kernel():
+    from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+        MarlinLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    kernel = object.__new__(MarlinLinearKernel)
+    kernel.config = MPLinearLayerConfig(
+        full_weight_shape=(_MARLIN_SIZE_K, _MARLIN_SIZE_N),
+        partition_weight_shape=(_MARLIN_SIZE_K, _MARLIN_SIZE_N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=_MARLIN_GROUP_SIZE,
+        zero_points=False,
+    )
+    kernel.w_q_name = "qweight"
+    kernel.w_s_name = "scales"
+    kernel.w_zp_name = None
+    return kernel
+
+
+def _load_marlin_checkpoint_format_weights(layer):
+    from vllm.model_executor.parameter import (
+        GroupQuantScaleParameter,
+        PackedvLLMParameter,
+    )
+
+    layer.qweight = PackedvLLMParameter(
+        data=torch.zeros(_MARLIN_SIZE_K // 8, _MARLIN_SIZE_N, dtype=torch.int32),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=0,
+        packed_factor=8,
+        weight_loader=default_weight_loader,
+    )
+    layer.scales = GroupQuantScaleParameter(
+        data=torch.ones(
+            _MARLIN_SIZE_K // _MARLIN_GROUP_SIZE, _MARLIN_SIZE_N, dtype=torch.float16
+        ),
+        input_dim=0,
+        output_dim=1,
+        weight_loader=default_weight_loader,
+    )
+
+
+def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
+    """Marlin must reuse the workspace storage captured by CUDA graphs."""
+    _stub_marlin_ops(monkeypatch)
+    kernel = _make_marlin_kernel()
+
+    layer = torch.nn.Module()
+    _load_marlin_checkpoint_format_weights(layer)
+    kernel.process_weights_after_loading(layer)
+
+    workspace_ptr = kernel.workspace.data_ptr()
+
+    _load_marlin_checkpoint_format_weights(layer)
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.workspace.data_ptr() == workspace_ptr
+    assert torch.all(kernel.workspace == 0)
+
+
+@pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
+def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
+    """The Marlin fallback prepare_* functions rerun on weight reload and must
+    reuse the workspace storage whose address captured CUDA graphs hold."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.quantization.utils import (
+        marlin_utils,
+        marlin_utils_fp4,
+        marlin_utils_fp8,
+    )
+
+    size_k, size_n = 128, 64
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    monkeypatch.setattr(
+        ops,
+        "gptq_marlin_repack",
+        lambda b_q_weight, size_k, size_n, num_bits, is_a_8bit=False: torch.zeros(
+            size_k // 16, size_n * 2, dtype=torch.int32
+        ),
+    )
+
+    layer = torch.nn.Module()
+    layer.output_size_per_partition = size_n
+    layer.input_size_per_partition = size_k
+    layer.orig_dtype = torch.float16
+    layer.params_dtype = torch.float16
+
+    if variant == "fp8":
+        prepare = marlin_utils_fp8.prepare_fp8_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_k, size_n, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
+    elif variant == "mxfp8":
+        prepare = marlin_utils_fp8.prepare_mxfp8_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_n, size_k, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.full((size_n, size_k // 32), 127, dtype=torch.uint8),
+                requires_grad=False,
+            )
+    else:
+        prepare = marlin_utils_fp4.prepare_fp4_layer_for_marlin
+
+        def load_checkpoint_format_weights():
+            layer.weight = torch.nn.Parameter(
+                torch.zeros(size_n, size_k // 2, dtype=torch.uint8),
+                requires_grad=False,
+            )
+            layer.weight_scale = torch.nn.Parameter(
+                torch.ones(size_n, size_k // 16, dtype=torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            layer.weight_global_scale = torch.nn.Parameter(
+                torch.ones(1, dtype=torch.float32), requires_grad=False
+            )
+
+    load_checkpoint_format_weights()
+    prepare(layer)
+    workspace_ptr = layer.workspace.data_ptr()
+
+    # Reload: fresh checkpoint-format tensors, prepare runs again
+    load_checkpoint_format_weights()
+    prepare(layer)
+
+    assert layer.workspace.data_ptr() == workspace_ptr
+    assert torch.all(layer.workspace == 0)
+
+
+def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
+    """An incompatible existing workspace means the address captured by CUDA
+    graphs is already unusable; allocating a replacement would hide that."""
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+
+    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
+    device = torch.device("cpu")
+
+    workspace = marlin_utils.marlin_make_workspace_new(device)
+    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
+    assert reused is workspace
+
+    with pytest.raises(ValueError, match="incompatible"):
+        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
+    with pytest.raises(ValueError, match="incompatible"):
+        marlin_utils.marlin_make_workspace_new(
+            device, existing=workspace.to(torch.int64)
+        )
 
 
 def test_model_cleanup(dist_init, default_vllm_config):
@@ -213,6 +494,35 @@ def test_get_numel_loaded_caps_at_param_size():
     args = inspect.signature(loader).bind(param, loaded_weight)
     num_loaded, _ = get_numel_loaded(loader, args)
     assert num_loaded == 10
+
+
+def test_layerwise_loading_warning_only_checks_new_layers(monkeypatch):
+    layers = [torch.nn.Linear(16, 1, bias=False) for _ in range(2)]
+
+    def partial_weight_loader(param, loaded_weight):
+        param.view(-1)[: loaded_weight.numel()].copy_(loaded_weight)
+
+    for layer in layers:
+        layer.weight.requires_grad_(False)
+        layer.weight.weight_loader = partial_weight_loader
+        reload_layerwise.initialize_online_processing(layer)
+
+    monkeypatch.setattr(reload_layerwise, "has_device_tensors", lambda _: True)
+    get_info_size = Mock(return_value=0)
+    warning_once = Mock()
+    monkeypatch.setattr(reload_layerwise, "get_info_size", get_info_size)
+    monkeypatch.setattr(reload_layerwise.logger, "warning_once", warning_once)
+
+    reload_layerwise.LOADING_LAYERS.clear()
+    try:
+        for layer in layers:
+            for _ in range(3):
+                layer.weight.weight_loader(layer.weight, torch.ones(1))
+    finally:
+        reload_layerwise.LOADING_LAYERS.clear()
+
+    assert get_info_size.call_count == 2
+    warning_once.assert_called_once()
 
 
 class _ComposedLoaderLayer(torch.nn.Module):
@@ -276,6 +586,58 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
     assert torch.equal(layer.D, loaded["D"])
+
+
+class _RecordingQuantMethod(QuantizeMethodBase):
+    """Records the layer's bias at the moment processing runs."""
+
+    uses_meta_device = True
+
+    def __init__(self):
+        self.bias_at_process = None
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.bias_at_process = layer.bias.detach().clone()
+
+
+class _LateBiasLayer(torch.nn.Module):
+    """Mimics an online-quantized linear: `weight` is created on meta by
+    `create_weights()`, which wraps the loaders, and the linear base registers
+    `bias` afterwards."""
+
+    def __init__(self, quant_method):
+        super().__init__()
+        self.quant_method = quant_method
+        weight = torch.nn.Parameter(torch.empty(4, 2, device="meta"))
+        weight.weight_loader = default_weight_loader
+        self.register_parameter("weight", weight)
+        initialize_online_processing(self)
+        bias = torch.nn.Parameter(torch.zeros(4))
+        bias.weight_loader = default_weight_loader
+        self.register_parameter("bias", bias)
+
+
+def test_online_processing_waits_for_late_registered_bias():
+    # Regression test: `bias` is skipped by the meta device paths, but it is
+    # still loaded by a weight loader. Excluding it from the processing trigger
+    # finalized the layer one load early, so the trailing bias was written into
+    # an already-processed layer (e.g. over FP8 Marlin's permuted bias).
+    quant_method = _RecordingQuantMethod()
+    layer = _LateBiasLayer(quant_method)
+    loaded_bias = torch.full((4,), 3.0)
+
+    layer.weight.weight_loader(layer.weight, torch.full((4, 2), 2.0))
+    assert quant_method.bias_at_process is None
+
+    layer.bias.weight_loader(layer.bias, loaded_bias)
+    assert quant_method.bias_at_process is not None
+    assert torch.equal(quant_method.bias_at_process, loaded_bias)
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
@@ -456,6 +818,110 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     assert torch.equal(layer.scale, loaded_scale)
     assert "scale" in layer._non_persistent_buffers_set
     assert "0.scale" not in model.state_dict()
+
+
+@pytest.fixture
+def hpc_rope_norm(monkeypatch, default_vllm_config):
+    """Import HpcRopeNorm with the external ``hpc`` package stubbed out."""
+    if "hpc" not in sys.modules:
+        stub = types.ModuleType("hpc")
+        stub.__spec__ = importlib.machinery.ModuleSpec("hpc", loader=None)
+        stub.QuantType = types.SimpleNamespace(  # type: ignore[attr-defined]
+            QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR=types.SimpleNamespace(value=0)
+        )
+        monkeypatch.setitem(sys.modules, "hpc", stub)
+    from vllm.model_executor.layers.hpc import rope_norm
+
+    monkeypatch.setattr(rope_norm, "_hpc_rope_norm_instances", {})
+    return rope_norm
+
+
+def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm):
+    """The fused HPC kernel is handed the live QK-norm weights after a refit.
+
+    Drives the production ``_forward_impl`` with a recording ``hpc`` stub. The
+    Q/K norm weights it receives must be the model's own float32 parameters,
+    so a layerwise reload that rewrites them in place (same storage) is what
+    the kernel sees. Previously the kernel read separate mirrors that no
+    reload path refreshed.
+    """
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    head_dim, num_heads, num_kv_heads, block_size = 128, 8, 1, 4
+    layer = torch.nn.Module()
+    layer.q_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.k_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.hpc_rope_norm = hpc_rope_norm.HpcRopeNorm(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        cos_sin_cache=torch.ones(16, head_dim),
+        use_qk_norm=True,
+        fallback_qnorm=layer.q_norm,
+        fallback_knorm=layer.k_norm,
+        kv_cache_dtype="auto",
+        layer_name="hpc_test_layer",
+    )
+    model = torch.nn.Sequential(layer)
+    rnorm = layer.hpc_rope_norm
+
+    calls: list[dict] = []
+
+    def record(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(sys.modules["hpc"], "rope_norm_store_kv", record, raising=False)
+
+    def kernel_norm_weights():
+        q_size, kv_size = num_heads * head_dim, num_kv_heads * head_dim
+        qkv = torch.zeros(1, q_size + 2 * kv_size, dtype=torch.bfloat16)
+        kv_cache = torch.zeros(
+            2, num_kv_heads, block_size, 2 * head_dim, dtype=torch.bfloat16
+        )
+        attn_layer = types.SimpleNamespace(
+            _k_scale=torch.ones(1), _v_scale=torch.ones(1)
+        )
+        attn_metadata = types.SimpleNamespace(
+            num_actual_tokens=1,
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            max_query_len=1,
+            decode_query_len=1,
+            qo_indptr=None,
+            qo_indptr_decode=None,
+            slot_mapping=torch.tensor([4]),
+            seq_lens=torch.tensor([1]),
+            block_table_tensor=torch.tensor([[1]]),
+            hpc_kv_written=False,
+        )
+        output = torch.zeros(1, q_size, dtype=torch.bfloat16)
+        rnorm._forward_impl(qkv, kv_cache, attn_metadata, attn_layer, output)
+        return calls[-1]["q_norm_weight"], calls[-1]["k_norm_weight"]
+
+    def loaded(value):
+        return torch.full((head_dim,), value, dtype=torch.bfloat16)
+
+    default_weight_loader(layer.q_norm.weight, loaded(0.5))
+    default_weight_loader(layer.k_norm.weight, loaded(0.25))
+    q, k = kernel_norm_weights()
+    assert torch.equal(q, loaded(0.5).float())
+    assert torch.equal(k, loaded(0.25).float())
+    q_ptr, k_ptr = q.data_ptr(), k.data_ptr()
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.q_norm.weight.weight_loader(layer.q_norm.weight, loaded(2.0))
+    layer.k_norm.weight.weight_loader(layer.k_norm.weight, loaded(3.0))
+    finalize_layerwise_reload(model, model_config=None)
+
+    q, k = kernel_norm_weights()
+    assert q.dtype == k.dtype == torch.float32
+    assert torch.equal(q, loaded(2.0).float())
+    assert torch.equal(k, loaded(3.0).float())
+    assert (q.data_ptr(), k.data_ptr()) == (q_ptr, k_ptr)
+    assert not hasattr(rnorm, "qnorm_weight")
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from vllm.entrypoints.chat_utils import (
     MultiModalItemTracker,
     _parse_chat_message_content_parts,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
@@ -57,8 +58,7 @@ def truncate_text_to_tokens(
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
-    """
-    Compute ColBERT MaxSim score.
+    """Compute ColBERT MaxSim score.
 
     Args:
         q_emb: Query token embeddings [query_len, dim]
@@ -66,6 +66,7 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
 
     Returns:
         MaxSim score (sum over query tokens of max similarity to any doc token)
+
     """
     # compute in float32 for numerical stability
     # [query_len, doc_len]
@@ -85,7 +86,9 @@ def _validate_mm_score_input(
             out.append(d)
         else:
             if not is_multimodal_model:
-                raise ValueError(f"MultiModalParam is not supported for {architecture}")
+                raise VLLMValidationError(
+                    f"MultiModalParam is not supported for {architecture}"
+                )
             content = cast(list[ScoreContentPartParam], d.get("content", []))
             out.append(content)
     return out
@@ -99,11 +102,11 @@ def _validate_score_input_lens(
     len_2 = len(data_2)
 
     if len_1 > 1 and len_1 != len_2:
-        raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+        raise VLLMValidationError("Input lengths must be either 1:1, 1:N or N:N")
     if len_1 == 0:
-        raise ValueError("At least one text element must be given")
+        raise VLLMValidationError("At least one text element must be given")
     if len_2 == 0:
-        raise ValueError("At least one text_pair element must be given")
+        raise VLLMValidationError("At least one text_pair element must be given")
 
 
 def validate_score_input(
@@ -246,8 +249,7 @@ def parse_score_data(
 
 
 def compress_token_type_ids(token_type_ids: list[int]) -> int:
-    """
-    Return position of the first 1 or the length of the list
+    """Return position of the first 1 or the length of the list
     if not found.
     """
     first_one = len(token_type_ids)

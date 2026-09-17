@@ -3,11 +3,11 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme
@@ -21,6 +21,40 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 XPU_WNA16_SUPPORTED_BITS = {2, 4}
+# On CUDA the Marlin/GPTQ/AWQ kernels only cover 4/8-bit. The remaining
+# widths (2/3/5/6/7) have no dedicated CUDA kernel, so they are dispatched to
+# the humming kernel instead. This mirrors compressed-tensors WNA16, whose
+# 5/6/7-bit biased scalar types also fall back to humming at kernel selection.
+CUDA_HUMMING_SUPPORTED_BITS = {2, 3, 5, 6, 7}
+
+# Backends selectable through VLLM_XPU_INC_WNA16_BACKEND that are served by the
+# oneDNN int4 GEMMs rather than by ARK. These only cover int4.
+XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
+
+
+def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> None:
+    """Raise unless ``int4_gemm_w4a8`` can serve this layer.
+
+    The backend is requested explicitly, so an unusable configuration is an
+    error rather than something to silently fall back from.
+    """
+    import torch
+
+    if not hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires the int4_gemm_w4a8 op, "
+            "which this build of vllm-xpu-kernels does not provide. "
+            f"Layer: {prefix}."
+        )
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
+    )
+    if layer_config.group_size <= 0 or layer_config.group_size % 32 != 0:
+        raise NotImplementedError(
+            "VLLM_XPU_INC_WNA16_BACKEND=w4a8 requires a group size that is a "
+            f"positive multiple of 32, got {layer_config.group_size}. "
+            f"Layer: {prefix}."
+        )
 
 
 class INCWna16Scheme(INCScheme):
@@ -39,12 +73,31 @@ class INCWna16Scheme(INCScheme):
         if current_platform.is_xpu():
             if layer_config.bits in XPU_WNA16_SUPPORTED_BITS and layer_config.sym:
                 from .inc_ark_ops import get_ark_state
+                from .inc_w4a8_linear import INCXPUW4A8LinearMethod
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
                     INCXPULinearMethod,
                 )
 
+                backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+                if backend in XPU_ONEDNN_BACKENDS:
+                    if layer_config.bits != 4:
+                        raise NotImplementedError(
+                            f"VLLM_XPU_INC_WNA16_BACKEND={backend} only supports "
+                            f"int4, got int{layer_config.bits}. Layer: {prefix}."
+                        )
+                    if backend == "w4a8":
+                        _check_xpu_w4a8_supported(layer_config, prefix)
+                        return INCLinearMethod(INCXPUW4A8LinearMethod(layer_config))
+                    return INCLinearMethod(INCXPULinearMethod(layer_config))
+
                 is_ark_available, ark_error, _, _ = get_ark_state()
+                if backend == "ark" and not is_ark_available:
+                    raise NotImplementedError(
+                        "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                        f"auto_round_kernel is unavailable: "
+                        f"{ark_error or 'unknown error'}. Layer: {prefix}."
+                    )
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
                 elif layer_config.bits == 2:
@@ -85,6 +138,15 @@ class INCWna16Scheme(INCScheme):
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 
+        # CUDA low-bit (2/3/5/6/7): no Marlin/GPTQ/AWQ kernel, route to humming
+        # so a single model can mix 4/8-bit (Marlin) and 2/3/5/6/7-bit (humming)
+        # layers.
+        if (
+            current_platform.is_cuda()
+            and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
+        ):
+            return _build_humming_linear_method(layer_config)
+
         from .inc_wna16_linear import INCWNA16LinearScheme
 
         return INCLinearMethod(INCWNA16LinearScheme(layer_config))
@@ -97,13 +159,19 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        # CPU does not support quantized MoE yet.
+        if current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
 
             return UnquantizedFusedMoEMethod(layer.moe_config)
+        # CUDA low-bit (2/3/5/6/7): route to the humming MoE kernel (see above).
+        if (
+            current_platform.is_cuda()
+            and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
+        ):
+            return _build_humming_moe_method(layer, layer_config)
         if layer_config.is_gptq:
             return _resolve_gptq_moe(layer, layer_config)
         if layer_config.is_awq:
@@ -120,21 +188,21 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    gptq_type_map = {
-        (4, True): scalar_types.uint4b8,
-        (8, True): scalar_types.uint8b128,
-    }
-    use_marlin = (layer_config.bits, layer_config.sym) in gptq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            gptq_type_map[(layer_config.bits, layer_config.sym)],
-            layer_config.group_size,
-            has_zp=not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
+    )
+
+    # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
+    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
+    # check like compressed-tensors does; the capability-based
+    # check_marlin_supported is skipped so the XPU path is reachable.
+    use_marlin = (layer_config.bits, layer_config.sym) in {
+        (4, True),
+        (8, True),
+    } and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
         return AutoGPTQMoEMethod(
@@ -169,21 +237,16 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    awq_type_map = {
-        4: scalar_types.uint4,
-        8: scalar_types.uint8,
-    }
-    use_marlin = layer_config.bits in awq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            awq_type_map[layer_config.bits],
-            layer_config.group_size,
-            not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
+    )
+
+    use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
+        layer, layer_config.group_size
+    )
 
     if use_marlin:
         return AutoAWQMoEMethod(
@@ -208,3 +271,48 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         }
     )
     return MoeWNA16Method(moe_config, layer.moe_config)
+
+
+def _humming_weight_config(layer_config: "INCLayerConfig") -> dict:
+    """Build the humming weight-schema config for a WNA16 int checkpoint."""
+    if layer_config.is_gptq:
+        return {
+            "quant_method": "gptq",
+            "bits": layer_config.bits,
+            "group_size": layer_config.group_size,
+            "desc_act": False,
+            "sym": layer_config.sym,
+        }
+    if layer_config.is_awq:
+        return {
+            "quant_method": "awq",
+            "bits": layer_config.bits,
+            "group_size": layer_config.group_size,
+            "zero_point": not layer_config.sym,
+        }
+    raise NotImplementedError(
+        "INC humming dispatch only supports gptq/awq packed int checkpoints, "
+        f"but found {layer_config}."
+    )
+
+
+def _build_humming_quant_config(layer_config: "INCLayerConfig"):
+    from vllm.model_executor.layers.quantization.humming import (
+        HummingLayerQuantizationConfig,
+    )
+    from vllm.utils.humming import BaseWeightSchema
+
+    weight_schema = BaseWeightSchema.from_config(_humming_weight_config(layer_config))
+    return HummingLayerQuantizationConfig(weight_schema=weight_schema)
+
+
+def _build_humming_linear_method(layer_config: "INCLayerConfig"):
+    from vllm.model_executor.layers.quantization.humming import HummingLinearMethod
+
+    return HummingLinearMethod(_build_humming_quant_config(layer_config))
+
+
+def _build_humming_moe_method(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
+    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+
+    return HummingMoEMethod(_build_humming_quant_config(layer_config), layer.moe_config)

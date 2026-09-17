@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -41,8 +44,7 @@ logger = init_logger(__name__)
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
-    """
-    An implementation of all2all communication based on
+    """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
@@ -76,9 +78,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -108,9 +108,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -137,9 +135,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Reduce-scatter hidden_states across all dp ranks.
-        """
+        """Reduce-scatter hidden_states across all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
@@ -153,9 +149,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
@@ -207,9 +201,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -268,9 +260,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP Low-Latency kernels.
-    """
+    """All2All communication based on DeepEP Low-Latency kernels."""
 
     _buffer: Any = None
     _mask: torch.Tensor | None = None
@@ -278,7 +268,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
-        self.support_fault_tolerance = False  # TODO: set to True when FT is supported.
+        self.support_fault_tolerance = (
+            get_current_vllm_config().parallel_config.enable_fault_tolerance
+        )
 
     def _make_all2all_kwargs(
         self,
@@ -288,8 +280,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """
-        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
           can dispatch all the ranks must hold the same value.
         token_hidden_size: the hidden dimension of each token.
         num_ep_ranks: the number of EP group ranks.
@@ -325,8 +316,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return kwargs
 
     def get_handle(self, kwargs):
-        """
-        The kwargs for DeepEPLLAll2AllManager is dictated by
+        """The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
         import deep_ep  # type: ignore[import-not-found]
@@ -360,17 +350,27 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         has_fault = (current != DeepEPLLAll2AllManager._last_mask).any()
         return has_fault
 
+    def clean_buffers(self) -> None:
+        buf = DeepEPLLAll2AllManager._buffer
+        if buf is None:
+            return
+        buf.get_local_buffer_tensor(dtype=torch.int8, use_rdma_buffer=True).zero_()
+        torch.accelerator.synchronize()
+        buf.low_latency_clean_mask_buffer()
+        torch.accelerator.synchronize()
+        DeepEPLLAll2AllManager._last_mask = None
+
 
 @dataclass
 class _NixlEPBufferState:
     buffer: Any
+    max_num_ep_ranks: int
     connected_ep_size: int
     active_ep_size: int
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on NIXL EP kernels.
+    """All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
@@ -389,7 +389,10 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group, tcp_store_group)
         self.support_fault_tolerance = True
 
-        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+    @property
+    def max_num_ep_ranks(self) -> int:
+        assert NixlEPAll2AllManager._buffer is not None
+        return NixlEPAll2AllManager._buffer.max_num_ep_ranks
 
     def _init_buffer(
         self,
@@ -399,11 +402,19 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     ) -> None:
         from nixl_ep import Buffer  # type: ignore[import-not-found]
 
-        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        parallel_config = get_current_vllm_config().parallel_config
+        max_num_ep_ranks = (
+            self.world_size
+            * parallel_config.elastic_ep_max_dp_size
+            // parallel_config.data_parallel_size
+            if parallel_config.enable_elastic_ep
+            else self.world_size
+        )
+        max_num_global_experts = max_num_ep_ranks * num_experts_per_rank
         num_rdma_bytes = Buffer.get_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
             hidden=token_hidden_size,
-            num_ranks=self.max_num_ep_ranks,
+            num_ranks=max_num_ep_ranks,
             num_experts=max_num_global_experts,
         )
         assert NixlEPAll2AllManager._buffer is None, (
@@ -414,7 +425,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             tcp_store_group=self.tcp_store_group.store,
         )
         buffer.update_memory_buffers(
-            num_ranks=self.max_num_ep_ranks,
+            num_ranks=max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
         )
@@ -422,6 +433,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer.connect_ranks(ranks_to_connect)
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
+            max_num_ep_ranks=max_num_ep_ranks,
             connected_ep_size=self.world_size,
             active_ep_size=self.world_size,
         )
@@ -461,6 +473,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
         for rank in range(state.active_ep_size, target_ep_size):
             state.buffer.update_mask_buffer(rank, mask=False)
+        torch.accelerator.synchronize()
         state.active_ep_size = target_ep_size
 
     def _stage_ep_size(self) -> None:
@@ -473,8 +486,12 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if target_ep_size > state.connected_ep_size:
             self._connect_to_ep_size(target_ep_size, make_active=False)
 
-    def commit_staged_state(self) -> None:
-        """Commit staged NIXL EP state to the active communication set."""
+    def stage_ep_size(self) -> None:
+        with NixlEPAll2AllManager._lock:
+            self._stage_ep_size()
+
+    def commit_ep_size(self) -> None:
+        """Commit the staged EP size to the active communication set."""
         with NixlEPAll2AllManager._lock:
             assert NixlEPAll2AllManager._buffer is not None
             state = NixlEPAll2AllManager._buffer
@@ -487,31 +504,31 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
             self._unmask_connected_ranks(target_ep_size)
 
-    def _ensure_ep_size(self, *, stage: bool) -> None:
-        if stage:
-            self._stage_ep_size()
-        else:
-            self.commit_staged_state()
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        peers = [rank for rank in range(self.world_size) if rank != self.rank]
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer = NixlEPAll2AllManager._buffer.buffer
+        for rank in peers:
+            buffer.update_mask_buffer(rank, mask=True)
+        torch.accelerator.synchronize()
+        try:
+            yield
+        finally:
+            for rank in peers:
+                buffer.update_mask_buffer(rank, mask=False)
+            torch.accelerator.synchronize()
 
     def get_handle(self, kwargs):
         with NixlEPAll2AllManager._lock:
-            stage = bool(kwargs.get("stage", False))
             state = NixlEPAll2AllManager._buffer
             if state is None:
-                assert not stage, (
-                    "NIXL EP staged initialization requires an existing buffer"
-                )
                 max_num_tokens_per_dp_rank = kwargs["max_num_tokens_per_dp_rank"]
-                num_experts_per_rank = (
-                    kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
-                )
                 self._init_buffer(
                     max_num_tokens_per_dp_rank=max_num_tokens_per_dp_rank,
                     token_hidden_size=kwargs["token_hidden_size"],
-                    num_experts_per_rank=num_experts_per_rank,
+                    num_experts_per_rank=kwargs["num_local_experts"],
                 )
-            else:
-                self._ensure_ep_size(stage=stage)
 
             assert NixlEPAll2AllManager._buffer is not None
             handle = NixlEPAll2AllManager._buffer.buffer
@@ -551,7 +568,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert state is not None
         if NixlEPAll2AllManager._mask is None:
             NixlEPAll2AllManager._mask = torch.zeros(
-                self.max_num_ep_ranks, device="cuda", dtype=torch.int32
+                state.max_num_ep_ranks, device="cuda", dtype=torch.int32
             )
         state.buffer.query_mask_buffer(NixlEPAll2AllManager._mask)
         return NixlEPAll2AllManager._mask[: state.active_ep_size]
@@ -565,11 +582,21 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         has_fault = (current != last).any()
         return has_fault
 
+    def clean_buffers(self) -> None:
+        if NixlEPAll2AllManager._buffer is None:
+            return
+        state = NixlEPAll2AllManager._buffer
+        state.buffer.get_local_buffer_tensor(
+            dtype=torch.int8, use_rdma_buffer=True
+        ).zero_()
+        torch.accelerator.synchronize()
+        state.buffer.clean_mask_buffer()
+        torch.accelerator.synchronize()
+        NixlEPAll2AllManager._last_mask = None
+
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
-    """
+    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels."""
 
     # This type lint could be removed after all of the work in
     # https://github.com/vllm-project/vllm/issues/26533 done.
@@ -595,7 +622,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         rank: int,
         gpus_per_node: int,
     ):
-        """Initialize workspace"""
+        """Initialize workspace."""
         if self.initialized:
             return
 
@@ -636,7 +663,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         )
 
     def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized"""
+        """Ensure workspace is initialized."""
         if not has_flashinfer_nvlink_two_sided():
             return False
 
@@ -655,7 +682,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         return self
 
     def cleanup(self):
-        """Clean up workspace"""
+        """Clean up workspace."""
         if (
             self.initialized
             and self.workspace_tensor is not None
@@ -674,8 +701,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
+    """All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
     This is a newer kernel from trtllm that should perform better than the kernel
     used by flashinfer_nvlink_two_sided.
     """
@@ -709,17 +735,13 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        dispatch_dtype_bytes_per_elem: int = 0,
-        dispatch_scale_bytes_per_token: int = 0,
+        x_bytes_per_token: int,
+        x_sf_bytes_per_token: int,
     ):
         """Initialize (or grow) the MoeAlltoAll workspace."""
-        if dispatch_dtype_bytes_per_elem == 0:
-            hidden_bytes = hidden_size // 2
-        else:
-            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
         total_dispatch_payload_size_per_token = (
-            hidden_bytes
-            + dispatch_scale_bytes_per_token
+            x_bytes_per_token
+            + x_sf_bytes_per_token
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
@@ -794,6 +816,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             comm_backend=CustomCommunicator(self.cpu_group),
         )
 
+        # Release cached allocator blocks before FlashInfer reserves the
+        # symmetric MNNVL fabric workspace.
+        torch.accelerator.empty_cache()
+
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
             max_num_tokens=self.max_num_tokens,
@@ -859,6 +885,20 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 self.moe_alltoall = None
                 self.mapping = None
                 self.initialized = False
+
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            from vllm.distributed.device_communicators.mnnvl_compat import (
+                CustomCommunicator,
+            )
+
+            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
 
 
 class MoriAll2AllManager(All2AllManagerBase):
@@ -964,8 +1004,7 @@ class MoriAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP v2 ElasticBuffer (unified API).
+    """All2All communication based on DeepEP v2 ElasticBuffer (unified API).
     Uses NCCL Gin backend with analytical SM calculation.
     """
 
@@ -978,6 +1017,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         self._device_group = device_group
         self.handle_cache = Cache()
         self._num_sms: int | None = None
+        self._gin_checked = False
 
     def _make_all2all_kwargs(
         self,
@@ -1000,11 +1040,37 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             explicitly_destroy=True,
         )
 
+    def _check_gin_support(self, group) -> None:
+        from vllm.utils.nccl import query_nccl_gin_type
+
+        # ProcessGroupNCCL creates communicators lazily. Initialize this exact
+        # group before querying so a null comm pointer is not mistaken for
+        # missing GIN support.
+        probe = torch.zeros(1, device="cuda")
+        torch.distributed.all_reduce(probe, group=group)
+
+        gin_type = query_nccl_gin_type(group)
+        if gin_type is None:
+            raise RuntimeError(
+                "DeepEPv2 communicator properties query failed; "
+                "networking capability could not be determined."
+            )
+        if gin_type == 0:
+            raise RuntimeError(
+                "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking). "
+                "This usually means IBGDA-capable InfiniBand NICs or drivers "
+                "are not available. See tools/ep_kernels/README.md for "
+                "requirements."
+            )
+
     def get_handle(self, kwargs):
         import deep_ep  # type: ignore[import-not-found]
 
         num_experts = kwargs.pop("num_experts", 256)
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        if not self._gin_checked:
+            self._check_gin_support(buffer_kwargs["group"])
+            self._gin_checked = True
         logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
         handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.ElasticBuffer

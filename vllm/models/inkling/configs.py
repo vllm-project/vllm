@@ -22,6 +22,7 @@ class InklingModelConfig(PretrainedConfig):
         hidden_size: int = 1536,
         intermediate_size: int = 768,
         dense_intermediate_size: int | None = None,
+        moe_intermediate_size: int | None = None,
         num_hidden_layers: int = 16,
         num_attention_heads: int = 12,
         num_key_value_heads: int = 4,
@@ -41,7 +42,8 @@ class InklingModelConfig(PretrainedConfig):
         o_bias: bool = False,
         use_embed_norm: bool = False,
         use_sconv: bool = False,
-        sconv_kernel_size: int = 4,
+        sconv_kernel_size: int | None = None,
+        conv_kernel_size: int | None = None,
         dense_mlp_idx: int = 0,
         n_routed_experts: int = 0,
         n_shared_experts: int = 0,
@@ -77,8 +79,24 @@ class InklingModelConfig(PretrainedConfig):
             swa_head_dim = head_dim
         if swa_v_head_dim is None:
             swa_v_head_dim = swa_head_dim
+        # OG format: https://huggingface.co/thinkingmachines/Inkling
+        # HF format: https://github.com/huggingface/transformers/blob/fe747d88a3296bd94d426db2717f232f9d4afdb7/src/transformers/models/inkling/configuration_inkling.py#L95
+        # Huggingface Transformers compatibility:
+        #   HF intermediate_size == OG dense_intermediate_size
+        #   HF moe_intermediate_size == OG intermediate_size
+        #   HF conv_kernel_size == OG sconv_kernel_size
+        if (
+            moe_intermediate_size is not None
+            and intermediate_size is not None
+            and dense_intermediate_size is None
+        ):
+            dense_intermediate_size = intermediate_size
+            intermediate_size = moe_intermediate_size
         if dense_intermediate_size is None:
             dense_intermediate_size = intermediate_size
+        # HF conv_kernel_size == OG sconv_kernel_size
+        if sconv_kernel_size is None:
+            sconv_kernel_size = conv_kernel_size if conv_kernel_size is not None else 4
         if local_layer_ids is None:
             local_layer_ids = []
 

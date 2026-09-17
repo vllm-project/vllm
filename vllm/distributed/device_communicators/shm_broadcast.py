@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copyreg
 import functools
+import io
+import os
 import pickle
+import shutil
 import sys
 import threading
 import time
@@ -30,9 +34,9 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.cpu_resource_utils import check_cgroup_memory_available
 from vllm.utils.network_utils import (
     get_ip,
-    get_open_port,
     get_open_zmq_inproc_path,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
@@ -73,8 +77,7 @@ _memory_fence_lock = threading.Lock()
 
 
 def memory_fence():
-    """
-    Full memory barrier for shared memory synchronization.
+    """Full memory barrier for shared memory synchronization.
 
     Ensures all prior memory writes are visible to other processes before
     any subsequent reads. This is critical for lock-free producer-consumer
@@ -107,8 +110,7 @@ LONG_WAIT_TIME_LOG_MSG = (
 
 
 class SpinCondition:
-    """
-    This class implements an interface similar to a threading.Condition. It
+    """This class implements an interface similar to a threading.Condition. It
     allows a writer to notify readers to wake up and read from the shared memory
     buffer. This notification is done over a zmq socket.
 
@@ -218,6 +220,44 @@ class SpinCondition:
         self.local_notify_socket.send(b"\x00")
 
 
+SHM_PATH = "/dev/shm"
+
+
+def check_shm_free_space(
+    required_bytes: int,
+    shm_path: str = SHM_PATH,
+    *,
+    allocation_name: str = "shared-memory allocation",
+) -> None:
+    """Raise if SHM cannot fit a shared segment and log cgroup headroom.
+
+    Args:
+        required_bytes: Size of the shared-memory segment to be created.
+        shm_path: Mount point backing POSIX shared memory; its filesystem
+            check is skipped if absent.
+        allocation_name: Human-readable name used in errors and logs.
+
+    Raises:
+        RuntimeError: If the SHM filesystem has insufficient space.
+
+    """
+    if os.path.isdir(shm_path):
+        free_bytes = shutil.disk_usage(shm_path).free
+        if required_bytes > free_bytes:
+            mib = 1 << 20
+            raise RuntimeError(
+                f"Insufficient space in {shm_path} for {allocation_name}: "
+                f"{required_bytes / mib:.0f} MiB required, "
+                f"{free_bytes / mib:.0f} MiB free. Increase {shm_path} "
+                "(e.g. --shm-size or --ipc=host)."
+            )
+
+    check_cgroup_memory_available(
+        required_bytes,
+        allocation_name,
+    )
+
+
 class ShmRingBuffer:
     def __init__(
         self,
@@ -288,6 +328,7 @@ class ShmRingBuffer:
         if name is None:
             # we are creating a buffer
             self.is_creator = True
+            check_shm_free_space(self.total_bytes_of_buffer)
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer
             )
@@ -354,6 +395,70 @@ class ShmRingBuffer:
         assert self.shared_memory.buf is not None, "Buffer has been closed"
         with self.shared_memory.buf[start:end] as buf:
             yield buf
+
+
+def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.Tensor:
+    """Rebuild a tensor from an out-of-band pickle buffer.
+
+    Counterpart of `_reduce_tensor`. Note that pickle passes the original
+    buffer-providing object from `loads(buffers=...)` straight to this
+    function (no `PickleBuffer` wrapper on the receiving side), so `buf` is
+    a `zmq.Frame`, a `memoryview` of a shared-memory ring chunk, or `bytes`
+    if the buffer was serialized in-band.
+    """
+    dtype = getattr(torch, dtype_str)
+    assert isinstance(dtype, torch.dtype)
+    if isinstance(buf, zmq.Frame):
+        # ZMQ frames own their message memory independently of any context,
+        # so the tensor can safely alias it with zero copies. The tensor's
+        # storage keeps the frame (and thus its bytes) alive via a strong
+        # reference for as long as the tensor is.
+        try:
+            return torch.frombuffer(buf, dtype=torch.uint8).view(dtype).view(shape)
+        except ValueError:
+            # Empty or read-only frame buffer; fall through to the copy path.
+            pass
+    # Shared-memory ring buffer chunks are reused by the writer once all
+    # readers have marked them read, so we must copy out of them. bytearray
+    # (vs bytes) keeps the resulting tensor writable, matching normal tensor
+    # semantics.
+    raw = bytearray(buf)
+    if not raw:
+        assert 0 in shape
+        return torch.empty(shape, dtype=dtype)
+    return torch.frombuffer(raw, dtype=torch.uint8).view(dtype).view(shape)
+
+
+def _reduce_tensor(tensor: torch.Tensor):
+    """Reduce a CPU tensor to a `PickleBuffer` for out-of-band pickling.
+
+    `torch.Tensor.__reduce_ex__` copies the tensor bytes into the pickle
+    byte stream via `torch.serialization` and never emits a `PickleBuffer`,
+    which defeats the out-of-band buffer handling in `MessageQueue.enqueue`.
+    This reducer instead exposes the tensor's memory directly, so large
+    tensors (e.g. `prompt_embeds` in `SchedulerOutput`) traverse the queue
+    without being copied into and back out of the pickled message.
+    """
+    if (
+        tensor.device.type == "cpu"
+        and tensor.layout == torch.strided
+        and not tensor.requires_grad
+    ):
+        try:
+            # The uint8 view exposes the raw bytes via the buffer protocol,
+            # including for dtypes numpy doesn't recognize (bfloat16, fp8, ...).
+            # reshape(-1) first so that 0-dim tensors can be viewed as well.
+            raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        except RuntimeError:
+            # Exotic tensors (e.g. with the conjugate bit set) that don't
+            # support aliasing views; let torch handle them.
+            pass
+        else:
+            dtype_str = str(tensor.dtype).removeprefix("torch.")
+            return _rebuild_tensor, (PickleBuffer(raw), tuple(tensor.shape), dtype_str)
+
+    # Fall back to torch's default (copying) reduction.
+    return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
 
 
 @dataclass
@@ -430,13 +535,13 @@ class MessageQueue:
                 connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port()
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
-            self.remote_socket.bind(socket_addr)
+            self.remote_socket.bind(f"tcp://{connect_ip}:0")
+            last_endpoint = self.remote_socket.getsockopt(zmq.LAST_ENDPOINT)
+            remote_subscribe_port = last_endpoint.decode().rsplit(":", 1)[1]
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
@@ -742,9 +847,23 @@ class MessageQueue:
             total_bytes += len(raw_buf) + 4
             return False
 
-        all_buffers[0] = pickle.dumps(
-            obj, protocol=pickle.HIGHEST_PROTOCOL, buffer_callback=oob_callback
-        )
+        # CPU tensors are routed through `_reduce_tensor` so that their
+        # bytes are emitted as out-of-band buffers instead of being
+        # copied into the pickle stream by torch's default reducer.
+        # Start from `copyreg.dispatch_table` to preserve globally
+        # registered reducers (e.g. `re.Pattern`); the per-pickler
+        # dispatch table would otherwise shadow them.
+        dispatch_table = dict(copyreg.dispatch_table)
+        dispatch_table[torch.Tensor] = _reduce_tensor
+        with io.BytesIO() as bio:
+            pickler = pickle.Pickler(
+                bio,
+                protocol=pickle.HIGHEST_PROTOCOL,
+                buffer_callback=oob_callback,
+            )
+            pickler.dispatch_table = dispatch_table
+            pickler.dump(obj)
+            all_buffers[0] = bio.getvalue()
         if self.n_local_reader > 0:
             if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
@@ -800,7 +919,8 @@ class MessageQueue:
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
-        timeout_ms = None if timeout is None else int(timeout * 1000)
+        # Ensure non-negative timeout passed to zmq poll.
+        timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
         recv, *recv_oob = socket.recv_multipart(copy=False)
@@ -820,8 +940,7 @@ class MessageQueue:
         reader_rank: int = 0,
         blocking: bool = False,
     ) -> tuple["MessageQueue", list[Handle]]:
-        """
-        Creates a MessageQueue for a process group with a single reader.
+        """Creates a MessageQueue for a process group with a single reader.
 
         This method is designed for scenarios where only one process (the reader)
         will consume messages, and all other processes are writers. It sets up
@@ -841,6 +960,7 @@ class MessageQueue:
             tuple[MessageQueue, list[Handle]]:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
+
         """
         from vllm.platforms.interface import get_assigned_physical_gpu_ids
 
@@ -873,8 +993,7 @@ class MessageQueue:
         external_writer_handle=None,
         blocking: bool = True,
     ) -> "MessageQueue":
-        """
-        Creates a MessageQueue for a distributed process group with one writer and
+        """Creates a MessageQueue for a distributed process group with one writer and
         multiple readers.
 
         This method is designed for scenarios where one process (the writer) sends

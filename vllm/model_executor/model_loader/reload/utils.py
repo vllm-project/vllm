@@ -33,27 +33,27 @@ def get_layer_params_buffers(layer: torch.nn.Module) -> LayerTensors:
 def get_layer_size(layer: torch.nn.Module) -> int:
     """Calculate total number of elements across loadable tensors in a layer.
 
-    Excludes SKIP_TENSORS (e.g. _expert_map) which are never moved to meta
-    device and never loaded via weight_loader during layerwise reload.
+    Excludes SKIP_LOAD_TENSORS (e.g. _expert_map) which are never loaded via
+    weight_loader during layerwise reload.
     """
-    from .meta import SKIP_TENSORS
+    from .meta import SKIP_LOAD_TENSORS
 
     return sum(
         tensor.numel()
         for name, tensor in get_layer_tensors(layer).items()
-        if name not in SKIP_TENSORS
+        if name not in SKIP_LOAD_TENSORS
     )
 
 
 def has_device_tensors(bound_args: BoundArguments) -> bool:
-    """
-    Return True if the loaded weights exist on an accelerator device
+    """Return True if the loaded weights exist on an accelerator device.
 
     Args:
         bound_args: args to load weights
 
     Returns:
         True if weights are on accelerator device
+
     """
     return any(
         isinstance(value, torch.Tensor) and value.device.type not in ("meta", "cpu")
@@ -62,14 +62,14 @@ def has_device_tensors(bound_args: BoundArguments) -> bool:
 
 
 def get_info_size(info: LayerReloadingInfo) -> int:
-    """
-    Calculate the number of bytes used by loaded weights for a given layer
+    """Calculate the number of bytes used by loaded weights for a given layer.
 
     Args:
         info: layerwise info to get size of
 
     Returns:
         number of bytes used by loaded weights
+
     """
     return sum(
         value.nbytes

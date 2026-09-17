@@ -4,13 +4,14 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
-    TextDecodeOptions, TextRequest,
+    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
+    PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
 use super::pb;
@@ -36,11 +37,12 @@ pub fn to_text_request(
         )));
     }
 
-    if req.truncate_prompt_tokens != 0 {
-        return Err(Status::invalid_argument(
-            "truncate_prompt_tokens is not supported",
-        ));
-    }
+    // Proto3 uses zero as unset; positive values select fixed left truncation.
+    // The -1 input-budget sentinel is outside the uint32 field domain.
+    let prompt_truncation = (req.truncate_prompt_tokens != 0).then_some(PromptTruncation {
+        limit: PromptTruncationLimit::Fixed(u64::from(req.truncate_prompt_tokens)),
+        side: TruncationSide::Left,
+    });
 
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
@@ -53,6 +55,7 @@ pub fn to_text_request(
     } else {
         req.request_id
     };
+    let session_id = req.session_id.filter(|s| !s.is_empty());
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -62,6 +65,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    sampling_params.watermarking = req.watermarking.unwrap_or(true);
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -83,7 +87,9 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: true,
+        skip_special_tokens: response
+            .and_then(|options| options.skip_special_tokens)
+            .unwrap_or(true),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
@@ -96,10 +102,12 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        prompt_truncation,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        session_id,
         reasoning_parser_kwargs: None,
         lora_request: None,
         arrival_time: None,
@@ -186,7 +194,7 @@ fn build_sampling_params(
     if let Some(r) = response {
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
-            params.logprobs = Some(count);
+            params.logprobs = count;
             params.logprob_token_ids = token_ids;
         }
         if r.prompt_logprobs {
@@ -203,7 +211,7 @@ fn build_sampling_params(
                 ));
             }
             let (count, _) = candidate_logprob_spec(r.prompt_candidates.as_ref());
-            params.prompt_logprobs = Some(count);
+            params.prompt_logprobs = count;
         }
     }
 
@@ -213,18 +221,22 @@ fn build_sampling_params(
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
 /// logprob_token_ids)` pair.
 ///
-/// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
-/// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
-///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
-///   are carried via `logprob_token_ids` on `SamplingParams`)
-/// - absent → `(1, None)` — just the sampled/scored token
-fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
+/// - `top_n(k)` → `(Some(k), None)` — return top-k candidates by probability
+/// - `all` → `(Some(-1), None)` — return the full vocabulary
+/// - nonempty `token_ids` → `(None, Some(ids))` — let the engine derive the count
+/// - absent or empty `token_ids` → `(Some(0), None)` — return only the sampled/scored token
+fn candidate_logprob_spec(
+    candidates: Option<&pb::CandidateTokens>,
+) -> (Option<i32>, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {
-        Some(pb::candidate_tokens::Select::TopN(n)) => (*n as i32, None),
-        Some(pb::candidate_tokens::Select::All(true)) => (-1, None),
-        Some(pb::candidate_tokens::Select::TokenIds(ids)) => (1, Some(ids.ids.clone())),
-        _ => (1, None),
+        Some(pb::candidate_tokens::Select::TopN(n)) => (Some(*n as i32), None),
+        Some(pb::candidate_tokens::Select::All(true)) => (Some(-1), None),
+        Some(pb::candidate_tokens::Select::TokenIds(ids)) if !ids.ids.is_empty() => {
+            // Match Python HTTP: selected IDs have their own limit, independent
+            // of the numeric top-logprobs count and its max_logprobs cap.
+            (None, Some(ids.ids.clone()))
+        }
+        _ => (Some(0), None),
     }
 }
 
@@ -253,6 +265,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -294,13 +309,14 @@ pub fn to_sequence_output(
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
     opts: &ResponseOpts,
-) -> pb::SequenceOutput {
+) -> Result<pb::SequenceOutput, Status> {
+    let finish_info = finished.map(|f| to_finish_info(f, token_ids)).transpose()?;
     let (lp_values, rank_values, candidates) = match logprobs {
         Some(lp) if opts.output_logprobs => output_logprobs_to_proto(lp),
         _ => (vec![], vec![], vec![]),
     };
 
-    pb::SequenceOutput {
+    Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
             delta.to_string()
@@ -316,11 +332,11 @@ pub fn to_sequence_output(
         logprobs: lp_values,
         ranks: rank_values,
         candidate_tokens: candidates,
-        finish_info: finished.map(|f| to_finish_info(f, token_ids)),
-    }
+        finish_info,
+    })
 }
 
-fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
+fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishInfo, Status> {
     use pb::finish_info::FinishReason as PbFinishReason;
 
     let (finish_reason, stop_reason) = match &finished.finish_reason {
@@ -341,18 +357,17 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
-            (PbFinishReason::Aborted as i32, None)
-        }
+        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
-    pb::FinishInfo {
+    Ok(pb::FinishInfo {
         num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
-    }
+    })
 }
 
 // ========================================================================================
@@ -419,6 +434,11 @@ fn positions_to_proto(
 // KV transfer params conversion (serde_json::Value ↔ prost_types::Struct)
 // ========================================================================================
 
+/// Largest integer exactly representable as `f64` (2^53 - 1). Integral
+/// numbers within this bound are emitted as JSON integers so consumers
+/// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
+const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
+
 fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
@@ -430,6 +450,9 @@ fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     match v.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
         Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
+        Some(Kind::NumberValue(n)) if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER_F64 => {
+            serde_json::Value::Number(serde_json::Number::from(*n as i64))
+        }
         Some(Kind::NumberValue(n)) => serde_json::json!(*n),
         Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
         Some(Kind::ListValue(list)) => {
@@ -439,7 +462,7 @@ fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     }
 }
 
-fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {
+pub(super) fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {
     match value {
         serde_json::Value::Object(map) => Some(prost_types::Struct {
             fields: map.iter().map(|(k, v)| (k.clone(), json_to_proto_value(v))).collect(),
@@ -499,8 +522,12 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
     use vllm_engine_core_client::protocol::output::StopReason;
-    use vllm_text::{FinishReason, Finished, Prompt};
+    use vllm_text::{
+        FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
+    };
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
@@ -511,6 +538,26 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watermarking_defaults_and_opt_out_survive_protobuf_conversion() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let request = pb::GenerateRequest {
+                watermarking,
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()])
+                    .expect("convert request");
+                assert_eq!(
+                    text.sampling_params.watermarking,
+                    watermarking.unwrap_or(true)
+                );
+            }
         }
     }
 
@@ -530,6 +577,20 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
@@ -556,6 +617,69 @@ mod tests {
         };
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
+    }
+
+    #[test]
+    fn output_logprob_selectors_survive_request_lowering() {
+        use pb::candidate_tokens::Select;
+
+        let selected_ids: Vec<u32> = (100..121).collect();
+        let cases = [
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: selected_ids.clone(),
+                })),
+                None,
+                Some(selected_ids),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: vec![198, 198],
+                })),
+                None,
+                Some(vec![198, 198]),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds { ids: vec![] })),
+                Some(0),
+                None,
+            ),
+            (None, Some(0), None),
+            (Some(Select::TopN(0)), Some(0), None),
+            (Some(Select::TopN(2)), Some(2), None),
+        ];
+        for (select, expected_count, expected_ids) in cases {
+            let req = pb::GenerateRequest {
+                response: Some(pb::ResponseOptions {
+                    output_logprobs: true,
+                    output_candidates: select.map(|select| pb::CandidateTokens {
+                        select: Some(select),
+                    }),
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let text =
+                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let params = lower_sampling_params(
+                text.sampling_params,
+                SamplingHints::default(),
+                SamplingLimits {
+                    max_model_len: 32,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                1,
+                &TestTokenizer::new(),
+            )
+            .expect("logprob selector should lower to an engine request");
+
+            assert_eq!(
+                (params.logprobs, params.logprob_token_ids),
+                (expected_count, expected_ids)
+            );
+        }
     }
 
     #[test]
@@ -604,7 +728,7 @@ mod tests {
         let fin = finished(FinishReason::Stop(None));
         let token_ids = [1_u32, 2, 3, 151643];
 
-        let info = to_finish_info(&fin, &token_ids);
+        let info = to_finish_info(&fin, &token_ids).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, Some(PbStopReason::EosTokenId(151643)));
@@ -614,7 +738,7 @@ mod tests {
     fn eos_stop_with_empty_token_ids_leaves_stop_reason_unset() {
         let fin = finished(FinishReason::Stop(None));
 
-        let info = to_finish_info(&fin, &[]);
+        let info = to_finish_info(&fin, &[]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, None);
@@ -625,7 +749,7 @@ mod tests {
         let fin = finished(FinishReason::Stop(Some(StopReason::TokenId(42))));
         // Terminal token list should be ignored when an explicit stop reason is
         // present.
-        let info = to_finish_info(&fin, &[7, 42]);
+        let info = to_finish_info(&fin, &[7, 42]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, Some(PbStopReason::StopTokenId(42)));
@@ -635,7 +759,7 @@ mod tests {
     fn explicit_stop_string_is_preserved() {
         let fin = finished(FinishReason::Stop(Some(StopReason::Text("</stop>".into()))));
 
-        let info = to_finish_info(&fin, &[1, 2, 3]);
+        let info = to_finish_info(&fin, &[1, 2, 3]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(
@@ -648,7 +772,7 @@ mod tests {
     fn length_finish_has_no_stop_reason() {
         let fin = finished(FinishReason::Length);
 
-        let info = to_finish_info(&fin, &[1, 2, 3]);
+        let info = to_finish_info(&fin, &[1, 2, 3]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Length as i32);
         assert_eq!(info.stop_reason, None);
@@ -658,7 +782,7 @@ mod tests {
     fn abort_finish_is_mapped_to_aborted() {
         let fin = finished(FinishReason::Abort);
 
-        let info = to_finish_info(&fin, &[]);
+        let info = to_finish_info(&fin, &[]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
@@ -673,7 +797,8 @@ mod tests {
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts);
+        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
+            .expect("sequence output");
 
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
