@@ -297,7 +297,12 @@ def test_aiter_fused_qkv_conv_matches_vllm_prefill_conv() -> None:
 
 
 @torch.inference_mode()
-def test_aiter_flashkda_preserves_vllm_state_layout() -> None:
+@pytest.mark.parametrize(
+    "num_tokens",
+    [96, 4096],
+    ids=["unsegmented", "segmented"],
+)
+def test_aiter_flashkda_preserves_vllm_state_layout(num_tokens: int) -> None:
     _requires_aiter_kda_prefill()
     from vllm.models.kimi_k3.amd.ops.third_party.kda import (
         chunk_kda_with_fused_gate,
@@ -305,8 +310,10 @@ def test_aiter_flashkda_preserves_vllm_state_layout() -> None:
 
     torch.manual_seed(17)
     device = "cuda"
-    num_heads, head_dim, num_tokens = 12, 128, 96
-    cu_seqlens = torch.tensor([0, 48, 96], device=device, dtype=torch.int32)
+    num_heads, head_dim = 12, 128
+    cu_seqlens = torch.tensor(
+        [0, num_tokens // 2, num_tokens], device=device, dtype=torch.int32
+    )
     shape = (1, num_tokens, num_heads, head_dim)
     q = torch.randn(shape, device=device, dtype=torch.bfloat16)
     k = torch.randn(shape, device=device, dtype=torch.bfloat16)
