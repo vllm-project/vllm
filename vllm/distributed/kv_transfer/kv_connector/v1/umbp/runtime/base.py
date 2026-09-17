@@ -59,6 +59,9 @@ class UMBPWorkerHandle(Protocol):
     def cancel(self, job: TransferJobState) -> TransferJobState:
         """Cancel if possible, otherwise wait until buffers are safe to reuse."""
 
+    def take_evicted_keys(self) -> Sequence[str]:
+        """Return locally published keys evicted since the last call."""
+
     def close(self) -> None:
         """Release worker-side resources."""
 

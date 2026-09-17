@@ -808,6 +808,20 @@ def test_worker_emits_block_stored_event_after_store_completion():
     assert result.kv_events[0].token_ids == [1, 2, 3, 4]
 
 
+def test_worker_emits_block_removed_for_runtime_eviction():
+    handle = _WorkerHandle()
+    handle.take_evicted_keys = lambda: [
+        "umbp:vllm:v1:test:tp0:pcp0:dcp0:pp0:g2:65766963746564"
+    ]
+    worker = UMBPStoreConnectorWorker(handle)
+
+    [event] = worker.get_kv_events()
+
+    assert event.block_hashes == [maybe_convert_block_hash(b"evicted")]
+    assert event.group_idx == 2
+    assert event.medium == "CPU"
+
+
 def test_umbp_stats_aggregate_and_reduce():
     first = UMBPStoreConnectorStats()
     first.record("load", submitted=2, completed=1, failed=1, num_bytes=64)

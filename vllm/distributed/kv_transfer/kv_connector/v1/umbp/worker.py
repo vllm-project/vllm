@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
@@ -386,9 +386,33 @@ class UMBPStoreConnectorWorker:
         return result
 
     def get_kv_events(self) -> list[Any]:
+        take_evicted = getattr(self.runtime, "take_evicted_keys", None)
+        if callable(take_evicted):
+            for key in take_evicted():
+                parsed = self._parse_key(key)
+                if parsed is None:
+                    continue
+                group_id, block_hash = parsed
+                self._worker_meta.kv_events.append(
+                    BlockRemoved(
+                        block_hashes=[maybe_convert_block_hash(block_hash)],
+                        medium="CPU",
+                        group_idx=group_id,
+                        locality="LOCAL",
+                    )
+                )
         events = self._worker_meta.kv_events
         self._worker_meta.kv_events = []
         return events
+
+    @staticmethod
+    def _parse_key(key: str) -> tuple[int, bytes] | None:
+        try:
+            group_part, hash_hex = key.rsplit(":", 1)
+            group_id = int(group_part.rsplit(":g", 1)[1])
+            return group_id, bytes.fromhex(hash_hex)
+        except (IndexError, ValueError):
+            return None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         failed = self._worker_meta.failed_block_ids
