@@ -63,6 +63,15 @@ class PoolerConfig:
     `None` uses the pooler's default, which is `True` in most cases.
     """
 
+    enable_flash_late_interaction: bool = True
+    """
+    Whether the engine may use the flash-maxsim zero-copy late-interaction
+    scoring path (and pre-compile its Triton kernels at model load).
+    Disabled automatically when the API server is started with
+    `--no-enable-flash-late-interaction`, so opting out of the frontend
+    path also skips the kernel warmup cost in the model runner.
+    """
+
     ## for embedding models
     dimensions: int | None = None
     """
