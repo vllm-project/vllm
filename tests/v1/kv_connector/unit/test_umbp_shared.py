@@ -233,6 +233,27 @@ def test_layout_planner_expands_kernel_subblocks():
     ]
 
 
+def test_layout_planner_partial_range_spans_physical_subblocks():
+    planner = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
+    caches = {
+        name: torch.empty((8, 2, 16, 8), dtype=torch.float16)
+        for name in ("layer1", "layer2")
+    }
+    planner.register_kv_caches(caches)
+
+    plan = planner.plan_registered_block(
+        "partial",
+        block_id=2,
+        token_start=6,
+        token_end=12,
+    )
+
+    assert [item.length for item in plan.ranges] == [128, 256, 128, 256]
+    assert [item.object_offset for item in plan.ranges] == [0, 128, 384, 512]
+    assert plan.ranges[0].base_address == caches["layer1"].data_ptr() + 2432
+    assert plan.ranges[1].base_address == caches["layer1"].data_ptr() + 2560
+
+
 def test_transfer_job_isolates_failed_keys():
     plans = (
         BlockTransferPlan("key-a", 7),

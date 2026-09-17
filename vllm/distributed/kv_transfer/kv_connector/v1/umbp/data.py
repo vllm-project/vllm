@@ -473,6 +473,7 @@ class KVLayoutPlanner:
         if block_id < 0:
             raise ValueError("block_id must be non-negative")
         ranges: list[KVRange] = []
+        partial_object_offset = 0
         for region in self.regions:
             try:
                 base_address = base_addresses[region.layer_name]
@@ -489,25 +490,24 @@ class KVLayoutPlanner:
                     raise ValueError("partial range requires both token bounds")
                 if not 0 <= token_start < token_end <= region.block_size:
                     raise ValueError("partial range is outside the KV block")
-                if physical_parts != 1:
-                    raise ValueError(
-                        "partial ranges with physical sub-blocks are unsupported"
-                    )
                 if region.block_bytes % region.block_size:
                     raise ValueError("KV page is not token-byte divisible")
                 bytes_per_token = region.block_bytes // region.block_size
-                partial_offset = token_start * bytes_per_token
+                byte_start = token_start * bytes_per_token
+                byte_end = token_end * bytes_per_token
                 partial_length = (token_end - token_start) * bytes_per_token
             else:
-                partial_offset = 0
+                byte_start = 0
+                byte_end = region.block_bytes
                 partial_length = region.block_bytes
             for part in range(physical_parts):
+                part_start = part * physical_stride
+                part_end = min(part_start + physical_stride, region.block_bytes)
+                overlap_start = max(byte_start, part_start)
+                overlap_end = min(byte_end, part_end)
+                if overlap_start >= overlap_end:
+                    continue
                 physical_block_id = block_id * physical_parts + part
-                part_length = (
-                    region.block_bytes
-                    if physical_parts == 1
-                    else physical_stride
-                )
                 ranges.append(
                     KVRange(
                         layer_name=region.layer_name,
@@ -516,17 +516,22 @@ class KVLayoutPlanner:
                         base_address=(
                             base_address
                             + physical_block_id * physical_stride
-                            + partial_offset
+                            + overlap_start
+                            - part_start
                         ),
                         stride=physical_stride,
-                        length=partial_length,
+                        length=overlap_end - overlap_start,
                         object_offset=(
-                            region.object_offset
+                            partial_object_offset
+                            + overlap_start
+                            - byte_start
                             if token_start is not None
                             else region.object_offset + part * physical_stride
                         ),
                     )
                 )
+            if token_start is not None:
+                partial_object_offset += partial_length
         return BlockTransferPlan(
             key=key,
             block_id=block_id,
