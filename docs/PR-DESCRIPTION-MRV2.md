@@ -29,7 +29,10 @@ leaves Uno's serving behaviour unchanged.
 - A cosmetic `launch_grid` local in `vllm/v1/worker/gpu/sample/gumbel.py`.
 - The scheduler trace helpers `_will_finish_after_next_sample`, the
   `uno_tail_debug` row builder, and the `UNO_STEP_TIMING_*` log sites, plus the
-  matching test cases (about 1,800 lines in total).
+  matching test cases.
+
+Taken together the removals above delete 1,841 lines across code and tests
+(`git diff --shortstat` of the cleanup commits).
 
 ### Contained
 
@@ -52,42 +55,43 @@ behaviour is covered by `tests/v1/core/test_scheduler.py`,
 `tests/v1/spec_decode/test_uno_tail_worker.py` and
 `tests/v1/spec_decode/test_uno_preemption.py`.
 
-The result of the pass is the core touch below; everything else is
+The result of the pass is the core touch below (this notes file excluded from
+the stat so the block is the literal output of its command); everything else is
 Uno-specific code, configuration validation and tests.
 
 ```text
-$ git diff --stat upstream/main HEAD
+$ git diff --stat upstream/main HEAD -- . ':(exclude)docs/PR-DESCRIPTION-MRV2.md'
  .buildkite/test_areas/spec_decode.yaml            |   13 +
  docs/features/speculative_decoding/README.md      |    3 +-
  docs/features/speculative_decoding/uno.md         |   52 +
  tests/v1/core/test_prefix_caching.py              |   59 +
- tests/v1/core/test_scheduler.py                   |  556 ++++
+ tests/v1/core/test_scheduler.py                   |  556 ++++++++
  tests/v1/core/utils.py                            |   22 +-
- tests/v1/e2e/spec_decode/test_uno.py              | 1662 ++++++++++
- tests/v1/e2e/spec_decode/uno_kv_budget.py         |  767 +++++
+ tests/v1/e2e/spec_decode/test_uno.py              | 1662 ++++++++++++++++++++++
+ tests/v1/e2e/spec_decode/uno_kv_budget.py         |  767 ++++++++++
  tests/v1/engine/test_preprocess_error_handling.py |   25 +
- tests/v1/spec_decode/test_uno_config.py           |  390 +++
- tests/v1/spec_decode/test_uno_lora_mrv2.py        |  614 ++++
- tests/v1/spec_decode/test_uno_mrv2.py             | 3123 ++++++++++++++++++
- tests/v1/spec_decode/test_uno_preemption.py       |  616 ++++
- tests/v1/spec_decode/test_uno_prepare_mrv2.py     |  462 ++++
- tests/v1/spec_decode/test_uno_tail_worker.py      |  207 ++
+ tests/v1/spec_decode/test_uno_config.py           |  390 +++++
+ tests/v1/spec_decode/test_uno_lora_mrv2.py        |  614 ++++++++
+ tests/v1/spec_decode/test_uno_mrv2.py             | 3123 +++++++++++++++++++++++++++++++++++++++++
+ tests/v1/spec_decode/test_uno_preemption.py       |  616 ++++++++
+ tests/v1/spec_decode/test_uno_prepare_mrv2.py     |  462 ++++++
+ tests/v1/spec_decode/test_uno_tail_worker.py      |  207 +++
  tests/v1/worker/test_gpu_model_runner_v2_eplb.py  |    2 +-
  vllm/config/speculative.py                        |   97 +-
  vllm/config/vllm.py                               |   79 +-
  vllm/v1/core/sched/async_scheduler.py             |    6 +-
- vllm/v1/core/sched/output.py                     |   11 +-
+ vllm/v1/core/sched/output.py                      |   11 +-
  vllm/v1/core/sched/scheduler.py                   |   46 +-
  vllm/v1/core/sched/uno_tail.py                    |   70 +
  vllm/v1/engine/input_processor.py                 |    5 +
- vllm/v1/spec_decode/uno_noise.py                  |   51 +
- vllm/v1/worker/gpu/model_runner.py                |  378 ++-
+ vllm/v1/spec_decode/uno_noise.py                  |   52 +
+ vllm/v1/worker/gpu/model_runner.py                |  378 ++++-
  vllm/v1/worker/gpu/spec_decode/__init__.py        |    6 +-
- vllm/v1/worker/gpu/spec_decode/uno.py             |  972 +++++++
- vllm/v1/worker/gpu/spec_decode/uno_lora.py        |  514 ++++
- vllm/v1/worker/gpu/spec_decode/uno_prepare.py     |  532 ++++
+ vllm/v1/worker/gpu/spec_decode/uno.py             |  972 +++++++++++++
+ vllm/v1/worker/gpu/spec_decode/uno_lora.py        |  514 +++++++
+ vllm/v1/worker/gpu/spec_decode/uno_prepare.py     |  532 +++++++
  vllm/v1/worker/gpu/warmup.py                      |  135 +-
- 31 files changed, 11520 insertions(+), 59 deletions(-)
+ 30 files changed, 11417 insertions(+), 59 deletions(-)
 ```
 
 The non-Uno core touch is the configuration validation, the runner's
