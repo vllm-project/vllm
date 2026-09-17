@@ -245,6 +245,19 @@ if has_mori():
         supports_apply_weight_on_input=False,
     )
 
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
+        MoriEPv2PrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        MoriEPv2PrepareAndFinalize,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        backend="mori_epv2",
+        supports_apply_weight_on_input=False,
+    )
+
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,

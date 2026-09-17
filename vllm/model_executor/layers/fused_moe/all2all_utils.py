@@ -111,6 +111,7 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
+        from .prepare_finalize.mori_epv2 import MoriEPv2PrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -324,6 +325,20 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
+        )
+
+    elif moe.use_mori_epv2_kernels:
+        all_to_all_args = dict(
+            hidden_dim=moe.hidden_dim,
+            max_num_inp_token_per_rank=moe.max_num_tokens,
+            num_experts_per_rank=moe.num_experts // all2all_manager.world_size,
+            num_experts_per_token=moe.experts_per_token,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = MoriEPv2PrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_mori_kernels:

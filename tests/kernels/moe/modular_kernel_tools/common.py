@@ -267,7 +267,11 @@ class Config:
 
     def needs_mori(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend in ("mori_high_throughput", "mori_low_latency")
+        return info.backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+            "mori_epv2",
+        )
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)

@@ -225,6 +225,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = MoriAll2AllManager(
                     self.cpu_group, self.all2all_backend
                 )
+            elif self.all2all_backend == "mori_epv2":
+                from .all2all import MoriEPv2All2AllManager
+
+                self.all2all_manager = MoriEPv2All2AllManager(self.cpu_group)
             elif self.all2all_backend == "deepep_v2":
                 from .all2all import DeepEPV2All2AllManager
 

@@ -1098,6 +1098,72 @@ class MoriAll2AllManager(All2AllManagerBase):
         return handle
 
 
+class MoriEPv2All2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+        if self.internode:
+            raise ValueError("MORI EPv2 only supports single-node expert parallelism")
+        if self.world_size > 8:
+            raise ValueError(
+                f"MORI EPv2 supports at most 8 ranks, got {self.world_size}"
+            )
+
+        from mori.cco import Communicator
+
+        uid = Communicator.get_unique_id() if self.rank == 0 else None
+        values = [uid]
+        dist.broadcast_object_list(values, src=0, group=self.cpu_group)
+        per_rank_vmm_gb = int(os.environ.get("VLLM_MORI_EPV2_PER_RANK_VMM_GB", "4"))
+        if per_rank_vmm_gb <= 0:
+            raise ValueError("VLLM_MORI_EPV2_PER_RANK_VMM_GB must be positive")
+        self._comm = Communicator.init(
+            self.world_size,
+            self.rank,
+            values[0],
+            per_rank_vmm=per_rank_vmm_gb * (1 << 30),
+        )
+        self.handle_cache = Cache()
+        logger.warning(
+            "MORI EPv2 selected: module=mori.ops.dispatch_combine_v2 "
+            "transport=cco-LSA class=EpDispatchCombineOp rank=%d world=%d "
+            "per_rank_vmm_gb=%d",
+            self.rank,
+            self.world_size,
+            per_rank_vmm_gb,
+        )
+
+    def _make_handle(self, **kwargs):
+        from mori.ops.dispatch_combine_v2 import (
+            EpDispatchCombineConfig,
+            EpDispatchCombineOp,
+        )
+
+        config = EpDispatchCombineConfig(
+            rank=self.rank,
+            world_size=self.world_size,
+            data_type=torch.bfloat16,
+            combine_mode="gather",
+            **kwargs,
+        )
+        handle = EpDispatchCombineOp(config, self._comm)
+        self._comm.barrier()
+        logger.warning(
+            "MORI EPv2 op initialized: dispatch=%s combine=%s "
+            "recv_cap=%d schedule=%s",
+            config.dispatch_dtype,
+            config.combine_dtype,
+            config.effective_max_recv,
+            config.schedule,
+        )
+        return handle
+
+    def get_handle(self, kwargs):
+        return self.handle_cache.get_or_create(kwargs, self._make_handle)
+
+    def destroy(self):
+        self._comm.destroy()
+
+
 class DeepEPV2All2AllManager(All2AllManagerBase):
     """All2All communication based on DeepEP v2 ElasticBuffer (unified API).
     Uses NCCL Gin backend with analytical SM calculation.
