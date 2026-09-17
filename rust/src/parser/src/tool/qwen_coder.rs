@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -5,9 +8,9 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, StructuralTagModel, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::tool::Tool;
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
@@ -15,6 +18,32 @@ const FUNCTION_START: &str = "<function=";
 const FUNCTION_END: &str = "</function>";
 const PARAMETER_START: &str = "<parameter=";
 const PARAMETER_END: &str = "</parameter>";
+
+/// Model-specific configuration for the shared Qwen Coder grammar.
+///
+/// Only the tool-call wrapper tokens vary across models that reuse this
+/// grammar; the inner `<function=...>` / `<parameter=...>` tags are always
+/// byte-identical. Seed-OSS, for example, wraps the same body in
+/// `<seed:tool_call>` / `</seed:tool_call>`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QwenCoderConfig {
+    /// Human-readable parser name used in error messages.
+    pub(crate) parser_name: &'static str,
+    /// Marker that opens a tool-call block.
+    pub(crate) tool_call_start: &'static str,
+    pub(crate) first_tool_call_start: &'static str,
+    pub(crate) next_tool_call_start: &'static str,
+    /// Marker that closes a tool-call block.
+    pub(crate) tool_call_end: &'static str,
+}
+
+const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
+    parser_name: "Qwen Coder",
+    tool_call_start: TOOL_CALL_START,
+    first_tool_call_start: "\n\n<tool_call>",
+    next_tool_call_start: "\n<tool_call>",
+    tool_call_end: TOOL_CALL_END,
+};
 
 type QwenCoderInput<'i> = Partial<&'i str>;
 
@@ -57,16 +86,24 @@ pub struct Qwen3CoderToolParser {
     mode: QwenCoderMode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
+    config: QwenCoderConfig,
 }
 
 impl Qwen3CoderToolParser {
     /// Create a Qwen Coder tool parser.
     fn new(tools: &[Tool]) -> Self {
+        Self::with_config(tools, QWEN_CODER_CONFIG)
+    }
+
+    /// Create a parser for a model that reuses the Qwen Coder grammar with a
+    /// different tool-call wrapper (e.g. Seed-OSS).
+    pub(crate) fn with_config(tools: &[Tool], config: QwenCoderConfig) -> Self {
         Self {
             buffer: String::new(),
             mode: QwenCoderMode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
+            config,
         }
     }
 
@@ -113,15 +150,16 @@ impl ToolParser for Qwen3CoderToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Qwen3Coder)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
+        let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, &mut self.mode)
+            parse_next_qwen_coder_event(input, &mut self.mode, config, self.emitted_tool_count > 0)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -134,9 +172,12 @@ impl ToolParser for Qwen3CoderToolParser {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
             if matches!(self.mode, QwenCoderMode::ToolCall { .. })
-                || self.buffer.starts_with(TOOL_CALL_START)
+                || self.buffer.starts_with(self.config.tool_call_start)
             {
-                return Err(parsing_failed!("incomplete Qwen Coder tool call"));
+                return Err(parsing_failed!(
+                    "incomplete {} tool call",
+                    self.config.parser_name
+                ));
             }
             output.push_text(&self.buffer);
         }
@@ -153,37 +194,49 @@ impl ToolParser for Qwen3CoderToolParser {
 fn parse_next_qwen_coder_event(
     input: &mut QwenCoderInput<'_>,
     mode: &mut QwenCoderMode,
+    config: QwenCoderConfig,
+    after_tool_call: bool,
 ) -> ModalResult<QwenCoderEvent> {
     match mode {
-        QwenCoderMode::Text => parse_text_event(input),
-        QwenCoderMode::ToolCall { end_marker_scan } => tool_call_event(input, end_marker_scan),
+        QwenCoderMode::Text => parse_text_event(input, config, after_tool_call),
+        QwenCoderMode::ToolCall { end_marker_scan } => {
+            tool_call_event(input, end_marker_scan, config.tool_call_end)
+        }
     }
 }
 
 /// Parse a text-mode Qwen Coder event.
-fn parse_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    alt((tool_call_start_event, safe_text_event)).parse_next(input)
-}
-
-/// Parse a Qwen Coder tool-call start marker.
-fn tool_call_start_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    literal(TOOL_CALL_START).value(QwenCoderEvent::ToolCallStart).parse_next(input)
-}
-
-/// Parse a safe text run before the next Qwen Coder marker.
-fn safe_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| QwenCoderEvent::Text { len })
+fn parse_text_event(
+    input: &mut QwenCoderInput<'_>,
+    config: QwenCoderConfig,
+    after_tool_call: bool,
+) -> ModalResult<QwenCoderEvent> {
+    let framed_start = if after_tool_call {
+        config.next_tool_call_start
+    } else {
+        config.first_tool_call_start
+    };
+    alt((
+        alt((literal(framed_start), literal(config.tool_call_start)))
+            .value(QwenCoderEvent::ToolCallStart),
+        |input: &mut QwenCoderInput<'_>| {
+            safe_text_len_mul(input, &[framed_start, config.tool_call_start])
+                .map(|len| QwenCoderEvent::Text { len })
+        },
+    ))
+    .parse_next(input)
 }
 
 /// Parse a complete Qwen Coder tool call.
 fn tool_call_event(
     input: &mut QwenCoderInput<'_>,
     end_marker_scan: &mut MarkerScanState,
+    tool_call_end: &'static str,
 ) -> ModalResult<QwenCoderEvent> {
     let (body,) = seq!(
         _: ws0,
-        take_until_marker(TOOL_CALL_END, end_marker_scan),
-        _: literal(TOOL_CALL_END),
+        take_until_marker(tool_call_end, end_marker_scan),
+        _: literal(tool_call_end),
     )
     .parse_next(input)?;
 
@@ -240,8 +293,9 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Qwen3CoderToolParser, StructuralTagModel, ToolParser};
+    use super::{Qwen3CoderToolParser, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -254,13 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn qwen_coder_exposes_structural_tag_model() {
+    fn qwen_coder_exposes_structural_tag_builder() {
         let parser = Qwen3CoderToolParser::new(&test_tools());
 
-        assert_eq!(
-            parser.structural_tag_model(),
-            Some(StructuralTagModel::Qwen3Coder)
-        );
+        assert!(parser.structural_tag_builder().is_some());
     }
 
     #[test]
@@ -713,6 +764,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Hangzhou" })
+        );
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<Qwen3CoderToolParser>(
+            "\n\n",
+            "<tool_call>\n<function=get_weather>\n</function>\n</tool_call>",
         );
     }
 }

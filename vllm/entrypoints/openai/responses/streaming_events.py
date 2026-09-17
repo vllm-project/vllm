@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Streaming SSE event builders for the Responses API.
+"""Streaming SSE event builders for the Responses API.
 
 Pure functions that translate streaming state + delta data into
 OpenAI Response API SSE events. Used by the streaming event
@@ -58,10 +57,11 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
@@ -70,6 +70,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
+)
+from vllm.entrypoints.openai.responses.utils import (
+    build_responses_tool_call_name_map,
+    resolve_responses_tool_call_name,
 )
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
@@ -120,8 +124,7 @@ def is_mcp_tool_by_namespace(
     recipient: str | None,
     allowed_function_tool_names: frozenset[str] | None = None,
 ) -> bool:
-    """
-    Determine if a tool call is an MCP tool based on recipient prefix.
+    """Determine if a tool call is an MCP tool based on recipient prefix.
 
     Inverse of :func:`is_function_recipient` — everything that is not
     a function call is an MCP tool.
@@ -662,7 +665,7 @@ def emit_browser_tool_events(
         )
     elif function_name == "find":
         action = response_function_web_search.ActionFind(
-            type="find",
+            type="find_in_page",
             pattern=parsed_args["pattern"],
             # TODO: translate to url
             url=f"cursor:{parsed_args.get('cursor', '')}",
@@ -815,6 +818,7 @@ class SimpleStreamingState:
     accumulated_text: str = ""
     tool_call_id: str = ""
     tool_call_name: str = ""
+    tool_call_namespace: str | None = None
     tool_call_index: int | None = None
     has_emitted_tool_call_delta: bool = False
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
@@ -1016,11 +1020,13 @@ def emit_simple_tool_call_open(
     state: SimpleStreamingState,
     name: str,
     index: int | None,
+    namespace: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
     state.tool_call_id = f"call_{random_uuid()}"
     state.tool_call_name = name
+    state.tool_call_namespace = namespace
     state.tool_call_index = index
     state.accumulated_text = ""
     state.has_emitted_tool_call_delta = False
@@ -1034,6 +1040,7 @@ def emit_simple_tool_call_open(
                 id=state.current_item_id,
                 call_id=state.tool_call_id,
                 name=name,
+                namespace=namespace,
                 arguments="",
                 status="in_progress",
             ),
@@ -1081,6 +1088,7 @@ def emit_simple_tool_call_done(
             item=ResponseFunctionToolCall(
                 type="function_call",
                 name=state.tool_call_name,
+                namespace=state.tool_call_namespace,
                 arguments=state.accumulated_text,
                 status="completed",
                 id=state.current_item_id,
@@ -1089,6 +1097,7 @@ def emit_simple_tool_call_done(
         ),
     )
     state.output_index += 1
+    state.tool_call_namespace = None
     state.current_state = _StateType.NONE
     return events
 
@@ -1134,8 +1143,7 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
 
 class SimpleStreamingEventProcessor:
-    """
-    State-machine processor for the simple (non-Harmony) streaming path.
+    """State-machine processor for the simple (non-Harmony) streaming path.
 
     Core flow:
       1. Resolve the target state from the delta_message
@@ -1166,14 +1174,18 @@ class SimpleStreamingEventProcessor:
         ),
     }
 
-    def __init__(self, state: SimpleStreamingState | None = None) -> None:
+    def __init__(
+        self,
+        state: SimpleStreamingState | None = None,
+        tools: list[Tool] | None = None,
+    ) -> None:
         self.state = state or SimpleStreamingState()
+        self.tool_call_name_map = build_responses_tool_call_name_map(tools)
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
     ) -> tuple[_StateType, Any]:
-        """
-        Decide which state the next delta belongs to.
+        """Decide which state the next delta belongs to.
 
         Priority: TOOL_CALL > REASONING > CONTENT, fallback to NONE.
         For TOOL_CALL the first tool_call object is also returned so
@@ -1191,8 +1203,7 @@ class SimpleStreamingEventProcessor:
         return _StateType.NONE, None
 
     def needs_transition(self, target_state: _StateType, tool_call: Any) -> bool:
-        """
-        Return True when we must close the current state and open a new one.
+        """Return True when we must close the current state and open a new one.
 
         Two cases trigger a transition:
           1. The target state differs from the current state
@@ -1224,8 +1235,15 @@ class SimpleStreamingEventProcessor:
         handlers = self._STATE_HANDLERS[target_state]
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
+            call_name = resolve_responses_tool_call_name(
+                tool_call.function.name,
+                tool_call_name_map=self.tool_call_name_map,
+            )
             return handlers.open_fn(
-                self.state, tool_call.function.name, tool_call.index
+                self.state,
+                call_name.name,
+                tool_call.index,
+                call_name.namespace,
             )
         return handlers.open_fn(self.state)
 

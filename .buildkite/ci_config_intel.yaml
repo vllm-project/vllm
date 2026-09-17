@@ -3,6 +3,7 @@ job_dirs:
   - ".buildkite/intel_jobs"
 run_all_patterns:
   - ".buildkite/ci_config_intel.yaml"
+  - ".buildkite/scripts/hardware_ci/run-intel-test.sh"
   - "docker/Dockerfile"
   - "docker/Dockerfile.xpu"
   - "CMakeLists.txt"

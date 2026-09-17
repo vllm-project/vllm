@@ -6,6 +6,7 @@ import transformers
 from packaging import version
 from transformers import AutoModel
 
+from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
@@ -34,6 +35,11 @@ CHECKPOINT_TO_HF_MAPPER = {
     "model.": "model.language_model.",
 }
 
+HANDELSBLATT_IMAGE_URL = (
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/jinavl-handelsblatt-preview.png"
+)
+PAPER_IMAGE_URL = f"{VLLM_S3_BUCKET_URL}/multimodal_asset/jinavl-paper-11.png"
+
 # Shared long text for test data
 LONG_TEXT_DOC = """We present ReaderLM-v2, a compact 1.5 billion parameter language model designed for efficient
 web content extraction. Our model processes documents up to 512K tokens, transforming messy HTML
@@ -50,12 +56,8 @@ lower computational requirements."""  # noqa: E501
 TEXT_IMAGE_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
+        {"image": PAPER_IMAGE_URL},
     ],
 }
 
@@ -68,11 +70,7 @@ TEXT_TEXT_TEST_DATA = {
 }
 
 IMAGE_TEXT_TEST_DATA = {
-    "query": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        }
-    ],
+    "query": [{"image": PAPER_IMAGE_URL}],
     "documents": [
         {"text": LONG_TEXT_DOC},
         {"text": "数据提取么?为什么不用正则啊,你用正则不就全解决了么?"},
@@ -80,18 +78,10 @@ IMAGE_TEXT_TEST_DATA = {
 }
 
 IMAGE_IMAGE_TEST_DATA = {
-    "query": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        }
-    ],
+    "query": [{"image": PAPER_IMAGE_URL}],
     "documents": [
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
+        {"image": PAPER_IMAGE_URL},
     ],
 }
 
@@ -99,13 +89,9 @@ TEXT_MIXED_DOCS_TEST_DATA = {
     "query": [{"text": "slm markdown"}],
     "documents": [
         {"text": LONG_TEXT_DOC},
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-        },
+        {"image": PAPER_IMAGE_URL},
         {"text": "数据提取么？为什么不用正则啊,你用正则不就全解决了么?"},
-        {
-            "image": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-        },
+        {"image": HANDELSBLATT_IMAGE_URL},
     ],
 }
 
@@ -122,8 +108,7 @@ def _normalize_image(image_val: str) -> str:
 def create_score_multimodal_param(
     content_parts: list[dict],
 ) -> list[ScoreMultiModalParam]:
-    """
-    Create a ScoreMultiModalParam from a list of content dictionaries.
+    """Create a ScoreMultiModalParam from a list of content dictionaries.
 
     Each dict supports the following formats:
     - Text: {'text': 'content'}
@@ -271,7 +256,7 @@ def test_model_text_image(
     model: str,
     dtype: str,
 ) -> None:
-    """Visual Documents Reranking"""
+    """Visual Documents Reranking."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -294,7 +279,7 @@ def test_model_text_text(
     model: str,
     dtype: str,
 ) -> None:
-    """Textual Documents Reranking"""
+    """Textual Documents Reranking."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -317,7 +302,7 @@ def test_model_image_text(
     model: str,
     dtype: str,
 ) -> None:
-    """Image Querying for Textual Documents"""
+    """Image Querying for Textual Documents."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -340,7 +325,7 @@ def test_model_image_image(
     model: str,
     dtype: str,
 ) -> None:
-    """Image Querying for Image Documents"""
+    """Image Querying for Image Documents."""
     _run_test(
         hf_runner,
         vllm_runner,
@@ -363,7 +348,7 @@ def test_model_text_mixed_documents(
     model: str,
     dtype: str,
 ) -> None:
-    """Text Query for Mixed Text and Image Documents"""
+    """Text Query for Mixed Text and Image Documents."""
     _run_test(
         hf_runner,
         vllm_runner,

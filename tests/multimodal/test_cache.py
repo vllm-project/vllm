@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
     MultiModalCache,
+    MultiModalCacheMissError,
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
@@ -90,7 +94,7 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
@@ -144,10 +148,11 @@ def _compare_caches(
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
-        MultiModalHasher.hash_kwargs(item=item.get_data()) for item in all_items
+        MultiModalHasher.hash_kwargs("blake3", item=item.get_data())
+        for item in all_items
     ]
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
@@ -229,6 +234,203 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         vllm_config_ipc_enabled,
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
+
+
+class _StubModelConfig:
+    """Minimal model-config stand-in: the cache classes only call
+    get_multimodal_config(), so this lets us construct them directly without a
+    real model, keeping this unit test free of any Hugging Face / network lookup.
+    """
+
+    def __init__(self, mm_processor_cache_gb: float) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_oversized_item_is_served_uncached():
+    """Items larger than the processor cache must not crash insert.
+
+    cachetools.LRUCache raises ValueError("value too large") when a single
+    item exceeds maxsize. Engine profiling uses a max-size dummy item, so this
+    used to abort EngineCore startup (vllm-project/vllm#52835). Skip the
+    insert and serve the item uncached instead.
+    """
+    # 1 KiB cache; a 4 KiB item cannot fit even if the cache is empty.
+    model_config = _StubModelConfig(mm_processor_cache_gb=1024 / GiB_bytes)
+    item = MultiModalKwargsItem.dummy(nbytes=4096)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+
+    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    assert p0_only.get_and_update_item((item, []), "big")[0] is item
+    assert not p0_only.is_cached_item("big")
+    assert p0_only.get_and_update_item((small, []), "small")[0] is small
+    assert p0_only.is_cached_item("small")
+
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    assert p0.get_and_update_item((item, []), "big")[0] is item
+    assert not p0.is_cached_item("big")
+    assert p1.get_and_update_item(item, "big") is item
+    assert "big" not in p1._cache
+
+
+def test_mm_cache_miss_raises_and_recovers():
+    """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
+
+    Reproduces the production failure: the P0 sender cache believes an item is
+    cached on P1 (so it sends ``data=None``), but the P1 receiver cache does not
+    have it. The receiver must raise ``MultiModalCacheMissError`` (carrying the
+    hash) instead of asserting; ``P0.invalidate()`` must drop the stale shadow
+    entry; and resending the item with data must repopulate both caches.
+
+    Caches are built directly (not via the registry) so the test needs no real
+    model or network.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    # Drift: the item reaches P1 with no data (P0 would have sent data=None on a
+    # stale HIT) but P1 does not have it. Must raise a typed, retryable error
+    # carrying the hash -- not assert.
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_item(None, mm_hash)
+    assert exc_info.value.mm_hashes == [mm_hash]
+
+    # Give P0 a (now stale) shadow entry for the hash.
+    miss = p0.get_and_update_item((item, []), mm_hash)
+    assert miss[0] is item  # MISS path returns the data to forward to P1
+    assert p0.is_cached_item(mm_hash)
+    # On the next request P0 short-circuits to data=None -- the drift bug when
+    # P1 lacks the item.
+    hit = p0.get_and_update_item((item, []), mm_hash)
+    assert hit[0] is None
+
+    # Recovery: drop the stale P0 entry so the client's resend-with-data takes
+    # the MISS path again and repopulates P1.
+    p0.invalidate(mm_hash)
+    assert not p0.is_cached_item(mm_hash)
+
+    resent = p0.get_and_update_item((item, []), mm_hash)
+    assert resent[0] is item  # MISS again -> data is resent
+    assert p1.get_and_update_item(item, mm_hash) == item  # P1 now caches it
+    # A subsequent uuid-only request now succeeds on P1.
+    assert p1.get_and_update_item(None, mm_hash) == item
+
+
+def test_mm_cache_miss_batches_all_drifted_hashes():
+    """All hashes drifted within one request must surface in a single error.
+
+    Otherwise a request with k drifted items needs k client retries (each resend
+    un-shadows only the one reported hash). get_and_update_features collects every
+    miss and raises once, so a single retry recovers the whole request -- while the
+    non-drifted items in the same request are still ingested.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    # A and C carry data; B, D, E arrive data=None (stale P0 shadow HITs) but P1
+    # has none of them -- all three must be reported together, in order.
+    features = [
+        _feature("A", item),
+        _feature("B", None),
+        _feature("C", item),
+        _feature("D", None),
+        _feature("E", None),
+    ]
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_features(features)
+    assert exc_info.value.mm_hashes == ["B", "D", "E"]
+    # The non-drifted items were still ingested into P1 before the raise.
+    assert "A" in p1._cache and "C" in p1._cache
+
+
+def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
+    """Regression test for the EngineCore crash with prefix caching + SHM cache.
+
+    On a repeated request, prefix caching can fully cover an item's
+    placeholder range, so strip_covered_mm_data() drops its payload: uncached
+    items arrive at the worker with data=None, while SHM-cached items keep
+    their address descriptor. Before the fix the SHM receiver asserted on the
+    None item, terminating EngineCore on the second identical request
+    (vllm-project/vllm#54994). The address item must still be resolved and
+    acknowledged so the object stays reclaimable.
+    """
+    monkeypatch.setenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_prefix_covered_items"
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(world_size=1),
+        model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
+    )
+    p0 = ShmObjectStoreSenderCache(vllm_config)  # type: ignore[arg-type]
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())  # type: ignore[arg-type]
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=100),
+            mm_hash=mm_hash,
+        )
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=1024)
+
+    try:
+        # Request 1 (sender miss): the payload is put into SHM; the worker
+        # receives an address descriptor and resolves it.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item, _ = p0.get_and_update_item((item, []), mm_hash)
+        first = _feature(mm_hash, address_item)
+        p1.get_and_update_features([first])
+        assert torch.equal(first.data["dummy"].data, item["dummy"].data)
+
+        # Request 2 (identical, fully prefix-covered): the sender hit takes
+        # writer references (touch + get_cached) and returns the address
+        # descriptor; the scheduler strips the covered uncached payload to
+        # data=None.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item_2, _ = p0.get_and_update_item(None, mm_hash)
+        covered_uncached = _feature("image_B", None)
+        covered_cached = _feature(mm_hash, address_item_2)
+
+        # Pre-fix this asserted in touch_receiver_cache_item and terminated
+        # EngineCore.
+        p1.get_and_update_features([covered_uncached, covered_cached])
+
+        assert covered_uncached.data is None
+        # The address item is resolved to the cached payload.
+        assert torch.equal(covered_cached.data["dummy"].data, item["dummy"].data)
+
+        # The hit's writer references were acknowledged by the worker, so the
+        # object remains reclaimable instead of permanently protected.
+        p0._shm_cache.free_unused()
+        assert not p0._shm_cache.is_cached(mm_hash)
+    finally:
+        p1._shm_cache.close()
+        p0.close()
 
 
 def _run_test_cache_eviction_lru(

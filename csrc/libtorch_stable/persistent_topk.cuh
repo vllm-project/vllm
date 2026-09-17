@@ -661,7 +661,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
                            uint32_t* shared_scalars, uint32_t* shared_ordered,
                            RadixRowState* state, uint32_t cta_in_group,
                            uint32_t ctas_per_group, int& barrier_phase,
-                           uint32_t iter, uint32_t tx) {
+                           uint32_t radix_iter, uint32_t tx) {
   const uint32_t my_chunk_end = (my_chunk_start + chunk_size < seq_len)
                                     ? my_chunk_start + chunk_size
                                     : seq_len;
@@ -718,7 +718,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
   // -- Stage 2: 4 rounds of radix select --
   for (uint32_t round = 0; round < 4; round++) {
-    const uint32_t global_round = iter * 4 + round;
+    const uint32_t global_round = radix_iter * 4 + round;
     const uint32_t shift = 24 - round * 8;
     const uint32_t prefix = shared_scalars[0];
     const uint32_t remaining_k = shared_scalars[1];
@@ -898,6 +898,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   RadixRowState* state = &params.row_states[group_id];
 
   int barrier_phase = 0;
+  uint32_t radix_iter = 0;
   const uint32_t total_iters = (params.num_rows + num_groups - 1) / num_groups;
 
   for (uint32_t iter = 0; iter < total_iters; iter++) {
@@ -905,7 +906,26 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     uint32_t row_idx = group_id + iter * num_groups;
     if (row_idx >= params.num_rows) break;
 
-    const uint32_t seq_len = params.lengths[row_idx];
+    // Clamp the row length before any decision is made on it.
+    //
+    // `lengths` is int32 and is consumed here as uint32, so a negative value
+    // (e.g. a padded decode slot whose per-token context length underflowed)
+    // would reinterpret as ~4e9 and sail past every threshold below. Any
+    // value beyond the row width would also read into the next row.
+    //
+    // Clamping to max_seq_len additionally keeps this per-row decision
+    // consistent with the `cta_in_group != 0` early exit above, which is
+    // taken from the host-side scalar: when max_seq_len <= RADIX_THRESHOLD
+    // the non-leader CTAs return immediately, so a leader that reached the
+    // cooperative radix path would wait on the inter-CTA barrier for peers
+    // that no longer exist and spin until the kernel is killed.
+    const int32_t raw_len = params.lengths[row_idx];
+    const uint32_t row_bound =
+        params.stride < params.max_seq_len ? params.stride : params.max_seq_len;
+    const uint32_t non_negative_len =
+        raw_len > 0 ? static_cast<uint32_t>(raw_len) : 0u;
+    const uint32_t seq_len =
+        non_negative_len < row_bound ? non_negative_len : row_bound;
     int32_t* row_output = params.output + row_idx * params.top_k;
     const float* row_input = params.input + row_idx * params.stride;
 
@@ -930,7 +950,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     radix_topk<TopK, VEC_SIZE>(
         row_input, row_output, seq_len, my_chunk_start, chunk_size,
         local_histogram, suffix_sum, shared_scalars, shared_ordered, state,
-        cta_in_group, ctas_per_group, barrier_phase, iter, tx);
+        cta_in_group, ctas_per_group, barrier_phase, radix_iter, tx);
+    radix_iter++;
   }
 }
 
@@ -1009,41 +1030,34 @@ constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
 constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
     sizeof(int) * 2 * FILTERED_TOPK_SMEM_INPUT_SIZE;  // 128KB
 
-/*!
- * \brief Filtered Top-K kernel for ragged sequences.
- *
- * \tparam DType Data type (float, half, nv_bfloat16)
- * \tparam IdType Index type (int32_t)
- * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
- */
-template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048,
-          bool UsePredicatedShortLoads = false>
-__global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
-    FilteredTopKUnifiedKernel(const DType* __restrict__ input,
-                              IdType* __restrict__ output,
-                              const IdType* __restrict__ lengths,
-                              uint32_t num_rows, uint32_t top_k,
-                              uint32_t max_len) {
+template <uint32_t MAX_K>
+struct FilteredTopKStorage {
+  alignas(128) int histogram[2][256 + 128];
+  alignas(128) int counter;
+  alignas(128) int threshold_bin;
+  alignas(128) int num_input[2];
+  alignas(128) int indices[MAX_K];
+  int last_remain;
+};
+
+// With CheckOverflow, return false before using a truncated stash so the caller
+// can retry with exact full-row selection.
+template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K,
+          bool UsePredicatedShortLoads, bool CheckOverflow = false>
+__device__ __forceinline__ bool filtered_topk_row(
+    const DType* score, IdType* dst, int length, uint32_t top_k,
+    FilteredTopKStorage<MAX_K>& storage) {
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
   constexpr int RADIX = 256;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
-
-  const uint32_t bid = blockIdx.x;
   const int tx = threadIdx.x;
-
-  if (bid >= num_rows) return;
-
-  const int length =
-      (lengths != nullptr) ? lengths[bid] : static_cast<int>(max_len);
-  const DType* score = input + bid * max_len;
-  IdType* dst = output + bid * top_k;
 
   // Trivial case: length <= top_k
   if (length <= static_cast<int>(top_k)) {
     for (int i = tx; i < static_cast<int>(top_k); i += BLOCK_SIZE) {
       dst[i] = (i < length) ? static_cast<IdType>(i) : static_cast<IdType>(-1);
     }
-    return;
+    return true;
   }
 
   // Short path
@@ -1056,16 +1070,14 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
                                                   _smem_reg);
     }
-    return;
+    return true;
   }
 
-  // Static shared memory
-  alignas(128) __shared__ int s_histogram_buf[2][RADIX + 128];
-  alignas(128) __shared__ int s_counter;
-  alignas(128) __shared__ int s_threshold_bin_id;
-  alignas(128) __shared__ int s_num_input[2];
-  alignas(128) __shared__ int s_indices[MAX_K];
-
+  auto& s_histogram_buf = storage.histogram;
+  auto& s_counter = storage.counter;
+  auto& s_threshold_bin_id = storage.threshold_bin;
+  auto& s_num_input = storage.num_input;
+  auto& s_indices = storage.indices;
   auto& s_histogram = s_histogram_buf[0];
 
   // Dynamic shared memory for input double buffer
@@ -1192,10 +1204,13 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     // Stage 2: refine with 8bit radix passes
 #pragma unroll
     for (int round = 0; round < NUM_ROUNDS; ++round) {
-      __shared__ int s_last_remain;
+      auto& s_last_remain = storage.last_remain;
       const auto r_idx = round % 2;
 
       const auto _raw_num_input = s_num_input[r_idx];
+      if constexpr (CheckOverflow) {
+        if (_raw_num_input > SMEM_INPUT_SIZE) return false;
+      }
       const auto num_input =
           (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
 
@@ -1263,6 +1278,30 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     const int idx = s_indices[base];
     dst[base] = static_cast<IdType>(idx);
   }
+  return true;
+}
+
+/*!
+ * \brief Filtered Top-K kernel for ragged sequences.
+ *
+ * \tparam DType Data type (float, half, nv_bfloat16)
+ * \tparam IdType Index type (int32_t)
+ * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
+ */
+template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048,
+          bool UsePredicatedShortLoads = false>
+__global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
+    FilteredTopKUnifiedKernel(const DType* __restrict__ input,
+                              IdType* __restrict__ output,
+                              const IdType* __restrict__ lengths,
+                              uint32_t num_rows, uint32_t top_k,
+                              uint32_t max_len) {
+  const uint32_t bid = blockIdx.x;
+  if (bid >= num_rows) return;
+  const int length = lengths ? lengths[bid] : static_cast<int>(max_len);
+  __shared__ FilteredTopKStorage<MAX_K> storage;
+  filtered_topk_row<DType, IdType, VEC_SIZE, MAX_K, UsePredicatedShortLoads>(
+      input + bid * max_len, output + bid * top_k, length, top_k, storage);
 }
 
 // Helper to compute GCD for VEC_SIZE selection

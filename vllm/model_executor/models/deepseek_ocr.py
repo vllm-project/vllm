@@ -3,7 +3,7 @@
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -46,6 +46,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -65,6 +66,7 @@ from vllm.v1.sample.logits_processor import (
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
@@ -77,13 +79,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - p: Number of patches
-        - base_size: Base size of the processor
-        - image_size: Image size of the processor
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - p: Number of patches
+    - base_size: Base size of the processor
+    - image_size: Image size of the processor
     """
 
     type: Literal["pixel_values"]
@@ -183,6 +184,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
         )
         if ngram_size is None:
             return None
+        assert isinstance(ngram_size, int) and isinstance(window_size, int)
 
         whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
         return NoRepeatNGramLogitsProcessor(
@@ -284,27 +286,19 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if "text" in hf_inputs.hf_data:
+            hf_inputs.hf_data["prompt"] = hf_inputs.hf_data.pop("text")
 
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
-
-        return processed_outputs
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,
@@ -316,7 +310,9 @@ class DeepseekOCRMultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             images_crop=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
@@ -341,6 +337,7 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -458,7 +455,11 @@ class DeepseekOCRForCausalLM(
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
+            return None
+        assert isinstance(pixel_values, torch.Tensor)
+        assert images_crop is None or isinstance(images_crop, torch.Tensor)
+        if torch.sum(pixel_values).item() == 0:
             return None
 
         # Use actual tensor spatial dim instead of hardcoded
@@ -622,9 +623,7 @@ class DeepseekOCRForCausalLM(
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",
@@ -659,8 +658,7 @@ class DeepseekOCRForCausalLM(
         self,
         image_spatial_crop: torch.Tensor | None = None,
     ) -> tuple[int, int, int, int]:
-        """
-        Return (num_input_tokens, num_output_tokens, global_output_token,
+        """Return (num_input_tokens, num_output_tokens, global_output_token,
         local_output_token) for a single image described by
         ``image_spatial_crop``.
         """
@@ -674,7 +672,8 @@ class DeepseekOCRForCausalLM(
         num_input_tokens = global_input_side**2
 
         if is_tiled:
-            num_patches = image_spatial_crop.prod(dim=-1)
+            assert image_spatial_crop is not None
+            num_patches = int(image_spatial_crop.prod().item())
             num_input_tokens += num_patches * (local_input_side**2)
 
         global_output_token = self.global_image_output_token
@@ -697,9 +696,15 @@ class DeepseekOCRForCausalLM(
             modalities=["image"],
             buffer_keys=["pixel_values"],
             out_hidden_size=self.projector_config.n_embed,
-            enable_dual_path_graph=True,
-            global_token_per_image=self.global_image_output_token,
-            local_token_per_patch=self.single_patch_output_token,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.global_image_output_token
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.single_patch_output_token,
+                    allow_zero_tokens=True,
+                ),
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -730,8 +735,10 @@ class DeepseekOCRForCausalLM(
                 EncoderItemSpec(
                     input_size=num_input_tokens,
                     output_tokens=num_output_tokens,
-                    global_output_tokens=global_output_token,
-                    local_output_tokens=local_output_token,
+                    path_output_tokens={
+                        "global": global_output_token,
+                        "local": local_output_token,
+                    },
                 )
             )
         return item_specs
@@ -778,6 +785,7 @@ class DeepseekOCRForCausalLM(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         assert path in ("global", "local")
 
@@ -827,8 +835,7 @@ class DeepseekOCRForCausalLM(
         self,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode batched global images with newline tokens inserted.
+        """Encode batched global images with newline tokens inserted.
         Output shape: ``[B * 272, n_embed]``.
         """
         bsz = pixel_values.shape[0]
@@ -853,8 +860,7 @@ class DeepseekOCRForCausalLM(
         self,
         images_crop: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Encode local patches without newline insertion (newlines are added later
+        """Encode local patches without newline insertion (newlines are added later
         in ``postprocess_encoder_output`` via ``_assemble_patch_grid``).
         Output shape: ``[P * 100, n_embed]``.
         """
@@ -917,32 +923,33 @@ class DeepseekOCRForCausalLM(
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
-        """
-        Assemble per-image embeddings from global and local encoder outputs.
+        """Assemble per-image embeddings from global and local encoder outputs.
 
-        ``output`` contains global-image features with newlines already
+        ``output['global']`` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):
         ``[B * 272, n_embed]``.
 
-        ``local_output`` contains local-patch features without
+        ``output['local']`` contains local-patch features without
         newlines (from CUDA graph replay or eager fallback):
         ``[P * 100, n_embed]``. May be ``None`` if no patches in batch.
 
         This method:
-        1. Splits ``output`` into per-image global portions.
-        2. Splits ``local_output`` into per-image patch groups.
+        1. Splits ``output['global']`` into per-image global portions.
+        2. Splits ``output['local']`` into per-image patch groups.
         3. For each image: assembles patch grid with newlines via
            ``_assemble_patch_grid``, then concatenates
            ``[local_tiled, global, view_seperator]``.
         """
+        output = outputs["global"]
+        local_output = outputs.get("local")
+        assert batch_mm_kwargs is not None
         bsz = len(indices)
         n_embed = output.shape[-1]
 

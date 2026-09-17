@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
-    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -46,20 +45,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     @property
     def wraps_legacy_quant_method(self) -> bool:
         return not self.old_quant_method.supports_internal_mk
-
-    @staticmethod
-    def make(
-        routed_experts: "RoutedExperts",
-        old_quant_method: FusedMoEMethodBase,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-    ) -> "FusedMoEModularMethod":
-        return FusedMoEModularMethod(
-            old_quant_method,
-            FusedMoEKernel(
-                prepare_finalize,
-                old_quant_method.select_gemm_impl(prepare_finalize, routed_experts),
-            ),
-        )
 
     @property
     def skip_forward_padding(self) -> bool:

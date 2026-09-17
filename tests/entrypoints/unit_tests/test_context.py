@@ -71,10 +71,10 @@ async def generate_mock_outputs(
 class FakeHarmonyParser(HarmonyParser):
     def __init__(self):
         # Skip HarmonyParser initialization and script outputs directly.
-        self.reasoning_parser = None
-        self.tool_parser = None
+        self._reasoning_parser = None
+        self._tool_parser = None
         self._chunk_results: list[ChunkResult] = []
-        self._flush_results: list[Segment | None] = []
+        self._flush_results: list[list[Segment]] = []
         self.processed_chunks: list[list[int]] = []
 
     def enqueue_chunk_result(
@@ -89,7 +89,7 @@ class FakeHarmonyParser(HarmonyParser):
             )
         )
 
-    def enqueue_flush_result(self, segment: Segment | None) -> None:
+    def enqueue_flush_result(self, segment: list[Segment]) -> None:
         self._flush_results.append(segment)
 
     def process_chunk(self, token_ids) -> ChunkResult:
@@ -98,10 +98,10 @@ class FakeHarmonyParser(HarmonyParser):
             return self._chunk_results.pop(0)
         return ChunkResult(segments=[], reasoning_token_count=0)
 
-    def flush(self) -> Segment | None:
+    def flush(self) -> list[Segment]:
         if self._flush_results:
             return self._flush_results.pop(0)
-        return None
+        return []
 
 
 def make_harmony_context(
@@ -544,7 +544,6 @@ async def test_streaming_multi_turn_token_counting():
 @pytest.mark.asyncio
 async def test_streaming_message_synchronization():
     """Completed messages from append-local and flush segments sync into context."""
-
     # Create a streaming context with some initial messages
     initial_messages = [
         Message(
@@ -598,13 +597,21 @@ async def test_streaming_message_synchronization():
         content=[TextContent(text=response_text)],
         recipient=Role.USER,
     )
-    flush_segment = Segment(
-        channel="commentary",
-        recipient=None,
-        delta="",
-        completed_message=message,
-    )
-    parser.enqueue_flush_result(flush_segment)
+    flush_segments = [
+        Segment(
+            channel="final",
+            recipient=None,
+            delta=response_text,
+            completed_message=None,
+        ),
+        Segment(
+            channel="final",
+            recipient=None,
+            delta="",
+            completed_message=message,
+        ),
+    ]
+    parser.enqueue_flush_result(flush_segments)
 
     # Create another output to trigger synchronization via flush()
     context.append_output(
@@ -618,8 +625,9 @@ async def test_streaming_message_synchronization():
     assert context.num_init_messages == 1
     assert context._messages[2].content[0].text == response_text
     assert context.last_append_flush_status is True
-    assert len(context.last_append_segments) == 1
-    assert context.last_append_segments[0].completed_message is message
+    assert len(context.last_append_segments) == 2
+    assert context.last_append_segments[-2].delta == response_text
+    assert context.last_append_segments[-1].completed_message is message
 
 
 def test_turn_metrics_copy_and_reset():
@@ -674,6 +682,7 @@ def create_simple_context_output(
     prompt="Test prompt",
     prompt_token_ids=None,
     num_cached_tokens=0,
+    num_cache_creation_tokens=None,
     logprobs=None,
     finished=True,
 ):
@@ -699,6 +708,7 @@ def create_simple_context_output(
         ],
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -819,6 +829,7 @@ def test_simple_context_token_counting():
             token_ids=[10, 11],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
     context.append_output(
@@ -827,12 +838,14 @@ def test_simple_context_token_counting():
             token_ids=[12],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
 
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
+    assert context.num_cache_creation_tokens == 3
 
 
 def test_simple_context_final_output():

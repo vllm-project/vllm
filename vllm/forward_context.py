@@ -28,8 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass(frozen=True)
 class BatchDescriptor:
-    """
-    Batch descriptor for cudagraph dispatching. We should keep the num of
+    """Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
     batch for cudagraph.
     """
@@ -83,7 +82,10 @@ class DPMetadata:
         num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
-        assert parallel_config.data_parallel_size > 1
+        assert (
+            parallel_config.data_parallel_size > 1
+            or parallel_config.use_sequence_parallel_moe
+        )
         assert parallel_config.is_moe_model is not False
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
@@ -97,8 +99,7 @@ class DPMetadata:
 
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
-        """
-        Context manager for setting self.local_sizes. Same as self.chunked_sizes
+        """Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(
@@ -206,6 +207,15 @@ def is_forward_context_available() -> bool:
     return _forward_context is not None
 
 
+def in_piecewise_cudagraph() -> bool:
+    """Whether the current forward runs in piecewise cudagraph mode (graph
+    segments separated by eager breaks), at capture or replay time."""
+    return (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
@@ -277,14 +287,20 @@ def set_forward_context(
 
     dp_metadata: DPMetadata | None = None
     if (
-        vllm_config.parallel_config.data_parallel_size > 1
+        (
+            vllm_config.parallel_config.data_parallel_size > 1
+            or vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         and vllm_config.parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
-        if num_tokens_across_dp is None:
+        if (
+            num_tokens_across_dp is None
+            and vllm_config.parallel_config.data_parallel_size > 1
+        ):
             assert ubatch_slices is None
             assert num_tokens is not None
             _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
@@ -293,6 +309,9 @@ def set_forward_context(
                 allow_microbatching=False,
             )
             assert num_tokens_across_dp is not None
+        elif num_tokens_across_dp is None:
+            assert num_tokens is not None
+            num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )

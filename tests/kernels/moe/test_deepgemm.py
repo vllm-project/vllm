@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit-test DeepGEMM FP8 and FP4 kernels (no DeepEP).
+"""Unit-test DeepGEMM FP8 and FP4 kernels (no DeepEP).
 Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 """
 
@@ -25,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deepgemm_moe_permute,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
@@ -41,14 +43,42 @@ from vllm.utils.deep_gemm import (
 BLOCK_SIZE = [128, 128]
 
 
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
+    hidden_states = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
+    activations, scales = per_token_group_quant_fp8(
+        hidden_states,
+        group_size=128,
+        use_ue8m0=True,
+    )
+    topk_ids = torch.tensor([[0], [1]], device="cuda", dtype=torch.int64)
+
+    _, permuted_scales, expert_ids, _, _ = deepgemm_moe_permute(
+        aq=activations,
+        aq_scale=scales,
+        topk_ids=topk_ids,
+        local_num_experts=2,
+        expert_map=None,
+        expert_tokens_meta=None,
+    )
+
+    padding = expert_ids < 0
+    assert padding.any()
+    torch.testing.assert_close(
+        permuted_scales[padding],
+        torch.zeros_like(permuted_scales[padding]),
+        rtol=0,
+        atol=0,
+    )
+
+
 def make_block_quant_fp8_weights(
     e: int,
     n: int,
     k: int,
     block_size: list[int],
 ):
-    """
-    Generate (w1, w2) expert weights and their per-block scale tensors
+    """Generate (w1, w2) expert weights and their per-block scale tensors
     in FP8 block-quantized format.
 
       w1 shape: (E, 2N, K)
@@ -89,8 +119,7 @@ def make_block_quant_fp8_weights(
 
 
 def run_single_case(m, n, k, topk, num_experts, block_size):
-    """
-    Run one (M,N,K) configuration on a single GPU and assert DeepGEMM ==
+    """Run one (M,N,K) configuration on a single GPU and assert DeepGEMM ==
     Triton baseline within tolerance.
     """
     tokens_bf16 = (
@@ -216,8 +245,7 @@ def make_mxfp4_weights(
     n: int,
     k: int,
 ):
-    """
-    Generate (w1, w2) expert weights in MXFP4 packed format with float32 scales,
+    """Generate (w1, w2) expert weights in MXFP4 packed format with float32 scales,
     plus BF16 reference weights for validation.
 
       w1 shape: (E, 2N, K//2) uint8    — packed FP4
@@ -278,8 +306,7 @@ def _bf16_moe_reference(x, w1, w2, topk_weights, topk_ids):
 
 
 def run_single_fp4_case(m, n, k, topk, num_experts):
-    """
-    Run one (M,N,K) configuration with FP4 weights on DeepGEMM and assert
+    """Run one (M,N,K) configuration with FP4 weights on DeepGEMM and assert
     DeepGEMM FP4 == BF16 reference within tolerance.
     """
     tokens_bf16 = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * (k**-0.5)
@@ -349,6 +376,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
 FP4_MNKs = [
     (128, 4096, 4096),  # DeepSeek V4 shape
     (256, 2048, 2048),  # Half-size variant
+    (128, 384, 3584),  # Kimi-K3 TP8 latent-MoE shape
 ]
 
 FP4_TOPKS = [2]

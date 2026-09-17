@@ -14,6 +14,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 
@@ -337,3 +338,21 @@ def test_async_progressive_load_failure(
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert scheduler.failed_recving_kv_req_ids == {request.request_id}
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
+
+
+@pytest.mark.cpu_test
+def test_block_level_load_failure_fails_closed_with_multiple_groups():
+    """Block-level invalid-block reporting is rejected on multi-group layouts.
+
+    Block IDs are only unique within a group, so the scheduler cannot map
+    them back to requests; connectors must report failed_recving instead.
+    """
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(
+        vllm_config,
+        kv_cache_config=make_kv_cache_config(block_size=16, swa_enabled=True),
+    )
+    assert len(scheduler.kv_cache_config.kv_cache_groups) == 2
+
+    with pytest.raises(RuntimeError, match="failed_recving"):
+        scheduler._handle_invalid_blocks({1}, {})

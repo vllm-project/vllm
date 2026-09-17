@@ -111,6 +111,7 @@ def split_tensor_along_last_dim(
 
     Returns:
         A list of Tensors
+
     """
     # Get the size and dimension.
     last_dim = tensor.dim() - 1
@@ -333,7 +334,6 @@ class StatelessProcessGroup:
     def barrier(self, timeout: float = 30.0):
         """A robust barrier to synchronize all ranks.
 
-
         Uses a multi-phase approach to ensure all processes reach the barrier
         before proceeding:
 
@@ -351,6 +351,7 @@ class StatelessProcessGroup:
 
         Raises:
             RuntimeError: If coordination fails or times out
+
         """
         # Generate a barrier ID that is globally unique
         try:
@@ -533,14 +534,23 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
 def init_gloo_process_group(
     prefix_store: PrefixStore,
     group_rank: int,
     group_size: int,
     timeout: timedelta,
 ) -> ProcessGroup:
-    """
-    Stateless init ProcessGroup with gloo backend compatible with
+    """Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
     with suppress_stdout():
@@ -573,8 +583,7 @@ def stateless_init_torch_distributed_process_group(
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
-    """
-    A replacement for `torch.distributed.init_process_group` that does not
+    """A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state. The created ProcessGroup object can be used for
     some operations such as `allreduce`, because it does not depend on the
     global rank. However, some operations such as `broadcast` cannot be used
@@ -616,6 +625,10 @@ def stateless_init_torch_distributed_process_group(
         gloo_timeout = get_cpu_distributed_timeout_or_none()
         if gloo_timeout is not None:
             timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(
@@ -671,9 +684,8 @@ def stateless_init_torch_distributed_process_group(
 
 
 def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
-    """
-    Destroy ProcessGroup returned by
-        stateless_init_torch_distributed_process_group().
+    """Destroy ProcessGroup returned by
+    stateless_init_torch_distributed_process_group().
     """
     pg.shutdown()
     _unregister_process_group(pg.group_name)
@@ -692,6 +704,7 @@ def get_worker_rank_suffix(global_rank: int | None = None) -> str:
     Returns:
         A string suffix identifying the worker's position in the
         distributed topology.
+
     """
     from vllm.distributed.parallel_state import (
         get_dcp_group,

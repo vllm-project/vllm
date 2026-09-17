@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -17,8 +20,36 @@ fn default_temperature() -> f32 {
     1.0
 }
 
+fn default_watermarking() -> bool {
+    true
+}
+
 fn default_max_tokens() -> u32 {
     16
+}
+
+///
+/// Parameters for detecting repetitive N-gram patterns in output tokens.
+///
+/// Mirrors Python's `RepetitionDetectionParams`:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L109-L144>
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepetitionDetectionParams {
+    /// Maximum N-gram size to check. 0 disables detection.
+    pub max_pattern_size: u32,
+    /// Minimum N-gram size to check. Defaults to 1 when zero.
+    #[serde(default)]
+    pub min_pattern_size: u32,
+    /// Minimum number of repetitions to trigger detection (must be >= 2).
+    pub min_count: u32,
+}
+
+impl RepetitionDetectionParams {
+    /// Return `true` when the params are effectively disabled (max_pattern_size
+    /// is 0).
+    pub fn is_disabled(&self) -> bool {
+        self.max_pattern_size == 0
+    }
 }
 
 /// Engine-core-facing sampling parameters for text generation.
@@ -41,6 +72,9 @@ pub struct EngineCoreSamplingParams {
     /// greedy sampling.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_watermarking")]
+    pub watermarking: bool,
     /// Cumulative probability threshold for nucleus sampling.
     #[serde(default = "default_top_p")]
     pub top_p: f32,
@@ -76,6 +110,9 @@ pub struct EngineCoreSamplingParams {
     /// Repetition penalty applied by the sampler.
     #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
+    /// Parameters for detecting repetitive N-gram patterns. `None` disables
+    /// detection.
+    pub repetition_detection: Option<RepetitionDetectionParams>,
     /// Token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
     /// Primary EOS token ID used by engine-core's dedicated EOS stop path.
@@ -115,6 +152,9 @@ pub struct EngineCoreSamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// A value of zero returns routing data for the entire prompt.
+    pub routed_experts_prompt_start: u32,
 }
 
 impl EngineCoreSamplingParams {
@@ -122,6 +162,7 @@ impl EngineCoreSamplingParams {
     pub fn for_test() -> Self {
         Self {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
@@ -134,6 +175,7 @@ impl EngineCoreSamplingParams {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
+            repetition_detection: None,
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
@@ -144,6 +186,7 @@ impl EngineCoreSamplingParams {
             logprob_token_ids: None,
             skip_reading_prefix_cache: None,
             extra_args: None,
+            routed_experts_prompt_start: 0,
         }
     }
 }
@@ -194,6 +237,7 @@ mod tests {
 
         // Omitted fields -> Python defaults.
         assert_eq!(sampling.temperature, 1.0);
+        assert!(sampling.watermarking);
         assert_eq!(sampling.top_p, 1.0);
         assert_eq!(sampling.top_k, 0);
         assert_eq!(sampling.seed, None);
@@ -203,6 +247,7 @@ mod tests {
         assert_eq!(sampling.frequency_penalty, 0.0);
         assert_eq!(sampling.presence_penalty, 0.0);
         assert_eq!(sampling.repetition_penalty, 1.0);
+        assert_eq!(sampling.repetition_detection, None);
         assert_eq!(sampling.logprobs, None);
         assert_eq!(sampling.prompt_logprobs, None);
         assert_eq!(sampling.eos_token_id, None);

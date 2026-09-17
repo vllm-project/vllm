@@ -12,7 +12,8 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.config import VllmConfig
+from vllm import envs
+from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
@@ -55,9 +56,22 @@ class CPUWorker(Worker):
                 allowed_memory_nodes,
             )
 
-        torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
+        # On s390x, numa_node may be a synthetic book ID that doesn't
+        # correspond to a real memory node. Fall back to first visible node.
+        if cpu_core.numa_node in allowed_memory_nodes:
+            memory_node = cpu_core.numa_node
+        else:
+            logger.warning(
+                "CPU group key %s is not a valid memory node. "
+                "Falling back to memory node %s.",
+                cpu_core.numa_node,
+                allowed_memory_nodes[0],
+            )
+            memory_node = allowed_memory_nodes[0]
 
-        memory_status = get_memory_node_info(cpu_core.numa_node)
+        torch.ops._C.init_cpu_memory_env([memory_node])
+
+        memory_status = get_memory_node_info(memory_node)
         memory_fraction = vllm_config.cache_config.gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
@@ -144,8 +158,12 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        init_method = self.distributed_init_method
+        os.environ["VLLM_DIST_IDENT"] = (
+            os.path.basename(init_method.removeprefix("file://"))
+            if init_method.startswith("file://")
+            else init_method.split(":")[-1]
+        )
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,
@@ -154,6 +172,9 @@ class CPUWorker(Worker):
             self.local_rank,
             current_platform.dist_backend,
         )
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -177,8 +198,23 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def _should_warm_up_model(self) -> bool:
+        # VLLM_CPU_CI_ENV always skips warmup to save CI time.
+        if envs.VLLM_CPU_CI_ENV:
+            return False
+        # With eager (CompilationMode.NONE) execution and an explicit KV
+        # cache size, warmup serves no purpose: there's no compiled graph to
+        # prewarm, and the auto KV-cache-size calc below -- which relies on
+        # a warmup forward pass having already bumped RSS to a realistic
+        # steady-state value -- is bypassed whenever the size is explicit.
+        return not (
+            self.compilation_config.mode == CompilationMode.NONE
+            and self.cache_config.kv_cache_memory_bytes is not None
+        )
+
     def determine_available_memory(self) -> int:
-        self.model_runner.warming_up_model()
+        if self._should_warm_up_model():
+            self.model_runner.warming_up_model()
 
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
@@ -239,7 +275,7 @@ class CPUWorker(Worker):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
-        if len(self.model_runner.kv_caches) == 0:
+        if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

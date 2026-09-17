@@ -20,8 +20,11 @@ class XpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+        )
         self.ca_comm: None = None
         if self.use_all2all:
             if self.all2all_backend in ("naive", "allgather_reducescatter"):
@@ -202,11 +205,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -226,8 +227,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -242,8 +242,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
