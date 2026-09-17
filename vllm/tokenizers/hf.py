@@ -23,8 +23,7 @@ class ThreadSafeHFTokenizerMixin:
 
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
-    """
-    If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
@@ -105,8 +104,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
