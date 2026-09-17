@@ -226,8 +226,7 @@ class ECConnectorBase(ABC):
         return None
 
     def get_ec_connector_stats(self) -> "ECConnectorStats | None":
-        """
-        Get the EC connector stats collected during the last interval.
+        """Get the EC connector stats collected during the last interval.
 
         Callable on either a worker-side or scheduler-side connector
         instance: the worker-side instance reports stats gathered during
@@ -358,8 +357,7 @@ class ECConnectorBase(ABC):
     def build_ec_connector_stats(
         cls, data: dict[str, Any] | None = None
     ) -> "ECConnectorStats | None":
-        """
-        ECConnectorStats resolution method. This method allows dynamically
+        """ECConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own ECConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
@@ -373,8 +371,7 @@ class ECConnectorBase(ABC):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> "ECConnectorPromMetrics | None":
-        """
-        Create an ECConnectorPromMetrics subclass which should register
+        """Create an ECConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
