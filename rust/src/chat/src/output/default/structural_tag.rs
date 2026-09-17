@@ -3,6 +3,8 @@
 
 //! Applies xgrammar structural-tag constraints for strict tool calling.
 
+use std::borrow::Cow;
+
 use serde_json::{Value, json};
 use thiserror_ext::AsReport;
 use vllm_engine_core_client::protocol::structured_outputs::{
@@ -82,36 +84,6 @@ pub(super) fn apply_structural_tag_constraint(
     Ok(())
 }
 
-/// The caller-provided response schema from the request's structured outputs
-/// constraint.
-enum CallerResponseSchema {
-    /// A JSON schema that can be scoped into the answer channel.
-    Scopable(Value),
-    /// A constraint that cannot be folded into a structural tag (regex,
-    /// grammar, or choice).
-    NotScopable,
-}
-
-impl CallerResponseSchema {
-    /// Extract the caller response schema from the request, if one is set.
-    fn extract(request: &ChatRequest) -> Option<Self> {
-        let params = request.sampling_params.structured_outputs.as_ref()?;
-        Some(match &params.constraint {
-            // The Json constraint also carries JSON-encoded schema *strings*
-            // (validated upstream); the tag needs the schema value itself.
-            StructuredOutputConstraint::Json(Value::String(raw)) => {
-                match serde_json::from_str::<Value>(raw) {
-                    Ok(schema) => Self::Scopable(schema),
-                    Err(_) => Self::NotScopable,
-                }
-            }
-            StructuredOutputConstraint::Json(schema) => Self::Scopable(schema.clone()),
-            StructuredOutputConstraint::JsonObject => Self::Scopable(json!({"type": "object"})),
-            _ => Self::NotScopable,
-        })
-    }
-}
-
 /// Apply a whole-generation structural tag from the parser's scoped builder,
 /// folding any caller-provided response schema into the answer channel.
 fn apply_scoped_structural_tag_constraint(
@@ -137,19 +109,39 @@ fn apply_scoped_structural_tag_constraint(
         None => false,
     };
 
-    let caller_schema = match CallerResponseSchema::extract(request) {
+    // The caller's response schema, if the constraint can be scoped into the
+    // answer channel. Borrowed where possible: the builder only reads it.
+    let constraint = request
+        .sampling_params
+        .structured_outputs
+        .as_ref()
+        .map(|params| &params.constraint);
+    let caller_schema = match constraint {
+        // The Json constraint also carries JSON-encoded schema *strings*
+        // (validated upstream); the tag needs the schema value itself.
+        Some(StructuredOutputConstraint::Json(Value::String(raw))) => {
+            serde_json::from_str(raw).ok().map(Cow::Owned)
+        }
+        Some(StructuredOutputConstraint::Json(schema)) => Some(Cow::Borrowed(schema)),
+        Some(StructuredOutputConstraint::JsonObject) => Some(Cow::Owned(json!({"type": "object"}))),
+        // Regex, grammar, and choice constraints cannot fold into a
+        // structural tag.
+        _ => None,
+    };
+
+    match &caller_schema {
         // A non-scopable constraint cannot fold into the answer channel, so it
         // cannot be combined with tool calls; reject it honestly instead of
         // silently dropping the caller's constraint.
-        Some(CallerResponseSchema::NotScopable) if forces_tool_channels => {
+        None if constraint.is_some() && forces_tool_channels => {
             bail_unsupported_structured_outputs!(
                 "the constraint cannot be combined with tool calls for this parser"
             );
         }
-        Some(CallerResponseSchema::NotScopable) => return Ok(()),
+        None if !forces_tool_channels => return Ok(()),
         // A forced tool-call turn has no answer channel for the schema to
         // constrain; reject the combination instead of silently dropping it.
-        Some(CallerResponseSchema::Scopable(_))
+        Some(_)
             if matches!(
                 tool_choice,
                 Some(ScopedToolChoice::Required | ScopedToolChoice::Function(_))
@@ -159,19 +151,14 @@ fn apply_scoped_structural_tag_constraint(
                 "the constraint cannot be combined with tool_choice \"required\" or a named tool choice for this parser"
             );
         }
-        Some(CallerResponseSchema::Scopable(schema)) => Some(schema),
-        None => None,
-    };
-
-    if caller_schema.is_none() && !forces_tool_channels {
-        return Ok(());
+        _ => {}
     }
 
     let structural_tag = builder
         .build_scoped(
             request.tools(),
             tool_choice,
-            caller_schema.as_ref(),
+            caller_schema.as_deref(),
             &StructuralTagOptions::default().with_reasoning(false),
         )
         .and_then(|tag| tag.to_json_string())
