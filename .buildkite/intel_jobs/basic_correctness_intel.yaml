@@ -18,7 +18,8 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/
-  - tests/basic_correctness/test_cumem.py
+  - tests/basic_correctness/test_mem.py
+  - tests/basic_correctness/test_cpu_offload.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh

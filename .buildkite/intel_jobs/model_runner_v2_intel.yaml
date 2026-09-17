@@ -83,6 +83,7 @@ steps:
     - vllm/v1/worker/gpu/
     - vllm/v1/worker/gpu_worker.py
     - tests/basic_correctness/test_basic_correctness.py
+    - tests/basic_correctness/_model_correctness.py
     - tests/v1/distributed/test_async_llm_dp.py
     - tests/v1/distributed/test_eagle_dp.py
   commands:
