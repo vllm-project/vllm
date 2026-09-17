@@ -927,6 +927,8 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
+                        if request.skip_reading_prefix_cache:
+                            ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
