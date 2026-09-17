@@ -131,6 +131,13 @@ pub enum OutputGrammarError {
     /// A model-specific structural-tag builder rejected its inputs.
     #[error("failed to build output grammar")]
     Build(#[from] xgrammar_structural_tag::Error),
+    /// A model-specific parser could not project a builder format to its
+    /// visible-output language.
+    #[error("unexpected output grammar shape from `{builder}` builder")]
+    UnexpectedBuilderFormat {
+        /// Builder whose output did not match the parser's known shape.
+        builder: &'static str,
+    },
 }
 
 /// Build the visible (post-reasoning) language from a crate structural-tag
@@ -147,6 +154,19 @@ pub(crate) fn visible_format_from_builder(
     let Some(builder) = builder else {
         return Ok(None);
     };
+
+    format_from_builder(
+        builder,
+        ctx,
+        StructuralTagOptions::default().with_reasoning(false),
+    )
+}
+
+fn format_from_builder(
+    builder: &dyn StructuralTagBuilder,
+    ctx: &OutputGrammarContext<'_>,
+    options: StructuralTagOptions,
+) -> Result<Option<Format>> {
     if !tool_grammar_applies(ctx) {
         return Ok(None);
     }
@@ -155,10 +175,22 @@ pub(crate) fn visible_format_from_builder(
         builder,
         &tool_params(ctx.tools, ctx.tool_strict_level),
         ctx.tool_choice.clone(),
-        StructuralTagOptions::default().with_reasoning(false),
+        options,
     )?;
 
     Ok(Some(structural_tag.format))
+}
+
+#[cfg(test)]
+pub(crate) fn full_format_from_builder_for_test(
+    builder: &dyn StructuralTagBuilder,
+    ctx: &OutputGrammarContext<'_>,
+) -> Result<Option<Format>> {
+    format_from_builder(
+        builder,
+        ctx,
+        StructuralTagOptions::default().with_reasoning(true),
+    )
 }
 
 fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
