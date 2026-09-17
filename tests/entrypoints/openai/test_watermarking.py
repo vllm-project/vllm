@@ -16,7 +16,6 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 
 
@@ -55,23 +54,6 @@ def test_batch_chat_request_preserves_watermarking_opt_out():
     params = converted.to_sampling_params(max_tokens=1, default_sampling_params={})
 
     assert params.watermarking is False
-
-
-@pytest.mark.parametrize(
-    "request_cls,kwargs",
-    [
-        (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hi"}]}),
-        (CompletionRequest, {"prompt": "hi"}),
-        (
-            BatchChatCompletionRequest,
-            {"messages": [[{"role": "user", "content": "hi"}]]},
-        ),
-    ],
-)
-@pytest.mark.parametrize("watermarking", [True, False])
-def test_best_of_is_rejected(request_cls, kwargs, watermarking):
-    with pytest.raises(VLLMValidationError, match="best_of.*not supported"):
-        request_cls(**kwargs, best_of=2, watermarking=watermarking)
 
 
 @pytest.mark.parametrize(

@@ -409,17 +409,6 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def reject_best_of(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("best_of") is not None:
-            raise VLLMValidationError(
-                "`best_of` is not supported.",
-                parameter="best_of",
-                value=data["best_of"],
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def check_cache_salt_support(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
