@@ -1424,6 +1424,74 @@ def test_index_topk_fp8(num_idx_heads: int, query_dtype, query_len: int, stage: 
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.supports_fp8()),
+    reason="FP8 E4M3 Triton indexer requires CUDA with FP8 support.",
+)
+@pytest.mark.parametrize("stage", ["decode", "prefill"])
+@torch.inference_mode()
+def test_index_topk_fp8_quantization_preserves_bf16_selection(stage: str):
+    """Quantizing Q/K preserves prominent blocks and at least 14/16 selections."""
+    torch.manual_seed(3)
+    topk, num_pages, num_idx_heads = 16, 100, 1
+    seq_len = 96 * BLOCK_SIZE + 37
+    planted_blocks = {7, 40, 88}
+    keys = torch.randn(
+        num_pages * BLOCK_SIZE, HEAD_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+    keys = keys * keys.float().pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt().to(
+        torch.bfloat16
+    )
+    query = torch.randn(1, num_idx_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    for block in planted_blocks:
+        keys[block * BLOCK_SIZE + 5] = query[0, 0] * 3
+    block_table = torch.arange(num_pages, dtype=torch.int32, device="cuda").unsqueeze(0)
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+
+    def select(cache: torch.Tensor) -> set[int]:
+        index_query = query.to(cache.dtype)
+        index_cache = cache.view(num_pages, BLOCK_SIZE, HEAD_DIM).contiguous()
+        if stage == "decode":
+            indices = minimax_m3_index_decode(
+                index_query,
+                index_cache,
+                block_table,
+                seq_lens,
+                max_seq_len=seq_len,
+                topk=topk,
+                init_blocks=0,
+                local_blocks=0,
+                num_kv_heads=num_idx_heads,
+                decode_query_len=1,
+                max_decode_query_len=1,
+            )
+        else:
+            cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+            prefix_lens = torch.tensor([seq_len - 1], dtype=torch.int32, device="cuda")
+            score = minimax_m3_index_score(
+                index_query,
+                index_cache,
+                block_table,
+                cu_seqlens_q,
+                seq_lens,
+                prefix_lens,
+                1,
+                seq_len,
+                num_idx_heads,
+            )
+            indices = minimax_m3_index_topk(
+                score, cu_seqlens_q, prefix_lens, 1, topk, 0, 0
+            )
+        return {int(block) for block in indices[0, 0].tolist() if block >= 0}
+
+    selected_bf16 = select(keys)
+    selected_fp8 = select(keys.to(torch.float8_e4m3fn))
+    assert len(selected_bf16) == len(selected_fp8) == topk
+    assert planted_blocks <= selected_bf16
+    assert planted_blocks <= selected_fp8
+    assert len(selected_bf16 & selected_fp8) >= topk - 2
+
+
+@pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="CuteDSL index decode score requires Blackwell.",
 )
