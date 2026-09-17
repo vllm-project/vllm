@@ -208,7 +208,6 @@ def _metadata_launch_pdl() -> bool:
 def _build_qsa_metadata_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
-    common_slot_mapping_ptr,
     block_table_ptr,
     token_to_req_ptr,
     logical_positions_ptr,
@@ -312,9 +311,12 @@ def _build_qsa_metadata_kernel(
             other=-1,
         )
         valid &= physical_block >= 0
-        valid &= (
-            tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
-        )
+        # No ownership gate here. The compressed cache is replicated, so every
+        # rank stores every state. The main slot mapping is DCP-sharded and
+        # holds PAD for a position this rank does not own, and gating on it made
+        # rank 0 store nothing: a state lands where (position + 1) % 8 == 0, and
+        # every such position is odd. The padding tail is already excluded by
+        # `mapped`, so the gate only ever removed owned-elsewhere positions.
         slot = physical_block * storage_block_size + (
             compressed_position % storage_block_size
         )
@@ -434,7 +436,6 @@ def build_qsa_metadata_triton(
     _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
         common_attn_metadata.query_start_loc,
         common_attn_metadata.seq_lens,
-        common_attn_metadata.slot_mapping,
         block_table,
         token_to_req,
         logical_positions,
@@ -524,9 +525,6 @@ def _build_qsa_metadata_torch(
             storage_block_size,
             compress_ratio,
             slot_mapping_buffer,
-        )
-        slot_mapping.masked_fill_(
-            common_attn_metadata.slot_mapping[:num_tokens] < 0, -1
         )
     if k_work_metadata_buffer is not None:
         query_lens = (
