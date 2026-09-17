@@ -10,7 +10,9 @@ Key capabilities:
 - **Per-tensor checksums**: Hashes parameters and persistent weight buffers.
 - **Distributed coverage**: Identifies every checksum by its data-, pipeline-,
   prefill-context-, tensor-, and expert-parallel ranks.
-- **Baseline and compare**: Detects changed, added, or missing tensors.
+- **Stateless comparison**: Detects changed, added, or missing tensors; the
+  caller supplies the baseline, so the check survives load balancing across API
+  server processes.
 - **Weight reset**: Randomizes covered tensors before a weight transfer.
 
 ## Usage
@@ -25,7 +27,7 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B --port 8000
 
 All Weight Checker operations use `POST /weight_checker` with an `action`.
 
-### Calculate checksums and save the baseline
+### Calculate checksums
 
 ```bash
 curl -X POST 'http://localhost:8000/weight_checker' \
@@ -39,20 +41,13 @@ Example response:
 {
   "checksums": {
     "dp0:pp0:pcp0:tp0:ep0:model.embed_tokens.weight": "0123456789abcdef..."
-  },
-  "engines": [
-    {
-      "dp0:pp0:pcp0:tp0:ep0:model.embed_tokens.weight": "0123456789abcdef..."
-    }
-  ],
-  "baseline_created": true
+  }
 }
 ```
 
-The first `checksum` in a verification cycle stores its result as the compare
-baseline. Later `checksum` calls return current values without replacing that
-baseline and return `"baseline_created": false`. Keys use the format
+Keys use the format
 `dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:{tensor_name}`.
+The caller keeps this mapping as the comparison baseline.
 
 ### Reset weights before transfer
 
@@ -62,14 +57,19 @@ curl -X POST 'http://localhost:8000/weight_checker' \
   -d '{"action":"reset"}'
 ```
 
-This randomizes the covered inference tensors without changing the baseline.
+This randomizes the covered inference tensors. The endpoint stores no state,
+so a reset never affects a later comparison.
 
 ### Compare weights with the baseline
+
+Send the mapping saved from the `checksum` call as `baseline`:
 
 ```bash
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
-  -d '{"action":"compare"}'
+  -d '{"action":"compare","baseline":{
+        "dp0:pp0:pcp0:tp0:ep0:model.embed_tokens.weight":"0123456789abcdef..."
+      }}'
 ```
 
 A successful restoration returns:
@@ -82,16 +82,14 @@ A successful restoration returns:
 ```
 
 Changed, added, or missing tensors produce `match: false`, with their fully
-qualified rank and tensor names in `mismatches`.
-
-`compare` is one-shot: it clears the baseline after comparison. Calling it
-again without a new `checksum` returns HTTP 400.
+qualified rank and tensor names in `mismatches`. `compare` without a `baseline`
+object returns HTTP 400.
 
 ### RLHF weight-update workflow
 
 The verification sequence is `checksum -> reset -> checksum -> compare`, with
 the weight transfer or reload occurring between `reset` and the second
-`checksum`:
+`checksum`. Keep the first checksum client-side and pass it to `compare`:
 
 ```bash
 # 1. Hash the original weights and save this result as the baseline.
@@ -111,7 +109,7 @@ curl -X POST 'http://localhost:8000/finish_weight_update' \
   -H 'Content-Type: application/json' \
   -d '{"weight_version":"step-100"}'
 
-# 3. Hash the transferred weights without replacing the original baseline.
+# 3. Hash the transferred weights.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
   -d '{"action":"checksum"}'
@@ -119,7 +117,7 @@ curl -X POST 'http://localhost:8000/weight_checker' \
 # 4. Compare the transferred weights with the original baseline.
 curl -X POST 'http://localhost:8000/weight_checker' \
   -H 'Content-Type: application/json' \
-  -d '{"action":"compare"}'
+  -d '{"action":"compare","baseline":{"...":"..."}}'
 ```
 
 Because the original weights are transferred back after `reset`, the expected
@@ -128,21 +126,19 @@ the operation covers every engine returned by the frontend.
 
 ## HTTP API summary
 
-| Action | Description | Changes checker state | Changes weights |
-| --- | --- | --- | --- |
-| `checksum` | Return checksums and save the first result as the baseline | Creates baseline if absent | No |
-| `reset` | Replace covered tensors with random values | No | Yes |
-| `compare` | Compare current checksums with the baseline | Clears baseline | No |
+| Action | Description | Changes weights |
+| --- | --- | --- |
+| `checksum` | Return per-tensor SHA-256 digests | No |
+| `reset` | Replace covered tensors with random values | Yes |
+| `compare` | Diff current weights against the supplied `baseline` | No |
 
-Invalid or missing actions return HTTP 400. Calling `compare` before
-`checksum` also returns HTTP 400.
+Invalid or missing actions return HTTP 400, and so does `compare` without a
+`baseline` object.
 
 ## Limitations
 
 - Checksum calculation copies every covered tensor to CPU and hashes all its
   bytes, so it should not be placed on a latency-sensitive request path.
-- The baseline is stored in the API server process and is lost on restart.
-- A baseline can be consumed only once. Concurrent clients must serialize a
-  complete verification cycle.
+- `compare` sends the whole baseline mapping, which is large for big models.
 - Checksums describe tensor bytes, not semantic model equivalence.
 - Weight Checker is available only through development HTTP endpoints.

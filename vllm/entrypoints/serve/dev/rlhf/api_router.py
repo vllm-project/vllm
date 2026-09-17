@@ -13,7 +13,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import _WeightCheckerState
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import compare_weight_checksums
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 from vllm.v1.worker.utils import combine_weight_checksums
@@ -237,21 +237,25 @@ async def weight_info(raw_request: Request):
 async def weight_checker(raw_request: Request) -> JSONResponse:
     """Checksum, reset, or compare model weights.
 
+    The endpoint keeps no state: with more than one API worker process, a
+    request lands on an arbitrary process, so the caller holds the baseline.
+
     Request body::
 
-        {"action": "compare"}    -> compare current weights against the baseline
-        {"action": "checksum"}   -> return SHA-256 and store the first baseline
-        {"action": "reset"}      -> overwrite GPU weights with random values
+        {"action": "checksum"} -> return SHA-256 digests of all weights
+        {"action": "reset"}    -> overwrite GPU weights with random values
+        {"action": "compare", "baseline": {name: hex_str}}
+                               -> diff current weights against the baseline
 
     Responses (all 200 on success):
 
-    * **compare**:  ``{"match": bool, "mismatches": [str]}``
     * **checksum**: ``{"checksums": {name: hex_str}}``
     * **reset**:    ``{"status": "reset"}``
+    * **compare**:  ``{"match": bool, "mismatches": [str]}``
 
     Use case in RL: checksum the current weights, reset them, transfer the
-    original weights, checksum again, and compare with the first checksum.
-    A successful transfer is expected to match the baseline.
+    original weights, checksum again, and compare that against the saved
+    first result. A successful transfer is expected to match the baseline.
     """
     try:
         body = await raw_request.json()
@@ -268,20 +272,19 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
         )
 
     client = engine_client(raw_request)
-    checker: _WeightCheckerState = raw_request.app.state.weight_checker
+    baseline: dict[str, str] | None = None
+    if action == "compare":
+        baseline = body.get("baseline")
+        if not isinstance(baseline, dict):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST.value,
+                detail="action='compare' requires a 'baseline' object",
+            )
 
     if action == "reset":
         # Overwrite every weight-bearing tensor with random values on the GPU
         await client.reset_weights()
         return JSONResponse(content={"status": "reset"})
-
-    # Avoid an expensive checksum RPC when compare cannot succeed. compare()
-    # repeats this check to keep the state object safe when used directly.
-    if action == "compare" and not checker.has_baseline():
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="No checksum baseline; call action='checksum' first",
-        )
 
     per_engine: list[dict[str, str]] = await client.compute_weight_checksums_all()
     if not per_engine:
@@ -298,30 +301,12 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
         ) from exc
 
     if action == "checksum":
-        baseline_created = checker.store_if_absent(checksums)
-        return JSONResponse(
-            content={
-                "checksums": checksums,
-                "engines": per_engine,
-                "baseline_created": baseline_created,
-            }
-        )
+        return JSONResponse(content={"checksums": checksums})
 
     # action == "compare"
-    try:
-        match, mismatches = checker.compare(checksums)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail=str(exc),
-        ) from exc
-
-    return JSONResponse(
-        content={
-            "match": match,
-            "mismatches": mismatches,
-        }
-    )
+    assert baseline is not None
+    match, mismatches = compare_weight_checksums(baseline, checksums)
+    return JSONResponse(content={"match": match, "mismatches": mismatches})
 
 
 @router.get("/get_world_size")
@@ -345,8 +330,4 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
-    # Initialize per-request state objects on the app.
-    if not hasattr(app.state, "weight_checker"):
-        app.state.weight_checker = _WeightCheckerState()
-
     app.include_router(router)

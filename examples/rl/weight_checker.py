@@ -14,6 +14,10 @@ The example follows the Weight Checker lifecycle:
 
     checksum -> reset -> reload/transfer -> checksum -> compare
 
+The server keeps no baseline state, so the caller holds the first checksum
+and sends it back when comparing. That keeps the check valid when requests
+are load-balanced over several API server processes.
+
 For a standalone demonstration, the existing ``collective_rpc`` development
 endpoint reloads the inference weights from the configured checkpoint. In a
 real RLHF system, replace ``reload_inference_weights`` with the trainer's
@@ -35,9 +39,14 @@ def post(base_url: str, path: str, **kwargs: Any) -> dict[str, Any]:
     return response.json()
 
 
-def check_weights(base_url: str, action: str) -> dict[str, Any]:
-    """Run one Weight Checker action."""
-    return post(base_url, "/weight_checker", json={"action": action})
+def check_weights(
+    base_url: str, action: str, baseline: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Run one Weight Checker action, passing a baseline when comparing."""
+    payload: dict[str, Any] = {"action": action}
+    if baseline is not None:
+        payload["baseline"] = baseline
+    return post(base_url, "/weight_checker", json=payload)
 
 
 def reload_inference_weights(base_url: str) -> None:
@@ -52,9 +61,8 @@ def reload_inference_weights(base_url: str) -> None:
 def verify_weight_update(base_url: str) -> None:
     """Run a complete reset, reload, and byte-for-byte verification cycle."""
     print("[1/4] Computing the original checksums and saving the baseline...")
-    original = check_weights(base_url, "checksum")
-    assert original["baseline_created"] is True
-    print(f"      hashed {len(original['checksums'])} tensors")
+    original = check_weights(base_url, "checksum")["checksums"]
+    print(f"      hashed {len(original)} tensors")
 
     print("[2/4] Resetting inference weights...")
     reset = check_weights(base_url, "reset")
@@ -64,11 +72,10 @@ def verify_weight_update(base_url: str) -> None:
     reload_inference_weights(base_url)
 
     print("[3/4] Computing checksums of the reloaded inference weights...")
-    current = check_weights(base_url, "checksum")
-    assert current["baseline_created"] is False
+    check_weights(base_url, "checksum")
 
     print("[4/4] Comparing the current weights with the original baseline...")
-    comparison = check_weights(base_url, "compare")
+    comparison = check_weights(base_url, "compare", original)
     if not comparison["match"]:
         mismatches = comparison["mismatches"]
         preview = "\n".join(f"  - {name}" for name in mismatches[:10])

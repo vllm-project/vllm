@@ -100,23 +100,9 @@ def wc_server(request, num_gpus_available):
 
 @pytest.mark.parametrize("wc_server", _API_MODES, indirect=True)
 class TestWeightCheckerAPI:
-    """API and state semantics that only need a single-engine server."""
+    """API semantics that only need a single-engine server."""
 
-    @pytest.fixture(autouse=True)
-    def consume_baseline_after_test(self, wc_server):
-        """Prevent a failed test from leaking its baseline into the next one."""
-        _, url = wc_server
-        before = weight_checker(url, "compare")
-        assert before.status_code == 400, (
-            f"weight-checker baseline leaked from the previous test: {before.text}"
-        )
-
-        yield
-
-        after = weight_checker(url, "compare")
-        assert after.status_code in (200, 400), after.text
-
-    def test_compare_without_baseline_returns_400(self, wc_server):
+    def test_compare_requires_a_baseline(self, wc_server):
         mode, url = wc_server
         response = weight_checker(url, "compare")
         assert response.status_code == 400, (
@@ -137,12 +123,12 @@ class TestWeightCheckerAPI:
         )
         assert health(url) == 200
 
-    def test_checksum_is_stable(self, wc_server):
+    def test_checksum_is_stable_and_stateless(self, wc_server):
         mode, url = wc_server
         first = weight_checker(url, "checksum")
         assert first.status_code == 200, first.text
+        assert set(first.json()) == {"checksums"}, first.text
         checksums = first.json()["checksums"]
-        assert first.json()["baseline_created"] is True
         assert checksums
         assert all(
             re.fullmatch(r"[0-9a-f]{64}", digest) for digest in checksums.values()
@@ -150,37 +136,46 @@ class TestWeightCheckerAPI:
 
         second = weight_checker(url, "checksum")
         assert second.status_code == 200, second.text
-        assert second.json()["baseline_created"] is False
         assert checksums == second.json()["checksums"], (
             f"[{mode['name']}] checksum changed while weights were unchanged"
         )
-        comparison = weight_checker(url, "compare")
-        assert comparison.status_code == 200, comparison.text
-        assert comparison.json() == {"match": True, "mismatches": []}
 
-    def test_checksum_compare_is_one_shot(self, wc_server):
+        # A repeated comparison must keep working: the endpoint stores no
+        # baseline, so every request is routed independently.
+        for _ in range(2):
+            comparison = weight_checker(url, "compare", checksums)
+            assert comparison.status_code == 200, comparison.text
+            assert comparison.json() == {"match": True, "mismatches": []}
+
+    def test_compare_reports_changed_and_missing_tensors(self, wc_server):
         mode, url = wc_server
-        assert weight_checker(url, "checksum").status_code == 200
+        baseline = weight_checker(url, "checksum")
+        baseline.raise_for_status()
+        baseline_checksums = baseline.json()["checksums"]
 
-        first = weight_checker(url, "compare")
-        assert first.status_code == 200, first.text
-        assert first.json() == {"match": True, "mismatches": []}
+        keys = list(baseline_checksums)
+        changed_key, missing_key = keys[0], keys[1]
+        altered = dict(baseline_checksums)
+        altered[changed_key] = "0" * 64
+        del altered[missing_key]
 
-        second = weight_checker(url, "compare")
-        assert second.status_code == 400, (
-            f"[{mode['name']}] expected 400 for a consumed baseline, got "
-            f"{second.status_code}: {second.text}"
-        )
+        comparison = weight_checker(url, "compare", altered)
+        assert comparison.status_code == 200, comparison.text
+        assert comparison.json() == {
+            "match": False,
+            "mismatches": sorted([changed_key, missing_key]),
+        }, mode["name"]
 
     def test_reset_changes_weights_and_reload_restores_them(self, wc_server):
         """A failed assertion still restores weights before the next test."""
         _, url = wc_server
         original = weight_checker(url, "checksum")
         original.raise_for_status()
+        baseline = original.json()["checksums"]
         try:
             reset = weight_checker(url, "reset")
             reset.raise_for_status()
-            comparison = weight_checker(url, "compare")
+            comparison = weight_checker(url, "compare", baseline)
             comparison.raise_for_status()
             assert comparison.json()["match"] is False
             assert comparison.json()["mismatches"]
@@ -188,8 +183,8 @@ class TestWeightCheckerAPI:
             collective_rpc(url, "reload_weights").raise_for_status()
         restored = weight_checker(url, "checksum")
         restored.raise_for_status()
-        assert restored.json()["checksums"] == original.json()["checksums"]
-        comparison = weight_checker(url, "compare")
+        assert restored.json()["checksums"] == baseline
+        comparison = weight_checker(url, "compare", baseline)
         comparison.raise_for_status()
         assert comparison.json() == {"match": True, "mismatches": []}
         assert ok(gen(url))
@@ -204,15 +199,10 @@ class TestWeightCheckerTP2DP2EP:
 
         initial = weight_checker(url, "checksum")
         assert initial.status_code == 200, initial.text
-        initial_body = initial.json()
-        assert initial_body["baseline_created"] is True
-        assert len(initial_body["engines"]) == mode["dp"], (
-            f"[{mode['name']}] expected checksums from {mode['dp']} engines, "
-            f"got {len(initial_body['engines'])}"
-        )
+        initial_checksums = initial.json()["checksums"]
 
         ranks = set()
-        for key in initial_body["checksums"]:
+        for key in initial_checksums:
             match = re.fullmatch(r"dp(\d+):pp0:pcp0:tp(\d+):ep\d+:.+", key)
             assert match is not None, f"Unqualified checksum key: {key}"
             ranks.add(tuple(map(int, match.groups())))
@@ -227,11 +217,10 @@ class TestWeightCheckerTP2DP2EP:
 
         current = weight_checker(url, "checksum")
         assert current.status_code == 200, current.text
-        assert current.json()["baseline_created"] is False
-        assert current.json()["checksums"] == initial_body["checksums"], (
+        assert current.json()["checksums"] == initial_checksums, (
             f"[{mode['name']}] reloaded checkpoint differs from initial weights"
         )
 
-        comparison = weight_checker(url, "compare")
+        comparison = weight_checker(url, "compare", initial_checksums)
         assert comparison.status_code == 200, comparison.text
         assert comparison.json() == {"match": True, "mismatches": []}

@@ -330,9 +330,12 @@ def health(url) -> int:
 # HTTP helpers — weight checker
 
 
-def weight_checker(url: str, action: str) -> requests.Response:
+def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
     """POST one weight-checker action and return the raw response."""
-    return requests.post(f"{url}/weight_checker", json={"action": action}, timeout=180)
+    payload = {"action": action}
+    if baseline is not None:
+        payload["baseline"] = baseline
+    return requests.post(f"{url}/weight_checker", json=payload, timeout=180)
 
 
 def collective_rpc(url: str, method: str) -> requests.Response:

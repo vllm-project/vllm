@@ -1,48 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""One-shot checksum baseline state for the Weight Checker endpoint."""
+"""Stateless comparison of rank-qualified weight checksums."""
 
 
-class _WeightCheckerState:
-    """Store the first checksum result in a verification cycle.
+def compare_weight_checksums(
+    baseline: dict[str, str],
+    current: dict[str, str],
+) -> tuple[bool, list[str]]:
+    """Return whether every tensor matches, and the keys that differ.
 
-    Operations that mutate the baseline must be externally serialized.
+    The caller owns the baseline: a multi-API-process deployment routes
+    requests to arbitrary processes, so no baseline can be kept server-side.
+    Keys present in only one of the two maps count as mismatches.
     """
-
-    def __init__(self):
-        self.baseline: dict[str, str] | None = None
-
-    def store_if_absent(self, checksums: dict[str, str]) -> bool:
-        """Store checksums unless a comparison baseline already exists."""
-        if self.baseline is not None:
-            return False
-        self.baseline = dict(checksums)
-        return True
-
-    def has_baseline(self) -> bool:
-        """Return whether a comparison baseline is currently stored."""
-        return self.baseline is not None
-
-    def compare(self, current: dict[str, str]) -> tuple[bool, list[str]]:
-        """Compare the current checksums with the stored baseline.
-
-        Args:
-            current: Complete rank-qualified keys mapped to SHA-256 digests.
-
-        Returns:
-            A tuple containing whether all tensors match and the names of changed,
-            added, or missing tensors.
-
-        Raises:
-            RuntimeError: If no baseline has been stored.
-        """
-        if self.baseline is None:
-            raise RuntimeError("No checksum baseline; call action='checksum' first")
-        mismatches = sorted(
-            key
-            for key in self.baseline.keys() | current.keys()
-            if self.baseline.get(key) != current.get(key)
-        )
-        # Compare is one-shot: clear the baseline so a second compare fails.
-        self.baseline = None
-        return not mismatches, mismatches
+    mismatches = sorted(
+        key
+        for key in baseline.keys() | current.keys()
+        if baseline.get(key) != current.get(key)
+    )
+    return not mismatches, mismatches

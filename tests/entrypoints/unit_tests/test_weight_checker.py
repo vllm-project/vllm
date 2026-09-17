@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checksum merging and one-shot baseline state, without a model or GPU."""
+"""Checksum merging and comparison, without a model or GPU."""
 
 import pytest
 
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import _WeightCheckerState
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import compare_weight_checksums
 from vllm.v1.worker.utils import combine_weight_checksums
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -21,17 +21,16 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
     ],
 )
 def test_compare_detects_changed_missing_and_extra_tensors(current, mismatches):
-    state = _WeightCheckerState()
     baseline = {"rank0:w": "a", "rank1:w": "b"}
-    assert state.store_if_absent(baseline)
-    baseline["rank0:w"] = "caller mutation"
-    assert not state.store_if_absent(current)
-    assert state.compare(current) == (not mismatches, mismatches)
-    assert not state.has_baseline()
-    with pytest.raises(RuntimeError, match="No checksum baseline"):
-        state.compare(current)
-    assert state.store_if_absent(current)
-    assert state.compare(current) == (True, [])
+    assert compare_weight_checksums(baseline, current) == (not mismatches, mismatches)
+
+
+def test_compare_does_not_mutate_its_inputs():
+    baseline = {"rank0:w": "a"}
+    current = {"rank0:w": "b"}
+    compare_weight_checksums(baseline, current)
+    assert baseline == {"rank0:w": "a"}
+    assert current == {"rank0:w": "b"}
 
 
 def test_merge_rejects_duplicate_rank_keys_even_when_values_match():
