@@ -1339,7 +1339,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # The mask aligns to the pre-expansion stream; capture it before the
         # prompt_embeds sentinel expansion shifts positions.
         pre_ids = (
-            list(prompt["prompt_token_ids"]) if assistant_tokens_mask is not None else None
+            list(prompt["prompt_token_ids"])
+            if assistant_tokens_mask is not None
+            else None
         )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
@@ -1351,9 +1353,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if assistant_tokens_mask is not None and pre_ids is not None:
                 # Each sentinel's 1-token slot grows to N tokens; none of it is
                 # assistant content, so splice zeros at the matched positions.
-                embeds_spans = find_mm_placeholders(
-                    prompt=pre_ids, mm_prompt_updates=mm_updates, tokenizer=None
-                ).get("prompt_embeds", [])
+                embeds_spans = find_mm_placeholders(pre_ids, mm_updates).get(
+                    "prompt_embeds", []
+                )
                 delta = 0
                 for f in embeds_spans:
                     at = f.start_idx + delta
@@ -1400,7 +1402,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # The mask aligns to the pre-expansion stream; capture it before the
         # prompt_embeds sentinel expansion shifts positions.
         pre_ids = (
-            list(prompt["prompt_token_ids"]) if assistant_tokens_mask is not None else None
+            list(prompt["prompt_token_ids"])
+            if assistant_tokens_mask is not None
+            else None
         )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
@@ -1412,9 +1416,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if assistant_tokens_mask is not None and pre_ids is not None:
                 # Each sentinel's 1-token slot grows to N tokens; none of it is
                 # assistant content, so splice zeros at the matched positions.
-                embeds_spans = find_mm_placeholders(
-                    prompt=pre_ids, mm_prompt_updates=mm_updates, tokenizer=None
-                ).get("prompt_embeds", [])
+                embeds_spans = find_mm_placeholders(pre_ids, mm_updates).get(
+                    "prompt_embeds", []
+                )
                 delta = 0
                 for f in embeds_spans:
                     at = f.start_idx + delta
