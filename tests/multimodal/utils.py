@@ -66,6 +66,80 @@ def create_video_from_image(
     return video_path
 
 
+def create_long_gop_video(
+    num_frames: int = 50,
+    fps: int = 30,
+    width: int = 64,
+    height: int = 64,
+) -> bytes:
+    """Encode an H.264 clip with one keyframe and green-channel = frame index.
+
+    The marker lets a test recover which frame the decoder actually returned,
+    independent of any metadata label.
+    """
+    import io
+
+    import av
+
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="mp4") as container:
+        stream = container.add_stream("h264", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        stream.codec_context.gop_size = num_frames
+        stream.codec_context.max_b_frames = 0
+        stream.codec_context.options = {
+            "x264-params": (f"scenecut=0:keyint={num_frames}:min-keyint={num_frames}")
+        }
+        for i in range(num_frames):
+            img = np.zeros((height, width, 3), dtype=np.uint8)
+            img[:, :, 1] = i % 256
+            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buf.getvalue()
+
+
+def create_edit_list_trimmed_video(
+    num_frames: int = 90,
+    trim_start_frame: int = 60,
+    fps: int = 30,
+) -> tuple[bytes, int]:
+    """Stream-copy-cut a long-GOP clip so an mp4 edit list hides the lead-in.
+
+    Remuxes the tail of a single-keyframe clip without re-encoding, rebasing
+    timestamps at ``trim_start_frame``: the lead-in packets are still needed
+    to decode, so they stay in the file at negative pts and the muxer records
+    an edit list. The header sample count stays ``num_frames`` while only the
+    trailing frames are presentable — the shape produced by lossless trims
+    (e.g. ``ffmpeg -ss ... -c copy``). Returns (video_bytes, visible_frames).
+    """
+    import io
+
+    import av
+
+    src = create_long_gop_video(num_frames=num_frames, fps=fps)
+    buf = io.BytesIO()
+    with (
+        av.open(io.BytesIO(src)) as source,
+        av.open(buf, mode="w", format="mp4") as out,
+    ):
+        in_stream = source.streams.video[0]
+        out_stream = out.add_stream_from_template(in_stream)
+        start_pts = round(trim_start_frame / fps / in_stream.time_base)
+        for packet in source.demux(in_stream):
+            if packet.pts is None or packet.dts is None:
+                continue
+            packet.pts -= start_pts
+            packet.dts -= start_pts
+            packet.stream = out_stream
+            out.mux(packet)
+    return buf.getvalue(), num_frames - trim_start_frame
+
+
 def cosine_similarity(A: npt.NDArray, B: npt.NDArray, axis: int = -1) -> npt.NDArray:
     """Compute cosine similarity between two vectors."""
     return np.sum(A * B, axis=axis) / (

@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 import weakref
 
 import pytest
 
 from vllm import LLM, PoolingRequestOutput
 from vllm.config import PoolerConfig
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
@@ -18,24 +16,21 @@ num_labels = 2
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         pooler_config=PoolerConfig(task="token_classify"),
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.mark.skip_global_cleanup
@@ -60,19 +55,19 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_score_api(llm: LLM):
-    err_msg = "Scoring API is only enabled for num_labels == 1."
+    err_msg = "This model does not support the Scoring API."
     with pytest.raises(ValueError, match=err_msg):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["classify", "embed", "token_embed"])
+@pytest.mark.parametrize("task", ["classify", "embed", "token_embed", "plugin"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
-    if task == "classify":
-        with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
-            llm.encode(prompt, pooling_task=task, use_tqdm=False)
-        assert "deprecated" in caplog_vllm.text
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "classify":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
         err_msg = "Embedding API is not supported by this model.+"
 
-        with pytest.raises(ValueError, match=err_msg):
-            llm.encode(prompt, pooling_task=task, use_tqdm=False)
+    with pytest.raises(ValueError, match=err_msg):
+        llm.encode(prompt, pooling_task=task, use_tqdm=False)

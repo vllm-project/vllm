@@ -30,7 +30,6 @@ def _num_waiting_requests(scheduler) -> int:
 
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -151,7 +150,6 @@ def test_basic_lifecycle():
 
 def test_interleaved_lifecycle():
     """Test Remote Prefills Work Well With Other Requests."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -249,13 +247,11 @@ def test_interleaved_lifecycle():
 
 
 def test_no_spurious_prefix_caching():
-    """
-    With P/D, blocks can be allocated but uncomputed for
+    """With P/D, blocks can be allocated but uncomputed for
     multiple engine steps. This test confirms that we do
     not accidentally have cache hits against uncomputed
     blocks.
     """
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -320,7 +316,6 @@ def test_no_spurious_prefix_caching():
 
 def test_full_block_prompt():
     """Test that we handle a prompt that is the full block size."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -394,11 +389,9 @@ def test_full_block_prompt():
 
 
 def test_cannot_schedule_after_recv():
-    """
-    Test that we can handle no schedule after recv due to not
+    """Test that we can handle no schedule after recv due to not
     enough remaining KV blocks.
     """
-
     # NOTE: the KVCacheManager will use 1 null block.
     # So there are 5 total working blocks.
     TOTAL_NUM_BLOCKS = 6
@@ -478,10 +471,14 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    assert (
-        scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
-        == NUM_PROMPT_BLOCKS * BLOCK_SIZE
-    )
+    # V2 emits a resumed (previously preempted) request as a NewRequestData
+    # rather than a cached request.
+    if scheduler.use_v2_model_runner:
+        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
+    else:
+        cached = scheduler_output.scheduled_cached_reqs
+        num_computed = cached.num_computed_tokens[0]
+    assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 0
@@ -497,11 +494,9 @@ def test_cannot_schedule_after_recv():
 
 
 def test_cannot_recv():
-    """
-    Test that we can handle no schedule KV block transfer due to not
+    """Test that we can handle no schedule KV block transfer due to not
     enough remaining KV blocks.
     """
-
     # NOTE: the KVCacheManager will use 1 null block.
     # So there are 5 total working blocks.
     TOTAL_NUM_BLOCKS = 6
@@ -587,7 +582,9 @@ def test_cannot_recv():
     assert_scheduler_empty(scheduler)
 
 
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_p_side_chunked_prefill_mamba(mock_platform):
     """P-side integration: Mamba N-1 truncation + chunked prefill completes.
 
@@ -655,3 +652,142 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     outputs = engine_core_outputs[0].outputs
     assert len(outputs) == 1
     assert outputs[0].finish_reason == FinishReason.LENGTH
+
+
+def test_async_load_reserves_blocks_for_inflight():
+    """A second async KV-connector load is not admitted if its initial
+    allocation would consume blocks reserved for an already in-flight sequence.
+
+    req_a gets a 1-block prefix (full sequence = 4 blocks), reserving 3 more.
+    req_b would need a 4-block initial allocation, but only
+    (free - req_a's 3-block reservation) = 3 blocks are available to it, so it is
+    held back in WAITING (holding no blocks) rather than wedging req_a.
+    """
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 5,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    # Partial external matches: req_a loads 1 block, req_b loads 4 blocks.
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE, True), (BLOCK_SIZE * 4, True)],
+    ):
+        scheduler.schedule()
+
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert req_b.status == RequestStatus.WAITING
+
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+    assert req_a.request_id in req_to_blocks
+    assert req_b.request_id not in req_to_blocks
+
+
+def test_async_loads_both_admitted_when_pool_fits():
+    """Sanity: with a pool large enough, the reservation gate admits both async
+    loads (it is not over-conservative)."""
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=64)
+
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=BLOCK_SIZE,
+            num_tokens=BLOCK_SIZE * 5,
+            do_remote_prefill=True,
+            num_remote_blocks=1,
+        )
+        for i in (1, 2)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE, True), (BLOCK_SIZE, True)],
+    ):
+        scheduler.schedule()
+
+    for req in reqs:
+        assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_async_load_reserves_blocks_for_promotion_margin():
+    """An async load is not admitted unless the blocks its own promotion will
+    need are still free.
+
+    A parked load is allocated without lookahead slots, but promotion pads it
+    to ``1 + num_spec_tokens`` and asks for the lookahead margin on top. Without
+    reserving that margin, two loads can be admitted that together consume the
+    whole pool; the head then fails ``allocate_slots`` forever while the load
+    behind it is never reached, and with nothing running no block is ever freed.
+
+    req_a (4 blocks) and req_b (3 blocks) exactly fill the 7 usable blocks, so
+    req_b must be held back in WAITING holding no blocks, leaving req_a room to
+    be promoted and run.
+    """
+    vllm_config = create_vllm_config(num_speculative_tokens=3)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 3,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    # Both get a full external hit, so each would hold its whole prompt.
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE * 4, True), (BLOCK_SIZE * 3, True)],
+    ):
+        scheduler.schedule()
+
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert req_b.status == RequestStatus.WAITING
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+    assert req_b.request_id not in req_to_blocks
+
+    # req_a's load lands: it must be promotable and actually get scheduled.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_recving={req_a.request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert req_a.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0

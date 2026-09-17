@@ -1,14 +1,15 @@
+#pragma once
 
-static float bf16_to_float(uint16_t bf16) {
+#include <bit>
+#include <cstdint>
+
+inline float bf16_to_float(uint16_t bf16) {
   uint32_t bits = static_cast<uint32_t>(bf16) << 16;
-  float fp32;
-  std::memcpy(&fp32, &bits, sizeof(fp32));
-  return fp32;
+  return std::bit_cast<float>(bits);
 }
 
-static uint16_t float_to_bf16(float fp32) {
-  uint32_t bits;
-  std::memcpy(&bits, &fp32, sizeof(fp32));
+inline uint16_t float_to_bf16(float fp32) {
+  uint32_t bits = std::bit_cast<uint32_t>(fp32);
   return static_cast<uint16_t>(bits >> 16);
 }
 
@@ -18,14 +19,13 @@ static uint16_t float_to_bf16(float fp32) {
  * Codes below copied from
  * https://github.com/PrincetonVision/marvin/tree/master/tools/tensorIO_matlab
  *************************************************/
-static uint16_t float_to_fp16(float fp32) {
+inline uint16_t float_to_fp16(float fp32) {
   uint16_t fp16;
 
-  unsigned x;
   unsigned u, remainder, shift, lsb, lsb_s1, lsb_m1;
   unsigned sign, exponent, mantissa;
 
-  std::memcpy(&x, &fp32, sizeof(fp32));
+  uint32_t x = std::bit_cast<uint32_t>(fp32);
   u = (x & 0x7fffffff);
 
   // Get rid of +NaN/-NaN case first.
@@ -77,12 +77,11 @@ static uint16_t float_to_fp16(float fp32) {
   return fp16;
 }
 
-static float fp16_to_float(uint16_t fp16) {
+inline float fp16_to_float(uint16_t fp16) {
   unsigned sign = ((fp16 >> 15) & 1);
   unsigned exponent = ((fp16 >> 10) & 0x1f);
   unsigned mantissa = ((fp16 & 0x3ff) << 13);
-  int temp;
-  float fp32;
+  uint32_t temp;
   if (exponent == 0x1f) { /* NaN or Inf */
     mantissa = (mantissa ? (sign = 0, 0x7fffff) : 0);
     exponent = 0xff;
@@ -101,6 +100,5 @@ static float fp16_to_float(uint16_t fp16) {
     exponent += 0x70;
   }
   temp = ((sign << 31) | (exponent << 23) | mantissa);
-  std::memcpy(&fp32, &temp, sizeof(temp));
-  return fp32;
+  return std::bit_cast<float>(temp);
 }

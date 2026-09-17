@@ -1,0 +1,295 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Integration accuracy test for MultiConnector (NixlConnector + OffloadingConnector).
+#
+# Launches a P/D setup where both prefill and decode instances use MultiConnector
+# wrapping NixlConnector and OffloadingConnector, then runs gsm8k accuracy via
+# test_accuracy.py.
+#
+# By default runs two configurations:
+#   1. Normal KV layout (LBHNC)
+#   2. Cross-layer KV layout (BLHNC) via VLLM_KV_CACHE_LAYOUT
+#
+# Usage:
+#   bash tests/v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+#
+# Environment variables:
+#   MODEL_NAMES              - model to test (default: Qwen/Qwen3-0.6B)
+#   GPU_MEMORY_UTILIZATION   - GPU memory fraction (default: 0.6)
+#   MAX_MODEL_LEN            - maximum model context length
+#   KV_BUFFER_DEVICE         - NIXL KV buffer device (default: cuda; use xpu for XPU)
+#   NUM_CONCURRENT           - lm-eval request concurrency (default: 100)
+#   ATTENTION_BACKEND        - optional attention backend for vllm serve
+#   VLLM_SERVE_EXTRA_ARGS    - comma-separated extra args for vllm serve
+#   SKIP_CROSS_LAYERS        - set to 1 to skip the cross-layer layout test
+#   SKIP_NORMAL_LAYOUT       - set to 1 to skip the normal layout test
+set -xe
+
+# ── Configuration ────────────────────────────────────────────────────────
+
+MODEL_NAMES=${MODEL_NAMES:-}
+if [[ -n "$MODEL_NAMES" ]]; then
+  MODELS=("$MODEL_NAMES")
+else
+  MODELS=("Qwen/Qwen3-0.6B")
+fi
+
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.6}
+BLOCK_SIZE=${BLOCK_SIZE:-128}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
+ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
+VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
+SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
+
+# ── KV transfer configs ─────────────────────────────────────────────────
+
+KV_CONFIG_NORMAL='{
+  "kv_connector":"MultiConnector",
+  "kv_role":"kv_both",
+  "kv_connector_extra_config":{
+    "connectors":[
+      {"kv_connector":"NixlConnector","kv_role":"kv_both",
+       "kv_buffer_device":"'$KV_BUFFER_DEVICE'"},
+      {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
+       "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
+    ]
+  }
+}'
+# Remove whitespace for CLI safety
+KV_CONFIG_NORMAL=$(echo "$KV_CONFIG_NORMAL" | tr -d '[:space:]')
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+PROCESS_GROUPS=()
+LAST_PROCESS_PID=
+
+start_background_process() {
+  local command=$1
+  setsid bash -c "$command" &
+  LAST_PROCESS_PID=$!
+  PROCESS_GROUPS+=("$LAST_PROCESS_PID")
+}
+
+owned_process_is_running() {
+  local process_pid=$1
+  kill -0 "$process_pid" 2>/dev/null || \
+    kill -0 -- "-$process_pid" 2>/dev/null
+}
+
+wait_for_server() {
+  local port=$1
+  local process_pid=$2
+  local process_name=$3
+  local endpoint=${4:-/health}
+  local deadline=$((SECONDS + 1200))
+
+  while ((SECONDS < deadline)); do
+    if ! kill -0 "$process_pid" 2>/dev/null; then
+      local status=0
+      wait "$process_pid" || status=$?
+      echo "$process_name exited with status $status before becoming ready"
+      return 1
+    fi
+    if curl -fs "http://localhost:${port}${endpoint}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "$process_name did not become ready on port $port"
+  return 1
+}
+
+wait_for_gpu_memory_release() {
+  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+    PYTHONPATH="${GIT_ROOT}" python3 -c \
+      "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
+  fi
+}
+
+cleanup_instances() {
+  if ((${#PROCESS_GROUPS[@]} == 0)); then
+    return
+  fi
+
+  echo "Cleaning up any running vLLM and proxy instances..."
+  local process_groups=("${PROCESS_GROUPS[@]}")
+  local process_group
+  for process_group in "${process_groups[@]}"; do
+    kill -TERM "$process_group" 2>/dev/null || true
+    kill -TERM -- "-$process_group" 2>/dev/null || true
+  done
+
+  local deadline=$((SECONDS + 30))
+  local processes_running=1
+  while ((processes_running && SECONDS < deadline)); do
+    processes_running=0
+    for process_group in "${process_groups[@]}"; do
+      if owned_process_is_running "$process_group"; then
+        processes_running=1
+        break
+      fi
+    done
+    if ((processes_running)); then
+      sleep 1
+    fi
+  done
+
+  for process_group in "${process_groups[@]}"; do
+    if owned_process_is_running "$process_group"; then
+      echo "Force-stopping process group $process_group after cleanup timeout"
+      kill -KILL "$process_group" 2>/dev/null || true
+      kill -KILL -- "-$process_group" 2>/dev/null || true
+    fi
+    wait "$process_group" 2>/dev/null || true
+  done
+
+  PROCESS_GROUPS=()
+}
+
+cleanup_on_exit() {
+  local rc=$?
+  cleanup_instances || true
+  exit "$rc"
+}
+
+trap cleanup_on_exit EXIT
+trap 'exit 130' SIGINT SIGTERM
+
+get_num_gpus() {
+  if [[ "$SMI_BIN" == *"nvidia"* ]]; then
+    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
+  elif [[ "$SMI_BIN" == *"rocm"* ]]; then
+    $SMI_BIN -l | grep -c GPU
+  else
+    echo "2"
+  fi
+}
+
+# ── Run tests for one model with a given KV config ───────────────────────
+
+run_tests_for_model() {
+  local model_name=$1
+  local kv_config=$2
+  local label=$3
+
+  echo "================================================================"
+  echo "Testing model: $model_name ($label)"
+  echo "KV config: $kv_config"
+  echo "================================================================"
+
+  local PREFILL_PORT=8100
+  local DECODE_PORT=8200
+  local PREFILL_GPU=0
+  local DECODE_GPU=1
+  local PREFILL_SIDE_CHANNEL_PORT=5559
+  local DECODE_SIDE_CHANNEL_PORT=5659
+
+  # ── Start prefill instance ──
+  echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
+  BASE_CMD="$DEVICE_VISIBILITY_ENV=$PREFILL_GPU \
+    VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-LBHNC}' \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
+    --port $PREFILL_PORT \
+    --enforce-eager \
+    --block-size ${BLOCK_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --tensor-parallel-size 1 \
+    --kv-transfer-config '$kv_config'"
+
+  if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+    IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+    for arg in "${extra_args[@]}"; do
+      BASE_CMD="${BASE_CMD} $arg"
+    done
+  fi
+  if [[ -n "$ATTENTION_BACKEND" ]]; then
+    BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
+  fi
+  start_background_process "$BASE_CMD"
+  local prefill_pid=$LAST_PROCESS_PID
+
+  # ── Start decode instance ──
+  echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
+  BASE_CMD="$DEVICE_VISIBILITY_ENV=$DECODE_GPU \
+    VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-LBHNC}' \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
+    --port $DECODE_PORT \
+    --enforce-eager \
+    --block-size ${BLOCK_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
+    --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+    --tensor-parallel-size 1 \
+    --kv-transfer-config '$kv_config'"
+
+  if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+    IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+    for arg in "${extra_args[@]}"; do
+      BASE_CMD="${BASE_CMD} $arg"
+    done
+  fi
+  if [[ -n "$ATTENTION_BACKEND" ]]; then
+    BASE_CMD="${BASE_CMD} --attention-backend $ATTENTION_BACKEND"
+  fi
+  start_background_process "$BASE_CMD"
+  local decode_pid=$LAST_PROCESS_PID
+
+  # ── Wait for servers ──
+  echo "Waiting for prefill instance on port $PREFILL_PORT to start..."
+  wait_for_server "$PREFILL_PORT" "$prefill_pid" "Prefill server"
+  echo "Waiting for decode instance on port $DECODE_PORT to start..."
+  wait_for_server "$DECODE_PORT" "$decode_pid" "Decode server"
+
+  # ── Start proxy ──
+  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
+  PROXY_CMD+=" --prefiller-hosts localhost"
+  PROXY_CMD+=" --prefiller-ports $PREFILL_PORT"
+  PROXY_CMD+=" --decoder-hosts localhost"
+  PROXY_CMD+=" --decoder-ports $DECODE_PORT"
+
+  echo "Starting proxy server with command: $PROXY_CMD"
+  start_background_process "$PROXY_CMD"
+  local proxy_pid=$LAST_PROCESS_PID
+  wait_for_server 8192 "$proxy_pid" "Proxy server" /healthcheck
+
+  # ── Run accuracy test ──
+  echo "Running accuracy tests for $model_name ($label)"
+  TEST_MODEL=$model_name python3 -m pytest -s -x \
+    "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+
+  # ── Cleanup ──
+  cleanup_instances
+  wait_for_gpu_memory_release
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────
+
+for model in "${MODELS[@]}"; do
+  if [[ -z "${SKIP_NORMAL_LAYOUT:-}" ]]; then
+    run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector normal layout"
+  fi
+
+  if [[ -z "${SKIP_CROSS_LAYERS:-}" ]]; then
+    VLLM_KV_CACHE_LAYOUT=BLHNC \
+      run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector cross-layer layout"
+  fi
+done
+
+echo "All MultiConnector accuracy tests passed!"

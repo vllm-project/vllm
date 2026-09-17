@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
+from tests.utils import large_gpu_test
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 
 DTYPES = [torch.float16, torch.bfloat16]
-QUANT_DTYPES = [torch.float8_e4m3fn, torch.int8]
+QUANT_DTYPES = [current_platform.fp8_dtype(), torch.int8]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 NUM_TOKENS_HIDDEN_SIZES = [
     *[(1, i) for i in [64, *VEC_HIDDEN_SIZES, 2048, 5120]],
@@ -28,9 +29,7 @@ SCALE_UBS = [False]
 GROUP_SIZES = [64, 128]
 IS_SCALE_TRANSPOSED = [False, True]
 SEEDS = [0]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
-]
+CUDA_DEVICES = [i for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
 
 
 def ref_silu_and_mul_per_block_quant(
@@ -60,7 +59,7 @@ def ref_silu_and_mul_per_block_quant(
 @pytest.mark.parametrize("group_size", GROUP_SIZES)
 @pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device_idx", CUDA_DEVICES)
 @torch.inference_mode()
 def test_silu_and_mul_per_block_quant(
     default_vllm_config,
@@ -72,9 +71,11 @@ def test_silu_and_mul_per_block_quant(
     group_size: int,
     is_scale_transposed: bool,
     seed: int,
-    device: str,
+    device_idx: str,
 ) -> None:
     """Test SiLU+Mul+Block Quantization kernel correctness."""
+    torch.accelerator.set_device_index(device_idx)
+    device = f"cuda:{device_idx}"
     torch.random.manual_seed(seed)
     torch.set_default_device(device)
 
@@ -147,7 +148,7 @@ def test_silu_block_quant_shapes(
     out, scales = ops.silu_and_mul_per_block_quant(
         x,
         group_size=group_size,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         is_scale_transposed=False,
     )
     assert out.shape == (num_tokens, hidden_size)
@@ -157,7 +158,7 @@ def test_silu_block_quant_shapes(
     out, scales = ops.silu_and_mul_per_block_quant(
         x,
         group_size=group_size,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         is_scale_transposed=True,
     )
     assert out.shape == (num_tokens, hidden_size)
@@ -177,13 +178,37 @@ def test_silu_block_quant_edge_cases(
     out, scales = ops.silu_and_mul_per_block_quant(
         x,
         group_size=128,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         is_scale_transposed=False,
     )
 
     assert out.shape == (batch_size, hidden_size)
-    assert out.dtype == torch.float8_e4m3fn
+    assert out.dtype == current_platform.fp8_dtype()
     assert scales.dtype == torch.float32
     assert not torch.isnan(out.float()).any()
     assert not torch.isnan(scales).any()
     assert not torch.isinf(scales).any()
+
+
+@large_gpu_test(min_gb=24)
+@torch.inference_mode()
+def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
+    """Token offsets beyond INT32_MAX must not wrap (issue #53390)."""
+    hidden_size = 16384
+    group_size = 128
+    quant_dtype = current_platform.fp8_dtype()
+    # Smallest batch whose last token's input offset (token_idx * 2 *
+    # hidden_size) exceeds INT32_MAX.
+    num_tokens = (2**31 - 1) // (2 * hidden_size) + 2
+
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=torch.bfloat16, device="cuda")
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x, group_size, quant_dtype, None, False
+    )
+    torch.accelerator.synchronize()
+
+    expected_out, expected_scales = ops.silu_and_mul_per_block_quant(
+        x[-1:].contiguous(), group_size, quant_dtype, None, False
+    )
+    assert torch.equal(scales[-1:], expected_scales)
+    assert torch.equal(out[-1:], expected_out)

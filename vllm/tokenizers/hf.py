@@ -2,21 +2,109 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
+import queue
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
-HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
+_T = TypeVar("_T", bound=TokenizerLike)
+
+
+class ThreadSafeHFTokenizerMixin:
+    """Mixin class for thread-safe HF fast tokenizers."""
+
+    pass
+
+
+def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
+    in-place to make the public interface thread-safe by routing calls
+    through a deep-copied tokenizer pool.
+
+    Note that:
+    - Only ``TokenizerLike``'s public interface is thread-safe.
+      This doesn't include ``_tokenizer`` property nor any mutation
+      methods like ``add_special_tokens`` or ``add_tokens``.
+    - Adjacent method calls could happen on different deep copies.
+    """
+    if not isinstance(tokenizer, TokenizersBackend) or isinstance(
+        tokenizer, ThreadSafeHFTokenizerMixin
+    ):
+        return tokenizer
+
+    og_tokenizer = copy.copy(tokenizer)
+
+    tokenizer_pool: queue.Queue[TokenizersBackend] = queue.Queue()
+    for _ in range(copies):
+        tokenizer_pool.put(copy.deepcopy(og_tokenizer))
+
+    @contextlib.contextmanager
+    def _borrow_from_pool():
+        try:
+            tok = tokenizer_pool.get_nowait()
+            yield tok
+        except queue.Empty:
+            tok = copy.deepcopy(og_tokenizer)
+            yield tok
+        finally:
+            tokenizer_pool.put(tok)
+
+    class TokenizerPool(tokenizer.__class__, ThreadSafeHFTokenizerMixin):  # type: ignore
+        def apply_chat_template(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.apply_chat_template(*args, **kwargs)
+
+        def batch_decode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.batch_decode(*args, **kwargs)
+
+        def batch_encode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.batch_encode(*args, **kwargs)
+
+        def convert_tokens_to_ids(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_tokens_to_ids(*args, **kwargs)
+
+        def convert_ids_to_tokens(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_ids_to_tokens(*args, **kwargs)
+
+        def convert_tokens_to_string(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.convert_tokens_to_string(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.decode(*args, **kwargs)
+
+        def encode(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok.encode(*args, **kwargs)
+
+        def __call__(self, *args, **kwargs):
+            with _borrow_from_pool() as tok:
+                return tok(*args, **kwargs)
+
+        def __reduce__(self):
+            return maybe_make_thread_pool, (og_tokenizer, copies)
+
+    TokenizerPool.__name__ = f"TokenizerPool{og_tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = TokenizerPool
+    # Return the tokenizer: TokenizerPool.__reduce__ reconstructs through this
+    # function, so falling off the end would unpickle to None (issue #45433).
+    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
@@ -26,6 +114,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
+    # The underlying tokenizer class could be a specific backend,
+    # which does not always implement is_fast in Transformers
+    tokenizer_is_fast = getattr(tokenizer, "is_fast", True)
 
     max_token_id = max(tokenizer_vocab.values())
     max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
@@ -54,6 +145,10 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def max_chars_per_token(self) -> int:
             return max_chars_per_token
+
+        @property
+        def is_fast(self) -> bool:
+            return tokenizer_is_fast
 
         def get_vocab(self) -> dict[str, int]:
             return tokenizer_vocab
@@ -103,7 +198,10 @@ class CachedHfTokenizer(TokenizerLike):
                     "is a custom tokenizer not yet available in the "
                     "HuggingFace transformers library, consider "
                     "setting `trust_remote_code=True` in LLM or using "
-                    "the `--trust-remote-code` flag in the CLI."
+                    "the `--trust-remote-code` flag in the CLI. If the "
+                    "model was created with a newer version of "
+                    "transformers, consider upgrading: "
+                    "`uv pip install --upgrade transformers`"
                 )
                 raise RuntimeError(err_msg) from e
             else:

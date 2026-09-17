@@ -7,23 +7,23 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
-)
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -36,10 +36,12 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_nvlink_one_sided,
+    has_flashinfer_trtllm_fused_moe,
 )
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
+    has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
 )
@@ -67,7 +69,6 @@ class ExpertInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[torch.dtype | str]
     blocked_quantization_support: bool
-    supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
     needs_aiter: bool = False
@@ -85,14 +86,14 @@ MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
 common_float_types: list[torch.dtype | str] = [
-    torch.float8_e4m3fn,
+    current_platform.fp8_dtype(),
     torch.bfloat16,
     torch.float16,
     torch.float32,
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
 nvfp4_types = ["nvfp4"]
-fp8_types = [torch.float8_e4m3fn]
+fp8_types = [current_platform.fp8_dtype()]
 
 
 def register_prepare_and_finalize(
@@ -129,7 +130,6 @@ def register_experts(
     activation_format: mk.FusedMoEActivationFormat,
     supported_dtypes: list[torch.dtype | str],
     blocked_quantization_support: bool,
-    supports_expert_map: bool,
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
     needs_aiter: bool = False,
@@ -142,7 +142,6 @@ def register_experts(
         activation_format,
         supported_dtypes,
         blocked_quantization_support,
-        supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
         needs_aiter,
@@ -176,7 +175,6 @@ register_experts(
     batched_format,
     common_float_types,
     blocked_quantization_support=True,
-    supports_expert_map=False,
     needs_matching_quant=True,
 )
 
@@ -185,7 +183,6 @@ register_experts(
     standard_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_expert_map=True,
     needs_matching_quant=True,
 )
 
@@ -194,7 +191,6 @@ register_experts(
     batched_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_expert_map=True,
 )
 
 # Disable on blackwell for now
@@ -222,8 +218,21 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+if has_deep_ep_v2() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        DeepEPV2PrepareAndFinalize,
+        standard_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_v2",
+    )
+
 if has_mori():
-    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
 
@@ -232,12 +241,12 @@ if has_mori():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        backend="mori",
+        backend="mori_high_throughput",
         supports_apply_weight_on_input=False,
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
@@ -260,7 +269,6 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
         # Note: this is a hack to get it to run for now
-        supports_expert_map=True,
     )
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
@@ -294,20 +302,32 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types,
         blocked_quantization_support=False,
-        supports_expert_map=True,
+    )
+
+if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+        TrtLlmFp8ExpertsModular,
+    )
+
+    register_experts(
+        TrtLlmFp8ExpertsModular,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
 
     register_experts(
         AiterExperts,
         standard_format,
-        fp8_types,
+        # AiterExperts also supports the fully-unquantized (None, None)
+        # scheme (see SUPPORTED_W_A in rocm_aiter_moe.py), not just fp8.
+        common_float_types,
         blocked_quantization_support=True,
-        supports_expert_map=True,
         needs_aiter=True,
     )
 else:
@@ -319,7 +339,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         batched_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_expert_map=False,
         needs_matching_quant=False,
         needs_deep_gemm=True,
     )
@@ -328,7 +347,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_expert_map=True,
         needs_matching_quant=False,
         needs_deep_gemm=True,
     )
@@ -337,7 +355,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         common_float_and_int_types,
         blocked_quantization_support=True,
-        supports_expert_map=True,
         needs_matching_quant=True,
         needs_deep_gemm=True,
     )
@@ -353,28 +370,27 @@ if cutlass_fp8_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_expert_map=False,
     )
     register_experts(
         CutlassBatchedExpertsFp8,
         batched_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_expert_map=False,
     )
 else:
     CutlassBatchedExpertsFp8 = None
     CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
     register_experts(
         CutlassExpertsFp4,
         standard_format,
         nvfp4_types,
         blocked_quantization_support=True,
-        supports_expert_map=False,
     )
 else:
     CutlassExpertsFp4 = None
@@ -383,35 +399,35 @@ MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
     # per-channel / per-column weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-channel / per-column weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # per-tensor weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-tensor weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # block-quantized weights and 128 block per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=[128, 128],

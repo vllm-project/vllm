@@ -122,8 +122,6 @@ For example:
 
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
 
---8<-- "vllm/model_executor/models/plamo2.py:plamo2_mamba_mixer"
-
 --8<-- "vllm/model_executor/layers/mamba/short_conv.py:short_conv"
 ```
 
@@ -138,7 +136,7 @@ For example:
 
 --8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
 
---8<-- "vllm/model_executor/layers/fused_moe/fused_moe.py:grouped_topk"
+--8<-- "vllm/model_executor/layers/fused_moe/router/grouped_topk_router.py:grouped_topk"
 ```
 
 **9. Norm:**

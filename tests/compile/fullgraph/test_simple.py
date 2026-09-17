@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test the piecewise compilation with a simple model so that we
+"""Test the piecewise compilation with a simple model so that we
 can exactly calculate the expected output and side effects.
 """
 
@@ -52,8 +51,7 @@ class SillyModel(nn.Module):
         self.intermediate_unbacked = intermediate_unbacked
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Overall effect:
+        """Overall effect:
         x = 3 * x + 19
         global_counter += 2
         """
@@ -161,7 +159,14 @@ def _run_simple_model(
 @pytest.mark.parametrize("intermediate_unbacked", [True, False])
 @torch.inference_mode()
 @create_new_process_for_each_test("spawn")
-def test_simple_piecewise_compile(backend, intermediate_unbacked):
+def test_simple_piecewise_compile(backend, intermediate_unbacked, monkeypatch):
+    # `intermediate_unbacked` flips a control-flow branch inside
+    # `SillyModel.forward`, but the AOT-compile cache key only hashes the
+    # forward function's qualname + line number, so both parametrize variants
+    # share the same cache slot. Disabling the cache forces each variant to
+    # compile fresh; otherwise the second-running variant loads the first's
+    # artifact and segfaults with an illegal memory access.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     _run_simple_model(
         splitting_ops=["silly::attention"],
         use_inductor_graph_partition=False,

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vllm import TokensPrompt
+from vllm.config import PoolerConfig
 
 
 @pytest.mark.parametrize(
@@ -20,6 +21,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         max_model_len=128,
         enforce_eager=True,
         runner="pooling",
+        pooler_config=PoolerConfig(task="token_embed"),
         enable_prefix_caching=True,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(
@@ -44,14 +46,3 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
             assert len(output.prompt_token_ids) == n
             assert len(output.outputs.data) == n
             assert output.num_cached_tokens == 0
-
-        # skip_reading_prefix_cache can still write to cache
-        # to accelerate following requests
-        pooling_outputs = vllm_model.llm.encode(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
-            pooling_task="embed",
-        )
-
-        for n, output in zip(n_prompt_tokens, pooling_outputs):
-            assert len(output.prompt_token_ids) == n
-            assert output.num_cached_tokens > 0

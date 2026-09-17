@@ -158,3 +158,92 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
             ],
             extra_body={"structured_outputs": {"grammar": ""}},
         )
+
+
+# Decode-side token reuse for disaggregated serving. The router forwards the
+# prefill stage's prompt token ids in kv_transfer_params so the decode stage
+# skips re-tokenizing.
+
+TOKEN_IN_MESSAGES = [{"role": "user", "content": "Hello, how are you today?"}]
+DECODE_MESSAGES = [{"role": "user", "content": "unrelated decode-side text"}]
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_prompt_token_ids_round_trip(client: openai.AsyncOpenAI):
+    """Ids forwarded in kv_transfer_params are used verbatim, skipping tokenize.
+
+    The decode request carries different messages, so a response whose
+    prompt_token_ids match the forwarded ids proves the ids were used rather
+    than the request's own messages. Generated text is not compared across
+    requests because vLLM greedy decoding is not bitwise-reproducible.
+    """
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={"return_token_ids": True},
+    )
+    reused_ids = baseline.prompt_token_ids
+    assert reused_ids
+
+    decode = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=DECODE_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": reused_ids},
+            "return_token_ids": True,
+        },
+    )
+
+    # The engine saw the forwarded ids, not the decode request's own messages.
+    assert decode.prompt_token_ids == reused_ids
+    # text-out: reuse still yields a detokenized message.
+    assert decode.choices[0].message.content
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI):
+    """Decode-side token reuse streams chat-formatted text-out."""
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        extra_body={"return_token_ids": True},
+    )
+    reused_ids = baseline.prompt_token_ids
+    assert reused_ids
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=DECODE_MESSAGES,
+        max_completion_tokens=16,
+        temperature=0,
+        stream=True,
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": reused_ids},
+            "return_token_ids": True,
+        },
+    )
+
+    content = ""
+    delta_token_ids: list[int] = []
+    first_chunk = True
+    async for chunk in stream:
+        if first_chunk:
+            # prompt_token_ids arrives once, on the first chunk.
+            assert chunk.prompt_token_ids == reused_ids
+            first_chunk = False
+        if not chunk.choices:
+            continue
+        if chunk.choices[0].delta.content:
+            content += chunk.choices[0].delta.content
+        if tids := getattr(chunk.choices[0], "token_ids", None):
+            delta_token_ids.extend(tids)
+
+    # streamed text-out, reconstructed from deltas, with generated token ids.
+    assert content
+    assert delta_token_ids

@@ -54,6 +54,7 @@ def server():
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
     task = "token_embed"
+    request_id = "client-request-id"
     response = requests.post(
         server.url_for("pooling"),
         json={
@@ -61,11 +62,13 @@ async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
             "input": input_text,
             "encoding_format": "float",
             "task": task,
+            "request_id": request_id,
         },
     )
 
     poolings = PoolingResponse.model_validate(response.json())
 
+    assert poolings.id == f"pooling-{request_id}"
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == len(input_tokens)
     assert len(poolings.data[0].data[0]) == 384
@@ -86,8 +89,12 @@ async def test_pooling_not_supported(
             "task": task,
         },
     )
+    assert response.json()["error"]["type"] == "BadRequestError"
 
-    if task != "embed":
-        assert response.json()["error"]["type"] == "BadRequestError"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "embed":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
         err_msg = f"Unsupported task: {task!r}"
-        assert response.json()["error"]["message"].startswith(err_msg)
+    assert response.json()["error"]["message"].startswith(err_msg)

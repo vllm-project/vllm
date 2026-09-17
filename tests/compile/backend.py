@@ -12,18 +12,24 @@ from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
 from vllm.compilation.passes.fx_utils import find_op_nodes
-from vllm.compilation.passes.inductor_pass import InductorPass
+from vllm.compilation.passes.inductor_pass import (
+    InductorPass,
+    pass_context,
+)
+from vllm.compilation.passes.ir.inplace_functionalization import (
+    VllmIRInplaceFunctionalizationPass,
+)
 from vllm.compilation.passes.pass_manager import with_pattern_match_debug
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 
 logger = init_logger("vllm.tests.compile.backend")
 
 
 class LazyInitPass(InductorPass):
-    """
-    If there's a pass that we want to initialize lazily in a test,
+    """If there's a pass that we want to initialize lazily in a test,
     we can wrap it in LazyInitPass, which will initialize the pass when invoked
     and then immediately invoke it.
     """
@@ -38,8 +44,7 @@ class LazyInitPass(InductorPass):
 
 
 class TestBackend:
-    """
-    This class provides a simple Inductor backend that can be used for testing.
+    """This class provides a simple Inductor backend that can be used for testing.
     It takes a list of custom passes and runs them after Inductor's passes.
     It also saves the graph before and after the custom passes for inspection.
 
@@ -53,10 +58,16 @@ class TestBackend:
         self.custom_passes = list(passes)
         vllm_config = get_current_vllm_config()
         compile_config = vllm_config.compilation_config
+        self.range = Range(1, vllm_config.scheduler_config.max_num_batched_tokens)
         # Deepcopy to allow multiple TestBackend instances to use the same VllmConfig
         self.inductor_config = deepcopy(compile_config.inductor_compile_config)
         self.inductor_config["force_disable_caches"] = True
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
+
+        # Add VllmIRInplaceFunctionalizationPass as pre-grad pass by default
+        self.inductor_config["pre_grad_custom_pass"] = (
+            VllmIRInplaceFunctionalizationPass(vllm_config)
+        )
 
         if debug_dump_path := vllm_config.compile_debug_dump_path():
             logger.debug("Dumping depyf output to %s", debug_dump_path)
@@ -68,7 +79,7 @@ class TestBackend:
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
 
-        with self.debug_ctx:
+        with self.debug_ctx, pass_context(self.range):
             return compile_fx(
                 graph, example_inputs, config_patches=self.inductor_config
             )

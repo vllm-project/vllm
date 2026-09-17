@@ -13,6 +13,9 @@ from vllm.compilation.passes.utility.scatter_split_replace import (
 from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import CompilationConfig, CompilationMode, VllmConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 
 class ScatterSplitReplacementModel(nn.Module):
@@ -61,7 +64,7 @@ class ScatterSplitReplacementModel(nn.Module):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_scatter_split_replace(dtype):
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

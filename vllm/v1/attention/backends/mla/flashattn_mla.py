@@ -56,6 +56,10 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
         return FlashAttnMLAMetadataBuilder
@@ -78,6 +82,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if not flash_attn_supports_mla():
@@ -250,6 +255,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,

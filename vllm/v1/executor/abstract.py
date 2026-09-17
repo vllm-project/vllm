@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -22,7 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -35,7 +36,7 @@ FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """Abstract base class for vLLM executors."
+    """Abstract base class for vLLM executors.
 
     An executor is responsible for executing the model on one device,
     or it can be a distributed executor that can execute the model on multiple devices.
@@ -110,30 +111,35 @@ class Executor(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
+        self.ec_output_aggregator: ECOutputAggregator | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
         raise NotImplementedError
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
+        """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+
+    def compile_or_warm_up_model(self) -> None:
+        """Compile/warm up the model and capture cudagraphs on workers."""
+        compilation_times: list[CompilationTimes] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
-                compilation_times
+                t.language_model for t in compilation_times
+            )
+            self.vllm_config.compilation_config.encoder_compilation_time = max(
+                t.encoder for t in compilation_times
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
-        """
-        Register a function to be called if the executor enters a permanent
+        """Register a function to be called if the executor enters a permanent
         failed state.
         """
         pass
@@ -144,6 +150,14 @@ class Executor(ABC):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
+    def get_supported_kv_cache_layouts(self) -> list[list[str]]:
+        """Layouts each worker's backends support, most preferred first."""
+        return self.collective_rpc("get_supported_kv_cache_layouts")
+
+    def set_kv_cache_layout(self, layout_name: str) -> None:
+        """Publish the resolved KV cache layout to the workers."""
+        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+
     @overload
     def collective_rpc(
         self,
@@ -153,8 +167,29 @@ class Executor(ABC):
         kwargs: dict | None = None,
         non_block: Literal[False] = False,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        pass
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: Literal[True] = True,
+    ) -> Future[list[_R]]:
+        pass
+
+    @abstractmethod
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+    ) -> list[_R] | Future[list[_R]]:
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -176,29 +211,13 @@ class Executor(ABC):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
+
         """
-        pass
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str | Callable[[WorkerBase], _R],
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict | None = None,
-        non_block: Literal[True] = True,
-    ) -> Future[list[_R]]:
-        pass
-
-    @abstractmethod
-    def collective_rpc(
-        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
-    ):
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -248,10 +267,6 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 1
-
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
@@ -277,16 +292,25 @@ class Executor(ABC):
         self.collective_rpc("shutdown")
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
-        """Init KVOutputAggregator"""
+        """Init KVOutputAggregator."""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )
+
+    def init_ec_output_aggregator(self) -> None:
+        self.ec_output_aggregator = ECOutputAggregator()
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
         output: list[tuple[SupportedTask, ...]]
         output = self.collective_rpc("get_supported_tasks")
         return output[0]
+
+    def supports_draft_weight_updates(self) -> bool:
+        worker_support: list[bool] = self.collective_rpc(
+            "supports_draft_weight_updates"
+        )
+        return all(worker_support)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -361,9 +385,7 @@ class Executor(ABC):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
-        """
-        Whether the executor supports async scheduling.
-        """
+        """Whether the executor supports async scheduling."""
         return False
 
 

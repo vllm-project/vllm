@@ -49,9 +49,7 @@ def _is_flashmla_available() -> tuple[bool, str | None]:
 
 
 def is_flashmla_dense_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
@@ -61,9 +59,7 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
 
 
 def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
@@ -73,7 +69,7 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     ):
         return (
             False,
-            "FlashMLA Sparse is only supported on Hopper and Blackwell devices.",
+            "FlashMLA Sparse is only supported on Hopper and Blackwell DC devices.",
         )
     return True, None
 
@@ -151,16 +147,3 @@ def flash_mla_with_kvcache_fp8(
         descale_k,
     )
     return out, softmax_lse
-
-
-#
-# TODO: Add fake functions
-#
-# @register_fake("_flashmla_C::get_mla_metadata")
-# def _get_mla_metadata_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
-#     return ....
-#
-# @register_fake("_flashmla_C::fwd_kvcache_mla")
-# def _fwd_kvcache_mla_fake(....) -> Tuple[torch.Tensor, torch.Tensor]:
-#     return ....
-#

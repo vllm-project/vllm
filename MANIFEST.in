@@ -4,6 +4,7 @@ include requirements/cuda.txt
 include requirements/rocm.txt
 include requirements/cpu.txt
 include CMakeLists.txt
+include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *

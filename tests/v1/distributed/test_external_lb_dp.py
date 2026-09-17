@@ -14,7 +14,7 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-MODEL_NAME = "ibm-research/PowerMoE-3b"
+MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 
 # Number of data parallel ranks for external LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
@@ -111,11 +111,12 @@ class ExternalLBServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
-        while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+        servers = [s for s, _ in self.servers]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
 
 
 @pytest.fixture(scope="module")
@@ -132,11 +133,19 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module", params=[1, 4])
+@pytest.fixture(
+    scope="module",
+    params=[(1, False), (4, False), (1, True)],
+    ids=["api-1-standard", "api-4-standard", "api-1-ep-enabled"],
+)
 def server_manager(request, default_server_args):
-    api_server_count = request.param
+    api_server_count, enable_expert_parallel = request.param
+    server_args = default_server_args.copy()
+    if enable_expert_parallel:
+        server_args.append("--enable-expert-parallel")
+
     server_manager = ExternalLBServerManager(
-        MODEL_NAME, DP_SIZE, api_server_count, default_server_args
+        MODEL_NAME, DP_SIZE, api_server_count, server_args
     )
 
     with server_manager:
@@ -166,9 +175,20 @@ def _get_parallel_config(server: RemoteOpenAIServer):
     return vllm_config["parallel_config"]
 
 
+def _assert_expert_parallel_config(
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+):
+    for server, server_args in servers:
+        expected = "--enable-expert-parallel" in server_args
+        parallel_config = _get_parallel_config(server)
+        assert parallel_config["enable_expert_parallel"] is expected
+
+
 def test_external_lb_server_info(server_manager):
     servers = server_manager.servers
     api_server_count = server_manager.api_server_count
+
+    _assert_expert_parallel_config(servers)
 
     for i, (server, _) in enumerate(servers):
         print(f"Testing {i=}")

@@ -17,7 +17,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "cuda_vec_utils.cuh"
+#include "../../cuda_vec_utils.cuh"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
@@ -26,7 +26,7 @@
 
 #include "cuda_utils.h"
 #include "nvfp4_utils.cuh"
-#include "launch_bounds_utils.h"
+#include "libtorch_stable/launch_bounds_utils.h"
 
 namespace vllm {
 
@@ -53,11 +53,14 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
+  int32_t const numValidRows =
+      min(numRows,
+          static_cast<int32_t>(__ldca(&input_offset_by_experts[n_experts])));
   // When fusing SiLU+Mul, input has gate || up layout (doubled width)
   int inColsPerRow = FUSE_SILU_MUL ? colsPerRow * 2 : colsPerRow;
 
   // Each global thread processes one element
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+  for (int globalIdx = tid; globalIdx < numValidRows * colsPerRow;
        globalIdx += gridDim.x * blockDim.x) {
     // Calculate which row and column this global thread should process
     int rowIdx = globalIdx / colsPerRow;
@@ -186,11 +189,13 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
+  int32_t const numValidRows =
+      min(numRows, static_cast<int32_t>(shared_input_offsets[n_experts]));
   // When fusing SiLU+Mul, input has gate || up layout (doubled width)
   int inColsPerRow = FUSE_SILU_MUL ? colsPerRow * 2 : colsPerRow;
 
   // Each global thread processes one element
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+  for (int globalIdx = tid; globalIdx < numValidRows * colsPerRow;
        globalIdx += gridDim.x * blockDim.x) {
     // Calculate which row and column this global thread should process
     int rowIdx = globalIdx / colsPerRow;
@@ -277,7 +282,9 @@ void quant_impl(void* output, void* output_scale, void* input,
       (totalWorkSize + block.x * grid.x - 1) / (block.x * grid.x);
   if (blockRepeat > 1) {
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
-    if (n_experts >= 4) {
+    // The shared-memory vectorized offset load only handles full 4-expert
+    // chunks. Use the scalar specialization for the remainder cases.
+    if (n_experts >= 4 && n_experts % 4 == 0) {
       cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, false>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
@@ -299,7 +306,9 @@ void quant_impl(void* output, void* output_scale, void* input,
               n_experts);
     }
   } else {
-    if (n_experts >= 16) {
+    // The low-latency vectorized expert lookup only handles full 16-expert
+    // chunks. Fall back to the scalar lookup path for the remainder cases.
+    if (n_experts >= 16 && n_experts % 16 == 0) {
       cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, false>
           <<<grid, block, 0, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),

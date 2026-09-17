@@ -213,6 +213,8 @@ class MicroGemm<cpu_utils::ISA::AMX, scalar_t> {
  public:
   static constexpr int32_t MaxMSize = 32;
   static constexpr int32_t NSize = 32;
+  static constexpr int32_t WeightOCGroupSize = 16;
+  static constexpr bool PackA = false;
 
  public:
   MicroGemm() : curr_m_(-1) {

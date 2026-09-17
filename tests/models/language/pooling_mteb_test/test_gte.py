@@ -72,7 +72,8 @@ MODELS = [
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
-        enable_test=True,
+        # Skip: numerical regression with transformers v5.
+        enable_test=False,
     ),
     ########## ModernBertModel
     EmbedModelInfo(

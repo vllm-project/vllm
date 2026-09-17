@@ -8,20 +8,16 @@ from typing import TYPE_CHECKING
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
-logger = init_logger(__name__)
-
 
 class Step3ReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Step3 model.
+    """Reasoning parser for Step3 model.
 
     The Step3 model uses </think> token to denote the end of reasoning
     text. This parser extracts all content before </think> as reasoning content.
@@ -29,6 +25,7 @@ class Step3ReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
+        self.think_start_token = "<think>"
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(rf"(.*?){self.think_end_token}", re.DOTALL)
@@ -47,6 +44,14 @@ class Step3ReasoningParser(ReasoningParser):
             )
         self.think_end_token_id: int = think_end_token_id
 
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.think_start_token
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.think_end_token
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -56,8 +61,7 @@ class Step3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         For text "abc</think>xyz":

@@ -33,7 +33,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
@@ -57,8 +57,7 @@ bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 class OOBTensorConsumer(ABC):
     @abstractmethod
     def __call__(self, tensor: torch.Tensor) -> dict | None:
-        """
-        Called with tensors for the current message.
+        """Called with tensors for the current message.
         Returns None to reject the tensor (falls back to regular serialization),
         otherwise a dict with arbitrary placeholder data to be included
         in the serialized message.
@@ -327,7 +326,7 @@ class MsgpackDecoder:
         oob_tensor_provider: OOBTensorProvider | None = None,
     ):
         self.share_mem = share_mem
-        self.pin_tensors = is_pin_memory_available()
+        self.pin_tensors = PIN_MEMORY
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
@@ -489,8 +488,7 @@ def run_method(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> Any:
-    """
-    Run a method of an object with the given arguments and keyword arguments.
+    """Run a method of an object with the given arguments and keyword arguments.
     If the method is string, it will be converted to a method using getattr.
     If the method is serialized bytes and will be deserialized using
     cloudpickle.
@@ -528,8 +526,7 @@ class PydanticMsgspecMixin:
     def __get_pydantic_core_schema__(
         cls, source_type: Any, handler: GetCoreSchemaHandler
     ) -> core_schema.CoreSchema:
-        """
-        Make msgspec.Struct compatible with Pydantic, respecting defaults.
+        """Make msgspec.Struct compatible with Pydantic, respecting defaults.
         Handle JSON=>msgspec.Struct. Used when exposing msgspec.Struct to the
         API as input or in `/docs`. Note this is cached by Pydantic and not
         called on every validation.

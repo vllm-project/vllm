@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.platforms import current_platform
 
 from ....conftest import VllmRunner
 
@@ -74,75 +75,51 @@ def _make_image_mm_param(
 
 
 def _run_token_embed_test(
-    vllm_runner: type[VllmRunner],
+    vllm_model: VllmRunner,
     model: str,
-    *,
-    dtype: str,
 ) -> None:
     """Verify per-token embedding shape and L2 normalization."""
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
+    outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
 
-        assert len(outputs) == 1
-        emb = torch.tensor(outputs[0])
-        # Token embeddings should be 2D: [num_tokens, embed_dim]
-        assert emb.dim() == 2
-        assert emb.shape[1] == EMBED_DIMS[model]
-        assert emb.shape[0] > 1
+    assert len(outputs) == 1
+    emb = torch.tensor(outputs[0])
+    # Token embeddings should be 2D: [num_tokens, embed_dim]
+    assert emb.dim() == 2
+    assert emb.shape[1] == EMBED_DIMS[model]
+    assert emb.shape[0] > 1
 
-        # Verify L2 normalization
-        norms = torch.norm(emb, p=2, dim=-1)
-        torch.testing.assert_close(
-            norms,
-            torch.ones_like(norms),
-            rtol=1e-2,
-            atol=1e-2,
-        )
+    # Verify L2 normalization
+    norms = torch.norm(emb, p=2, dim=-1)
+    torch.testing.assert_close(
+        norms,
+        torch.ones_like(norms),
+        rtol=1e-2,
+        atol=1e-2,
+    )
 
 
 def _run_late_interaction_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
     from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
-        d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
+    q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
+    d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
 
-        q_emb = torch.tensor(q_outputs[0])
-        d_emb = torch.tensor(d_outputs[0])
+    q_emb = torch.tensor(q_outputs[0])
+    d_emb = torch.tensor(d_outputs[0])
 
-        manual_score = compute_maxsim_score(q_emb, d_emb).item()
+    manual_score = compute_maxsim_score(q_emb, d_emb).item()
 
-        vllm_scores = vllm_model.score(TEXT_QUERIES[0], TEXT_DOCUMENTS[0])
+    vllm_scores = vllm_model.score(TEXT_QUERIES[0], TEXT_DOCUMENTS[0])
 
-        assert len(vllm_scores) == 1
-        assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
+    assert len(vllm_scores) == 1
+    assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
 
 
 def _run_relevance_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Verify that relevant documents score higher than irrelevant ones."""
     query = "What is machine learning?"
@@ -152,59 +129,18 @@ def _run_relevance_test(
         "Deep learning uses neural networks for complex tasks.",
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.score(query, documents)
+    scores = vllm_model.score(query, documents)
 
-        assert len(scores) == 3
-        assert scores[0] > scores[1], "ML doc should score higher than weather doc"
-        assert scores[2] > scores[1], "DL doc should score higher than weather doc"
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_token_embed(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_token_embed_test(vllm_runner, model, dtype=dtype)
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_late_interaction_scoring(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_late_interaction_test(vllm_runner, model, dtype=dtype)
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_relevance_ordering(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_relevance_test(vllm_runner, model, dtype=dtype)
+    assert len(scores) == 3
+    assert scores[0] > scores[1], "ML doc should score higher than weather doc"
+    assert scores[2] > scores[1], "DL doc should score higher than weather doc"
 
 
 # ── Multimodal scoring tests ────────────────────────────────
 
 
 def _run_multimodal_text_query_image_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score a text query against image documents via the multimodal path."""
     red_image = _make_base64_image(64, 64, color=(255, 0, 0))
@@ -215,27 +151,15 @@ def _run_multimodal_text_query_image_docs_test(
         _make_image_mm_param(red_image),
         _make_image_mm_param(blue_image),
     ]
+    scores = vllm_model.llm.score(query, image_docs)
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.llm.score(query, image_docs)
-
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
 
 
 def _run_multimodal_mixed_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score a text query against a mix of text and image documents."""
     red_image = _make_base64_image(64, 64, color=(255, 0, 0))
@@ -246,28 +170,17 @@ def _run_multimodal_mixed_docs_test(
         _make_image_mm_param(red_image),
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.llm.score(query, documents)
+    scores = vllm_model.llm.score(query, documents)
 
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
-        # Text document about France should score higher than a random image
-        assert scores[0].outputs.score > scores[1].outputs.score
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
+    # Text document about France should score higher than a random image
+    assert scores[0].outputs.score > scores[1].outputs.score
 
 
 def _run_multimodal_image_query_text_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score an image query against text documents."""
     red_image = _make_base64_image(64, 64, color=(255, 0, 0))
@@ -278,6 +191,20 @@ def _run_multimodal_image_query_text_docs_test(
         "The weather forecast shows rain tomorrow.",
     ]
 
+    scores = vllm_model.llm.score(image_query, documents)
+
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", [DTYPE])
+def test_colpali_default_runner(
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
     with vllm_runner(
         model,
         runner="pooling",
@@ -286,38 +213,32 @@ def _run_multimodal_image_query_text_docs_test(
         enforce_eager=True,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
-        scores = vllm_model.llm.score(image_query, documents)
-
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_multimodal_text_query_image_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_multimodal_text_query_image_docs_test(vllm_runner, model, dtype=dtype)
+        _run_token_embed_test(vllm_model, model)
+        _run_late_interaction_test(vllm_model)
+        _run_relevance_test(vllm_model)
+        _run_multimodal_mixed_docs_test(vllm_model)
+        _run_multimodal_image_query_text_docs_test(vllm_model)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_multimodal_mixed_docs(
+def test_colpali_v2_multimodal_text_query_image_docs(
     vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
     model: str,
     dtype: str,
 ) -> None:
-    _run_multimodal_mixed_docs_test(vllm_runner, model, dtype=dtype)
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colpali_multimodal_image_query_text_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_multimodal_image_query_text_docs_test(vllm_runner, model, dtype=dtype)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    attention_backend = "FLASH_ATTN" if current_platform.is_cuda() else None
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype=dtype,
+        max_model_len=4096,
+        enforce_eager=True,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        attention_backend=attention_backend,
+        kernel_config={"enable_flashinfer_autotune": False},
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        _run_multimodal_text_query_image_docs_test(vllm_model)

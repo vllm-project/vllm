@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import random
 
 import pytest
 import torch
 import torch.distributed
 
+import vllm.distributed.eplb.eplb_communicator as eplb_comm
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_communicator import (
+    create_eplb_communicator,
+    has_nixl,
+)
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -23,14 +27,36 @@ from vllm.distributed.parallel_state import (
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
+    """Gloo receives must reach the GPU without an implicit pageable copy."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
+
+    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+
+    def receive(tensors):
+        for tensor in tensors:
+            tensor.fill_(7)
+        return []
+
+    monkeypatch.setattr(eplb_comm, "batch_isend_irecv", receive)
+    communicator = eplb_comm.TorchDistGlooStagedEplbCommunicator(cpu_group=None)
+    dst = torch.empty(32, device="cuda")
+    communicator.add_recv([dst], src_rank=1, expert_id=0)
+    gsd.with_gpu_sync_check(communicator.execute)()
+    torch.testing.assert_close(dst.cpu(), torch.full((32,), 7.0))
+
+
 def create_expert_indices_with_redundancy(
     num_layers: int,
     num_logical_experts: int,
     total_physical_experts: int,
     redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:
-    """
-    Create expert indices with redundancy.
+    """Create expert indices with redundancy.
 
     Args:
         num_layers: number of layers
@@ -40,6 +66,7 @@ def create_expert_indices_with_redundancy(
 
     Returns:
         indices: Shape (num_layers, total_physical_experts)
+
     """
     assert sum(redundancy_config) == total_physical_experts
     assert len(redundancy_config) == num_logical_experts
@@ -68,8 +95,7 @@ def create_expert_weights(
     device: torch.device,
     physical_to_logical_mapping: torch.Tensor,
 ) -> list[list[torch.Tensor]]:
-    """
-    Create fake expert weights tensor for testing.
+    """Create fake expert weights tensor for testing.
 
     Use `arange` to generate predictable weights values, based on logical
     expert ID.
@@ -78,6 +104,7 @@ def create_expert_weights(
     Args:
         physical_to_logical_mapping: Shape (num_layers, num_local_experts)
             mapping[layer, physical_pos] = logical_expert_id
+
     """
     expert_weights = []
 
@@ -182,9 +209,7 @@ def verify_redundant_experts_have_same_weights(
     world_size: int,
     num_local_experts: int,
 ) -> bool:
-    """
-    Verify that all replicas of the same logical expert have the same weights.
-    """
+    """Verify that all replicas of the same logical expert have the same weights."""
     num_layers = len(expert_weights)
     total_physical_experts = world_size * num_local_experts
 
@@ -275,12 +300,15 @@ def assert_verification_synced(local_ok: bool, msg: str) -> None:
     assert bool(ok_tensor.item()), msg
 
 
-def create_eplb_communicator_or_raise(*, group_coordinator, backend, expert_weights):
+def create_eplb_communicator_or_raise(
+    *, group_coordinator, backend, expert_weights, expert_buffer
+):
     try:
         return create_eplb_communicator(
             group_coordinator=group_coordinator,
             backend=backend,
             expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -353,29 +381,27 @@ def _test_async_transfer_layer_without_mtp_worker(
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
         communicator.set_stream(cuda_stream)
 
         for layer_idx in range(num_layers):
-            is_unchanged, is_received_locally, recv_metadata = asyncio.run(
-                transfer_layer(
-                    old_layer_indices=old_indices_cpu[layer_idx],
-                    new_layer_indices=new_indices_cpu[layer_idx],
-                    expert_weights=expert_weights[layer_idx],
-                    expert_weights_buffer=expert_buffer,
-                    ep_group=ep_group,
-                    communicator=communicator,
-                    cuda_stream=cuda_stream,
-                )
+            transfer_metadata = transfer_layer(
+                old_layer_indices=old_indices_cpu[layer_idx],
+                new_layer_indices=new_indices_cpu[layer_idx],
+                expert_weights=expert_weights[layer_idx],
+                expert_weights_buffer=expert_buffer,
+                ep_group=ep_group,
+                communicator=communicator,
+                cuda_stream=cuda_stream,
+                layer_idx=layer_idx,
             )
             cuda_stream.synchronize()
             move_from_buffer(
                 expert_weights=expert_weights[layer_idx],
                 expert_weights_buffers=expert_buffer,
-                is_unchanged=is_unchanged,
-                is_received_locally=is_received_locally,
-                recv_metadata=recv_metadata,
+                transfer_metadata=transfer_metadata,
                 new_indices=new_indices_cpu[layer_idx].numpy(),
                 ep_rank=ep_rank,
             )
@@ -462,10 +488,12 @@ def _test_rearrange_expert_weights_with_redundancy(
             num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
         )
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute weight rearrangement
@@ -473,9 +501,9 @@ def _test_rearrange_expert_weights_with_redundancy(
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
-            communicator=communicator,
+            communicator,
         )
 
     # Verify the rearrangement result
@@ -527,7 +555,9 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
+)
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
     num_layers,
@@ -536,7 +566,8 @@ def test_rearrange_expert_weights_with_redundancy(
     eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
-
+    if eplb_communicator == "nixl" and not has_nixl():
+        pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -591,10 +622,12 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute rearrangement (should be no change)
@@ -602,9 +635,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             indices,
             indices,  # Same indices
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=False,
         )
 
     # Verify that the weights have not changed
@@ -633,7 +666,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
+@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "nixl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -642,7 +675,8 @@ def test_async_transfer_layer_without_mtp(
     eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
-
+    if eplb_communicator == "nixl" and not has_nixl():
+        pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
@@ -658,11 +692,9 @@ def test_async_transfer_layer_without_mtp(
 
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_no_change(world_size):
-    """
-    Test that when the indices do not change, the weights should remain
+    """Test that when the indices do not change, the weights should remain
     unchanged.
     """
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -720,10 +752,12 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute profile mode rearrangement
@@ -731,9 +765,10 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=True,  # Profile mode
+            is_profile=True,
         )
 
     # In profile mode, the weights should remain unchanged
@@ -759,7 +794,6 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(

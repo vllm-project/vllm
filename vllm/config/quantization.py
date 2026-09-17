@@ -1,121 +1,278 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+import regex as re
+from pydantic import (
+    Field,
+    GetPydanticSchema,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import core_schema
 
 from vllm.config.utils import config
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+    kInt8StaticChannelSym,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+    kMxfp8Dynamic,
+    kNvfp4Static,
+)
+
+# User-facing names addressable from quantization_config.
+QUANT_KEY_NAMES: dict[str, QuantKey] = {
+    "fp8_per_tensor_static": kFp8StaticTensorSym,
+    "fp8_per_tensor_dynamic": kFp8DynamicTensorSym,
+    "fp8_per_token": kFp8DynamicTokenSym,
+    "fp8_per_channel_static": kFp8StaticChannelSym,
+    "fp8_per_block_static": kFp8Static128BlockSym,
+    "fp8_per_block_dynamic": kFp8Dynamic128Sym,
+    "mxfp8": kMxfp8Dynamic,
+    "mxfp4": kMxfp4Dynamic,
+    "int8_per_channel_static": kInt8StaticChannelSym,
+}
 
 
-class OnlineQuantScheme(Enum):
-    """Supported online quantization schemes."""
+def _coerce_quant_key(v: Any) -> QuantKey | None:
+    if v is None or isinstance(v, QuantKey):
+        return v
+    if not isinstance(v, str):
+        raise TypeError(f"expected str or QuantKey, got {type(v).__name__}")
+    try:
+        return QUANT_KEY_NAMES[v]
+    except KeyError:
+        raise ValueError(
+            f"unknown quantization name {v!r}; "
+            f"expected one of {sorted(QUANT_KEY_NAMES)}"
+        ) from None
 
-    # fp8, weights and activations scaled per-tensor
-    FP8_PER_TENSOR = "fp8_per_tensor"
 
-    # fp8, activations scaled in blocks of 1x128 elements, weights scaled in
-    # blocks of 128x128 elements (popularized by DeepSeek)
-    FP8_PER_BLOCK = "fp8_per_block"
-
-    # TODO(future PRs): add more online quant schemes here: mxfp8, etc
+# Stop pydantic from introspecting QuantKey: it transitively contains a
+# NamedTuple with `ClassVar[GroupShape]` declarations that pydantic refuses.
+QuantKeyField = Annotated[
+    QuantKey | None,
+    GetPydanticSchema(
+        lambda _src, _handler: core_schema.no_info_plain_validator_function(
+            _coerce_quant_key
+        )
+    ),
+]
 
 
 @config
-class OnlineQuantizationConfigArgs:
-    """Configuration for online quantization.
+class QuantSpec:
+    """Quantization spec for one layer kind (linear or MoE).
 
-    Controls how ``OnlineQuantizationConfig`` is applied to a model.
-    At least one of ``global_scheme``, ``linear_scheme_override``, or
-    ``moe_scheme_override`` must be set.
+    `None` on either side means the method class falls back to its own default
+    (typically inherited from the checkpoint, or unquantized for online).
     """
 
-    global_scheme: OnlineQuantScheme | None = None
-    """Quantization scheme applied to every supported layer."""
+    weight: QuantKeyField = None
+    """Weight quantization key, or a name from QUANT_KEY_NAMES."""
 
-    linear_scheme_override: OnlineQuantScheme | None = None
-    """Quantization scheme override for ``LinearBase`` layers."""
+    activation: QuantKeyField = None
+    """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
-    moe_scheme_override: OnlineQuantScheme | None = None
-    """Quantization scheme override for ``FusedMoE`` layers."""
+    def __str__(self) -> str:
+        def quant_key_str(quant_key: QuantKey | None) -> str:
+            if quant_key is None:
+                return "None"
+            return next(
+                (
+                    name
+                    for name, known_quant_key in QUANT_KEY_NAMES.items()
+                    if known_quant_key == quant_key
+                ),
+                str(quant_key),
+            )
+
+        return quant_key_str(self.weight)
+
+
+@config
+class QuantizationConfigArgs:
+    """User-facing quantization configuration.
+
+    See `docs/features/quantization/online.md` for the schema and shorthand
+    string forms accepted on `linear` and `moe`.
+    """
+
+    linear: QuantSpec | None = None
+    """Spec applied to ``LinearBase`` layers."""
+
+    moe: QuantSpec | None = None
+    """Spec applied to ``FusedMoEFactory`` layers."""
 
     ignore: list[str] = Field(default_factory=list)
-    """Layers to skip quantization for. Supports exact names and regex
-    patterns with ``re:`` prefix (e.g. ``re:.*attn.*``), consistent with
-    compressed_tensors layer skipping."""
+    """Layers to skip quantization for. Online quantization also supports
+    fnmatch-style patterns."""
 
-    @field_validator(
-        "global_scheme", "linear_scheme_override", "moe_scheme_override", mode="before"
-    )
+    targets: dict[str, str] | None = None
+    """Per-layer online quantization overrides, keyed by exact layer name or
+    regex patterns with a `re:`, or fnmatch-style patterns for online
+    quantization, mapping to an online shorthand name (see
+    `_ONLINE_SHORTHANDS`). A layer that matches no pattern is left unquantized.
+    Mutually exclusive with `linear` and `moe`.
+    """
+
+    @field_validator("linear", "moe", mode="before")
     @classmethod
-    def _coerce_scheme(
-        cls, v: str | OnlineQuantScheme | None
-    ) -> OnlineQuantScheme | None:
-        if isinstance(v, str):
-            return OnlineQuantScheme(v)
+    def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
+        if not isinstance(v, str):
+            return v
+        field_name = info.field_name
+        assert field_name is not None
+        if v in _ONLINE_SHORTHANDS:
+            spec = getattr(_ONLINE_SHORTHANDS[v], field_name)
+            if spec is None:
+                raise ValueError(
+                    f"online shorthand {v!r} does not define a {field_name} spec"
+                )
+            return spec
+        return QuantSpec(weight=_coerce_quant_key(v))
+
+    @field_validator("targets", mode="before")
+    @classmethod
+    def _validate_targets(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise TypeError(f"targets must be a dict, got {type(v).__name__}")
+        for pattern, shorthand in v.items():
+            if not isinstance(pattern, str):
+                raise ValueError(
+                    f"targets keys must be strings, got {type(pattern).__name__}"
+                )
+            if not isinstance(shorthand, str) or shorthand not in _ONLINE_SHORTHANDS:
+                raise ValueError(
+                    f"targets[{pattern}] = {shorthand} is not a valid "
+                    f"online shorthand name; expected one of "
+                    f"{sorted(_ONLINE_SHORTHANDS)}"
+                )
+            if pattern.startswith("re:"):
+                try:
+                    re.compile(pattern[3:])
+                except re.error as e:
+                    raise ValueError(
+                        f"targets key {pattern} is not a valid regex: {e}"
+                    ) from e
         return v
 
-
-def resolve_online_quant_config(
-    quantization: str | None,
-    quantization_config: dict[str, Any] | OnlineQuantizationConfigArgs | None,
-) -> OnlineQuantizationConfigArgs | None:
-    """Resolve online quant scheme shorthand into a quantization config.
-
-    If ``quantization`` is an online quant scheme (e.g. ``'fp8_per_tensor'``),
-    ensures ``quantization_config`` has a matching ``global_scheme`` and casts
-    it to :class:`OnlineQuantizationConfigArgs` if needed.
-    """
-    online_quant_values = {s.value for s in OnlineQuantScheme}
-    valid_quantization_values = online_quant_values | {"online"}
-    if quantization not in valid_quantization_values:
-        if quantization_config is not None:
+    @model_validator(mode="after")
+    def _validate_targets_exclusivity(self) -> "QuantizationConfigArgs":
+        if self.targets is None:
+            return self
+        if self.linear is not None or self.moe is not None:
             raise ValueError(
-                f"quantization_config is only supported when quantization "
-                f"is one of {sorted(valid_quantization_values)}, "
-                f"got quantization={quantization!r}"
+                "quantization_config.targets is mutually exclusive with "
+                f"quantization_config.linear/moe, got "
+                f"targets={self.targets}, linear={self.linear}, "
+                f"moe={self.moe}."
             )
-        return None
+        return self
 
-    if quantization in online_quant_values:
-        scheme = OnlineQuantScheme(quantization)
 
+# CLI shorthands accepted by `--quantization`. Each desugars to a full
+# QuantizationConfigArgs; activation overrides go through quantization_config.
+_ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
+    "fp8_per_tensor": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kFp8StaticTensorSym),
+        moe=QuantSpec(weight=kFp8StaticTensorSym),
+    ),
+    "fp8_per_block": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kFp8Static128BlockSym),
+        moe=QuantSpec(weight=kFp8Static128BlockSym),
+    ),
+    # Per-output-channel weight scale + dynamic per-token activation.
+    # Same shape as llmcompressor's FP8_DYNAMIC recipe.
+    "fp8_per_channel": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kFp8StaticChannelSym),
+        moe=QuantSpec(weight=kFp8StaticChannelSym),
+    ),
+    "mxfp8": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp8Dynamic),
+        moe=QuantSpec(weight=kMxfp8Dynamic),
+    ),
+    "mxfp4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static),
+        moe=QuantSpec(weight=kMxfp4Static),
+    ),
+    # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+    "int8_per_channel_weight_only": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # Online NVFP4 on MoE with per-token dynamic activation scales (Blackwell +
+    # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
+    "nvfp4_per_token": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kNvfp4Static),
+    ),
+}
+
+
+# Names accepted by `--quantization`; "online" means "use quantization_config".
+ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
+    *_ONLINE_SHORTHANDS.keys(),
+    "online",
+)
+
+# These names are also checkpoint quantization methods. Their online configs
+# are resolved only when checkpoint quantization metadata is absent.
+_DEFERRED_ONLINE_SHORTHANDS = frozenset(("mxfp4", "mxfp8"))
+
+
+def resolve_quantization_config(
+    quantization: str | None,
+    quantization_config: dict[str, Any] | QuantizationConfigArgs | None,
+) -> QuantizationConfigArgs | None:
+    """Resolve `--quantization` shorthand and `--quantization-config` into a
+    QuantizationConfigArgs.
+
+    `quantization` is a CLI shorthand that desugars into a base config via
+    `_ONLINE_SHORTHANDS`. `quantization_config` is a dict or pre-built args
+    object. When both are given, fields explicitly set in `quantization_config`
+    take precedence over the shorthand.
+    """
+    if quantization is not None and quantization not in ONLINE_QUANT_SHORTHAND_NAMES:
+        # Pre-quantized checkpoints can be composed with online quantization
+        # for layers that the base quant_method leaves unquantized. The
+        # checkpoint quant_method remains the primary quantization method; composition
+        # is performed after its config has been loaded.
         if quantization_config is None:
-            quantization_config = {
-                "global_scheme": scheme.value,
-            }
-        elif isinstance(quantization_config, OnlineQuantizationConfigArgs):
-            if quantization_config.global_scheme is None:
-                quantization_config.global_scheme = scheme
-            elif quantization_config.global_scheme != scheme:
-                raise ValueError(
-                    f"quantization={quantization!r} conflicts with "
-                    f"quantization_config.global_scheme="
-                    f"{quantization_config.global_scheme.value!r}. "
-                    f"These must match when both are specified."
-                )
-        elif isinstance(quantization_config, dict):
-            existing = quantization_config.get("global_scheme")
-            if existing is None:
-                quantization_config["global_scheme"] = scheme.value
-            else:
-                # Coerce to enum for comparison
-                existing_scheme = (
-                    OnlineQuantScheme(existing)
-                    if isinstance(existing, str)
-                    else existing
-                )
-                if existing_scheme != scheme:
-                    raise ValueError(
-                        f"quantization={quantization!r} conflicts "
-                        f"with quantization_config"
-                        f"['global_scheme']={existing!r}. "
-                        f"These must match when both are specified."
-                    )
+            return None
 
-    # Cast dict to OnlineQuantizationConfigArgs
+        # `quantization_config` may hold both:
+        # 1. Base quantization method activation key override,
+        # 2. online quantization config to apply on top of the base quant_method.
+        if isinstance(quantization_config, dict):
+            return QuantizationConfigArgs(**quantization_config)
+        return quantization_config
+
+    base = _ONLINE_SHORTHANDS.get(quantization) if quantization else None
+
+    if quantization_config is None:
+        if quantization in _DEFERRED_ONLINE_SHORTHANDS:
+            return None
+        return base
+
     if isinstance(quantization_config, dict):
-        quantization_config = OnlineQuantizationConfigArgs(**quantization_config)
+        quantization_config = QuantizationConfigArgs(**quantization_config)
 
-    return quantization_config
+    if base is None:
+        return quantization_config
+
+    return QuantizationConfigArgs(
+        linear=quantization_config.linear or base.linear,
+        moe=quantization_config.moe or base.moe,
+        ignore=quantization_config.ignore or base.ignore,
+        targets=quantization_config.targets or base.targets,
+    )

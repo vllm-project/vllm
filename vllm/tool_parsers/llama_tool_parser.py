@@ -11,16 +11,16 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -37,13 +37,19 @@ logger = init_logger(__name__)
 
 
 class Llama3JsonToolParser(ToolParser):
-    """
-    Tool call parser for Llama 3.x and 4 models intended for use with the
+    """Tool call parser for Llama 3.x and 4 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser llama3_json or
     llama4_json are set.
     """
+
+    bot_token: str = "<|python_tag|>"
+    structural_tag_model = "llama"
+    # Simple regex to find opening braces - we'll use JSON decoder for parsing
+    # This handles arbitrary nesting depth correctly
+    tool_call_start_regex: re.Pattern = re.compile(r"\{")
+    json_decoder: json.JSONDecoder = json.JSONDecoder()
 
     def __init__(
         self,
@@ -60,20 +66,17 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list
-        self.bot_token = "<|python_tag|>"
-        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
-            0
-        ]
-        # Simple regex to find opening braces - we'll use JSON decoder for parsing
-        # This handles arbitrary nesting depth correctly
-        self.tool_call_start_regex = re.compile(r"\{")
-        self.json_decoder = json.JSONDecoder()
+        self.bot_token_id = self.vocab.get(self.bot_token)
+        if self.bot_token_id is None:
+            raise RuntimeError(
+                "Llama3JsonToolParser could not locate the bot token "
+                f"'{self.bot_token}' in the tokenizer."
+            )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response.
+        """Extract the tool calls from a complete model response.
         Only extracts JSON content and ignores any surrounding plain text.
         Supports both single JSON and multiple JSONs separated by semicolons.
         """

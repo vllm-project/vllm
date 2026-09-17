@@ -17,43 +17,41 @@ class ColModernVBertConfig(PretrainedConfig):
     def __init__(
         self,
         embedding_dim: int = 128,
-        vlm_config: dict | None = None,
+        image_token_id: int = 50407,
+        pixel_shuffle_factor: int = 4,
+        text_config: dict | None = None,
+        vision_config: dict | None = None,
         **kwargs,
     ):
         self.embedding_dim = embedding_dim
+        self.image_token_id = image_token_id
+        self.pixel_shuffle_factor = pixel_shuffle_factor
 
-        if vlm_config is None:
-            vlm_config = {}
+        text_config = text_config or {}
+        self.hidden_size = text_config.get("hidden_size", 768)
 
-        # Top-level VLM fields
-        self.image_token_id = vlm_config.get("image_token_id", 50407)
-        self.pixel_shuffle_factor = vlm_config.get("pixel_shuffle_factor", 4)
-        self.hidden_size = vlm_config.get("hidden_size", 768)
-        additional_vocab_size = vlm_config.get("additional_vocab_size", 40)
-
-        # Text config (ModernBERT)
-        text_cfg = vlm_config.get("text_config", {})
-        base_vocab = text_cfg.get("vocab_size", 50368)
         self.text_config = ModernBertConfig(
-            vocab_size=base_vocab + additional_vocab_size,
-            hidden_size=text_cfg.get("hidden_size", 768),
-            intermediate_size=text_cfg.get("intermediate_size", 1152),
-            num_hidden_layers=text_cfg.get("num_hidden_layers", 22),
-            num_attention_heads=text_cfg.get("num_attention_heads", 12),
-            mlp_bias=text_cfg.get("mlp_bias", False),
-            max_position_embeddings=vlm_config.get("max_position_embeddings", 8192),
+            vocab_size=text_config.get("vocab_size", 50408),
+            hidden_size=text_config.get("hidden_size", 768),
+            intermediate_size=text_config.get("intermediate_size", 1152),
+            num_hidden_layers=text_config.get("num_hidden_layers", 22),
+            num_attention_heads=text_config.get("num_attention_heads", 12),
+            mlp_bias=text_config.get("mlp_bias", False),
+            max_position_embeddings=text_config.get("max_position_embeddings", 8192),
         )
 
-        # Vision config (SigLIP)
-        vis_cfg = vlm_config.get("vision_config", {})
+        vision_config = vision_config or {}
         self.vision_config = SiglipVisionConfig(
-            hidden_size=vis_cfg.get("embed_dim", 768),
-            image_size=vis_cfg.get("image_size", 512),
-            patch_size=vis_cfg.get("patch_size", 16),
-            num_hidden_layers=vis_cfg.get("num_hidden_layers", 12),
-            intermediate_size=vis_cfg.get("intermediate_size", 3072),
-            num_attention_heads=vis_cfg.get("num_attention_heads", 12),
+            hidden_size=vision_config.get("hidden_size", 768),
+            image_size=vision_config.get("image_size", 512),
+            patch_size=vision_config.get("patch_size", 16),
+            num_hidden_layers=vision_config.get("num_hidden_layers", 12),
+            intermediate_size=vision_config.get("intermediate_size", 3072),
+            num_attention_heads=vision_config.get("num_attention_heads", 12),
         )
+
+        # Ensure architectures is set so vLLM routes to our model class
+        kwargs.setdefault("architectures", ["ColModernVBertForRetrieval"])
         super().__init__(**kwargs)
 
     @property

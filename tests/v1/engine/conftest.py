@@ -24,12 +24,12 @@ EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
-    """Generate output processor dummy test vectors, without logprobs
+    """Generate output processor dummy test vectors, without logprobs.
 
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
-    """
 
+    """
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
     vllm_config = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
     # Tokenize prompts under test & create dummy generated tokens
@@ -62,10 +62,11 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 
 @pytest.fixture
 def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
-    """Generate output processor dummy test vectors, with logprobs
+    """Generate output processor dummy test vectors, with logprobs.
 
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
+
     """
     # Build dummy test vectors without logprobs
     dtv = _build_test_vectors_no_logprobs()

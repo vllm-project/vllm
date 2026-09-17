@@ -5,12 +5,18 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops.layernorm_guard import (
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+    LayerNormFwdKernel,
+    calc_rows_per_block,
     layer_norm_fwd,
     layernorm_fn,
     rms_norm_ref,
 )
+from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
+
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 
 def layer_norm_ref(
@@ -100,6 +106,59 @@ IS_RMS_NORM = [True, False]
 SEEDS = [0, 42]
 
 
+@pytest.mark.parametrize("rows_per_token", [1, 2, 4, 8, 16])
+def test_layer_norm_fwd_warmup_keys_cover_qwen_gdn(
+    rows_per_token: int,
+) -> None:
+    device = torch.device(DEVICE)
+    group_size = 128
+    max_num_tokens = 512
+    kernel = LayerNormFwdKernel()
+    warmup_keys = set(
+        kernel.get_warmup_keys(
+            max_num_tokens=max_num_tokens,
+            rows_per_token=rows_per_token,
+            group_size=group_size,
+            x_dtype=torch.bfloat16,
+            weight_dtype=torch.bfloat16,
+            device=device,
+            norm_before_gate=True,
+            is_rms_norm=True,
+            activation="silu",
+        )
+    )
+
+    for num_tokens in range(1, max_num_tokens + 1):
+        num_rows = num_tokens * rows_per_token
+        runtime_key = kernel.dispatch(
+            x_dtype=torch.bfloat16,
+            y_dtype=torch.bfloat16,
+            weight_dtype=torch.bfloat16,
+            bias_dtype=None,
+            z_dtype=torch.bfloat16,
+            mean_dtype=None,
+            rstd_dtype=torch.float32,
+            x_aligned=True,
+            y_aligned=True,
+            weight_aligned=True,
+            bias_aligned=True,
+            z_aligned=True,
+            mean_aligned=True,
+            rstd_aligned=True,
+            stride_x_row=group_size,
+            stride_y_row=group_size,
+            stride_z_row=group_size,
+            M=num_rows,
+            N=group_size,
+            BLOCK_N=triton.next_power_of_2(group_size),
+            ROWS_PER_BLOCK=calc_rows_per_block(num_rows, device),
+            norm_before_gate=True,
+            is_rms_norm=True,
+            activation="silu",
+        )
+        assert runtime_key in warmup_keys
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -115,7 +174,7 @@ def test_layer_norm_fwd_basic(
 ) -> None:
     """Test basic layer norm forward pass without z (gate) tensor."""
     set_random_seed(seed)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -157,7 +216,7 @@ def test_layer_norm_fwd_with_gate(
 ) -> None:
     """Test layer norm forward pass with z (gate) tensor."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -214,7 +273,7 @@ def test_layer_norm_fwd_with_groups(
         )
 
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -254,7 +313,7 @@ def test_layer_norm_rows_per_block(
 ) -> None:
     """Test that rows_per_block logic works correctly for various M sizes."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     hidden_size = 1024
 
     # Create inputs
@@ -279,7 +338,7 @@ def test_strided_input(dtype: torch.dtype) -> None:
     """Test that the kernel handles non-contiguous (strided)
     inputs correctly."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     num_tokens = 128
     hidden_size = 1024
 
@@ -319,7 +378,7 @@ def test_output_buffer_provided(
 ) -> None:
     """Test that the kernel works when an output buffer is provided."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     # Create inputs
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -360,7 +419,7 @@ def test_multidimensional_input(
 ) -> None:
     """Test that the autograd function handles multidimensional inputs."""
     set_random_seed(42)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     hidden_size = shape[-1]
 
     # Create inputs
@@ -404,7 +463,7 @@ def test_rmsnorm_gated_forward_native_dtype(
 
     from vllm.model_executor.layers.layernorm import RMSNormGated
 
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     set_random_seed(42)
 
     layer = RMSNormGated(

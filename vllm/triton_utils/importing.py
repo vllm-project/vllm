@@ -3,9 +3,12 @@
 
 import os
 import types
+from importlib.metadata import version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -20,15 +23,42 @@ if HAS_TRITON:
         # It's generally expected that x.driver exists and has
         # an is_active method.
         # The `x.driver and` check adds a small layer of safety.
+        # The "cpu" backend's driver reports itself active unconditionally, so
+        # it must be excluded here or every GPU host looks like it has 2 active
+        # drivers. Triton's own driver selection skips it for the same reason
+        # (see triton.runtime.driver._create_driver): CPU is only ever used
+        # when explicitly selected.
         active_drivers = [
-            x.driver for x in backends.values() if x.driver and x.driver.is_active()
+            x.driver
+            for name, x in backends.items()
+            if name != "cpu" and x.driver and x.driver.is_active()
         ]
 
+        # Check Triton CPU
+        if "cpu" in version("vllm"):
+            if "cpu" in backends:
+                HAS_TRITON = True
+                # Suppress following warnings on CPU-only platforms
+                if len(active_drivers) == 0:
+                    active_drivers.append(backends["cpu"].driver)
+            else:
+                logger.warning(
+                    "Triton is installed, but doesn't include CPU backend. "
+                    "Disabling Triton."
+                )
+                HAS_TRITON = False
+
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
-        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        # or HIP_VISIBLE_DEVICES might be temporarily empty (e.g., Ray sets it to ""
+        # during actor init)
+        visible_devices_env = (
+            "HIP_VISIBLE_DEVICES"
+            if current_platform.is_rocm()
+            else "CUDA_VISIBLE_DEVICES"
+        )
+        visible_devices = os.environ.get(visible_devices_env)
         is_distributed_env = (
-            cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
+            visible_devices is not None and len(visible_devices.strip()) == 0
         )
 
         # Apply lenient driver check for distributed environments
@@ -79,6 +109,7 @@ class TritonPlaceholder(types.ModuleType):
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
+        self.cdiv = cdiv
         self.language = TritonLanguagePlaceholder()
 
     def _dummy_decorator(self, name):
@@ -99,5 +130,6 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.int32 = None
         self.tensor = None
         self.exp = None
+        self.exp2 = None
         self.log = None
         self.log2 = None

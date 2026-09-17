@@ -29,7 +29,7 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 def _use_color() -> bool:
     if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
         return False
-    if envs.VLLM_LOGGING_COLOR == "1":
+    if envs.VLLM_LOGGING_COLOR == "1" or envs.FORCE_COLOR:
         return True
     if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":  # stdout
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -90,11 +90,17 @@ def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
     logger.warning(msg, *args, stacklevel=3)
 
 
+@lru_cache
+def _print_error_once(logger: Logger, msg: str, *args: Hashable) -> None:
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.error(msg, *args, stacklevel=3)
+
+
 LogScope = Literal["process", "global", "local"]
 
 
 def _should_log_with_scope(scope: LogScope) -> bool:
-    """Decide whether to log based on scope"""
+    """Decide whether to log based on scope."""
     if scope == "global":
         from vllm.distributed.parallel_state import is_global_first_rank
 
@@ -107,17 +113,16 @@ def _should_log_with_scope(scope: LogScope) -> bool:
 
 
 class _VllmLogger(Logger):
-    """
-    Note:
-        This class is just to provide type information.
-        We actually patch the methods directly on the [`logging.Logger`][]
-        instance to avoid conflicting with other libraries such as
-        `intel_extension_for_pytorch.utils._logger`.
+    """Note:
+    This class is just to provide type information.
+    We actually patch the methods directly on the [`logging.Logger`][]
+    instance to avoid conflicting with other libraries such as
+    `intel_extension_for_pytorch.utils._logger`.
+
     """
 
     def debug_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
-        """
-        As [`debug`][logging.Logger.debug], but subsequent calls with
+        """As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
@@ -125,8 +130,7 @@ class _VllmLogger(Logger):
         _print_debug_once(self, msg, *args)
 
     def info_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
-        """
-        As [`info`][logging.Logger.info], but subsequent calls with
+        """As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
@@ -136,13 +140,20 @@ class _VllmLogger(Logger):
     def warning_once(
         self, msg: str, *args: Hashable, scope: LogScope = "local"
     ) -> None:
-        """
-        As [`warning`][logging.Logger.warning], but subsequent calls with
+        """As [`warning`][logging.Logger.warning], but subsequent calls with
         the same message are silently dropped.
         """
         if not _should_log_with_scope(scope):
             return
         _print_warning_once(self, msg, *args)
+
+    def error_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
+        """As [`error`][logging.Logger.error], but subsequent calls with
+        the same message are silently dropped.
+        """
+        if not _should_log_with_scope(scope):
+            return
+        _print_error_once(self, msg, *args)
 
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
@@ -150,6 +161,7 @@ _METHODS_TO_PATCH = {
     "debug_once": _VllmLogger.debug_once,
     "info_once": _VllmLogger.info_once,
     "warning_once": _VllmLogger.warning_once,
+    "error_once": _VllmLogger.error_once,
 }
 
 
@@ -205,7 +217,6 @@ def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
-
     logger = logging.getLogger(name)
 
     for method_name, method in _METHODS_TO_PATCH.items():
@@ -242,8 +253,10 @@ _configure_vllm_root_logger()
 
 # Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
 # so we set its logging level to WARNING when vLLM's logging level is INFO.
+# httpx2 is the successor huggingface_hub switches to in its 2.x releases.
 if envs.VLLM_LOGGING_LEVEL == "INFO":
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 
@@ -292,8 +305,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
 
 
 def enable_trace_function_call(log_file_path: str, root_dir: str | None = None):
-    """
-    Enable tracing of every function call in code under `root_dir`.
+    """Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
     `log_file_path` is the path to the log file.
     `root_dir` is the root directory of the code to trace. If None, it is the

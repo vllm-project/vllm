@@ -24,14 +24,19 @@ class CpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+        )
         self.dist_module = torch.distributed
 
         if (
             (
                 current_platform.get_cpu_architecture() == CpuArchEnum.X86
                 or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+                or current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                or current_platform.get_cpu_architecture() == CpuArchEnum.S390X
             )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
@@ -45,23 +50,26 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 unique_name,
             )
 
+        # send/recv tensor_dict is only supported through the SHM communicator backend
+        self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
+
         if self.use_all2all:
-            if self.all2all_backend != "naive":  # type: ignore[has-type]
+            if self.all2all_backend not in (
+                "naive",
+                "allgather_reducescatter",
+            ):  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on CPU. "
-                    "Falling back to `naive` all2all manager for CPU.",
+                    "Falling back to `allgather_reducescatter` manager.",
                     self.all2all_backend,  # type: ignore[has-type]
                 )
-                self.all2all_backend = "naive"
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
+            from .all2all import AgRsAll2AllManager
 
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
+            self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+            logger.info("Using allgather_reducescatter all2all manager.")
 
     def _all_group_ranks_share_shm_group_name(self) -> bool:
-        """
-        CPUSHM requires all ranks in this group to agree on one SHM group name.
+        """CPUSHM requires all ranks in this group to agree on one SHM group name.
         This is a lightweight consistency check for VLLM_DIST_IDENT/name inputs.
         """
         local_name = _CPUSHMDistributed.make_group_name(self)
@@ -80,8 +88,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -143,12 +150,22 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int,
     ) -> None:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.send_tensor_dict(tensor_dict, dst)
 
     def recv_tensor_dict(
         self,
         src: int,
     ) -> dict[str, torch.Tensor | Any]:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.recv_tensor_dict(src)
 
     def dispatch_router_logits(
@@ -161,11 +178,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -185,8 +200,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -201,8 +215,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None

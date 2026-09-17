@@ -5,15 +5,17 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize,
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+    BatchedPrepareAndFinalize,
+)
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
@@ -32,7 +34,6 @@ def test_batched_deepgemm_vs_triton(
     E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
-
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
 
     device = "cuda"
@@ -78,7 +79,6 @@ def test_batched_deepgemm_vs_triton(
     mk_triton = FusedMoEKernel(
         prep_finalize,
         triton_experts,
-        inplace=False,
     )
 
     out_triton = mk_triton.apply(
@@ -103,7 +103,6 @@ def test_batched_deepgemm_vs_triton(
     mk_deepgemm = FusedMoEKernel(
         prep_finalize,
         deepgemm_experts,
-        inplace=False,
     )
 
     out_deepgemm = mk_deepgemm.apply(

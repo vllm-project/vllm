@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark the performance of the cutlass_moe_fp8 kernel vs the triton_moe
+"""Benchmark the performance of the cutlass_moe_fp8 kernel vs the triton_moe
 kernel. Both kernels take in fp8 quantized weights and 16-bit activations,
 but use different quantization strategies and backends.
 """
@@ -16,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -190,7 +189,7 @@ def bench_run(
     torch.accelerator.synchronize()
 
     def bench_cuda_graph(graph, num_warmup=5, num_iters=100):
-        """Benchmark CUDA graph using events like benchmark_moe.py"""
+        """Benchmark CUDA graph using events like benchmark_moe.py."""
         # Warmup
         for _ in range(num_warmup):
             graph.replay()

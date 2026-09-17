@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for cutlass kernels
+"""Tests for cutlass kernels.
 
 Run `pytest tests/kernels/quantization/test_cutlass_scaled_mm.py`.
 """
@@ -38,6 +38,18 @@ MNK_FACTORS = [
     (512, 8192, 4096),
     (512, 16384, 128),
     (512, 24576, 128),
+]
+
+# Shapes with N or K not divisible by 16.  These exercise the padding path
+# inside CutlassFP8ScaledMMLinearKernel.apply_scaled_mm (e.g. Qwen2.5-VL
+# vision MLP dims).
+UNALIGNED_MNK_FACTORS = [
+    (32, 3420, 1280),
+    (32, 1280, 6840),
+    (1, 3420, 1280),
+    (64, 6840, 1280),
+    (16, 100, 200),
+    (33, 255, 513),
 ]
 
 CUDA_DEVICES = [
@@ -152,7 +164,83 @@ def test_cutlass_fp8_gemm(
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize("m,n,k", UNALIGNED_MNK_FACTORS)
+@pytest.mark.parametrize(
+    "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize(
+    "b_scale_group_shape", [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(89),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_cutlass_fp8_gemm_padded(
+    m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
+):
+    """Test CUTLASS FP8 GEMM with padding for non-16-aligned N/K dims.
+
+    Exercises CutlassFP8ScaledMMLinearKernel.apply_scaled_mm which pads
+    inputs to satisfy CUTLASS alignment requirements — the path taken by
+    models like Qwen2.5-VL whose vision MLP has non-16-aligned dims.
+    """
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        CutlassFP8ScaledMMLinearKernel,
+    )
+
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    b = to_fp8(torch.randn((n, k), device="cuda").t())
+
+    a_scales_shape = scale_shape(a.shape, a_scale_group_shape)
+    b_scales_shape = scale_shape(b.shape, b_scale_group_shape)
+
+    scale_a = torch.randn(a_scales_shape, device="cuda", dtype=torch.float32)
+    scale_b = torch.randn(b_scales_shape, device="cuda", dtype=torch.float32)
+
+    scale_a = scale_a.t().contiguous().t()
+    scale_b = scale_b.t().contiguous().t()
+
+    out_dtype = torch.bfloat16
+    bias = torch.rand((n,), device="cuda", dtype=out_dtype) * 10 if use_bias else None
+
+    baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+
+    # process_weights_after_loading pad b to 16
+    pad_k = (16 - k % 16) % 16
+    pad_n = (16 - n % 16) % 16
+    if pad_k > 0 or pad_n > 0:
+        b = torch.nn.functional.pad(b.t().contiguous(), (0, pad_k, 0, pad_n)).t()
+        if pad_n > 0 and scale_b.numel() > 1:
+            scale_b = torch.nn.functional.pad(scale_b, (0, pad_n), value=1.0)
+
+    kernel = object.__new__(CutlassFP8ScaledMMLinearKernel)
+    kernel.logical_output_size = n
+    out = kernel.apply_scaled_mm(
+        A=a,
+        B=b,
+        out_dtype=out_dtype,
+        As=scale_a,
+        Bs=scale_b,
+        bias=bias,
+        output_shape=[m, n],
+    )
+
+    torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
+
+
+# Two prefill-sized cases for the SM 12.x blockwise path, where the op switches
+# the tile scheduler to a swizzled CTA order once the weight exceeds the L2
+# (16384x2560 = 40 MiB and 5120x5120 = 25 MiB on a 24 MiB L2 part); the odd M
+# also covers the non-swap-AB dispatch. Elsewhere they run the default order
+# like the rest of the list.
+BLOCKWISE_PREFILL_FACTORS = [
+    (8193, 16384, 2560),
+    (5120, 5120, 5120),
+]
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS + BLOCKWISE_PREFILL_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape,b_scale_group_shape", [((1, 128), (128, 128))]
 )
@@ -167,8 +255,6 @@ def test_cutlass_fp8_blockwise_scale_gemm(
     if k % b_scale_group_shape[0] != 0 or n % b_scale_group_shape[1] != 0:
         return
     if m % a_scale_group_shape[0] != 0 or k % a_scale_group_shape[1] != 0:
-        return
-    if m % 4 != 0 and current_platform.has_device_capability(100):
         return
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 

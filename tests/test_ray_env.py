@@ -6,6 +6,7 @@ import os
 from unittest.mock import patch
 
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 
 # ---------------------------------------------------------------------------
 # Default prefix matching
@@ -105,6 +106,19 @@ class TestExclusion:
     def test_exclude_vars(self):
         result = get_env_vars_to_copy(exclude_vars={"CUDA_VISIBLE_DEVICES"})
         assert "CUDA_VISIBLE_DEVICES" not in result
+
+    @patch.dict(
+        os.environ,
+        {
+            "VLLM_HOST_IP": "10.0.0.1",
+            "VLLM_NIXL_SIDE_CHANNEL_HOST": "10.0.0.1",
+        },
+        clear=False,
+    )
+    def test_worker_specific_host_vars_are_excluded(self):
+        result = get_env_vars_to_copy(exclude_vars=WORKER_SPECIFIC_ENV_VARS)
+        assert "VLLM_HOST_IP" not in result
+        assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in result
 
     @patch.dict(os.environ, {"LMCACHE_LOCAL_CPU": "True"}, clear=False)
     @patch(

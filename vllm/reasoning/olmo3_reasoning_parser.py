@@ -8,16 +8,13 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
-
-logger = init_logger(__name__)
 
 
 class Olmo3ReasoningState(enum.Enum):
@@ -35,8 +32,7 @@ class Indices:
 
 
 def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
-    """
-    Find the longest overlap where the end of string a matches the start
+    """Find the longest overlap where the end of string a matches the start
     of string b.
 
     Args:
@@ -46,8 +42,8 @@ def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
     Returns:
         Tuple of IndicesTuples representing the overlapping portions in each
         string, or a tuple of None if no overlap exists
-    """
 
+    """
     # swap so a is always the shorter string
     a, b, swap = (a, b, False) if len(a) < len(b) else (b, a, True)
 
@@ -191,8 +187,7 @@ class Olmo3ReasoningBuffer:
 
 
 class Olmo3ReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Olmo 3 model
+    """Reasoning parser for Olmo 3 model.
 
     Olmo3ReasoningParser
 
@@ -218,28 +213,51 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
+    think_start: str = r"<think>"
+    think_end: str = r"</think>"
+    # </think> is split in 3 by the pre-tokenizer, first split can be tokenized
+    # with an optional leading space, so there are 2 possible tokenizations
+    think_end_first_split: list[str] = [r"Ġ</", r"</"]
+    think_end_rest_split: list[str] = [r"think", r">"]
+    # notice that the first think is optional; this allows template to
+    # work in cases when we hardcode a <think> at the beginning of the
+    # reasoning template.
+    reasoning_regex: re.Pattern = re.compile(
+        rf"^(?:{think_start})?(?P<reasoning>.*?)"
+        rf"{think_end}(?P<content>.*)$",
+        re.DOTALL,
+    )
+
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-
-        self.think_start = r"<think>"
-        self.think_end = r"</think>"
-
-        # notice that the first think is optional; this allows template to
-        # work in cases when we hardcode a <think> at the beginning of the
-        # reasoning template.
-        reasoning_expr = (
-            rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
-            rf"{self.think_end}(?P<content>.*)$"
-        )
-        self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
-
         self.buffer = Olmo3ReasoningBuffer(
             think_start=self.think_start, think_end=self.think_end
         )
+        self.think_end_first_token_ids: list[int] = [
+            self.vocab[token] for token in self.think_end_first_split
+        ]
+        self.think_end_rest_token_ids: list[int] = [
+            self.vocab[token] for token in self.think_end_rest_split
+        ]
+
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.think_start
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.think_end
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        text = self.model_tokenizer.decode(input_ids)
-        return self.think_end in text
+        rest_ids = self.think_end_rest_token_ids
+        rest_len = len(rest_ids)
+        for i in range(len(input_ids) - rest_len, -1, -1):
+            if (
+                list(input_ids[i + 1 : i + 1 + rest_len]) == rest_ids
+                and input_ids[i] in self.think_end_first_token_ids
+            ):
+                return True
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for Olmo 3 streaming reason parsing, the stream parse
@@ -265,8 +283,8 @@ class Olmo3ReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the
             reasoning content and non-reasoning content.
-        """
 
+        """
         re_match = self.reasoning_regex.match(model_output)
         if re_match:
             reasoning = re_match.group("reasoning") or None
@@ -285,8 +303,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Extract content using token ID sequence state machine"""
-
+        """Extract content using token ID sequence state machine."""
         delta_message = self.buffer.add_text(delta_text)
         if delta_message is None and self.buffer.think_end in self.buffer.buffer:
             # this is a bit hacky, but, because of how the buffer is

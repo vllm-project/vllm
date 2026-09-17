@@ -2,17 +2,17 @@ name: vllm_intel_ci
 job_dirs:
   - ".buildkite/intel_jobs"
 run_all_patterns:
+  - ".buildkite/ci_config_intel.yaml"
+  - ".buildkite/scripts/hardware_ci/run-intel-test.sh"
   - "docker/Dockerfile"
+  - "docker/Dockerfile.xpu"
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/xpu.txt"
-  - "requirements/build.txt"
-  - "requirements/test.txt"
   - "setup.py"
   - "csrc/"
   - "cmake/"
 run_all_exclude_patterns:
-  - "docker/Dockerfile."
   - "csrc/cpu/"
   - "csrc/rocm/"
   - "cmake/hipify.py"

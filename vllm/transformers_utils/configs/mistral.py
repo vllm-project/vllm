@@ -117,7 +117,6 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "original_max_position_embeddings": ("original_max_position_embeddings", int),
         "beta": ("beta_fast", float),
         "alpha": ("beta_slow", float),
-        "apply_scale": ("apply_yarn_scaling", bool),
     }
 
     yarn_config = config.get("yarn") or {}
@@ -133,6 +132,11 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         if old_name in yarn_config:
             # Cast to remove Transformers > v5 type warnings
             config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
+
+    # `apply_scale: false` means no magnitude correction, which Transformers
+    # spells as an explicit attention_factor of 1.
+    if not yarn_config.pop("apply_scale", True):
+        config["rope_parameters"]["attention_factor"] = 1.0
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 

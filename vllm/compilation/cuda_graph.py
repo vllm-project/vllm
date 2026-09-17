@@ -38,7 +38,7 @@ class CUDAGraphStat:
 
 
 class CUDAGraphLogging:
-    """Aggregate and log cudagraph metrics"""
+    """Aggregate and log cudagraph metrics."""
 
     COLUMN_HEADERS = [
         "Unpadded Tokens",
@@ -221,7 +221,9 @@ class CUDAGraphWrapper:
 
     def unwrap(self) -> Callable[..., Any]:
         # in case we need to access the original runnable.
-        return self.runnable
+        runnable = self.runnable
+        # Recurse through nested wrappers.
+        return runnable.unwrap() if hasattr(runnable, "unwrap") else runnable
 
     @property
     def cudagraph_wrapper(self) -> "CUDAGraphWrapper":
@@ -290,9 +292,14 @@ class CUDAGraphWrapper:
                     # across layers will make the cudagraph capture very slow.
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda: None))
                     stack.enter_context(
-                        patch("torch.accelerator.empty_cache", lambda: None)
+                        patch("gc.collect", lambda *args, **kwargs: None)
+                    )
+                    stack.enter_context(
+                        patch(
+                            "torch.accelerator.empty_cache",
+                            lambda *args, **kwargs: None,
+                        )
                     )
 
                 if self.graph_pool is not None:

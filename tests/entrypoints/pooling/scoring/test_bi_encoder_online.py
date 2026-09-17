@@ -8,7 +8,6 @@ from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
-from vllm.platforms import current_platform
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
 input_text = "This product was excellent and exceeded my expectations"
@@ -29,10 +28,6 @@ TEXTS_2 = [
 @pytest.fixture(scope="module")
 def server():
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -411,4 +406,8 @@ async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

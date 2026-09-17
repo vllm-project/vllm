@@ -96,6 +96,7 @@ def _make_paged_kv_metadata(
         kv_indices         – CUDA int32, shape [total_blocks]
         kv_last_page_lens  – CPU int32, shape [num_seqs]
         block_tables       – CUDA int32, shape [num_seqs, max_blocks_per_seq]
+
     """
     num_seqs = len(kv_lens)
     max_blocks = (max(kv_lens) + block_size - 1) // block_size
@@ -190,6 +191,7 @@ def test_fast_plan_decode_warmup_uses_full_plan(dtype: torch.dtype) -> None:
             indptr_cpu=kv_indptr,
             indices=kv_indices,
             last_page_len_cpu=kv_last_page_lens,
+            seq_lens_cpu=torch.tensor(kv_lens, dtype=torch.int32, device="cpu"),
             num_qo_heads=num_query_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_size,
@@ -268,6 +270,7 @@ def test_fast_plan_decode_matches_full_plan(
         indptr_cpu=kv_indptr,
         indices=kv_indices_buf,
         last_page_len_cpu=kv_last_page_lens,
+        seq_lens_cpu=torch.tensor(kv_lens, dtype=torch.int32, device="cpu"),
         num_qo_heads=num_query_heads,
         num_kv_heads=num_kv_heads,
         head_dim=head_size,

@@ -13,8 +13,7 @@ logger = init_logger(__name__)
 
 
 class CudagraphDispatcher:
-    """
-    Runtime cudagraph dispatcher to dispatch keys for multiple set of
+    """Runtime cudagraph dispatcher to dispatch keys for multiple set of
     cudagraphs.
 
     The dispatcher stores two sets of dispatch keys, one for PIECEWISE and one
@@ -34,11 +33,7 @@ class CudagraphDispatcher:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.uniform_decode_query_len = (
-            1
-            if not self.vllm_config.speculative_config
-            else 1 + self.vllm_config.speculative_config.num_speculative_tokens
-        )
+        self.uniform_decode_query_len = 1 + self.vllm_config.num_speculative_tokens
 
         # Dict to store valid cudagraph dispatching keys.
         self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
@@ -46,9 +41,14 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
+            or is_breakable_cudagraph_enabled()
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
@@ -108,8 +108,7 @@ class CudagraphDispatcher:
                         )
 
     def _get_lora_cases(self) -> list[int]:
-        """
-        Returns list of has_lora values for CUDA graph capture.
+        """Returns list of has_lora values for CUDA graph capture.
         This is the single source of truth for LoRA capture cases.
         """
         lora_config = self.vllm_config.lora_config
@@ -240,8 +239,7 @@ class CudagraphDispatcher:
         valid_modes: AbstractSet[CUDAGraphMode] | None = None,
         invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
-        """
-        Given conditions(e.g.,batch descriptor and if using piecewise only),
+        """Given conditions(e.g.,batch descriptor and if using piecewise only),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.
         A new batch descriptor is returned as we might dispatch a uniform batch
         to a graph that supports a more general batch (uniform to non-uniform).
@@ -258,6 +256,7 @@ class CudagraphDispatcher:
                 valid_modes to compute allowed modes. (e.g., {FULL} for
                 features like cascade attention not supported by full
                 cudagraphs). None means no modes are excluded.
+
         """
         allowed_modes = valid_modes or CUDAGraphMode.valid_runtime_modes()
 
@@ -323,13 +322,13 @@ class CudagraphDispatcher:
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
     def get_capture_descs(self) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
-        """
-        Returns capture descriptors for cudagraph capturing.
+        """Returns capture descriptors for cudagraph capturing.
 
         Returns:
             List of (runtime_mode, batch_descriptors) tuples, ordered PIECEWISE
             first then FULL. Batch descriptors are sorted largest-first for
             memory efficiency.
+
         """
         if not self.keys_initialized or self.cudagraph_mode == CUDAGraphMode.NONE:
             return []

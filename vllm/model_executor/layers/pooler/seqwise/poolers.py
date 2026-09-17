@@ -42,8 +42,7 @@ SequencePoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
 class SequencePooler(Pooler):
-    """
-    A layer that pools specific information from hidden states.
+    """A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
@@ -60,6 +59,12 @@ class SequencePooler(Pooler):
 
         self.pooling = pooling
         self.head = head
+
+    def extra_repr(self) -> str:
+        return (
+            f"pooling={self.pooling.__class__.__name__}, "
+            f"head={self.head.__class__.__name__}"
+        )
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         tasks = set(POOLING_TASKS)
@@ -89,7 +94,7 @@ class SequencePooler(Pooler):
         return pooled_data
 
 
-def pooler_for_embed(pooler_config: PoolerConfig):
+def pooler_for_embed(pooler_config: PoolerConfig) -> SequencePooler:
     pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
     vllm_config = get_current_vllm_config()
@@ -109,16 +114,21 @@ def pooler_for_classify(
     pooling: SequencePoolingMethod | SequencePoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | None = None,
-):
+) -> SequencePooler:
     if pooling is None:
         pooling = get_seq_pooling_method(pooler_config.get_seq_pooling_type())
 
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
+    if model_config.pooler_config is None:
+        raise ValueError(
+            "model_config.pooler_config must be set for classification pooling"
+        )
     head = ClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,
-        logit_bias=model_config.pooler_config.logit_bias,
+        logit_mean=model_config.pooler_config.logit_mean,
+        logit_sigma=model_config.pooler_config.logit_sigma,
         activation=resolve_classifier_act_fn(
             model_config, static_num_labels=True, act_fn=act_fn
         ),
