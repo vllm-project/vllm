@@ -127,6 +127,7 @@ def fused_mm_input_norm_triton(
 
     Returns:
         ``outputs``, for chaining.
+
     """
     # --- dtype validation ---------------------------------------------
     assert inputs.dtype in _SUPPORTED_INPUTS, f"unsupported input dtype: {inputs.dtype}"
@@ -205,8 +206,7 @@ def fused_mm_input_norm_triton(
 
 @CustomOp.register("fused_mm_input_norm")
 class FusedMMInputNorm(CustomOp):
-    """
-    Module that applies rescaling and normalisation to input images.
+    """Module that applies rescaling and normalisation to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
 
     Note on dtype semantics:
