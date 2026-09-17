@@ -10,8 +10,7 @@ from transformers.processing_utils import ProcessorMixin
 
 
 class GLM4VImageProcessorFast(BaseImageProcessorFast):
-    """
-    Port of https://huggingface.co/zai-org/glm-4v-9b/blob/main/tokenization_chatglm.py#L177
+    """Port of https://huggingface.co/zai-org/glm-4v-9b/blob/main/tokenization_chatglm.py#L177
     to HF Transformers.
     """
 
