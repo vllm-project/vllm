@@ -2,15 +2,15 @@ group: Miscellaneous Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: XPU Batch Invariance (UT)
-  key: xpu-batch-invariance-ut
-  timeout_in_minutes: 30
-  num_devices: 1
+- label: XPU Batch Invariance
+  key: xpu-batch-invariance
+  timeout_in_minutes: 60
+  num_devices: 2
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 1+
-    mem: 16+
+    gpu: 2+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -19,14 +19,16 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/
-    - tests/v1/determinism/test_xpu_batch_invariant.py
+    - tests/v1/determinism/test_xpu_batch_invariant_ut.py
+    - tests/v1/determinism/test_xpu_batch_invariant_e2e.py
     - .buildkite/intel_jobs/misc_intel.yaml
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_BATCH_INVARIANT=1 &&
       cd tests &&
-      pytest -v -s v1/determinism/test_xpu_batch_invariant.py'
+      pytest -v -s v1/determinism/test_xpu_batch_invariant_ut.py &&
+      pytest -v -s v1/determinism/test_xpu_batch_invariant_e2e.py'
 
 - label: V1 Core + KV + Metrics
   key: v1-core-kv-metrics-intel
