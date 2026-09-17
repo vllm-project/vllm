@@ -140,7 +140,6 @@ def dcp_gather_kv_rows(
     out_buf: torch.Tensor,
 ) -> torch.Tensor:
     """All-gather this rank's KV shard and return it in global token order."""
-
     gathered = gathered_buf[: get_dcp_group().world_size * local_padded.shape[0]]
     dist.all_gather_into_tensor(
         gathered, local_padded.contiguous(), group=get_dcp_group().device_group

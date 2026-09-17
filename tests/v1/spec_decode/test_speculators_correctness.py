@@ -134,8 +134,7 @@ def print_spec_decode_stats(stats: dict) -> None:
 
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
-    """
-    Test speculators model properly initializes speculative decoding.
+    """Test speculators model properly initializes speculative decoding.
 
     Verifies:
     1. Speculative config is automatically initialized from speculators config
@@ -185,8 +184,7 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_correctness(monkeypatch, config):
-    """
-    E2E correctness test via the speculators auto-detect path.
+    """E2E correctness test via the speculators auto-detect path.
 
     Evaluates GSM8k accuracy to ensure the speculators-format model produces
     correct outputs, and checks that acceptance length does not collapse under
