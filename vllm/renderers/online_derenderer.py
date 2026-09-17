@@ -233,6 +233,7 @@ class OnlineDerenderer:
         Returns:
             (new_text, updated_state) — the delta text for this chunk and the
             state to pass to the next call.
+
         """
         prev_tokens = list(state.prev_tokens)
         prefix_offset = state.prefix_offset
@@ -296,6 +297,7 @@ class OnlineDerenderer:
         Returns:
             (chunk, updated_state) — the derendered SSE chunk and the state
             the client must pass to the next call.
+
         """
         if state is None:
             state = DerenderStreamState()
@@ -461,6 +463,7 @@ class OnlineDerenderer:
 
         Returns:
             (chunk, updated_state) — the derendered chunk and updated state.
+
         """
         if state is None:
             state = DerenderStreamState()
