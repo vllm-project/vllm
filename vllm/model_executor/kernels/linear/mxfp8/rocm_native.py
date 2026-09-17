@@ -119,6 +119,18 @@ def _mxfp8_dot_scaled_linear(
     return out
 
 
+# Triton 3.8 enables TRITON_HIP_USE_ASYNC_COPY by default on gfx950; its extra LDS
+# buffer leaves no room for num_stages=3 at BLOCK_K=256.
+# TODO(rasmith)(Rohan138): Remove the 3.8 check once
+# https://github.com/vllm-project/vllm/pull/50605 merges.
+_BK256_STAGES = 3
+if triton.__version__.startswith("3.8") and current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        _BK256_STAGES = 2
+
+
 def _select_cfg(M, N, K):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
 
@@ -166,7 +178,7 @@ def _select_cfg(M, N, K):
         # 3.6; on triton 3.7 its large BLOCK_M register/LDS footprint spills or hits
         # "out of resources", so use 128x128x256 -- within the known-good footprint.)
         if M >= 4096 and K >= 1024 and K % 256 == 0 and occ >= 256:
-            return 128, 128, 256, 8, 3
+            return 128, 128, 256, 8, _BK256_STAGES
         return 128, 128, 128, 8, 3
     # large-K (K >= 2048). BLOCK_K is K-divisibility-guarded (the K-loop is unmasked):
     # served large-K is 2048/6144 (%256==0), but fall back to 128 (always divides, since
@@ -186,7 +198,7 @@ def _select_cfg(M, N, K):
     # Covers the qkv-class local N=1536 (TP=8 qkv / TP=4 shared_gate_up) and the deep-K
     # / very-large-M shapes.
     if K % 256 == 0 and (1280 < N <= 1536 or (occ >= 128 and (K >= 4096 or M >= 4096))):
-        return 128, 128, 256, 8, 3
+        return 128, 128, 256, 8, _BK256_STAGES
     # small local-N (e.g. TP=8 shared_gate_up N=768): a 64-wide BLOCK_N doubles the
     # N-tile count -> better CU fill than 128x128 at this mid-large M (~1.4x there).
     if N <= 1024 and K % 256 == 0:
