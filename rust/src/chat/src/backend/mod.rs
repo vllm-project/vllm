@@ -78,8 +78,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default chat template override, provided either as an
     /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
-    /// Optional server-default keyword arguments merged into every
-    /// chat-template render before request-level `chat_template_kwargs`.
+    /// Server-default keyword arguments. HF merges these before request kwargs;
+    /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.

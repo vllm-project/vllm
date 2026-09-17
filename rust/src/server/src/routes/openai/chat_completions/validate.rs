@@ -125,8 +125,8 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
 mod tests {
     use std::collections::HashMap;
 
+    use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
-    use vllm_chat::ReasoningEffort;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
