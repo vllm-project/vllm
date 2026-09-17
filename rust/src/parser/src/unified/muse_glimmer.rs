@@ -176,6 +176,15 @@ pub struct MuseGlimmerUnifiedParser {
     prefilled_kind: Option<ChannelKind>,
     /// Names of the tools registered on the request (for name normalization).
     registered_names: Vec<String>,
+    /// Whether the buffer position is a legal bare-header position: the
+    /// previously committed byte was nothing (stream start), a structural
+    /// marker (a channel close, header, or call), or whitespace. Without this,
+    /// a bare header glued to a non-whitespace byte (`xto=calc<|message|>`)
+    /// would parse differently depending on whether a delta boundary falls
+    /// between them: whole-input only recognizes ws-anchored headers, while a
+    /// buffer-start `to=` could not see the byte before it. The whitespace
+    /// class includes `\n` (Python `_OPEN_TAIL_HEADER_RE` anchors on `[\s]`).
+    bare_header_anchored: bool,
     tokenizer: DynTokenizer,
     start_token_id: u32,
 }
@@ -193,6 +202,7 @@ impl MuseGlimmerUnifiedParser {
             reasoning_block_count: 0,
             prefilled_kind: None,
             registered_names: tools.iter().map(|tool| tool.name.clone()).collect(),
+            bare_header_anchored: true,
             tokenizer,
             start_token_id,
         })
@@ -212,6 +222,9 @@ impl MuseGlimmerUnifiedParser {
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
         self.mode = MuseGlimmerMode::Idle;
         self.prefilled_kind = None;
+        // Anything but an open prefilled channel body ends the prompt at a
+        // header boundary: a legal bare-header position.
+        self.bare_header_anchored = true;
 
         let Some(start_pos) = prompt_token_ids.iter().rposition(|&id| id == self.start_token_id)
         else {
@@ -249,6 +262,11 @@ impl MuseGlimmerUnifiedParser {
         if body.contains(EOM) || body.contains(EOT) {
             return;
         }
+        // Generation continues the prefilled body: a bare header is legal only
+        // where the prompt's last byte leaves a bare-header position (an empty
+        // body ends right after the `<|message|>` marker, so it is legal).
+        self.bare_header_anchored =
+            body.chars().next_back().is_none_or(char::is_whitespace);
         self.mode = match classify_recipient(recipient.as_deref()) {
             ChannelKind::Reasoning => {
                 // The prefilled block counts, so the next `to=self` block is
@@ -267,6 +285,17 @@ impl MuseGlimmerUnifiedParser {
         piece: DecodedText,
         output: &mut UnifiedParserOutput,
     ) -> Result<()> {
+        // The next event's bare-header position depends on what this event
+        // committed: marker/header/call spans are structural, text anchors
+        // only when it ends in whitespace.
+        match &event {
+            MuseGlimmerEvent::Text | MuseGlimmerEvent::Reasoning => {
+                if let Some(last) = piece.text.chars().next_back() {
+                    self.bare_header_anchored = last.is_whitespace();
+                }
+            }
+            _ => self.bare_header_anchored = true,
+        }
         match event {
             MuseGlimmerEvent::Text => output.push_text(piece.text),
             MuseGlimmerEvent::Reasoning => output.push_reasoning(piece),
@@ -339,6 +368,7 @@ impl MuseGlimmerUnifiedParser {
         self.emitted_call_count = 0;
         self.reasoning_block_count = 0;
         self.prefilled_kind = None;
+        self.bare_header_anchored = true;
         self.buffer.take().text
     }
 }
@@ -383,7 +413,12 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         self.buffer.append(delta);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-            parse_next_muse_glimmer_event(input, &mut self.mode, &mut self.invoke_scan)
+            parse_next_muse_glimmer_event(
+                input,
+                &mut self.mode,
+                &mut self.invoke_scan,
+                self.bare_header_anchored,
+            )
         })? {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.invoke_scan.reset();
@@ -443,26 +478,46 @@ fn parse_next_muse_glimmer_event(
     input: &mut MuseGlimmerInput<'_>,
     mode: &mut MuseGlimmerMode,
     invoke_scan: &mut MarkerScanState,
+    bare_header_anchored: bool,
 ) -> ModalResult<MuseGlimmerEvent> {
     match mode {
-        MuseGlimmerMode::Idle => parse_idle_event(input),
-        MuseGlimmerMode::Reasoning => parse_reasoning_event(input),
+        MuseGlimmerMode::Idle => parse_idle_event(input, bare_header_anchored),
+        MuseGlimmerMode::Reasoning => parse_reasoning_event(input, bare_header_anchored),
         MuseGlimmerMode::Content { reclassify } => {
-            parse_content_event(input, *reclassify, invoke_scan)
+            parse_content_event(input, *reclassify, invoke_scan, bare_header_anchored)
         }
         MuseGlimmerMode::Tool { .. } => parse_tool_event(input, invoke_scan),
         MuseGlimmerMode::Done => parse_done_event(input),
     }
 }
 
+/// Run a bare-header parser only at a legal bare-header position.
+fn at_bare_header_position<'i, O>(
+    anchored: bool,
+    mut parser: impl FnMut(&mut MuseGlimmerInput<'i>) -> ModalResult<O>,
+) -> impl FnMut(&mut MuseGlimmerInput<'i>) -> ModalResult<O> {
+    move |input: &mut MuseGlimmerInput<'i>| {
+        if anchored {
+            parser(input)
+        } else {
+            Err(ErrMode::Backtrack(ContextError::new()))
+        }
+    }
+}
+
 /// Parse an event while waiting for the next channel header.
-fn parse_idle_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+fn parse_idle_event(
+    input: &mut MuseGlimmerInput<'_>,
+    bare_header_anchored: bool,
+) -> ModalResult<MuseGlimmerEvent> {
     alt((
         framed_header_event,
-        bare_header_event,
+        at_bare_header_position(bare_header_anchored, bare_header_event),
         // A stray close between channels is structural noise.
         literal(EOM).value(MuseGlimmerEvent::Skip),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
+        // A bare `<|message|>` not at a bare-header position is literal text.
+        literal(MESSAGE).value(MuseGlimmerEvent::Text),
         // A `<|start|>` that does not begin a valid framed header is literal text.
         literal(START).value(MuseGlimmerEvent::Text),
         safe_idle_text_event,
@@ -471,13 +526,21 @@ fn parse_idle_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmer
 }
 
 /// Parse an event inside a reasoning (`to=self`) channel.
-fn parse_reasoning_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+fn parse_reasoning_event(
+    input: &mut MuseGlimmerInput<'_>,
+    bare_header_anchored: bool,
+) -> ModalResult<MuseGlimmerEvent> {
     alt((
         framed_header_event,
-        bare_tool_switch_event,
+        at_bare_header_position(bare_header_anchored, bare_tool_switch_event),
         literal(EOM).value(MuseGlimmerEvent::ChannelClose),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-        failed_bare_header_text.value(MuseGlimmerEvent::Reasoning),
+        at_bare_header_position(
+            bare_header_anchored,
+            |input: &mut MuseGlimmerInput<'_>| {
+                failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Reasoning)
+            },
+        ),
         literal(START).value(MuseGlimmerEvent::Reasoning),
         safe_reasoning_text_event,
     ))
@@ -490,14 +553,20 @@ fn parse_content_event(
     input: &mut MuseGlimmerInput<'_>,
     reclassify: bool,
     invoke_scan: &mut MarkerScanState,
+    bare_header_anchored: bool,
 ) -> ModalResult<MuseGlimmerEvent> {
     if !reclassify {
         return alt((
             framed_header_event,
-            bare_tool_switch_event,
+            at_bare_header_position(bare_header_anchored, bare_tool_switch_event),
             literal(EOM).value(MuseGlimmerEvent::ChannelClose),
             literal(EOT).value(MuseGlimmerEvent::TurnEnd),
-            failed_bare_header_text.value(MuseGlimmerEvent::Text),
+            at_bare_header_position(
+                bare_header_anchored,
+                |input: &mut MuseGlimmerInput<'_>| {
+                    failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Text)
+                },
+            ),
             literal(START).value(MuseGlimmerEvent::Text),
             safe_tagged_content_text_event,
         ))
@@ -505,13 +574,18 @@ fn parse_content_event(
     }
     alt((
         framed_header_event,
-        bare_tool_switch_event,
+        at_bare_header_position(bare_header_anchored, bare_tool_switch_event),
         literal(EOM).value(MuseGlimmerEvent::ChannelClose),
         literal(EOT).value(MuseGlimmerEvent::TurnEnd),
         |input: &mut MuseGlimmerInput<'_>| atem_tool_channel_event(input, invoke_scan),
         // The ATEM opener is literal content when no complete invoke follows.
         alt((literal(FUNCTION_CALLS_OPEN), literal(INVOKE_OPEN))).value(MuseGlimmerEvent::Text),
-        failed_bare_header_text.value(MuseGlimmerEvent::Text),
+        at_bare_header_position(
+            bare_header_anchored,
+            |input: &mut MuseGlimmerInput<'_>| {
+                failed_bare_header_text(input).map(|_| MuseGlimmerEvent::Text)
+            },
+        ),
         literal(START).value(MuseGlimmerEvent::Text),
         safe_content_text_event,
     ))
@@ -557,7 +631,10 @@ fn framed_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlim
 
 /// Parse a bare channel header at channel boundaries: `[^\S\n]*` + optional
 /// `to=RECIPIENT` + `<|message|>`. The first channel of a turn starts bare
-/// right after the prompt's trailing `<|start|>assistant`.
+/// right after the prompt's trailing `<|start|>assistant`. Callers must gate
+/// this on the parser's bare-header anchor (see
+/// [`MuseGlimmerUnifiedParser::bare_header_anchored`]); a framed-header tail
+/// needs no gate because a framed header is authoritative anywhere.
 fn bare_header_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
     let (recipient,) = seq!(
         _: take_while(0.., is_inline_ws),
@@ -1077,6 +1154,86 @@ mod tests {
         let call = first_call(&output);
         assert_eq!(call.name.as_deref(), Some("weather.get"));
         assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn muse_glimmer_glued_bare_tool_header_is_body_text() {
+        // A bare header glued to a non-whitespace byte is not at a bare-header
+        // position, so it stays body text -- and a chunk boundary right before
+        // `to=` must not change that.
+        let output = assert_chunking_invariant(
+            " to=self<|message|>think xto=calc<|message|>\
+             <atem:invoke name=\"calc\"></atem:invoke><|eom|>\
+             <|start|>assistant to=user<|message|>done<|eot|>",
+        );
+
+        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.reasoning_text(),
+            "think xto=calc<|message|><atem:invoke name=\"calc\"></atem:invoke>"
+        );
+        assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_glued_bare_tool_header_split_before_to() {
+        // The chunk-boundary case of the model defect: the header is glued to
+        // the preceding non-whitespace byte, so no channel switch happens.
+        let mut parser = test_parser();
+        let mut output = parser.parse_chunk(" to=self<|message|>think x").unwrap();
+        output.append(
+            parser
+                .parse_chunk("to=calc<|message|><atem:invoke name=\"calc\"></atem:invoke><|eom|>")
+                .unwrap(),
+        );
+        output.append(
+            parser.parse_chunk("<|start|>assistant to=user<|message|>done<|eot|>").unwrap(),
+        );
+        output.append(parser.finish().unwrap());
+
+        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.reasoning_text(),
+            "think xto=calc<|message|><atem:invoke name=\"calc\"></atem:invoke>"
+        );
+        assert_eq!(output.normal_text(), "done");
+    }
+
+    #[test]
+    fn muse_glimmer_idle_glued_bare_headers_are_literal_text() {
+        let output =
+            assert_chunking_invariant(" to=user<|message|>a<|eom|>xto=self<|message|>R<|eom|>");
+
+        assert_eq!(output.normal_text(), "axto=self<|message|>R");
+        assert!(output.reasoning_text().is_empty());
+    }
+
+    #[test]
+    fn muse_glimmer_idle_whitespace_before_bare_header_stays_text() {
+        // The whitespace before a bare header is body text: whether it shares
+        // a chunk with the header or not must not change the output.
+        let output = assert_chunking_invariant(" to=user<|message|>a<|eom|>x <|message|>b<|eot|>");
+        assert_eq!(output.normal_text(), "ax b");
+
+        let mut parser = test_parser();
+        let mut output = parser.parse_chunk(" to=user<|message|>a<|eom|>x").unwrap();
+        output.append(parser.parse_chunk(" ").unwrap());
+        output.append(parser.parse_chunk("<|message|>b<|eot|>").unwrap());
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.normal_text(), "ax b");
+    }
+
+    #[test]
+    fn muse_glimmer_bare_header_right_after_marker_still_fires() {
+        // A marker event is a legal bare-header position even without any
+        // intervening whitespace.
+        let output = assert_chunking_invariant(
+            " to=user<|message|>a<|eom|>to=self<|message|>r<|eom|>\
+             <|start|>assistant to=user<|message|>b<|eot|>",
+        );
+
+        assert_eq!(output.normal_text(), "ab");
+        assert_eq!(output.reasoning_text(), "r");
     }
 
     #[test]
