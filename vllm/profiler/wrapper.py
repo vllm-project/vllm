@@ -138,6 +138,7 @@ class WorkerProfiler(ABC):
         Returns:
             True if the step was an active profiling step (data recorded),
             False if the step was a warmup step (data discarded).
+
         """
         return True
 
@@ -354,6 +355,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         Returns:
             True if the step was an active profiling step (data recorded),
             False if the step was a warmup step (data discarded).
+
         """
         if self._uses_schedule:
             self.profiler.step()

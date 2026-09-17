@@ -57,6 +57,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
 
     Returns:
         Dict with "hidden_states" and "token_ids" tensors.
+
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
@@ -96,8 +97,7 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    Simple debug implementation of a HiddenStatesConnector.
+    """Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
@@ -436,8 +436,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -448,6 +447,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         # This connector is store-only, so we don't need to load any tokens
         return 0, False
@@ -471,6 +471,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleHiddenStatesConnectorMetadata()
 
@@ -509,8 +510,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
+        """Called exactly once when a request has finished, before its blocks are
         freed.
 
         Returns True to delay block freeing until get_finished extracts
@@ -587,16 +587,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-        """
 
+        """
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "

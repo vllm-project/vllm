@@ -842,8 +842,7 @@ def test_video_processor_from_model_repo(
 
 
 def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
-    """
-    Regression test for handling videos with broken frames.
+    """Regression test for handling videos with broken frames.
     This test uses a pre-corrupted video file (assets/corrupted.mp4) that
     contains broken frames to verify the video loader handles
     them gracefully without crashing and returns accurate metadata.
@@ -882,8 +881,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    """An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
     hides the decode lead-in: the header still counts every physical sample
     while sequential decode only yields the visible frames. Sampling over the
     header count used to collapse such videos to the few indices below the
@@ -923,8 +921,7 @@ def test_video_backend_handles_edit_list_trimmed_video(
 
 
 def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that frame recovery correctly uses the next valid frame when
+    """Test that frame recovery correctly uses the next valid frame when
     target frames fail to load.
 
     Uses corrupted.mp4 and mocks VideoCapture.grab() to fail on specific
@@ -1019,8 +1016,7 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test frame recovery with an actual corrupted video file using sparse sampling.
+    """Test frame recovery with an actual corrupted video file using sparse sampling.
 
     This test uses corrupted.mp4 which has genuine H.264 codec errors on
     frame 17. With num_frames=8, the target frames are [0, 3, 7, 10, 14, 17, 21, 25].
@@ -1088,8 +1084,7 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that frame_recovery works with the dynamic video backend.
+    """Test that frame_recovery works with the dynamic video backend.
 
     The dynamic backend samples frames based on fps/duration rather than
     loading all frames. This test verifies recovery works in that context.
