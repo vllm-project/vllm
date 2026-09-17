@@ -39,6 +39,7 @@ def fill_uno_noise(
         step: Decode step, independent of the sampler's random generator.
         low: Inclusive token range start.
         high: Exclusive token range end.
+
     """
     if low >= high:
         raise ValueError("Uno noise requires a nonempty token range")
