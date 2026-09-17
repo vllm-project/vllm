@@ -1095,12 +1095,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 for k, v in image_embeds.items()
             }
             placeholder = self._tracker.add("image_embeds", (embeds, uuid))
-
-        if isinstance(image_embeds, str):
+        elif isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
             placeholder = self._tracker.add("image_embeds", (embedding, uuid))
-
-        if image_embeds is None:
+        else:
             placeholder = self._tracker.add("image_embeds", (None, uuid))
 
         self._add_placeholder("image", placeholder)
