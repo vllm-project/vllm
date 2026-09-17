@@ -384,9 +384,8 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
 
     make_routing_data = gptoss_moe.make_routing_data
     routing_data_from_sparse_topk = gptoss_moe.routing_data_from_sparse_topk
-    use_legacy_triton_kernels = gptoss_moe.use_legacy_triton_kernels
 
-    if use_legacy_triton_kernels:
+    if gptoss_moe.triton_kernels_version == "3.5.1":
         pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
 
     from triton_kernels.topk import topk as topk_fn
