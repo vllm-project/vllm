@@ -486,13 +486,9 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    # Omit absent prompt metadata (Rust skips None fields).
-                    exclude = {
-                        name
-                        for name in ("prompt_token_ids", "mm_placeholders")
-                        if getattr(chunk, name) is None
-                    }
-                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
+                    # Omit absent fields, like the Rust frontend and the
+                    # final usage chunk below.
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(

@@ -680,6 +680,36 @@ mod tests {
     }
 
     #[test]
+    fn stream_chunk_omits_absent_fields() {
+        // Contract shared with the Python frontend: absent optional fields
+        // are omitted from stream chunks, not serialized as null.
+        let chunk = GenerateStreamResponse {
+            request_id: "raw-1".to_string(),
+            choices: vec![GenerateResponseStreamChoice {
+                index: 0,
+                logprobs: None,
+                finish_reason: None,
+                token_ids: vec![1],
+            }],
+            usage: None,
+            prompt_token_ids: None,
+            mm_placeholders: None,
+        };
+
+        let json = serde_json::to_value(&chunk).expect("serialize chunk");
+
+        for key in ["usage", "prompt_token_ids", "mm_placeholders"] {
+            assert!(json.get(key).is_none(), "{key} should be omitted");
+        }
+        for key in ["logprobs", "finish_reason"] {
+            assert!(
+                json["choices"][0].get(key).is_none(),
+                "{key} should be omitted"
+            );
+        }
+    }
+
+    #[test]
     fn extract_mm_placeholders_returns_none_without_features() {
         assert!(extract_mm_placeholders(None).is_none());
         assert!(extract_mm_placeholders(Some(&[])).is_none());
