@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-MRCR long-context accuracy test.
+"""MRCR long-context accuracy test.
 
 Usage:
     pytest -s -v tests/evals/mrcr/test_mrcr_correctness.py \
