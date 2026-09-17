@@ -31,10 +31,15 @@ class UMBPStoreConnectorWorker:
     """Translate shared metadata into runtime load/store jobs."""
 
     def __init__(
-        self, runtime: UMBPWorkerHandle, layout: KVLayoutPlanner | None = None
+        self,
+        runtime: UMBPWorkerHandle,
+        layout: KVLayoutPlanner | None = None,
+        *,
+        layerwise_load: bool = True,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
+        self.layerwise_load = layerwise_load
         self._load_jobs: dict[str, TransferJobState] = {}
         self._layer_load_jobs: dict[str, dict[str, TransferJobState]] = {}
         self._pending_load_layers: dict[str, set[str]] = {}
@@ -83,6 +88,9 @@ class UMBPStoreConnectorWorker:
         self, request_id: str, plans: list[BlockTransferPlan]
     ) -> None:
         materialized = self._materialize_plans(plans)
+        if not self.layerwise_load:
+            self._load_jobs[request_id] = self.runtime.load(materialized)
+            return
         plans_by_layer: dict[str, list[BlockTransferPlan]] = {}
         for plan in materialized:
             layer_names = {item.layer_name for item in plan.ranges}
