@@ -39,6 +39,15 @@ logger = init_logger(__name__)
 _MIN_WORK_PER_SPLIT = 512
 _SPLIT_OCCUPANCY_MULTIPLIER = 2
 
+# Triton MLA can serve a non-causal multi-token block while the MLA cache is
+# DCP-sharded: forward_mqa flattens the block to one decode row per query token
+# and every row sees the same committed prefix, so a rank-local seq_len is the
+# whole story. Only ROCm has been validated end to end (DSpark draft against a
+# DCP-sharded target), so the capability stays scoped to it until another
+# platform is measured. One constant keeps the backend eligibility gate and the
+# reorder threshold from disagreeing.
+_SUPPORTS_NONCAUSAL_MULTITOKEN_DCP = current_platform.is_rocm()
+
 
 def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     # Power of 2 to avoid excessive kernel instantiations, capped by an SM-based
@@ -56,6 +65,9 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # Non-causal DSpark block is flattened to one decode row per query token in
     # forward_mqa, so no intra-block causal masking is required.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = (
+        _SUPPORTS_NONCAUSAL_MULTITOKEN_DCP
+    )
 
     @classmethod
     def get_cudagraph_support(
@@ -93,7 +105,11 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         # the decode path; raise its reorder threshold to the spec block length
         # so full-cudagraph capture admits it. Causal usage stays single-token.
         if getattr(self, "non_causal_multi_token_decode", False):
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+            self._init_reorder_batch_threshold(
+                1,
+                supports_spec_as_decode=True,
+                supports_dcp_with_varlen=_SUPPORTS_NONCAUSAL_MULTITOKEN_DCP,
+            )
         self._reserve_attn_logits_workspace()
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
