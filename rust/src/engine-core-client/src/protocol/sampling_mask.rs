@@ -13,7 +13,7 @@ use crate::protocol::logprobs::array::decode_array1_u32;
 use crate::protocol::tensor::WireNdArray;
 
 /// Decoded sampling-mask support sets, one row per generated token position.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SamplingMask {
     pub rows: Vec<Vec<u32>>,
 }
@@ -89,19 +89,16 @@ impl MaybeWireSamplingMask {
 
 impl WireSamplingMask {
     fn from_direct(value: &SamplingMask) -> std::result::Result<Self, String> {
-        let mut token_ids = Vec::new();
-        let mut offsets = Vec::with_capacity(value.rows.len() + 1);
-        offsets.push(0_i64);
-        for row in &value.rows {
-            token_ids.extend(row.iter().map(|&token_id| i64::from(token_id)));
-            offsets.push(
-                i64::try_from(token_ids.len())
-                    .map_err(|_| "sampling mask token count exceeds i64".to_string())?,
-            );
-        }
+        let [row] = value.rows.as_slice() else {
+            return Err(format!(
+                "per-request engine-core sampling mask must contain exactly one row, got {}",
+                value.rows.len()
+            ));
+        };
+        let token_ids = row.iter().map(|&token_id| i64::from(token_id)).collect::<Vec<_>>();
         Ok(Self {
             token_ids: WireNdArray::from_i64(vec![token_ids.len()], token_ids)?,
-            offsets: Some(WireNdArray::from_i64(vec![offsets.len()], offsets)?),
+            offsets: None,
             cu_num_generated_tokens: None,
         })
     }

@@ -318,7 +318,7 @@ pub fn to_sequence_output(
 
     let sampling_mask = finished
         .and_then(|finished| finished.sampling_mask.as_ref())
-        .map(|rows| rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
+        .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
         .unwrap_or_default();
 
     Ok(pb::SequenceOutput {
@@ -530,6 +530,7 @@ impl ResponseOpts {
 mod tests {
     use prost::Message as _;
     use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -815,7 +816,9 @@ mod tests {
     #[test]
     fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
         let mut fin = finished(FinishReason::Length);
-        fin.sampling_mask = Some(vec![vec![1, 10], vec![2, 20]]);
+        fin.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, 10], vec![2, 20]],
+        });
 
         let terminal =
             to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())

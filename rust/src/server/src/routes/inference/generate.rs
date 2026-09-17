@@ -577,6 +577,7 @@ mod tests {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
         }
     }
 
@@ -660,6 +661,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
+            sampling_mask: None,
         };
 
         let response = collect_generate(
@@ -746,6 +748,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
+            sampling_mask: None,
         };
 
         let response = collect_generate(

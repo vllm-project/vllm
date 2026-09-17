@@ -236,11 +236,7 @@ sampling_mask_wire = [
         [5],
         msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
     ],
-    [
-        "<i8",
-        [2],
-        msgspec.msgpack.Ext(3, np.array([0, 5], dtype=np.int64).tobytes()),
-    ],
+    None,
     None,
 ]
 outputs_with_sampling_mask = EngineCoreOutputs(

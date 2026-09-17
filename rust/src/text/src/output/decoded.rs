@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
@@ -51,7 +52,7 @@ pub struct Finished {
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned with all generated token positions.
-    pub sampling_mask: Option<Vec<Vec<u32>>>,
+    pub sampling_mask: Option<SamplingMask>,
 }
 
 /// Sample metadata emitted by one engine output update.
@@ -122,7 +123,7 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
-    let mut sampling_mask: Option<Vec<Vec<u32>>> = None;
+    let mut sampling_mask: Option<SamplingMask> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -224,14 +225,14 @@ pub async fn decoded_text_event_stream(
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
             }
-            if let Some(rows) = &mut new_sampling_mask {
-                rows.truncate(num_tokens);
+            if let Some(mask) = &mut new_sampling_mask {
+                mask.rows.truncate(num_tokens);
             }
         }
 
         output_token_count += new_token_ids.len();
-        if let Some(mut rows) = new_sampling_mask {
-            sampling_mask.get_or_insert_with(Vec::new).append(&mut rows);
+        if let Some(mut mask) = new_sampling_mask {
+            sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
         }
 
         let decoded_logprobs = new_logprobs
@@ -256,14 +257,15 @@ pub async fn decoded_text_event_stream(
         }
 
         if let Some(reason) = finish_reason {
-            if let Some(rows) = sampling_mask.as_ref()
-                && rows.len() != output_token_count
+            if let Some(mask) = sampling_mask.as_ref()
+                && mask.rows.len() != output_token_count
             {
-                return Err(Error::SamplingMaskTokenCountMismatch {
+                return Err(vllm_llm::Error::SamplingMaskTokenCountMismatch {
                     request_id,
                     token_count: output_token_count,
-                    row_count: rows.len(),
-                });
+                    row_count: mask.rows.len(),
+                }
+                .into());
             }
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
@@ -409,10 +411,14 @@ mod tests {
     async fn sampling_masks_survive_text_decode_and_collection() {
         let prompt: Arc<[u32]> = Arc::from([]);
         let mut first = GenerateOutput::for_test(Some(prompt), vec![b'a' as u32], None);
-        first.sampling_mask = Some(vec![vec![1, b'a' as u32]]);
+        first.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, b'a' as u32]],
+        });
         let mut terminal =
             GenerateOutput::for_test(None, vec![b'b' as u32], Some(FinishReason::Length));
-        terminal.sampling_mask = Some(vec![vec![2, b'b' as u32]]);
+        terminal.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![2, b'b' as u32]],
+        });
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let collected = decoded_text_event_stream(
@@ -428,8 +434,44 @@ mod tests {
 
         assert_eq!(
             collected.sampling_mask,
-            Some(vec![vec![1, b'a' as u32], vec![2, b'b' as u32]])
+            Some(SamplingMask {
+                rows: vec![vec![1, b'a' as u32], vec![2, b'b' as u32]],
+            })
         );
+    }
+
+    #[tokio::test]
+    async fn sampling_mask_mismatch_reuses_llm_error() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut terminal = GenerateOutput::for_test(
+            Some(prompt),
+            vec![b'a' as u32, b'b' as u32],
+            Some(FinishReason::Length),
+        );
+        terminal.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, b'a' as u32]],
+        });
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let error = decoded_text_event_stream(
+            "test-mask-mismatch".into(),
+            tokenizer,
+            stream::iter([Ok(terminal)]),
+            TextDecodeOptions::default(),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::Error::Llm(vllm_llm::Error::SamplingMaskTokenCountMismatch {
+                token_count: 2,
+                row_count: 1,
+                ..
+            })
+        ));
     }
 
     fn opts(stop: &[&str], min_tokens: u32) -> TextDecodeOptions {
@@ -646,8 +688,9 @@ mod tests {
                 })
                 .collect(),
         });
-        raw.sampling_mask =
-            Some(token_ids.iter().map(|&token_id| vec![token_id, token_id + 100]).collect());
+        raw.sampling_mask = Some(SamplingMask {
+            rows: token_ids.iter().map(|&token_id| vec![token_id, token_id + 100]).collect(),
+        });
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let output = decoded_text_event_stream(
@@ -667,12 +710,14 @@ mod tests {
         assert_eq!(output.logprobs.as_ref().unwrap().positions.len(), 4);
         assert_eq!(
             output.sampling_mask,
-            Some(vec![
-                vec![b'a' as u32, b'a' as u32 + 100],
-                vec![b'b' as u32, b'b' as u32 + 100],
-                vec![b'c' as u32, b'c' as u32 + 100],
-                vec![b'x' as u32, b'x' as u32 + 100],
-            ])
+            Some(SamplingMask {
+                rows: vec![
+                    vec![b'a' as u32, b'a' as u32 + 100],
+                    vec![b'b' as u32, b'b' as u32 + 100],
+                    vec![b'c' as u32, b'c' as u32 + 100],
+                    vec![b'x' as u32, b'x' as u32 + 100],
+                ],
+            })
         );
         assert_eq!(output.usage.output_token_count, 4);
     }

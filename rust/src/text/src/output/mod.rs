@@ -17,6 +17,7 @@ mod logprobs;
 use std::sync::Arc;
 
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -36,7 +37,7 @@ pub struct CollectedTextOutput {
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned with generated token positions.
-    pub sampling_mask: Option<Vec<Vec<u32>>>,
+    pub sampling_mask: Option<SamplingMask>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
