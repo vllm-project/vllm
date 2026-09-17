@@ -22,6 +22,21 @@ from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
+# Only match "v"-prefixed release tags (e.g. "v0.29.0"); other tag namespaces
+# such as "proto-v*" (used for the Rust vllm-proto crate) must not be mistaken
+# for vLLM package version tags.
+VLLM_TAG_REGEX = r"^v(?P<version>[0-9][^+]*)$"
+VLLM_GIT_DESCRIBE_COMMAND = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--abbrev=40",
+    "--match",
+    "v[0-9]*",
+]
+
 
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -1249,9 +1264,17 @@ def get_vllm_version() -> str:
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
         print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="vllm/_version.py")
+        return get_version(
+            write_to="vllm/_version.py",
+            tag_regex=VLLM_TAG_REGEX,
+            git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+        )
 
-    version = get_version(write_to="vllm/_version.py")
+    version = get_version(
+        write_to="vllm/_version.py",
+        tag_regex=VLLM_TAG_REGEX,
+        git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+    )
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if not envs.VLLM_SKIP_VERSION_SUFFIX:
