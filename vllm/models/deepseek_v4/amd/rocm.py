@@ -558,14 +558,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
         if self.indexer is None:
-            # Only enable multi-stream overlap for CSA layer now.
-            self.aux_stream_list = None
+            # Dense layers have no compressor work to overlap; HCA layers
+            # (compressor, no indexer) keep the streams for the dual-stream
+            # fork below.
+            if self.compressor is None:
+                self.aux_stream_list = None
         else:
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
-    def _enable_csa_multi_stream(self) -> bool:
-        """All CSA multi-stream gates: env var, streams, and capture region.
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
 
         Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
         the attention inputs on the owning stream. Forking side streams
@@ -573,7 +576,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         this overlap on ROCm (event waits can hang), so multi-stream only
         runs where the fork/join becomes static graph edges: inside capture,
         or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks.
+        has no eager breaks. Covers both the HCA and CSA forks.
         """
         attn_metadata = get_forward_context().attn_metadata
         return self.aux_stream_list is not None and (
@@ -624,7 +627,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             device=hidden_states.device,
         )
 
-        if self._enable_csa_multi_stream():
+        if self._enable_multi_stream_overlap():
             # The ROCm override consumes these sentinels inside the capture
             # boundary, moving the stream fan-out ahead of the projections.
             self._prepare_and_attn_fn(
@@ -658,7 +661,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        """Run the ROCm CSA fork/join inside the graph capture boundary."""
+        """Run the ROCm fork/join (HCA or CSA) inside the capture boundary."""
         aux_streams = self.aux_stream_list
         # The sequential pipeline disables aux_stream_list before calling
         # back with real projection inputs; aux_streams is None ends that
@@ -684,13 +687,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         # Re-check: forward's gate ran inside a captured segment that
         # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
-        if not self._enable_csa_multi_stream():
+        if not self._enable_multi_stream_overlap():
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
         indexer = self.indexer
         compressor = self.compressor
-        assert indexer is not None and compressor is not None
+        assert compressor is not None
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
@@ -710,6 +713,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             compressor(score, positions, self.rotary_emb)
 
+        if indexer is None:
+            # HCA dual-stream: the main compressor runs on aux stream 0 while
+            # the default stream produces q and inserts KV into the SWA cache.
+            # Both branches only read hidden_states, so the join merely has to
+            # precede the sparse attention that consumes the compressed KV.
+            (q, _qr_out, _qr_scale_out, kv_out), _ = execute_in_parallel(
+                default_chain,
+                [main_compressor_chain],
+                self.ln_events[0],
+                [self.ln_events[1]],
+                aux_streams[:1],
+                enable=True,
+            )
+            self._sparse_indexer_and_attn(
+                hidden_states, None, None, None, q, kv_out, positions, o_padded
+            )
+            return
+
         def indexer_compressor_chain() -> None:
             score = torch.mm(
                 hidden_states,
@@ -718,6 +739,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             indexer.compressor(score, positions, self.indexer_rotary_emb)
 
+        # CSA three-stream: the main and indexer compressors run on aux
+        # streams 0 and 1 while the default stream produces q and inserts KV
+        # into the SWA cache. Every branch only reads hidden_states plus its
+        # own state, so the join merely has to precede the indexer op and the
+        # sparse attention, which consume the compressed KV caches.
         (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
             default_chain,
             [main_compressor_chain, indexer_compressor_chain],
