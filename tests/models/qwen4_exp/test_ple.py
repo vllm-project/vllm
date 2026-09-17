@@ -1597,9 +1597,11 @@ def _make_conv_metadata(
         ),
     ],
 )
+@pytest.mark.parametrize("fuse_residual", [True, False])
 def test_fused_conv_correctness(
     case: _ConvBatchCase,
     state_layout: str,
+    fuse_residual: bool,
 ) -> None:
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
@@ -1640,12 +1642,15 @@ def test_fused_conv_correctness(
     )
     null_state = conv_state[NULL_BLOCK_ID].clone()
     residual_kernel = residual.clone()
-    residual_reference = residual.clone()
+    # The unfused kernel must overwrite the buffer without reading its contents.
+    residual_reference = (
+        residual.clone() if fuse_residual else torch.zeros_like(residual)
+    )
 
     module._short_conv_dilated_dispatch(
         inputs=inputs,
         residual=residual_kernel,
-        outer_residual=outer_residual,
+        outer_residual=outer_residual if fuse_residual else None,
         metadata=metadata,
         conv_state=conv_state,
         conv_weights=weights,
@@ -1659,7 +1664,8 @@ def test_fused_conv_correctness(
         conv_state_len=module.conv_state_len,
         dilation=module.short_conv_dilation,
     )
-    residual_reference = outer_residual + residual_reference
+    if fuse_residual:
+        residual_reference = outer_residual + residual_reference
 
     assert torch.equal(
         residual_kernel[:num_real_tokens], residual_reference[:num_real_tokens]
@@ -1669,7 +1675,7 @@ def test_fused_conv_correctness(
     if case.graph_padding:
         assert torch.equal(
             residual_kernel[num_real_tokens:],
-            (outer_residual + residual)[num_real_tokens:],
+            residual_reference[num_real_tokens:],
         )
 
 

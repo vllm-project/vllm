@@ -341,7 +341,14 @@ def _check_ple(vllm_config: VllmConfig) -> None:
                     rtol=0,
                 )
                 expected = ple(hidden, ids, qsl, context)
-                actual = sp_ple(sp_shard(hidden), ids, qsl, context)
+                with patch(
+                    "vllm.models.qwen4_exp.nvidia.ple_layer.sp_all_gather",
+                    wraps=sp_all_gather,
+                ) as all_gather:
+                    actual = sp_ple(sp_shard(hidden), ids, qsl, context)
+                # Gather only convolution inputs, without either residual branch.
+                assert all_gather.call_count == 1
+                assert all_gather.call_args.args[0].shape[-1] == ple.hc_hidden_size
             torch.testing.assert_close(
                 sp_all_gather(actual)[:num_tokens], expected, atol=0.002, rtol=0.02
             )

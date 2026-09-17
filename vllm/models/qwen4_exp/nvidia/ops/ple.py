@@ -344,6 +344,7 @@ def _ple_conv_kernel(
     MODE: tl.constexpr,
     HAS_INIT: tl.constexpr,
     NULL_STATE_ID: tl.constexpr,
+    FUSE_RESIDUAL: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     t = tl.program_id(0)
@@ -438,21 +439,23 @@ def _ple_conv_kernel(
     conv = acc.to(residual_ptr.dtype.element_ty).to(tl.float32)
     y = conv * tl.sigmoid(conv)
     conv_output = tl.where(out_ok, y, 0.0).to(residual_ptr.dtype.element_ty)
-    residual = tl.load(
-        residual_ptr + output_t * C + c_offs,
-        mask=c_mask,
-        other=0.0,
-    )
-    # Preserve the original eager operation boundaries: short convolution is
-    # first accumulated into the BF16/FP16 PLE output, then the outer residual
-    # is added to that rounded value.
-    ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
-    outer_residual = tl.load(
-        outer_residual_ptr + output_t * C + c_offs,
-        mask=c_mask,
-        other=0.0,
-    )
-    ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
+    ple_output = conv_output
+    if FUSE_RESIDUAL:
+        residual = tl.load(
+            residual_ptr + output_t * C + c_offs,
+            mask=c_mask,
+            other=0.0,
+        )
+        # Preserve the original eager operation boundaries: short convolution is
+        # first accumulated into the BF16/FP16 PLE output, then the outer residual
+        # is added to that rounded value.
+        ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
+        outer_residual = tl.load(
+            outer_residual_ptr + output_t * C + c_offs,
+            mask=c_mask,
+            other=0.0,
+        )
+        ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(
@@ -575,7 +578,7 @@ def ple_conv(
     conv_state: torch.Tensor,
     conv_weights: torch.Tensor,
     state_indices: torch.Tensor,
-    outer_residual: torch.Tensor,
+    outer_residual: torch.Tensor | None,
     *,
     mode: Literal["decode", "spec", "prefill"],
     dilation: int,
@@ -585,7 +588,9 @@ def ple_conv(
     spec_query_len: int = 1,
     token_indices: torch.Tensor | None = None,
 ) -> None:
-    """Add short convolution and the outer residual; update state."""
+    """Update state and write activated convolution into residual.
+    A non-None outer_residual enables both fused residual additions.
+    """
     BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C = inputs.shape
@@ -657,6 +662,7 @@ def ple_conv(
         SPEC_QUERY_LEN=kernel_spec_query_len,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
+        FUSE_RESIDUAL=outer_residual is not None,
         NULL_STATE_ID=NULL_BLOCK_ID,
         launch_pdl=launch_pdl,
         num_warps=num_warps,

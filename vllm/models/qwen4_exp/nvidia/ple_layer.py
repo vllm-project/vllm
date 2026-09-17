@@ -193,7 +193,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
@@ -208,7 +208,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_non_spec = has_prefill or has_decode
         inputs = inputs[: metadata.num_actual_tokens]
         residual = residual[: metadata.num_actual_tokens]
-        outer_residual = outer_residual[: metadata.num_actual_tokens]
+        if outer_residual is not None:
+            outer_residual = outer_residual[: metadata.num_actual_tokens]
 
         spec_token_indices = None
         non_spec_token_indices = None
@@ -260,11 +261,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 residual_d, residual_p = torch.split(
                     residual, [num_decode_tokens, num_prefill_tokens], dim=0
                 )
-                outer_residual_d, outer_residual_p = torch.split(
-                    outer_residual,
-                    [num_decode_tokens, num_prefill_tokens],
-                    dim=0,
-                )
+                outer_residual_d: torch.Tensor | None = None
+                outer_residual_p: torch.Tensor | None = None
+                if outer_residual is not None:
+                    outer_residual_d, outer_residual_p = torch.split(
+                        outer_residual,
+                        [num_decode_tokens, num_prefill_tokens],
+                        dim=0,
+                    )
                 token_indices_d = None
                 token_indices_p = None
             else:
@@ -338,14 +342,16 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
-        outer_residual: torch.Tensor,
+        outer_residual: torch.Tensor | None,
     ) -> None:
+        """Update convolution state, optionally fusing both residual additions."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         # Profiling omits all metadata or this Mamba entry. Short convolution
         # is a no-op there, but preserve the outer residual addition.
         if attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
 
         if not isinstance(attn_metadata, dict):
@@ -356,7 +362,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            residual.add_(outer_residual)
+            if outer_residual is not None:
+                residual.add_(outer_residual)
             return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
@@ -427,18 +434,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_key.eps,
         )
         if self.use_sequence_parallel:
-            # The fused convolution requires all three inputs in full-token layout.
-            packed_output = torch.cat([gated_output, conv_input, hidden_states], dim=-1)
-            packed_output = sp_all_gather(packed_output)[: input_ids.shape[0]]
-            gated_output, conv_input, hidden_states = packed_output.split(
-                self.hc_hidden_size, dim=-1
-            )
-            gated_output = gated_output.contiguous()
-            conv_input = conv_input.contiguous()
-            hidden_states = hidden_states.contiguous()
-        self._short_conv(conv_input, gated_output, hidden_states)
-        if self.use_sequence_parallel:
-            gated_output = sp_shard(gated_output)
+            # Only convolution needs full tokens. Add residuals on local shards.
+            conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
+            # Metadata may omit padding tokens or all tokens during profiling.
+            conv_output = torch.zeros_like(conv_input)
+            self._short_conv(conv_input, conv_output, outer_residual=None)
+            gated_output.add_(sp_shard(conv_output))
+            gated_output.add_(hidden_states)
+        else:
+            self._short_conv(conv_input, gated_output, hidden_states)
         return gated_output
 
 
