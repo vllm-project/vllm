@@ -403,6 +403,10 @@ class OffloadingManager(ABC):
         The scheduler reads this once, after the manager is built, so the
         values must stay fixed for the process lifetime.
 
+        Document each key that you publish in
+        docs/features/kv_offloading_usage.md, because a label name reaches a
+        dashboard and stays there.
+
         Returns:
             Mapping of label name to value. The frontend renders each value
             with str(), so a value must be a scalar that msgpack carries, not
