@@ -37,15 +37,16 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionBackend,
-    FlashAttentionImpl,
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
+)
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -64,11 +65,13 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
 
-class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
+class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    # The QSA custom op scatters K/V into the cache inside the layer forward.
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -76,12 +79,12 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # QSA consumes manager pages directly and does not use FA4 paged attention.
+        # QSA consumes manager pages directly and does not use paged attention.
         return [MultipleOf(16)]
 
     @staticmethod
-    def get_impl_cls() -> type[Qwen4ExpQSAFlashAttentionImpl]:
-        return Qwen4ExpQSAFlashAttentionImpl
+    def get_impl_cls() -> type[Qwen4ExpQSAImpl]:
+        return Qwen4ExpQSAImpl
 
     @staticmethod
     def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
@@ -96,23 +99,86 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         return False
 
 
-class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
+class Qwen4ExpQSAImpl(AttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
     supports_dcp: bool = False
     supports_pcp: bool = False
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        if not is_flash_attn_varlen_func_available():
-            raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+    ) -> None:
+        if alibi_slopes is not None:
+            raise NotImplementedError("QSA does not support ALiBi")
+        if sliding_window is not None:
+            raise NotImplementedError("QSA does not support sliding-window attention")
+        if logits_soft_cap is not None:
+            raise NotImplementedError("QSA does not support logits soft capping")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("QSA only supports decoder attention")
         if self.dcp_world_size != 1:
             raise NotImplementedError(
                 "Qwen4Exp QSA does not support decode context parallelism"
             )
-        if self.kv_cache_dtype not in ("auto", "bfloat16"):
+        if kv_cache_dtype not in ("auto", "bfloat16"):
             raise NotImplementedError("Qwen4Exp QSA requires a BF16 main KV cache")
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.alibi_slopes = None
+        self.sliding_window = (-1, -1)
+        self.kv_cache_dtype = kv_cache_dtype
+        self.logits_soft_cap = 0.0
+        self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.supports_quant_query_input = False
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        triton_reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "Qwen4Exp QSA runs through forward_qsa, not the generic forward"
+        )
 
     def forward_qsa(
         self,
@@ -130,8 +196,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         del key, value
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("QSA does not support fused output quantization")
-        if self.alibi_slopes is not None or self.sinks is not None:
-            raise NotImplementedError("QSA does not support ALiBi or attention sinks")
+        if self.alibi_slopes is not None:
+            raise NotImplementedError("QSA does not support ALiBi")
         if self.sliding_window != (-1, -1):
             raise NotImplementedError("QSA does not support sliding-window attention")
 
@@ -275,8 +341,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
         set_default_quant_scales(self, register_buffer=True)
 
-        self.attn_backend = Qwen4ExpQSAFlashAttentionBackend
-        self.impl = Qwen4ExpQSAFlashAttentionImpl(
+        self.attn_backend = Qwen4ExpQSABackend
+        self.impl = Qwen4ExpQSAImpl(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -361,7 +427,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.indexer.output_width,
         ):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
-        impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
+        impl = cast(Qwen4ExpQSAImpl, self.impl)
         impl.do_kv_cache_update(
             self,
             key,
@@ -430,6 +496,7 @@ def qwen4_exp_qsa_with_output(
     layer_name: LayerNameType,
 ) -> None:
     """Run the complete QSA state/update/attend transaction."""
+
     layer_name = _resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[layer_name]
     if not isinstance(layer, Qwen4ExpQSAAttention):
@@ -454,7 +521,7 @@ direct_register_custom_op(
 __all__ = [
     "QSAIndexer",
     "Qwen4ExpQSAAttention",
-    "Qwen4ExpQSAFlashAttentionBackend",
-    "Qwen4ExpQSAFlashAttentionImpl",
+    "Qwen4ExpQSABackend",
+    "Qwen4ExpQSAImpl",
     "qwen4_exp_qsa_with_output",
 ]
