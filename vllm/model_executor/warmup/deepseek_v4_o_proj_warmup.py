@@ -37,7 +37,9 @@ def deepseek_v4_o_proj_warmup(model: torch.nn.Module, max_num_tokens: int) -> No
     head_dim = attn.nope_head_dim + attn.rope_head_dim
     device = attn.wo_a.weight.device
     start = time.perf_counter()
-    o = torch.zeros(sizes[-1], attn.n_local_heads, head_dim, dtype=torch.bfloat16, device=device)
+    o = torch.zeros(
+        sizes[-1], attn.n_local_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
     positions = torch.zeros(sizes[-1], dtype=torch.int64, device=device)
     for n in sizes:
         attn._o_proj(o[:n], positions[:n])

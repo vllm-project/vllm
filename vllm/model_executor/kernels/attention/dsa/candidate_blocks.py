@@ -62,9 +62,9 @@ def _block_scores_kernel(
         reduced = tl.reduce(values, 1, _max_with_nan)
         reduced = tl.where((end_raw > start) & (blocks == pin), float("inf"), reduced)
         tl.store(scores + row * nblocks + blocks, reduced, blocks < row_blocks)
-    if tl.program_id(1) == 0:
-        if (end_raw > start) & (pin >= row_blocks) & (pin < nblocks):
-            tl.store(scores + row * nblocks + pin, float("inf"))
+    far_pin = (end_raw > start) & (pin >= row_blocks) & (pin < nblocks)
+    if (tl.program_id(1) == 0) & far_pin:
+        tl.store(scores + row * nblocks + pin, float("inf"))
 
 
 @triton.jit(do_not_specialize=["width", "nblocks"])
@@ -134,7 +134,9 @@ def _mask_candidates_kernel(
     end = tl.minimum(end, width)
     edge = tl.load(flags + row * (nblocks + 1) + nblocks)
     offsets = tl.arange(0, TILE)
-    for tile in range(tl.program_id(1), tl.cdiv(tl.maximum(end - start, 0), TILE), ROW_PROGRAMS):
+    for tile in range(
+        tl.program_id(1), tl.cdiv(tl.maximum(end - start, 0), TILE), ROW_PROGRAMS
+    ):
         cols = start + tile * TILE + offsets
         valid = cols < end
         block = (cols - start) // BLOCK_SIZE
@@ -214,8 +216,8 @@ def _topk_candidates_kernel(
                 hist += tl.histogram(digit, 256)
                 hist -= tl.where(d_bins == 0, tl.sum((~match).to(tl.int32), 0), 0)
             total = tl.sum(hist, 0)
-            above = total - tl.cumsum(hist, 0)   # keys whose digit is strictly greater
-            # threshold digit: the largest d with at least `remaining` keys at digit >= d
+            above = total - tl.cumsum(hist, 0)  # keys whose digit is strictly greater
+            # threshold digit: the largest d with >= `remaining` keys at digit >= d
             cand = tl.where(above + hist >= remaining, d_bins, -1)
             d = tl.max(cand, 0)
             above_d = tl.sum(tl.where(d_bins == d, above, 0), 0)
@@ -237,10 +239,18 @@ def _topk_candidates_kernel(
             take = gt | (eq & (eq_rank < remaining))
             take_i = take.to(tl.int32)
             pos = tl.cumsum(take_i, 0) - take_i + n_written
-            tl.store(output + row * out_stride_row + pos * out_stride_col, idx, take & (pos < K))
+            tl.store(
+                output + row * out_stride_row + pos * out_stride_col,
+                idx,
+                take & (pos < K),
+            )
             n_written += tl.sum(take_i, 0)
             n_ties += tl.sum(eq_i, 0)
-        tl.store(output + row * out_stride_row + out_cols * out_stride_col, -1, out_cols >= n_written)
+        tl.store(
+            output + row * out_stride_row + out_cols * out_stride_col,
+            -1,
+            out_cols >= n_written,
+        )
 
 
 def select_candidate_blocks(
@@ -301,6 +311,7 @@ def select_candidate_blocks(
         row_repeat,
         1024,
     )
+
 
 def apply_candidate_mask(
     logits: torch.Tensor,
