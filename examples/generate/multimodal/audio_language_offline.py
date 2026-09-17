@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use vLLM for running offline inference
+"""This example shows how to use vLLM for running offline inference
 with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
@@ -286,8 +285,7 @@ def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
 
 # Phi-4-multimodal-instruct
 def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
-    """
-    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    """Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process audio inputs.
     """
     model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")

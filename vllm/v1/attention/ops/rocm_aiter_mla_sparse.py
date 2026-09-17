@@ -58,6 +58,7 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
@@ -74,6 +75,8 @@ def _get_aiter_top_k_kernel(
     compress_ratio: int,
     num_rows: int,
     max_valid_seq_len: int | None = None,
+    num_columns: int | None = None,
+    topk_tokens: int = 1024,
     on_gfx950: bool = _ON_GFX950,
 ) -> Callable[..., None] | None:
     if compress_ratio <= 1 or not on_gfx950:
@@ -81,6 +84,13 @@ def _get_aiter_top_k_kernel(
 
     if not is_prefill:
         assert max_valid_seq_len is not None
+        if (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns is not None
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        ):
+            return None
         # AITER v0.1.19 decode is one-block only. This measured gfx950
         # FP32/k=1024 compressed-row boundary is independent of the native
         # split-count boundary in sampler.cu.
@@ -807,6 +817,7 @@ def rocm_fp8_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -905,6 +916,7 @@ def fp8_mqa_logits_torch(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
@@ -973,8 +985,8 @@ def rocm_fp8_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
-    """
 
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     k_fp8, scale = kv
@@ -1443,6 +1455,8 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+            num_columns=logits.shape[1],
+            topk_tokens=topk_tokens,
         )
         if aiter_topk_kernel is not None:
             _launch_aiter_top_k_per_row_decode(
