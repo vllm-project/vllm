@@ -501,46 +501,52 @@ mod tests {
         let tools = vec![
             tool("search", json!({"type": "object"})),
             tool("lookup", json!({"type": "object"})),
-            tool("my.ns", json!({"type": "object"})),
         ];
-        let options = StructuralTagOptions::default();
-
         let json = MuseGlimmerStructuralTagBuilder
             .build_scoped(
                 &tools,
                 Some(ScopedToolChoice::Function("lookup".to_string())),
                 None,
-                &options,
+                &StructuralTagOptions::default(),
             )
             .unwrap()
             .to_json_string()
             .unwrap();
+
         assert!(json.contains(r#""begin":" to=lookup.lookup<|message|>""#));
         assert!(!json.contains("search"));
-        assert!(!json.contains("my.ns"));
+    }
 
-        // A dotted name has exactly the verbatim begin variant.
+    #[test]
+    fn function_choice_on_dotted_name_keeps_only_the_verbatim_begin() {
+        let tools = vec![tool("my.ns", json!({"type": "object"}))];
         let json = MuseGlimmerStructuralTagBuilder
             .build_scoped(
                 &tools,
                 Some(ScopedToolChoice::Function("my.ns".to_string())),
                 None,
-                &options,
+                &StructuralTagOptions::default(),
             )
             .unwrap()
             .to_json_string()
             .unwrap();
+
         assert!(json.contains(r#""begin":" to=my.ns<|message|>""#));
         assert!(!json.contains("my.ns.my.ns"));
+    }
 
+    #[test]
+    fn function_choice_on_unknown_name_fails_with_tool_not_found() {
+        let tools = vec![tool("search", json!({"type": "object"}))];
         let error = MuseGlimmerStructuralTagBuilder
             .build_scoped(
                 &tools,
                 Some(ScopedToolChoice::Function("missing".to_string())),
                 None,
-                &options,
+                &StructuralTagOptions::default(),
             )
             .unwrap_err();
+
         assert!(
             matches!(error, xgrammar_structural_tag::Error::ToolNotFound { name } if name == "missing")
         );
@@ -565,37 +571,51 @@ mod tests {
     }
 
     #[test]
-    fn unfaithful_schemas_keep_invoke_body_free_form() {
-        let extra_properties = tool(
+    fn additional_properties_allowance_keeps_invoke_body_free_form() {
+        let tools = vec![tool(
             "open",
             json!({
                 "type": "object",
                 "properties": { "q": { "type": "string" } },
                 "additionalProperties": true
             }),
-        );
-        let undeclared_required = tool(
+        )];
+        let json = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap()
+            .to_json_string()
+            .unwrap();
+
+        assert!(!json.contains("<atem:parameter"));
+    }
+
+    #[test]
+    fn undeclared_required_name_keeps_invoke_body_free_form() {
+        let tools = vec![tool(
             "lookup",
             json!({
                 "type": "object",
                 "properties": { "a": { "type": "string" } },
                 "required": ["a", "b"]
             }),
-        );
+        )];
+        let json = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap()
+            .to_json_string()
+            .unwrap();
 
-        for tool in [extra_properties, undeclared_required] {
-            let json = MuseGlimmerStructuralTagBuilder
-                .build_scoped(
-                    std::slice::from_ref(&tool),
-                    Some(ScopedToolChoice::Required),
-                    None,
-                    &StructuralTagOptions::default(),
-                )
-                .unwrap()
-                .to_json_string()
-                .unwrap();
-            assert!(!json.contains("<atem:parameter"), "{}", tool.name);
-        }
+        assert!(!json.contains("<atem:parameter"));
     }
 
     #[test]

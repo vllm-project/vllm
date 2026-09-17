@@ -1430,12 +1430,15 @@ mod tests {
         // Suffix-only matching is not safe: `foo.get_weather` stays as emitted.
         assert_eq!(output.calls()[0].name.as_deref(), Some("foo.get_weather"));
         assert_eq!(output.calls()[1].name.as_deref(), Some("weather.get"));
+    }
 
-        // With no registered tools, even a doubled name passes through.
+    #[test]
+    fn muse_glimmer_doubled_name_passes_through_without_registered_tools() {
         let mut parser = test_parser();
         let output = parser
             .parse_complete(&tool_channel("get_weather.get_weather", "", EOT))
             .unwrap();
+
         assert_eq!(
             first_call(&output).name.as_deref(),
             Some("get_weather.get_weather")
