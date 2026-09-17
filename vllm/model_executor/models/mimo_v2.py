@@ -521,12 +521,33 @@ def _shard_fp8_qkv_proj(
     and V rows are gathered from the chunks that hold them, dequantized with
     the chunk's own scales, reordered, and re-quantized to fp8.
     """
-    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
-        "TP size must evenly split the number of KV heads."
+    assert num_heads % tp_size == 0, (
+        f"num_heads={num_heads} must be divisible by tp_size={tp_size}."
     )
     assert ckpt_tp > 0 and num_heads % ckpt_tp == 0 and num_kv_heads % ckpt_tp == 0, (
         f"num_heads={num_heads} / num_kv_heads={num_kv_heads} must split the "
         f"checkpoint's fused qkv_proj TP size {ckpt_tp}."
+    )
+    # When there are fewer KV heads than ranks, vLLM replicates them
+    # (`num_kv_head_replicas`) and rank r owns KV head r // replicas, which
+    # keeps every Q head grouped with the KV head it attends to.
+    if tp_size <= num_kv_heads:
+        assert num_kv_heads % tp_size == 0, (
+            f"num_kv_heads={num_kv_heads} must be divisible by tp_size={tp_size}."
+        )
+        kv_head_ids = list(
+            range(
+                tp_rank * (num_kv_heads // tp_size),
+                (tp_rank + 1) * (num_kv_heads // tp_size),
+            )
+        )
+    else:
+        assert tp_size % num_kv_heads == 0, (
+            f"tp_size={tp_size} must be divisible by num_kv_heads={num_kv_heads}."
+        )
+        kv_head_ids = [tp_rank // (tp_size // num_kv_heads)]
+    q_head_ids = list(
+        range(tp_rank * (num_heads // tp_size), (tp_rank + 1) * (num_heads // tp_size))
     )
 
     rows_per_chunk = w_full.shape[0] // ckpt_tp
@@ -568,17 +589,15 @@ def _shard_fp8_qkv_proj(
     # Gather this rank's Q, K and V rows from the chunks that hold them.
     q_heads_per_chunk = num_heads // ckpt_tp
     kv_heads_per_chunk = num_kv_heads // ckpt_tp
-    q_heads_per_rank = num_heads // tp_size
-    kv_heads_per_rank = num_kv_heads // tp_size
     head_rows = torch.arange(head_dim)
     v_head_rows = torch.arange(v_head_dim)
     row_index: list[torch.Tensor] = []
-    for head in range(tp_rank * q_heads_per_rank, (tp_rank + 1) * q_heads_per_rank):
+    for head in q_head_ids:
         chunk = head // q_heads_per_chunk
         row_index.append(
             chunk * rows_per_chunk + (head % q_heads_per_chunk) * head_dim + head_rows
         )
-    for head in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
+    for head in kv_head_ids:
         chunk = head // kv_heads_per_chunk
         row_index.append(
             chunk * rows_per_chunk
@@ -586,7 +605,7 @@ def _shard_fp8_qkv_proj(
             + (head % kv_heads_per_chunk) * head_dim
             + head_rows
         )
-    for head in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
+    for head in kv_head_ids:
         chunk = head // kv_heads_per_chunk
         row_index.append(
             chunk * rows_per_chunk
