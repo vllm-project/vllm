@@ -241,7 +241,7 @@ class UMBPStoreConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        meta = UMBPConnectorMetadata()
+        meta = UMBPConnectorMetadata(async_load=self.load_async)
         for request_id in scheduler_output.finished_req_ids:
             self._pending_loads.pop(request_id, None)
             self._load_specs.pop(request_id, None)
@@ -345,6 +345,11 @@ class UMBPStoreConnectorScheduler:
         for partial_plans in self._pending_partial_tails.values():
             meta.partial_tail_plans.extend(partial_plans)
         self._pending_partial_tails.clear()
+        meta.deferred_store_requests.update(
+            plan.request_id
+            for plan in self._pending_stores
+            if plan.request_id is not None
+        )
         meta.store_plans.extend(self._pending_stores)
         self._pending_stores.clear()
         self._reference_store_blocks(meta)
@@ -576,6 +581,7 @@ class UMBPStoreConnectorScheduler:
         future = self._lookup_futures.pop(request.request_id, None)
         if future is not None:
             future.cancel()
+        plans: list[BlockTransferPlan] = []
         if self.lazy_offload:
             tracker = self._tracker_for_request(request.request_id)
             tracker.save_mode = "lazy"
@@ -596,7 +602,7 @@ class UMBPStoreConnectorScheduler:
             if plans:
                 pending_meta = UMBPConnectorMetadata(store_plans=plans)
                 self._reference_store_blocks(pending_meta)
-        return False, None
+        return bool(plans), None
 
     def register_finished_partial_tail(
         self,
