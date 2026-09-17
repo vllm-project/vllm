@@ -114,10 +114,7 @@ class DPMetadata:
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(
-            self.num_tokens_across_dp_cpu,
-            sequence_parallel_size,
-            pcp_size,
-            use_ep,
+            self.num_tokens_across_dp_cpu, sequence_parallel_size, pcp_size, use_ep
         )
         try:
             yield self.local_sizes
