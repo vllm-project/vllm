@@ -1176,6 +1176,7 @@ class MLADualRMSGroupQuantPattern(
                 eps,
                 eps,
                 128,
+                False,
             )
             # q_fp8, q_scale, kv_normed, k_pe
             return at[0], at[1], at[2], k_pe
