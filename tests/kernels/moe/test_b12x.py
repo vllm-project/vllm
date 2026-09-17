@@ -511,7 +511,10 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     monkeypatch.setattr(
         ct_mxfp4,
         "select_mxfp4_moe_backend",
-        lambda config: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
+        lambda config, activation_key=None: (
+            Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+            B12xExperts,
+        ),
     )
     moe_config = SimpleNamespace(
         w13_num_shards=2, moe_backend="b12x", activation=MoEActivation.SILU

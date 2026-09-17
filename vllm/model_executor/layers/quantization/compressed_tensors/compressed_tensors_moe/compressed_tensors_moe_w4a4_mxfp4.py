@@ -22,16 +22,20 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.model_executor.utils import set_weight_attrs
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe):
+    def __init__(self, moe, input_quant=None):
         super().__init__(moe)
         self.group_size = 32
+        activation_key = kMxfp4Dynamic if input_quant is not None else None
 
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            config=self.moe,
+            config=self.moe, activation_key=activation_key
         )
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
