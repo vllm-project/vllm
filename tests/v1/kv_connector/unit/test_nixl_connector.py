@@ -350,7 +350,8 @@ def test_prefill_exports_cached_tokens_in_kv_transfer_params():
     """The P worker reports its own prefix-cache hits in the returned
     kv_transfer_params so the D worker can surface them in
     prompt_tokens_details instead of the ~100% local hit it measures
-    when pulling the KVs from the remote."""
+    when pulling the KVs from the remote.
+    """
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 

@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
@@ -54,6 +57,28 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert torch.equal(
         batch.query_start_loc.cpu(), torch.from_numpy(batch.query_start_loc_np)
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA top-k.")
+@pytest.mark.parametrize("is_padding", [True, False])
+def test_make_dummy_padding_controls_moe_routing(monkeypatch, is_padding: bool):
+    """Dummy tokens marked as padding are dropped by the MoE router (top-k id
+    -1), which is wanted for idle DP ranks. Profile runs must not mark them, or
+    no token reaches the experts and MoE memory is never profiled."""
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    num_tokens = 16
+    buffers = InputBuffers(
+        max_num_reqs=4, max_num_tokens=num_tokens, device=torch.device(DEVICE)
+    )
+    batch = InputBatch.make_dummy(4, num_tokens, buffers, is_padding=is_padding)
+    hidden_states = torch.randn(num_tokens, 4, device=DEVICE)
+    router_logits = torch.randn(num_tokens, 8, device=DEVICE)
+
+    with set_forward_context(None, VllmConfig(), is_padding=batch.is_padding):
+        _, topk_ids, _ = fused_topk(hidden_states, router_logits, 2, False)
+
+    assert bool((topk_ids == -1).all()) is is_padding
+    assert bool((topk_ids >= 0).all()) is not is_padding
 
 
 def test_maybe_prepare_dcp_local_seq_lens_uses_shared_buffer(monkeypatch):

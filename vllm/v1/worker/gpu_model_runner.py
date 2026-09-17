@@ -46,7 +46,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
 )
 from vllm.distributed.parallel_state import (
-    GraphCaptureContext,
     get_dcp_group,
     get_pp_group,
     get_tp_group,
@@ -128,7 +127,6 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
-    current_stream,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -1860,8 +1858,12 @@ class GPUModelRunner(
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if self.enable_prompt_embeds:
             # The multimodal embed path reads is_token_ids.gpu; its .cpu copy is
-            # refreshed every step but the async fast paths below only scatter
-            # input_ids.gpu, so refresh is_token_ids.gpu here too.
+            # refreshed every step but the async fast path below replaces draft
+            # tokens directly on the GPU. Mark those positions as token IDs before
+            # refreshing the GPU mask so their embeddings are rebuilt. Sampled
+            # tokens are already marked by bookkeeping.
+            if spec_flattened_indices:
+                self.is_token_ids.np[spec_flattened_indices] = True
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
@@ -6712,31 +6714,11 @@ class GPUModelRunner(
         per_graph_estimate = {}
         encoder_memory_estimate = 0
 
-        # On ROCm, capture these throwaway profiling graphs on vLLM's dedicated
-        # compute stream instead of the fresh side stream graph_capture()
-        # allocates by default. torch's allocator pools free blocks per stream,
-        # so a side-stream forward strands a persistent aiter scratch buffer in
-        # a separate pool, shifting the physical placement of the real KV cache
-        # allocated afterward and slowing bandwidth-bound decode ~20%. The
-        # graphs are discarded, so a side stream is unnecessary here.
-        # Use current_stream(), not torch.cuda.current_stream(): before vLLM
-        # initializes its dedicated stream, torch returns the per-thread default
-        # stream (cuda_stream=0), which cannot be used for cudagraph capture.
-        # cap_ctx=None keeps the side-stream path on CUDA.
-        cap_ctx = (
-            GraphCaptureContext(current_stream())
-            if current_platform.is_rocm()
-            else None
-        )
-
         # Cleanup-only guard: CUDA graph capture errors should still propagate
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with (
-                self._freeze_gc(),
-                graph_capture(device=self.device, graph_capture_context=cap_ctx),
-            ):
+            with self._freeze_gc(), graph_capture(device=self.device):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
