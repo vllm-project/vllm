@@ -214,10 +214,13 @@ class KVRegion:
     block_stride: int
     block_bytes: int
     object_offset: int
+    block_size: int = 1
 
     def __post_init__(self) -> None:
         if self.block_stride <= 0 or self.block_bytes <= 0:
             raise ValueError("KV region sizes must be positive")
+        if self.block_size <= 0:
+            raise ValueError("KV region block_size must be positive")
         if self.block_bytes > self.block_stride:
             raise ValueError(
                 f"KV region bytes ({self.block_bytes}) exceed its stride "
@@ -379,6 +382,7 @@ class KVLayoutPlanner:
                         block_stride=tensor.block_stride,
                         block_bytes=block_bytes,
                         object_offset=offset,
+                        block_size=spec.block_size,
                     )
                 )
                 offset += block_bytes
@@ -439,6 +443,8 @@ class KVLayoutPlanner:
         *,
         request_id: str | None = None,
         generation: int = 0,
+        token_start: int | None = None,
+        token_end: int | None = None,
     ) -> "BlockTransferPlan":
         if not self._base_addresses:
             raise RuntimeError("KV caches must be registered before planning")
@@ -448,6 +454,8 @@ class KVLayoutPlanner:
             self._base_addresses,
             request_id=request_id,
             generation=generation,
+            token_start=token_start,
+            token_end=token_end,
         )
 
     def plan_for_block(
@@ -458,6 +466,8 @@ class KVLayoutPlanner:
         *,
         request_id: str | None = None,
         generation: int = 0,
+        token_start: int | None = None,
+        token_end: int | None = None,
     ) -> "BlockTransferPlan":
         """Lower one GPU block into a deterministic scatter/gather plan."""
         if block_id < 0:
@@ -474,6 +484,23 @@ class KVLayoutPlanner:
                 region.layer_name, region.block_stride
             )
             physical_parts = max(1, region.block_bytes // physical_stride)
+            if token_start is not None or token_end is not None:
+                if token_start is None or token_end is None:
+                    raise ValueError("partial range requires both token bounds")
+                if not 0 <= token_start < token_end <= region.block_size:
+                    raise ValueError("partial range is outside the KV block")
+                if physical_parts != 1:
+                    raise ValueError(
+                        "partial ranges with physical sub-blocks are unsupported"
+                    )
+                if region.block_bytes % region.block_size:
+                    raise ValueError("KV page is not token-byte divisible")
+                bytes_per_token = region.block_bytes // region.block_size
+                partial_offset = token_start * bytes_per_token
+                partial_length = (token_end - token_start) * bytes_per_token
+            else:
+                partial_offset = 0
+                partial_length = region.block_bytes
             for part in range(physical_parts):
                 physical_block_id = block_id * physical_parts + part
                 part_length = (
@@ -489,11 +516,14 @@ class KVLayoutPlanner:
                         base_address=(
                             base_address
                             + physical_block_id * physical_stride
+                            + partial_offset
                         ),
                         stride=physical_stride,
-                        length=part_length,
+                        length=partial_length,
                         object_offset=(
-                            region.object_offset + part * physical_stride
+                            region.object_offset
+                            if token_start is not None
+                            else region.object_offset + part * physical_stride
                         ),
                     )
                 )
@@ -534,6 +564,8 @@ class BlockTransferPlan:
     token_ids: tuple[int, ...] = ()
     block_size: int = 0
     medium: str = "CPU"
+    token_start: int | None = None
+    token_end: int | None = None
 
 
 @dataclass
@@ -592,6 +624,7 @@ class PartialTailPlan:
     start_token: int
     end_token: int
     key: str
+    block_size: int
 
 
 @dataclass

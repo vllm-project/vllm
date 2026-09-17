@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from .data import (
     BlockTransferPlan,
     KVLayoutPlanner,
+    PartialTailPlan,
     TransferJobState,
     TransferJobStatus,
     UMBPConnectorMetadata,
@@ -62,6 +63,8 @@ class UMBPStoreConnectorWorker:
                 plan.block_id,
                 request_id=plan.request_id,
                 generation=plan.generation,
+                token_start=plan.token_start,
+                token_end=plan.token_end,
             )
             for plan in plans
         ]
@@ -266,7 +269,15 @@ class UMBPStoreConnectorWorker:
         self._store_jobs.clear()
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
-        for request_id, plans in metadata.store_requests.items():
+        store_requests = {
+            request_id: list(plans)
+            for request_id, plans in metadata.store_requests.items()
+        }
+        for partial_plan in metadata.partial_tail_plans:
+            store_requests.setdefault(partial_plan.request_id, []).append(
+                self._partial_tail_to_plan(partial_plan)
+            )
+        for request_id, plans in store_requests.items():
             if plans:
                 self._stats.record(
                     "store",
@@ -280,7 +291,7 @@ class UMBPStoreConnectorWorker:
                 self._store_jobs[request_id] = self.runtime.store(
                     self._materialize_plans(plans)
                 )
-        if metadata.store_plans and not metadata.store_requests:
+        if metadata.store_plans and not store_requests:
             materialized = self._materialize_plans(metadata.store_plans)
             self._stats.record(
                 "store",
@@ -294,6 +305,21 @@ class UMBPStoreConnectorWorker:
             self._store_jobs["__umbp_batch__"] = self.runtime.store(
                 materialized
             )
+
+    @staticmethod
+    def _partial_tail_to_plan(
+        plan: PartialTailPlan,
+    ) -> BlockTransferPlan:
+        return BlockTransferPlan(
+            key=plan.key,
+            block_id=plan.block_id,
+            request_id=plan.request_id,
+            generation=plan.generation,
+            group_id=plan.group_id,
+            block_size=plan.block_size,
+            token_start=plan.start_token % plan.block_size,
+            token_end=plan.end_token % plan.block_size,
+        )
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
         """Drain jobs before vLLM reuses preempted GPU block IDs."""

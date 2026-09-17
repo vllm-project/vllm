@@ -20,6 +20,7 @@ from .data import (
     BlockTransferPlan,
     KVLayoutPlanner,
     LoadSpec,
+    PartialTailPlan,
     RankCompletenessPolicy,
     RankTopology,
     RequestTracker,
@@ -75,6 +76,7 @@ class UMBPStoreConnectorScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}
         self._next_generation = 0
         self._pending_stores: list[BlockTransferPlan] = []
+        self._pending_partial_tails: dict[str, list[PartialTailPlan]] = {}
         self._gpu_block_pool: BlockPool | None = None
         self._pinned_store_blocks: dict[tuple[str, int], list[int]] = {}
         self._store_plan_requests: dict[
@@ -296,6 +298,9 @@ class UMBPStoreConnectorScheduler:
             if tracker := self._request_trackers.get(request_id):
                 tracker.reset()
 
+        for plans in self._pending_partial_tails.values():
+            meta.partial_tail_plans.extend(plans)
+        self._pending_partial_tails.clear()
         meta.store_plans.extend(self._pending_stores)
         self._pending_stores.clear()
         self._reference_store_blocks(meta)
@@ -425,6 +430,51 @@ class UMBPStoreConnectorScheduler:
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
         return False, None
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue a single full-attention partial tail for the next step."""
+        del block_ids
+        if not partial_tail_offloads:
+            return False
+        if len(self.kv_cache_config.prefix_cacheable_group_ids) != 1:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None:
+            return False
+        boundaries = {entry[2] for entry in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("partial tail entries must share a boundary")
+        boundary = boundaries.pop()
+        if boundary <= 0 or boundary % self.hash_block_size == 0:
+            return False
+        hash_index = boundary // self.hash_block_size - 1
+        if hash_index >= len(request.block_hashes):
+            return False
+        group_id = self.kv_cache_config.prefix_cacheable_group_ids[0]
+        start_token = (boundary - 1) // self.block_size * self.block_size
+        plans: list[PartialTailPlan] = []
+        for entry_group_id, block_id, _ in partial_tail_offloads:
+            if entry_group_id != group_id:
+                return False
+            plans.append(
+                PartialTailPlan(
+                    request_id=request.request_id,
+                    generation=tracker.generation,
+                    block_id=block_id,
+                    group_id=group_id,
+                    start_token=start_token,
+                    end_token=boundary,
+                    key=self.codec.key(request.block_hashes[hash_index], group_id),
+                    block_size=self.block_size,
+                )
+            )
+        self._pending_partial_tails[request.request_id] = plans
+        return True
 
     def update_connector_output(self, output: KVConnectorOutput) -> None:
         metadata = output.kv_connector_worker_meta
