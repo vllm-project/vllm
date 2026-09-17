@@ -219,8 +219,7 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
 def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
-    cudagraph_manager's needs_capture decision.
-    """
+    cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(supports_mm_inputs=False)
     runner.cudagraph_manager = SimpleNamespace(
@@ -246,8 +245,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
 def test_capture_model_locks_workspace_after_capture(monkeypatch):
     """A workspace resize after capture frees the buffer the captured graphs
     baked in, so capture_model must lock the workspace before returning
-    (https://github.com/vllm-project/vllm/issues/55336).
-    """
+    (https://github.com/vllm-project/vllm/issues/55336)."""
     runner = _make_capture_runner(captured=True)
     monkeypatch.setattr(
         model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
@@ -268,8 +266,7 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
     """With no graphs to capture (e.g. enforce_eager) there is nothing baked
-    into the workspace, so the early return must not lock it.
-    """
+    into the workspace, so the early return must not lock it."""
     runner = _make_capture_runner(captured=False)
     lock_calls = []
     monkeypatch.setattr(
@@ -283,8 +280,7 @@ def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
 def test_capture_model_profile_only_skips_lock(monkeypatch):
     """The memory-profiling capture pass runs before kernel warmup and the
     real capture; locking there would stop the warmup from growing the
-    workspace to its scheduler-realistic size.
-    """
+    workspace to its scheduler-realistic size."""
     runner = _make_capture_runner(captured=True)
     monkeypatch.setattr(
         model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext

@@ -168,8 +168,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     @override
     def drain_jobs(self) -> None:
         """Synchronous tier — submit_*() returns only after the operation
-        completes, so there is nothing to wait for.
-        """
+        completes, so there is nothing to wait for."""
         return
 
     def get_num_chunks(self) -> int:

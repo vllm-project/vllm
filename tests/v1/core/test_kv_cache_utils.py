@@ -1068,6 +1068,22 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
     return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
 
+def test_metrics_empty_distinguishes_no_queries_from_no_hits():
+    """`hit_rate` alone cannot tell the two apart; `empty` can.
+
+    Both an unobserved window and a genuine all-miss window report a hit
+    rate of 0.0, so anything surfacing that number to a human has to check
+    `empty` first - which is what the prefix-cache log line does.
+    """
+    metrics = CachingMetrics(max_recent_requests=5)
+    assert metrics.empty
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(_stats(1, 20, 0))
+    assert not metrics.empty
+    assert metrics.hit_rate == 0.0
+
+
 def test_metrics():
     """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
@@ -2593,8 +2609,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     """The kpool tail parasitizes the indexer tensors instead of getting its
     own: sibling idx/tail tensors paired by layer order, zero standalone tail
     bytes, one shared block per request, and no prefix-caching leakage from
-    the kpool-sized scratch group.
-    """
+    the kpool-sized scratch group."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
 
@@ -2665,8 +2680,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
 
 def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     """The tail's kpool-sized scratch block (4 tokens) must not constrain the
-    prefix-cache hash granularity: participating groups alone decide it.
-    """
+    prefix-cache hash granularity: participating groups alone decide it."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
 
@@ -2742,8 +2756,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     """Platform-prepadded mamba pages (mamba_page_size_padded hint) must not
-    disable slot sharing; the layout re-pads them to the MLA page.
-    """
+    disable slot sharing; the layout re-pads them to the MLA page."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
 
@@ -2774,8 +2787,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
 def test_get_kv_cache_config_mamba_hybrid_sharing_pp_balanced_projection():
     """Round-robin mamba grouping keeps practical PP splits balanced: every
     stage's largest projected mamba group slice fits its projected MLA
-    layers, so per-stage slot tensors all have an MLA owner.
-    """
+    layers, so per-stage slot tensors all have an MLA owner."""
     model_config = ModelConfig(max_model_len=8192)
     vllm_config = VllmConfig(model_config=model_config)
 
@@ -2819,8 +2831,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatc
     """PP=4's default partition [11,11,12,11] leaves stage 0 with 2 MLA
     layers but a round-robin slice of 3 under the minimum 4 mamba groups;
     grouping bumps to 5 groups so every stage's projection keeps sharing
-    on instead of silently falling back on stage 0.
-    """
+    on instead of silently falling back on stage 0."""
     from vllm.config import ParallelConfig
     from vllm.distributed.utils import get_pp_indices
 
@@ -2869,8 +2880,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_starved_stage(monkeypatch):
 def test_get_kv_cache_config_mamba_hybrid_sharing_beats_cross_layers_flag():
     """Hybrid slot sharing must take precedence over the experimental
     enable_cross_layers_blocks packed layout: generic packing would give the
-    MLA slots a strided view, breaking the contiguous virtual split.
-    """
+    MLA slots a strided view, breaking the contiguous virtual split."""
     model_config = ModelConfig(max_model_len=8192)
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
@@ -3172,8 +3182,7 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
     """A layer-compact run region is its own dense allocation: under LHBNC the head
     groups sit between the layers and the blocks, so a run's block stride is one head
     group's slice, not the whole page (regression test for setStorage out-of-bounds
-    on ROCm hybrid models).
-    """
+    on ROCm hybrid models)."""
     full = new_kv_cache_spec()
     swa = new_sliding_window_spec(sliding_window=full.block_size * 2)
     page = full.page_size_bytes
@@ -3252,8 +3261,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
 def test_hidden_states_with_tp_scales_page_size():
     """When TP shrinks KV pages below the hidden-state per-token cost,
     get_kv_cache_groups must scale up target block sizes so that the
-    common page accommodates the unsharded hidden states.
-    """
+    common page accommodates the unsharded hidden states."""
     # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
     # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
     #         = 16 * 2 * 64 * 2 = 4096 bytes.
@@ -4083,8 +4091,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():
     """``UniformTypeKVCacheSpecs`` is not a ``FullAttentionSpec``, so callers
-    scanning groups with a bare isinstance miss DeepSeek-V4-shaped configs.
-    """
+    scanning groups with a bare isinstance miss DeepSeek-V4-shaped configs."""
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     full = FullAttentionSpec(block_size=4, **common)
     mla = MLAAttentionSpec(block_size=4, **common)
@@ -4253,8 +4260,7 @@ def test_no_warning_when_draft_group_is_identified(caplog_vllm):
 
 def _deepseek_v4_specs(model_version="deepseek_v4"):
     """DeepseekV4-shaped specs: full MLA layers plus sliding-window MLA layers
-    at differing page sizes, with the MTP draft layer registered last.
-    """
+    at differing page sizes, with the MTP draft layer registered last."""
     return {
         "model.layers.0.self_attn.attn": new_mla_spec(),
         "model.layers.1.self_attn.attn": new_mla_spec(),

@@ -48,8 +48,7 @@ def test_without_spec_decoding(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor, prefill chunking.
-    """
+    uni/multiproc executor, prefill chunking."""
     struct_outputs = StructuredOutputsParams(json=sample_json_schema)
     test_sampling_params: list[dict[str, Any]] = [
         dict(),
@@ -205,8 +204,7 @@ def run_tests(
     test_sampling_params: list[dict[str, Any]],
 ):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor with spec decoding.
-    """
+    uni/multiproc executor with spec decoding."""
     # Flex attention supports float32.
     attention_config = {"backend": "FLEX_ATTENTION"}
 

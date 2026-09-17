@@ -607,8 +607,7 @@ def _cadenced_dp_engine_core(
     monkeypatch, results: list[tuple[bool, bool]], dp_sync_interval: int = 32
 ):
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
-    returns the core and the step numbers at which the all-reduce ran.
-    """
+    returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
     core.dp_sync_interval = dp_sync_interval
@@ -627,8 +626,7 @@ def _cadenced_dp_engine_core(
 
 def test_dp_sync_interval_default_is_16():
     """Regression pin: lowering the default narrows the mid-wave pause tail
-    for async RL, where the engine is rarely idle when pause lands.
-    """
+    for async RL, where the engine is rarely idle when pause lands."""
     assert ParallelConfig.dp_sync_interval == 16
 
 
@@ -646,8 +644,7 @@ def test_dp_sync_interval_normal_wave(monkeypatch, dp_sync_interval: int):
 def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     """A pause of an idle engine arms every rank before its kick-started
     first step, so the step-1 sync reaches consensus after one dummy batch
-    regardless of the configured cadence.
-    """
+    regardless of the configured cadence."""
     core, synced = _cadenced_dp_engine_core(
         monkeypatch, [(False, True)], dp_sync_interval=32
     )
@@ -673,8 +670,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
-    caches are cleared and before the caller is unblocked.
-    """
+    caches are cleared and before the caller is unblocked."""
     core = _pausable_engine_core_proc()
     core.engines_running = deferred
     order: list[str] = []

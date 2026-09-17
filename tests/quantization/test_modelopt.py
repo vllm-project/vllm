@@ -587,8 +587,7 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
     """``quant_method="NVFP4"`` (W4A4) resolves to a
     ``(kNvfp4Static, kNvfp4Dynamic)`` QuantSpec under the generic
-    ``ModelOptLinearMethod``.
-    """
+    ``ModelOptLinearMethod``."""
     from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
@@ -637,8 +636,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     """The bespoke-method escape hatch: a format registered in
     ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
     generic ``ModelOptLinearMethod``. This is how a format that cannot be a
-    ``(weight, activation)`` key pair plugs into dispatch.
-    """
+    ``(weight, activation)`` key pair plugs into dispatch."""
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
@@ -669,8 +667,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
     ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``.
-    """
+    generic method routes this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
@@ -941,8 +938,7 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
 def test_modelopt_fp8_pb_wo_rejects_non_128_input():
     """Input width must still be a multiple of 128 (same as #53132, which only
     pads the output). A partial input block is refused loudly rather than
-    silently loading wrong scales.
-    """
+    silently loading wrong scales."""
     from vllm.model_executor.layers.quantization import modelopt as mo
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8Static128BlockSym,

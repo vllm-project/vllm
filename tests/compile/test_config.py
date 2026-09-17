@@ -541,6 +541,25 @@ def _mock_config_for_cudagraph_sizes(
     return config
 
 
+@pytest.mark.parametrize("max_num_seqs", [100, 101])
+def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
+    max_num_seqs: int,
+) -> None:
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert max_num_seqs in compilation_config.cudagraph_capture_sizes
+
+
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [
@@ -1229,8 +1248,7 @@ def test_compile_sizes_padding_validation():
 
 def test_inductor_asserts_default_disabled(monkeypatch):
     """Test that inductor runtime asserts are disabled by default
-    (INFO logging level) on torch < 2.12.
-    """
+    (INFO logging level) on torch < 2.12."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib
@@ -1248,8 +1266,7 @@ def test_inductor_asserts_default_disabled(monkeypatch):
 
 def test_inductor_asserts_enabled_in_debug(monkeypatch):
     """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
-    on torch < 2.12.
-    """
+    on torch < 2.12."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
 
     import importlib
@@ -1285,8 +1302,7 @@ def test_get_inductor_factors_includes_configs():
 
 def test_inductor_asserts_user_override(monkeypatch):
     """Test that explicit inductor_compile_config overrides the
-    debug-logging default.
-    """
+    debug-logging default."""
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
     import importlib

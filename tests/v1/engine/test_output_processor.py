@@ -177,7 +177,8 @@ def test_incremental_detokenization(
 def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
-    which sees the KVs pulled from the remote prefill as a ~100% hit."""
+    which sees the KVs pulled from the remote prefill as a ~100% hit.
+    """
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -229,8 +230,7 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
 ):
     """A per-request stream_interval can raise the interval above the engine
     default but not below it (values under the default clamp up), without
-    altering the generated text.
-    """
+    altering the generated text."""
     engine_stream_interval = 5
     # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
     request_stream_intervals = [1, 10]

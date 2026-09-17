@@ -733,8 +733,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         """Override to handle single tensor weights
-        that need to be split into slices.
-        """
+        that need to be split into slices."""
         self.reset_lora(index)
 
         # Handle case where checkpoint has single tensor weights

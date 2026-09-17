@@ -107,8 +107,7 @@ async def _run_request_bursts(
 
 class MultinodeInternalLBServerManager:
     """Manages multi-node data parallel vLLM server instances for internal
-    load balancer testing using --headless mode.
-    """
+    load balancer testing using --headless mode."""
 
     def __init__(
         self,
@@ -242,8 +241,7 @@ class MultinodeInternalLBServerManager:
 
 class APIOnlyServerManager:
     """Manages API-only server (Node 0) and headless engines server (Node 1)
-    for testing separated API server and engine configuration.
-    """
+    for testing separated API server and engine configuration."""
 
     def __init__(
         self,
@@ -645,8 +643,7 @@ async def test_api_only_multinode_dp_completion_streaming(
     model_name: str,
 ) -> None:
     """Test API-only server streaming with all engines on separate
-    headless server.
-    """
+    headless server."""
     prompt = "What is an LLM?"
 
     async def make_streaming_request():

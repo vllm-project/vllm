@@ -323,8 +323,7 @@ class TestEventsToDelta:
 
     def test_multiple_arg_chunks_same_batch_coalesced(self):
         """Multiple events for the same tool in one batch must produce
-        at most one DeltaToolCall per index.
-        """
+        at most one DeltaToolCall per index."""
         engine = _make_engine()
         events = [
             SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
@@ -552,8 +551,7 @@ class TestPostToolContentDeferral:
     """Regression: content after TOOL_CALL_END in the same batch must not
     produce a mixed DeltaMessage(content=..., tool_calls=...) — that causes
     split_delta to reorder content before tool_calls, breaking the Responses
-    API state machine.
-    """
+    API state machine."""
 
     def test_text_after_tool_end_deferred(self):
         engine = _make_engine()
@@ -607,8 +605,7 @@ class TestPostToolContentDeferral:
         """Deferred content from batch N must not mix with arg-continuation
         tool events in batch N+1 — that creates a DeltaMessage with both
         content and nameless tool_calls, which crashes the Responses API
-        state machine (name=None → Pydantic ValidationError).
-        """
+        state machine (name=None → Pydantic ValidationError)."""
         engine = _make_engine()
         engine._content_has_nonws = True
 
@@ -837,8 +834,7 @@ class TestBuildExtractedResult:
 
 class TestEngineBasedPath:
     """Tests for the _engine_based accumulation behavior in
-    DelegatingParser.parse_delta.
-    """
+    DelegatingParser.parse_delta."""
 
     def test_engine_based_true_when_both_parsers_engine(self):
         r = SimpleNamespace(engine_based_streaming=True)
@@ -884,8 +880,7 @@ class TestEngineBasedPath:
 
 class TestParseTokenIdPassthrough:
     """parse() must forward model_output_token_ids to _single_pass_parse
-    so that token-ID-based strict terminal matching is active.
-    """
+    so that token-ID-based strict terminal matching is active."""
 
     def test_literal_tool_tag_in_content_preserved_with_token_ids(self, mock_request):
         engine = _make_engine(_hermes_config())
@@ -1109,8 +1104,7 @@ class TestAdapterFinishOnStreamEnd:
 
     def test_lexer_buffer_flushed_on_finished(self):
         """Text buffered as a potential terminal prefix must be emitted
-        as content when the stream ends.
-        """
+        as content when the stream ends."""
         tokenizer = make_mock_tokenizer(_VOCAB)
         parser = _CombinedDelegating(tokenizer)
         request = _make_delegating_request()
@@ -1128,8 +1122,7 @@ class TestAdapterFinishOnStreamEnd:
 
     def test_args_buffer_flushed_on_finished(self):
         """Pending arg buffer text must be emitted when stream ends
-        mid-tool-call (closing brace held back in buffer).
-        """
+        mid-tool-call (closing brace held back in buffer)."""
         tokenizer = make_mock_tokenizer(_VOCAB)
         parser = _CombinedDelegating(tokenizer)
         request = _make_delegating_request()
@@ -1365,8 +1358,7 @@ class TestSkipToolSpanForwarding:
 
 class TestToolAdapterForwardsKwargs:
     """ParserEngineToolAdapter.__init__ must forward **kwargs to the
-    parser engine class so chat_template_kwargs reach model parsers.
-    """
+    parser engine class so chat_template_kwargs reach model parsers."""
 
     @pytest.mark.parametrize(
         "enable_thinking,expected_state",
@@ -1396,8 +1388,7 @@ class TestToolAdapterForwardsKwargs:
 
 class TestExtractContentIdsNoEmptyReturn:
     """extract_content_ids must return input_ids (not []) when there is
-    no THINK_END token ID and _reasoning_ended is True.
-    """
+    no THINK_END token ID and _reasoning_ended is True."""
 
     _NO_THINK_CONFIG = ParserEngineConfig(name="no_think_end", token_id_terminals={})
 
@@ -1795,8 +1786,7 @@ class TestDropSpecialTokens:
 
     def test_drops_special_token_by_id_from_content(self):
         """A special token (not a configured terminal) is dropped when
-        it arrives as its actual token ID.
-        """
+        it arrives as its actual token ID."""
         config = ParserEngineConfig(
             name="drop_content_test",
             terminals={},
@@ -1831,8 +1821,7 @@ class TestDropSpecialTokens:
 
     def test_drops_via_text_fallback_when_no_token_ids(self):
         """When no token IDs are provided, text-based lexer catches
-        drop tokens as a fallback.
-        """
+        drop tokens as a fallback."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1845,8 +1834,7 @@ class TestDropSpecialTokens:
 
     def test_regular_tokens_spelling_special_survive(self):
         """Regular tokens that spell out a drop-token string survive
-        when token IDs prove they are not the special token.
-        """
+        when token IDs prove they are not the special token."""
         vocab = {**_DROP_VOCAB, "h": 72, "<": 73, "bos": 74, ">": 75, "w": 76}
         engine = _make_engine(
             vocab=vocab,
@@ -1862,8 +1850,7 @@ class TestDropSpecialTokens:
 
     def test_configured_terminal_not_treated_as_drop(self):
         """Tokens already in config.terminals (like <think>) are handled
-        by the state machine, not the drop mechanism.
-        """
+        by the state machine, not the drop mechanism."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1918,8 +1905,7 @@ class TestDropSpecialTokens:
     def test_drops_applied_with_skip_tool_parsing(self):
         """Drop tokens are always dropped, even with skip_tool_parsing.
         DROP_TERMINALs have no transitions by construction, so no parser
-        pass can use them.
-        """
+        pass can use them."""
         for initial_state in (ParserState.REASONING, ParserState.CONTENT):
             engine = _make_engine(
                 vocab=_DROP_VOCAB,
@@ -1935,8 +1921,7 @@ class TestDropSpecialTokens:
 
     def test_transitions_unaffected_by_drop_in_reasoning_with_skip_tool_parsing(self):
         """With skip_tool_parsing in REASONING state, drop tokens are
-        removed but configured terminals still fire their transitions.
-        """
+        removed but configured terminals still fire their transitions."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1972,8 +1957,7 @@ class TestDropSpecialTokens:
 
     def test_mixed_configured_and_drop_terminals(self):
         """Configured terminals trigger transitions while drop terminals
-        are silently removed in the same stream.
-        """
+        are silently removed in the same stream."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1997,8 +1981,7 @@ class TestTruncatedToolOpenerStreamParity:
     """Regression tests for #47137: when generation terminates inside a
     ``<tool_call>`` opener that has not been promoted to a tool call
     (via ``max_tokens`` or a ``stop`` string), the non-streaming path
-    must drop the incomplete markup, matching the streaming path.
-    """
+    must drop the incomplete markup, matching the streaming path."""
 
     _QWEN3_VOCAB = {
         "<tool_call>": 100,
@@ -2044,8 +2027,7 @@ class TestTruncatedToolOpenerStreamParity:
     )
     def test_truncated_opener_dropped_in_both_paths(self, mock_request, chunks):
         """A cutoff inside the opener yields no content and no tool calls
-        in both the non-streaming and streaming paths.
-        """
+        in both the non-streaming and streaming paths."""
         text = "".join(chunks)
 
         _, content, tool_calls = self._make_parser().parse(
@@ -2058,8 +2040,7 @@ class TestTruncatedToolOpenerStreamParity:
 
     def test_content_before_truncated_opener_preserved(self, mock_request):
         """Only the incomplete markup is dropped; content generated before
-        the opener is returned identically by both paths.
-        """
+        the opener is returned identically by both paths."""
         chunks = ["Checking the weather. ", "<tool_call>", "\n", "<function"]
         text = "".join(chunks)
 
@@ -2073,8 +2054,7 @@ class TestTruncatedToolOpenerStreamParity:
 
     def test_content_around_unpromoted_tool_block_stays_ordered(self, mock_request):
         """Text surrounding a complete-but-unparsable tool block keeps its
-        original order in the non-streaming path, matching streaming.
-        """
+        original order in the non-streaming path, matching streaming."""
         chunks = ["A ", "<tool_call>", "garbage", "</tool_call>", " B"]
         text = "".join(chunks)
 
@@ -2088,8 +2068,7 @@ class TestTruncatedToolOpenerStreamParity:
 
     def test_complete_tool_call_still_promoted(self, mock_request):
         """Sanity check: a complete tool call still parses in the
-        non-streaming path after the truncation fix.
-        """
+        non-streaming path after the truncation fix."""
         text = (
             "<tool_call>\n"
             "<function=get_weather>\n"
@@ -2109,8 +2088,7 @@ class TestThinkMarkupWithoutReasoningParser:
     """With no reasoning parser configured, reasoning markup is plain
     content: engine-backed tool parsers must return it verbatim in both
     the non-streaming and streaming paths, not consume the markers or
-    reclassify the block as reasoning and drop it.
-    """
+    reclassify the block as reasoning and drop it."""
 
     _VOCAB = {
         "<think>": 90,
@@ -2176,8 +2154,7 @@ class TestThinkMarkupWithoutReasoningParser:
 
     def test_think_block_preserved_alongside_tool_call(self, mock_request):
         """The tools-called branch also returns the tool parser's content;
-        a think block preceding a promoted tool call must survive in it.
-        """
+        a think block preceding a promoted tool call must survive in it."""
         think = "<think>plan</think>"
         text = think + (
             "<tool_call>\n"

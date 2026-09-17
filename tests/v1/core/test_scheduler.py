@@ -19,6 +19,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -191,6 +192,22 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def test_max_num_active_seqs_caps_admission():
+    """Admission is capped by max_num_active_seqs, not max_num_seqs."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_active_seqs=3)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 3
+    assert len(scheduler.running) == 3
+    assert len(scheduler.waiting) == 7
+    # Execution capacity is untouched.
+    assert scheduler.max_num_running_reqs == 16
 
 
 def _bind_hisparse_connector(scheduler):
@@ -538,8 +555,7 @@ def test_throttle_defers_inflight_prefill_chunk():
     """DP prefill balancing throttles ALL prefill compute on a throttled step,
     not just new admissions: an in-progress (chunked) prefill already in the
     running queue is also deferred, so the step runs decode-only, while a
-    separate decode keeps being scheduled.
-    """
+    separate decode keeps being scheduled."""
     scheduler = create_scheduler(
         max_num_seqs=16, max_num_batched_tokens=50, enable_chunked_prefill=True
     )
@@ -593,8 +609,7 @@ def test_throttle_capacity_bound_guard_admits():
     """Saturation guard: if a cadence-aligned release step cannot drain the
     waiting prefill queue (it ran out of token budget), the throttle backs off on
     the next step so the backlog cannot grow into a TTFT avalanche -- prefills are
-    admitted even though throttle_prefills is set.
-    """
+    admitted even though throttle_prefills is set."""
     scheduler = create_scheduler(
         max_num_seqs=16, max_num_batched_tokens=200, enable_chunked_prefill=True
     )
@@ -1293,8 +1308,7 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
 
 def test_prefix_cache_query_not_inflated_by_connector_defer():
     """The GPU prefix-cache query is recorded at admission, so a request the
-    connector defers several times is counted once, not once per retry.
-    """
+    connector defers several times is counted once, not once per retry."""
     num_defers_before_matching = 3
     scheduler = create_scheduler(
         enable_prefix_caching=True,
@@ -1322,8 +1336,7 @@ def test_prefix_cache_query_not_inflated_by_connector_defer():
 
 def test_preemption_re_records_prefix_cache_query():
     """A preempted request re-enters the lookup on resume, so its recomputation
-    is counted again into the preempted stats.
-    """
+    is counted again into the preempted stats."""
     scheduler = create_scheduler(enable_prefix_caching=True)
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
@@ -1359,8 +1372,7 @@ def test_preemption_re_records_prefix_cache_query():
 
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
-    records no phantom miss.
-    """
+    records no phantom miss."""
     scheduler = create_scheduler(enable_prefix_caching=False)
     for request in create_requests(num_requests=2):
         scheduler.add_request(request)
@@ -1374,8 +1386,7 @@ def test_prefix_cache_stats_not_recorded_when_caching_disabled():
 
 def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
     """A real cache hit rejected once by allocate_slots and admitted on the next
-    step is counted exactly once, hits included.
-    """
+    step is counted exactly once, hits included."""
     block_size = 16
     scheduler = create_scheduler(
         enable_prefix_caching=True,
@@ -2291,6 +2302,25 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
+def test_kv_connector_honors_skip_reading_prefix_cache():
+    """A request that must score every prompt row takes no external hit."""
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
+        block_size=BLOCK_SIZE,
+    )
+    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
+    scoring.sampling_params.prompt_logprobs = 1
+    scoring.skip_reading_prefix_cache = True
+    scheduler.add_request(plain)
+    scheduler.add_request(scoring)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
+    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """Test whether Scheduler with KVConnector schedules tokens, allocates
@@ -3094,8 +3124,7 @@ def create_requests_with_priority(
 
 def test_priority_scheduling_basic_ordering():
     """Test that requests are scheduled in priority order
-    (lower value = higher priority).
-    """
+    (lower value = higher priority)."""
     scheduler = create_scheduler_with_priority()
 
     # Create requests with different priorities
@@ -3124,8 +3153,7 @@ def test_priority_scheduling_basic_ordering():
 
 def test_priority_scheduling_arrival_time_tiebreaker():
     """Test that arrival time is used
-    as tiebreaker when priorities are equal.
-    """
+    as tiebreaker when priorities are equal."""
     scheduler = create_scheduler_with_priority()
 
     # Create requests with same priority but different arrival times
@@ -3282,8 +3310,7 @@ def test_priority_scheduling_preemption():
 
 def test_priority_scheduling_no_preemption_when_space_available():
     """Test that preemption doesn't happen
-    when there's space for new requests.
-    """
+    when there's space for new requests."""
     scheduler = create_scheduler_with_priority(
         max_num_seqs=3,  # Allow 3 concurrent requests
         max_num_batched_tokens=200,  # Sufficient token budget
@@ -3336,8 +3363,7 @@ def test_priority_scheduling_no_preemption_when_space_available():
 
 def test_priority_scheduling_preemption_victim_selection():
     """Test that the correct victim is selected for
-    preemption based on priority and arrival time.
-    """
+    preemption based on priority and arrival time."""
     # This test verifies the priority-based victim selection logic
     # by checking the waiting queue order after adding requests with different
     # priorities
@@ -3457,8 +3483,7 @@ def test_priority_scheduling_waiting_queue_order():
 
 def test_priority_scheduling_fcfs_fallback():
     """Test that FCFS behavior is maintained when all
-    requests have same priority.
-    """
+    requests have same priority."""
     scheduler = create_scheduler_with_priority()
 
     # Create requests with same priority but different arrival times
@@ -3527,8 +3552,7 @@ def test_priority_scheduling_with_limited_slots():
 
 def test_priority_scheduling_heap_property():
     """Test that the waiting queue maintains heap
-    property for priority scheduling.
-    """
+    property for priority scheduling."""
     scheduler = create_scheduler_with_priority(
         max_num_seqs=1,  # Only one request can run at a time
     )
@@ -3753,8 +3777,7 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
     use_ec_connector, ec_role, use_v2_model_runner
 ):
     """Test that priority scheduling preempts lower priority requests
-    when out of KV cache space.
-    """
+    when out of KV cache space."""
     # Create scheduler with very limited memory to force preemption
     scheduler = create_scheduler_with_priority(
         max_num_seqs=2,  # Allow multiple requests
@@ -3899,8 +3922,7 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
     enable_chunked_prefill: bool, is_encoder_decoder: bool, expect_enabled: bool
 ) -> None:
     """Validate that chunked prefill is appropriately disabled for
-    encoder-decoder models.
-    """
+    encoder-decoder models."""
     scheduler_config = SchedulerConfig(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=is_encoder_decoder,
@@ -3929,8 +3951,7 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
     scheduler_config: SchedulerConfig, is_encoder_decoder: bool, expect_enabled: bool
 ) -> None:
     """Validate chunked prefill settings in the scheduler config for
-    encoder-decoder models.
-    """
+    encoder-decoder models."""
     assert scheduler_config.enable_chunked_prefill is expect_enabled
     if is_encoder_decoder:
         # Encoder-decoder models should automatically disable chunked multimodal
@@ -4020,8 +4041,7 @@ def _assert_right_encoder_inputs(
 ):
     """Verify that requests/mm_hashes should (not) in scheduled encoder input
     If check_exist is False, this function returns True
-    if requests are NOT in encoder inputs
-    """
+    if requests are NOT in encoder inputs"""
     # Get the scheduled encoder inputs
     # NOTE: scheduled_encoder_inputs is a dictionary with request id as key
     scheduled_encoder_inputs = output.scheduled_encoder_inputs
@@ -4182,8 +4202,7 @@ def test_ec_connector_text_only_request(use_kv_connector):
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_cache_hit_external_load(use_kv_connector):
     """Test ec_consumer loads from external cache when hit.
-    A normal basic operation for EPD disaggrgation
-    """
+    A normal basic operation for EPD disaggrgation"""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         enable_prefix_caching=True,
@@ -4630,8 +4649,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     cache_exist, use_kv_connector
 ):
     """Test that priority scheduling preempts lower priority requests
-    when out of KV cache space.
-    """
+    when out of KV cache space."""
     # Create scheduler with very limited memory to force preemption
     scheduler = create_scheduler_with_priority(
         model="llava-hf/llava-1.5-7b-hf",
@@ -5298,10 +5316,90 @@ def test_scheduler_kv_connector_stats():
         assert final_stats == expected_data
 
 
+def test_scheduler_ec_connector_stats():
+    """Test worker-side, scheduler-side, and combined EC connector stats."""
+
+    class GenericECConnectorStats(ECConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: ECConnectorStats) -> ECConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    test_cases = (
+        ({"worker": 1}, None, {"worker": 1}),
+        (None, {"scheduler": 2}, {"scheduler": 2}),
+        ({"worker": 1}, {"scheduler": 2}, {"worker": 1, "scheduler": 2}),
+    )
+
+    for worker_data, scheduler_data, expected_data in test_cases:
+        scheduler = create_scheduler()
+        worker_stats = (
+            GenericECConnectorStats(data=worker_data) if worker_data else None
+        )
+        scheduler_stats = (
+            GenericECConnectorStats(data=scheduler_data) if scheduler_data else None
+        )
+        scheduler.ec_connector = Mock()
+        scheduler.ec_connector.take_unavailable_requests.return_value = set()
+        scheduler.ec_connector.get_ec_connector_stats.return_value = (
+            scheduler_stats if worker_stats is None else None
+        )
+
+        def update_connector_output(
+            ec_connector_output: ECConnectorOutput,
+            scheduler=scheduler,
+            scheduler_stats=scheduler_stats,
+        ):
+            scheduler.ec_connector.get_ec_connector_stats.return_value = scheduler_stats
+
+        scheduler.ec_connector.update_connector_output.side_effect = (
+            update_connector_output
+        )
+
+        model_output = ModelRunnerOutput(
+            req_ids=["req_0"],
+            req_id_to_index={"req_0": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            ec_connector_output=ECConnectorOutput(ec_connector_stats=worker_stats)
+            if worker_stats
+            else None,
+        )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=None,
+            num_scheduled_tokens={"req_0": 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[0],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+
+        final_stats = next(
+            iter(engine_core_outputs.values())
+        ).scheduler_stats.ec_connector_stats
+        assert final_stats == expected_data
+
+
 def test_ec_connector_update_connector_output_called():
     """Test that worker-side EC connector output is forwarded to the
-    EC connector's update_connector_output hook.
-    """
+    EC connector's update_connector_output hook."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         use_ec_connector=True,
@@ -5506,8 +5604,7 @@ def test_variable_length_cross_attn_block_allocation():
 
 def test_cross_attn_blocks_not_over_allocated():
     """Test that cross-attention blocks are not over-allocated compared to
-    what each request actually needs.
-    """
+    what each request actually needs."""
     from math import ceil
 
     block_size = 16
@@ -5603,8 +5700,7 @@ def test_cross_attn_blocks_not_under_allocated():
 
 def test_cross_attn_zero_blocks_without_encoder_inputs():
     """Test that requests without encoder inputs get zero cross-attention
-    blocks, even when the scheduler is configured for encoder-decoder.
-    """
+    blocks, even when the scheduler is configured for encoder-decoder."""
     block_size = 16
     scheduler = _create_encoder_decoder_scheduler(block_size=block_size)
 
@@ -5709,8 +5805,7 @@ def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     evicted entry and crashes the engine with "Encoder cache miss". The
     scheduler must retain the input until the *confirmed* progress
     (num_computed_tokens - num_output_placeholders) passes the range end, so
-    that no pending rejection can rewind into the range.
-    """
+    that no pending rejection can rewind into the range."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         num_speculative_tokens=3,
@@ -5821,8 +5916,7 @@ def test_free_encoder_inputs_defers_for_eagle_lookahead():
     position so the drafter's +1 look-ahead mm-embedding gather (which reads one
     position past the target's computed range) still finds it cached. This is
     the primary mechanism that prevents the drafter "Encoder cache miss"; the
-    worker-side token-embedding fallback is only a backstop.
-    """
+    worker-side token-embedding fallback is only a backstop."""
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     # create_scheduler only builds ngram spec configs; force the eagle path that
     # _free_encoder_inputs keys off (its read-ahead deferral).
@@ -5852,8 +5946,7 @@ def test_free_encoder_inputs_defers_for_eagle_lookahead():
 
 def test_free_encoder_inputs_unchanged_without_spec_decode():
     """Without speculative decoding, encoder inputs are freed as soon as
-    num_computed_tokens passes the placeholder range, as before.
-    """
+    num_computed_tokens passes the placeholder range, as before."""
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=50, length=100)]]
     request = create_requests(
@@ -5884,8 +5977,7 @@ def test_encoder_cache_retained_across_preemption_and_resume():
     encoder input must pull the still-cached entry back out of `freeable`
     without scheduling a recompute, keeping the scheduler and worker
     consistent. The spec-rollback retention margin does not gate this path,
-    so it is covered separately here.
-    """
+    so it is covered separately here."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         num_speculative_tokens=3,
@@ -5929,8 +6021,7 @@ def test_encoder_cache_recomputed_when_evicted_during_preemption():
     pressure before it resumes, the scheduler reports the mm_hash as freed
     (so the worker drops it) and a resume must schedule a recompute rather
     than assume the worker still holds it. check_and_update_cache must
-    return False so the encoder input is re-scheduled.
-    """
+    return False so the encoder input is re-scheduled."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         num_speculative_tokens=3,
@@ -6581,8 +6672,7 @@ def _decode_ready_request(scheduler):
 
 def test_update_draft_token_ids_strips_ngram_padding():
     """ngram_gpu pads unfilled draft slots with -1; manager validation must
-    strip them before grammar.validate_tokens (which otherwise raises).
-    """
+    strip them before grammar.validate_tokens (which otherwise raises)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
@@ -6601,8 +6691,7 @@ def test_update_draft_token_ids_strips_ngram_padding():
 
 def test_update_draft_token_ids_in_output_strips_padding():
     """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to manager validation is stripped).
-    """
+    is preserved (only the input to manager validation is stripped)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 

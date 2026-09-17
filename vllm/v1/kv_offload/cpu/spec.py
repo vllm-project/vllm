@@ -28,8 +28,7 @@ def _all_workers_barrier() -> None:
     """Block until every worker rank has reached this point (gloo cpu group).
 
     A superset of the node-local mmap openers suffices: once the barrier
-    releases, every worker sharing the region file has mapped it.
-    """
+    releases, every worker sharing the region file has mapped it."""
     from vllm.distributed.parallel_state import (
         get_inner_dp_world_group,
         get_world_group,
@@ -162,8 +161,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
-        per-rank tensor); replicated-layout dedup is gated on this being True.
-        """
+        per-rank tensor); replicated-layout dedup is gated on this being True."""
         return current_platform.is_cuda_alike()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:

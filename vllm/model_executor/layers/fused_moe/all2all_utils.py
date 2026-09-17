@@ -276,6 +276,7 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+            sp_size=moe.moe_parallel_config.sp_size,
         )
 
     elif moe.use_mori_kernels:
@@ -284,13 +285,20 @@ def maybe_make_prepare_finalize(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.is_per_act_token or quant_config.is_block_quantized
+            quant_config.is_per_act_token
+            or quant_config.is_block_quantized
+            or quant_config.is_per_tensor
         )
         if use_fp8_dispatch:
-            # For PTPC (per token per channel) quant, scale dim is 1
-            # For 1x128 quant, scale dim is hidden_dim // 128
+            # For PTPC (per token per channel) or per-tensor quant,
+            # scale dim is 1. For 1x128 quant, scale dim is
+            # hidden_dim // 128
             quant_dtype = quant_config.quant_dtype
-            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            scale_dim = (
+                1
+                if (quant_config.is_per_act_token or quant_config.is_per_tensor)
+                else moe.hidden_dim // 128
+            )
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.

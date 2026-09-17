@@ -650,8 +650,7 @@ class MessageQueue:
 
     def shutdown(self):
         """If this is an idle reader, wakes it up so it can clean up and shut
-        down
-        """
+        down"""
         self.shutting_down = True
         if self._spin_condition is not None:
             self._spin_condition.cancel()
@@ -761,8 +760,7 @@ class MessageQueue:
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
-            indefinite
-            """
+            indefinite"""
             if self._should_warn:
                 elapsed = time.monotonic() - self.started
                 if elapsed >= VLLM_RINGBUFFER_WARNING_INTERVAL * self.n_warning:

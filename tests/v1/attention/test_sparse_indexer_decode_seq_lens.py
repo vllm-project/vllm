@@ -102,8 +102,7 @@ def expected_row_seq_lens(per_req_positions, batch_size, next_n):
 
 def test_legacy_flat_layout_misaligns_and_bleeds():
     """The bug: ``positions[:n] + 1`` with padded-row coordinates reads other
-    requests' positions and prefill positions.
-    """
+    requests' positions and prefill positions."""
     decode_lens, per_req, positions = make_non_uniform_batch()
     batch_size = decode_lens.shape[0]
     next_n = int(decode_lens.max())
@@ -138,8 +137,7 @@ def test_helper_uniform_layout_matches_flat_slice():
 
 def test_helper_padded_layout_per_row():
     """Non-uniform batches map every padded row to its own token's position;
-    pad rows get 0 (empty tail).
-    """
+    pad rows get 0 (empty tail)."""
     decode_lens, per_req, positions = make_non_uniform_batch()
     out = _decode_topk_seq_lens(positions, decode_lens, 8, 3, 4, requires_padding=True)
     expected = expected_row_seq_lens(per_req, 3, 4)
@@ -151,8 +149,7 @@ def test_helper_padded_layout_per_row():
 def expand_tail_region(dec_seq):
     """Run the production pure-torch expand + append pair (the fused kernel
     replicates it exactly on the identity path) and return the tail columns
-    [TOPK_TOKENS, TOPK_TOKENS + KPOOL - 1).
-    """
+    [TOPK_TOKENS, TOPK_TOKENS + KPOOL - 1)."""
     rows = dec_seq.shape[0]
     pool_ids = torch.arange(SELECT_K, dtype=torch.int64).expand(rows, SELECT_K)
     valid = torch.ones_like(pool_ids, dtype=torch.bool)
@@ -166,8 +163,7 @@ def expand_tail_region(dec_seq):
 def test_tail_expansion_legacy_vs_fixed():
     """End-to-end tail consequence: the fixed mapping appends exactly the
     request's trailing incomplete pool; the legacy flat slice drops real tail
-    tokens and emits indices far past the request's own sequence.
-    """
+    tokens and emits indices far past the request's own sequence."""
     decode_lens, per_req, positions = make_non_uniform_batch()
     n = 12
     fixed = _decode_topk_seq_lens(

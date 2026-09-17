@@ -220,8 +220,7 @@ def strip_covered_mm_data(
     so the workers never consume the payload fields. M-RoPE models keep
     CPU-side metadata fields used to compute positions. SHM address items
     are also kept so workers can balance the sender's reference count. The
-    scheduler-side ``Request`` keeps the full features.
-    """
+    scheduler-side ``Request`` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
         return mm_features
 

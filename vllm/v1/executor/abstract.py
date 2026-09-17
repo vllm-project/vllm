@@ -284,8 +284,7 @@ class Executor(ABC):
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
-        exception.
-        """
+        exception."""
         raise NotImplementedError
 
     def shutdown(self) -> None:

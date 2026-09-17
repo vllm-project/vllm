@@ -103,8 +103,7 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
     """Register `PROMPT_EMBEDS_PLACEHOLDER_TOKEN` as a special token and return
-    its token ID.
-    """
+    its token ID."""
     cached = _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE.get(tokenizer)
     if cached is not None:
         return cached
@@ -193,8 +192,7 @@ def _build_mixed_prompt_embeds(
     positions: list[tuple[int, int]],
 ) -> tuple[torch.Tensor, list[bool]]:
     """Build the full-length `prompt_embeds` tensor and the `is_token_ids`
-    mask aligned to `token_ids`.
-    """
+    mask aligned to `token_ids`."""
     total_len = len(token_ids)
     hidden_size = prompt_embeds_tensors[0].shape[1]
     dtype = prompt_embeds_tensors[0].dtype

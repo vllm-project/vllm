@@ -147,8 +147,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
-        this method is returned
-        """
+        this method is returned"""
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:

@@ -57,8 +57,7 @@ def test_dummy_inputs_scheduler_budget(
 @pytest.mark.core_model
 def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     """Test supports_multimodal_inputs returns correct boolean for various
-    configs.
-    """
+    configs."""
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,

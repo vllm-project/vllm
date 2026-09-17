@@ -4383,8 +4383,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
         def _generate_exact_length_tokens(target_length: int) -> tuple[list[int], int]:
             """Generate tokens that decode and re-encode to exactly
-            target_length.
-            """
+            target_length."""
             # Generate random tokens
             tokens = np.random.randint(0, vocab_size, size=target_length).tolist()
 

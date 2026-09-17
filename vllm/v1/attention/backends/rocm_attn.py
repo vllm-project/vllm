@@ -244,8 +244,7 @@ class RocmAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """K and V as two head groups so the native HIP kernels address each side
-        as one contiguous region (x-packed interior applied in split_kv_cache).
-        """
+        as one contiguous region (x-packed interior applied in split_kv_cache)."""
         if spec.state_content_bytes is not None:
             return spec
         assert spec.head_size == spec.head_size_v, (

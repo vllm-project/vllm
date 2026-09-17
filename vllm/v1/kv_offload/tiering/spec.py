@@ -414,8 +414,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         """Require a mapping on every ref and record layer portability.
 
         Fails loudly rather than persist direct-layout bytes under a
-        canonical format identity.
-        """
+        canonical format identity."""
         all_refs = [
             ref for group_refs in kv_caches.group_data_refs for ref in group_refs
         ]

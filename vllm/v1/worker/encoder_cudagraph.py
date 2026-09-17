@@ -77,8 +77,7 @@ class EncoderCudaGraphManager:
         model: SupportsEncoderCudaGraph,
     ):
         """Initialize CUDA graph manager with provided token budgets
-        and max batch size.
-        """
+        and max batch size."""
         self.vllm_config = vllm_config
         self.device = device
         self.dtype = dtype

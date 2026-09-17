@@ -616,8 +616,7 @@ def _convert_chat_logprobs_to_completion_logprobs(
     logprobs: ChatCompletionLogProbs,
 ) -> CompletionLogProbs:
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
-    (parallel flat lists) as required by the /v1/completions response schema.
-    """
+    (parallel flat lists) as required by the /v1/completions response schema."""
     if logprobs.content is None:
         return CompletionLogProbs()
 

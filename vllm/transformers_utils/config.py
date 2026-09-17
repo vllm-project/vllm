@@ -273,7 +273,7 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
             layer_types = set(rope_parameters) & set(
                 hf_configuration_utils.ALLOWED_LAYER_TYPES
             )
-            if shared_keys := set(rope_parameters) - layer_types:
+            if layer_types and (shared_keys := set(rope_parameters) - layer_types):
                 for key in shared_keys:
                     del rope_parameters[key]
                 logger.warning(
@@ -539,8 +539,7 @@ def register_config_parser(config_format: str):
 
 def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
     """Some models may have no rope_theta in their config but still use RoPE.
-    This function sets a default rope_theta if it's missing.
-    """
+    This function sets a default rope_theta if it's missing."""
     if getattr(config, "rope_parameters", None) is None:
         config.rope_parameters = {"rope_type": "default"}
     if "rope_theta" not in config.rope_parameters:
@@ -549,8 +548,7 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     """Patch legacy RoPE type fields for backwards compatibility with
-    older custom models which would otherwise fail to load.
-    """
+    older custom models which would otherwise fail to load."""
     # No RoPE parameters to patch
     if rope_parameters is None:
         return

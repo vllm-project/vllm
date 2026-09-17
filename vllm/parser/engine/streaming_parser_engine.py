@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Streaming parser engine that orchestrates token ID scanning,
-incremental lexing, and state-machine-driven semantic event emission.
-"""
+incremental lexing, and state-machine-driven semantic event emission."""
 
 from __future__ import annotations
 

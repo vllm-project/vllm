@@ -367,8 +367,7 @@ def test_free_request_with_duplicate_mm_hashes():
     """Freeing a request whose two inputs share the same mm_hash must fully
     clean up request_cached_ids. After the first free_encoder_input call,
     cached[mm_hash] becomes empty; the second call must still remove the
-    remaining input_id from request_cached_ids.
-    """
+    remaining input_id from request_cached_ids."""
     manager = EncoderCacheManager(cache_size=20)
 
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
@@ -384,8 +383,7 @@ def test_free_request_with_duplicate_mm_hashes():
 
 def test_duplicate_mm_hash_stays_referenced_until_last_free():
     """`cached` holds one reference per request, not per position, so freeing
-    the first of two occurrences must not release the entry.
-    """
+    the first of two occurrences must not release the entry."""
     manager = EncoderCacheManager(cache_size=20)
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
 
@@ -406,8 +404,7 @@ def test_duplicate_mm_hash_stays_referenced_until_last_free():
 def test_duplicate_mm_hash_is_not_evicted_before_last_use():
     """An item repeated within one request (an image carried across
     conversation turns) must not become reclaimable capacity while a later
-    occurrence still has to be spliced in, or the encoder recomputes it.
-    """
+    occurrence still has to be spliced in, or the encoder recomputes it."""
     manager = EncoderCacheManager(cache_size=8)
     req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
     other = MockRequest("r2", ["imgB"], [8])

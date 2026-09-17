@@ -1733,6 +1733,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                # Profiling and warmup must route the dummy tokens to experts
+                # so MoE memory is measured and MoE kernels are exercised.
+                is_padding=not is_profile,
             )
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
@@ -2228,8 +2231,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
-        memory is reclaimable when running in the same process.
-        """
+        memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
         self.fast_prefill = None

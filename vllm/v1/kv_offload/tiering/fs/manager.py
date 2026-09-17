@@ -269,8 +269,7 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect finished jobs; a failed promotion marks only its failed keys
-        as a miss here (scheduler thread).
-        """
+        as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:

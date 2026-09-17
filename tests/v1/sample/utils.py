@@ -204,8 +204,7 @@ def fake_update_logitsprocs_state(
     batch_update: BatchUpdate | None,
 ) -> None:
     """Imitate logits processors persistent batch state update
-    in engine core
-    """
+    in engine core"""
     for logitproc in test_fakes.get_logitsprocs():
         logitproc.update_state(batch_update)
     holder = test_fakes.sampling_metadata.thinking_budget_state_holder

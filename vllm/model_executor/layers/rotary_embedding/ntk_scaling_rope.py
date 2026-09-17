@@ -9,8 +9,7 @@ from .base import RotaryEmbedding
 
 class NTKScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with fixed and mixed NTK scaling.
-    https://kexue.fm/archives/9706
-    """
+    https://kexue.fm/archives/9706"""
 
     def __init__(
         self,

@@ -107,8 +107,7 @@ class Sampler:
         self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
     ) -> tuple[int, int] | None:
         """(num_logprobs, max_per_req_token_ids) for the given requests, or
-        None when none of them want logprobs.
-        """
+        None when none of them want logprobs."""
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
         max_token_ids = (
             self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np)

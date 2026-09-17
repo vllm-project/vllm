@@ -71,10 +71,16 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUExpertsInt8,
             CPUExpertsInt8,
+            PowerCPUExpertsInt8,
             ZenCPUExpertsInt8,
         )
 
-        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]
+        return [
+            ZenCPUExpertsInt8,
+            PowerCPUExpertsInt8,
+            ArmCPUExpertsInt8,
+            CPUExpertsInt8,
+        ]
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -224,8 +230,7 @@ def _humming_int8_weight_schema(
     weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming compressed-tensors int8 schema from the canonical
-    on-device tensors; humming does the signed-int8 -> native conversion.
-    """
+    on-device tensors; humming does the signed-int8 -> native conversion."""
     config: dict[str, Any] = {
         "quant_method": "compressed-tensors",
         "format": "int-quantized",

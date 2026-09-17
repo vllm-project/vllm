@@ -400,8 +400,7 @@ class NixlBaseConnectorScheduler:
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
         Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
-        will recompute locally.
-        """
+        will recompute locally."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
             return num_prompt_tokens - backoff
@@ -414,8 +413,7 @@ class NixlBaseConnectorScheduler:
         multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled.
-        """
+        request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (
