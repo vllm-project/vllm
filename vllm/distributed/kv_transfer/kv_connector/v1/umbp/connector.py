@@ -17,6 +17,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -31,7 +35,7 @@ from .data import (
 )
 from .runtime import UMBPRuntimeFactory, UMBPRuntimeConfig
 from .scheduler import UMBPStoreConnectorScheduler
-from .stats import UMBPStoreConnectorStats
+from .stats import UMBPStoreConnectorStats, UMBPStorePromMetrics
 from .worker import UMBPStoreConnectorWorker
 
 if TYPE_CHECKING:
@@ -252,6 +256,21 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         cls, data: dict[str, Any] | None = None
     ) -> UMBPStoreConnectorStats | None:
         return UMBPStoreConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> UMBPStorePromMetrics:
+        return UMBPStorePromMetrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+        )
 
     def get_kv_connector_kv_cache_events(self) -> UMBPStoreKVEvents | None:
         assert self.connector_worker is not None
