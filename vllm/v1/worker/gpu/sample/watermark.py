@@ -52,6 +52,7 @@ def _repeated_context_mask_kernel(
     prompt_lens_ptr,
     total_lens_ptr,
     history_offsets_ptr,
+    history_offsets_stride,
     contexts_ptr,
     context_stride,
     local_positions_ptr,
@@ -85,7 +86,7 @@ def _repeated_context_mask_kernel(
     history_len = total_len - sequence_start
     history_offset = 0
     if HAS_HISTORY_OFFSETS:
-        history_offset = tl.load(history_offsets_ptr + row)
+        history_offset = tl.load(history_offsets_ptr + row * history_offsets_stride)
 
     offsets = tl.arange(0, BLOCK)
     repeated = tl.full((), 0, tl.int32)
@@ -274,7 +275,8 @@ def repeated_context_mask(
         skip_partial_context: Mark contexts containing start padding so they use
             ordinary sampling.
         history_offsets: Number of newer, non-committed positions preceding each
-            context. These positions count toward `max_history`.
+            context. These positions count toward `max_history`. Must be 1-D
+            over rows; a stride-0 broadcast row is fine.
         local_positions: Position within each request's speculative block. When
             provided, compare each context with earlier contexts in that block.
         num_speculative_steps: Maximum number of draft tokens in the block.
@@ -334,6 +336,7 @@ def repeated_context_mask(
         prompt_lens,
         total_lens,
         history_offsets,
+        0 if history_offsets is None else history_offsets.stride(0),
         contexts,
         contexts.stride(0),
         local_positions,
@@ -402,6 +405,7 @@ def draft_watermarking_mask(
         prompt_lens,
         total_lens,
         steps,
+        steps.stride(0),
         contexts,
         contexts.stride(0),
         None,
