@@ -200,7 +200,7 @@ def test_expansion_factor_follows_the_q_row_count():
 
 
 def test_non_uniform_block_is_rejected():
-    """q rows must divide evenly across the decode requests."""
+    """Q rows must divide evenly across the decode requests."""
     with pytest.raises(AssertionError, match="non-uniform decode block"):
         _run_forward_mqa(_seq_lens(1), query_len=1, causal=True, q_rows=6)
 
