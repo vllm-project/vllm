@@ -28,8 +28,7 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
     """The target's lm_head — from get_language_model() for
-    *ForConditionalGeneration targets, else the top-level module.
-    """
+    *ForConditionalGeneration targets, else the top-level module."""
     return getattr(target_language_model, "lm_head", None) or getattr(
         target_model, "lm_head", None
     )

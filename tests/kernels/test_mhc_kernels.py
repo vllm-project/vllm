@@ -1372,8 +1372,7 @@ def _patch_first_rank_pp_group(monkeypatch):
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     """First finalize (at the end of load_weights) allocates
-    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams.
-    """
+    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1388,8 +1387,7 @@ def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
 def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     """Re-finalizing after a weight refit must copy into the existing
     broadcast tensor so its address stays stable for captured CUDA graphs,
-    while picking up the new hc_attn_fn values.
-    """
+    while picking up the new hc_attn_fn values."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])

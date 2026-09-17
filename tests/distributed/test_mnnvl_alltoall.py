@@ -160,8 +160,7 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
     class _AttnMeta:
         """Minimal placeholder so set_forward_context's
         ``attn_metadata is not None`` guard (forward_context.py:334)
-        is satisfied. The real DPMetadata is built from num_tokens_across_dp.
-        """
+        is satisfied. The real DPMetadata is built from num_tokens_across_dp."""
 
         dp_metadata = None
 
@@ -460,8 +459,7 @@ def _one_sided_workspace_grow_worker(rank, world_size):
 def test_one_sided_manager_workspace_grow(world_size):
     """A later initialize() with a larger per-token payload must grow the
     workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
-    payload must no-op.
-    """
+    payload must no-op."""
     _spawn_workers(
         _one_sided_workspace_grow_worker,
         world_size,

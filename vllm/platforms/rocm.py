@@ -91,8 +91,7 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     CUDA_VISIBLE_DEVICES has already been set to the desired value.
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    """
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -127,8 +126,7 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
 
 def _sync_hip_cuda_env_vars():
     """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
-    Treats empty string as unset. Raises on genuine conflicts.
-    """
+    Treats empty string as unset. Raises on genuine conflicts."""
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
@@ -867,25 +865,8 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
-        model_config = vllm_config.model_config
-        if (
-            compilation_config.cudagraph_mode is None
-            and model_config is not None
-            and on_gfx950()
-            and vllm_config.use_v2_model_runner
-            and model_config.architecture
-            in {
-                "DeepseekV4ForCausalLM",
-                "DeepseekV4ForConditionalGeneration",
-            }
-        ):
-            # Default to eager after reported gfx950/MRV2 accuracy regressions:
-            # https://github.com/vllm-project/vllm/issues/52644
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()

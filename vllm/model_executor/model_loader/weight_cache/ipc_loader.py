@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC model loader: maps post-quantized weights from a local weight cache
-daemon via CUDA IPC instead of loading from disk.
-"""
+daemon via CUDA IPC instead of loading from disk."""
 
 import dataclasses
 import socket

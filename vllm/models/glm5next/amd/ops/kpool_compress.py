@@ -98,8 +98,7 @@ def _kpool_softmax_rotate_write_cache_kernel(
     BLOCK_D: tl.constexpr,
 ):
     """One program per pool. softmax(slot_score+ape)-weighted sum of slot_k ->
-    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at ``loc``.
-    """
+    Hadamard-128 -> per-vector fp8 absmax quant -> write to cache at ``loc``."""
     row = tl.program_id(0)
     do_write = True
     if HAS_WRITE_MASK:

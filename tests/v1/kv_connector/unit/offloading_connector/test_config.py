@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -32,6 +33,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
 def _make_vllm_config(
@@ -863,8 +866,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
     """The canonical layout certifies portability group by group; none of
-    these shapes are portable in the direct layout.
-    """
+    these shapes are portable in the direct layout."""
     assert not _parallelism_agnostic(kv_cache_groups)
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
@@ -872,10 +874,46 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
-    version — the v2 runner is the case the canonical layout exists for.
-    """
+    version — the v2 runner is the case the canonical layout exists for."""
     groups = _groups(_full_attention_spec())
     assert _parallelism_agnostic(groups, canonical=True, v2=True)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("scheduler", [False, True])
+def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
+    specs = {
+        f"l{i}": _mla_spec(block_size=64, head_size=size, dtype=torch.uint8)
+        for i, size in enumerate([656] * 4 + [132] * 3)
+    }
+    uniform = UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * uniform.page_size_bytes,
+                layers=list(specs),
+                layer_stride=0,
+                block_stride=uniform.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(list(specs), uniform)],
+    )
+    if scheduler:
+        kv_cache_config = generate_scheduler_kv_cache_config([kv_cache_config])
+    config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        extra_config={"canonical_layout": True, "cpu_bytes_to_use": 196608 * 8},
+    )
+    config.cache_config.kv_cache_layout = "LBHNC"
+    config.parallel_config.distributed_executor_backend = "mp"
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    spec = TieringOffloadingSpec(offloading_config)
+    assert spec.kv_bytes_per_chunk == 196608
+    assert spec.num_chunks == 8
+    mapper = FileMapper.from_offloading_spec("/cache", spec, parallel_agnostic=True)
+    assert mapper.get_run_config()["tp_size"] == 1
+    assert mapper.get_run_config()["replicated_layout"] is True
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
