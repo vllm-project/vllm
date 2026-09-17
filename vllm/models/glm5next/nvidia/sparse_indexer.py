@@ -568,12 +568,25 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
+        use_cooperative_topk = (
+            current_platform.is_cuda()
+            and select_k in (512, 1024, 2048)
+            and num_rows <= 64
+            and logits.stride(0) % 4 == 0
+            and current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(120)
+        )
         if current_platform.is_cuda() and select_k in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
-            torch.ops._C.persistent_topk(
+            topk_op = (
+                torch.ops._C.cooperative_topk
+                if use_cooperative_topk
+                else torch.ops._C.persistent_topk
+            )
+            topk_op(
                 logits,
                 seq_lens,
                 topk_dst,
