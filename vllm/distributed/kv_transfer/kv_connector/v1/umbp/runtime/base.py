@@ -36,6 +36,9 @@ class UMBPSchedulerHandle(Protocol):
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         """Return authoritative existence for each key."""
 
+    def clear(self) -> bool:
+        """Clear all objects visible to this scheduler handle."""
+
     def close(self) -> None:
         """Release scheduler-side resources."""
 

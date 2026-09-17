@@ -180,6 +180,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_pending_push_work()
 
+    def reset_cache(self) -> bool | None:
+        if self.connector_scheduler is None:
+            return None
+        return self.connector_scheduler.reset_store()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)

@@ -625,6 +625,15 @@ class UMBPStoreConnectorScheduler:
     def has_pending_push_work(self) -> bool:
         return bool(self._pinned_store_blocks)
 
+    def reset_store(self) -> bool:
+        for future in self._lookup_futures.values():
+            future.cancel()
+        self._lookup_futures.clear()
+        self._lookup_states.clear()
+        self._load_specs.clear()
+        self._pending_loads.clear()
+        return self.runtime.clear()
+
     def close(self) -> None:
         self._lookup_executor.shutdown(wait=True, cancel_futures=True)
         self.runtime.close()
