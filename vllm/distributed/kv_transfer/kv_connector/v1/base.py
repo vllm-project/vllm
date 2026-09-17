@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+    from vllm.v1.core.kv_cache_lookup import JointCacheHit
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -470,6 +472,16 @@ class KVConnectorBase_V1(ABC):
 
         """
         return
+
+    def get_joint_cache_hit(
+        self, request: "Request", coordinator: "KVCacheCoordinator"
+    ) -> "JointCacheHit | None":
+        """Optionally replace local/external lookups with a positional hit.
+
+        The connector owns lookup pins until allocation notification or the
+        end of the scheduler step. None retains the legacy lookup path.
+        """
+        return None
 
     @abstractmethod
     def get_num_new_matched_tokens(

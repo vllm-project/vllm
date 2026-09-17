@@ -7,6 +7,7 @@ from typing import NamedTuple
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_lookup import CacheLookup, JointCacheHit
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -274,6 +275,21 @@ class KVCacheCoordinator(ABC):
                     num_external_computed_tokens,
                 )
 
+    def allocate_joint_computed_blocks(
+        self, request_id: str, hit: JointCacheHit
+    ) -> None:
+        """Adopt a complete joint match after its capacity check succeeds."""
+        # Lookup pins protect every group's sources before any target allocation.
+        assert hit.pinned
+        assert all(
+            request_id not in manager.num_cached_block
+            for manager in self.single_type_managers
+        )
+        for manager, blocks in zip(self.single_type_managers, hit.blocks, strict=True):
+            manager.add_joint_computed_blocks(
+                request_id, blocks, hit.num_computed_tokens
+            )
+
     def allocate_new_blocks(
         self,
         request_id: str,
@@ -370,6 +386,32 @@ class KVCacheCoordinator(ABC):
                     group_idx,
                 )
 
+    def emit_joint_cached_block_events(
+        self, request: Request, hit: JointCacheHit
+    ) -> None:
+        """Emit reuse events for contiguous GPU runs in each group."""
+        for group_idx, (manager, group) in enumerate(
+            zip(self.single_type_managers, hit.blocks, strict=True)
+        ):
+            run_start = None
+            for index in range(len(group) + 1):
+                is_gpu = (
+                    index < len(group)
+                    and not group[index].is_cpu
+                    and not group[index].block.is_null
+                )
+                if is_gpu and run_start is None:
+                    run_start = index
+                elif not is_gpu and run_start is not None:
+                    manager.block_pool.emit_cached_block_events(
+                        request,
+                        index - run_start,
+                        manager.block_size,
+                        group_idx,
+                        start_block=run_start,
+                    )
+                    run_start = None
+
     def reset_prefix_cache(self) -> bool:
         """Reset each manager's pool once."""
         pools = dict.fromkeys(
@@ -458,6 +500,8 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        *,
+        lookup: CacheLookup | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         ``num_uncached_common_prefix_tokens`` (a shared prefix that a
@@ -514,6 +558,8 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        *,
+        lookup: CacheLookup | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -575,12 +621,14 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        *,
+        lookup: CacheLookup | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
-            block_pool=self.block_pool,
+            block_pool=lookup if lookup is not None else self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
             drop_eagle_block=0 in self.eagle_group_ids,
             alignment_tokens=self.block_size,
@@ -834,6 +882,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        *,
+        lookup: CacheLookup | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -845,6 +895,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
+            lookup: Optional cache view; otherwise use each group's own pool.
 
         Returns:
             A tuple containing:
@@ -914,7 +965,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_hashes=block_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
-                    block_pool=self.single_type_managers[first_group_id].block_pool,
+                    block_pool=(
+                        lookup
+                        if lookup is not None
+                        else self.single_type_managers[first_group_id].block_pool
+                    ),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
