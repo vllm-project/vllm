@@ -853,6 +853,8 @@ class TestMultiConnectorStats:
                         "num_descriptors": [10, 20],
                         "num_failed_transfers": [],
                         "num_failed_notifications": [],
+                        "num_failed_handshakes": [],
+                        "num_kv_expired_reqs": [],
                     }
                 )
             }
