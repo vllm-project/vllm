@@ -151,6 +151,7 @@ def create_and_prepopulate_kv_cache(
     Returns:
         A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
         2 * head_size)`` order with strides determined by ``layout``.
+
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -242,14 +243,19 @@ def create_and_prepopulate_kv_cache(
 class MockAttentionLayer:
     """A mock attention layer for testing."""
 
-    def __init__(self, device: torch.device):
+    def __init__(
+        self,
+        device: torch.device,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+    ):
         self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(k_scale, device=device)
+        self._v_scale = torch.tensor(v_scale, device=device)
         # Add float versions for flashinfer
         self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
+        self._k_scale_float = k_scale
+        self._v_scale_float = v_scale
 
 
 def _clone_kv_cache_in_layout(
@@ -284,9 +290,10 @@ def run_attention_backend(
     kv_cache_dtype: str = "auto",
     sinks: torch.Tensor | None = None,
     use_cuda_graph: bool = False,
+    layer_k_scale: float = 1.0,
+    layer_v_scale: float = 1.0,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
-
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
         use_direct_block_mask = False
@@ -356,7 +363,7 @@ def run_attention_backend(
         )
 
     # Create mock layer and output buffer
-    mock_layer = MockAttentionLayer(device)
+    mock_layer = MockAttentionLayer(device, layer_k_scale, layer_v_scale)
     output = torch.empty_like(query)
 
     if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
@@ -386,9 +393,11 @@ def run_attention_backend(
             )
         graph.replay()
     else:
-        output = impl.forward(
+        backend_output = impl.forward(
             mock_layer, query, key, value, kv_cache, attn_metadata, output=output
         )
+        if backend_output is not None:
+            output = backend_output
 
     return output
 
@@ -413,9 +422,10 @@ def _test_backend_correctness(
     model_dtype: torch.dtype | None = None,
     max_num_seqs: int | None = None,
     max_num_batched_tokens: int | None = None,
+    layer_k_scale: float = 1.0,
+    layer_v_scale: float = 1.0,
 ):
-    """
-    Test that all backends produce similar outputs to a reference implementation
+    """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
 
     This test works by:
@@ -688,6 +698,8 @@ def _test_backend_correctness(
             kv_cache_dtype=kv_cache_dtype,
             sinks=sinks,
             use_cuda_graph=use_cuda_graph,
+            layer_k_scale=layer_k_scale,
+            layer_v_scale=layer_v_scale,
         )
 
         # Check shape and dtype consistency
@@ -1316,6 +1328,45 @@ def test_sliding_window_backend_correctness(
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
+    default_vllm_config,
+):
+    """Stale scale tensors must not affect an unquantized KV cache."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+
+    def sliding_window_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+        sliding_window: int,
+    ):
+        causal_mask = q_idx + context_len >= kv_idx
+        window_mask = q_idx + context_len - kv_idx < sliding_window
+        return causal_mask & window_mask
+
+    model = "microsoft/Phi-tiny-MoE-instruct"
+    batch_spec = BATCH_SPECS["small_decode"]
+    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
+    sliding_window = model_config.get_sliding_window()
+    assert sliding_window is not None
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        [AttentionBackendEnum.ROCM_AITER_FA],
+        partial(sliding_window_mask_mod, sliding_window=sliding_window),
+        layer_k_scale=0.25,
+        layer_v_scale=0.5,
+    )
 
 
 @pytest.mark.parametrize(
