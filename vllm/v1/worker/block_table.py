@@ -11,11 +11,11 @@ import torch
 
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -67,20 +67,20 @@ class BlockTable:
         cp_kv_cache_interleave_size: int,
         slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
     ):
-        """
-        Args:
-            block_size: Block size used for KV cache memory allocation
-            max_num_reqs: Maximum number of concurrent requests supported.
-            max_num_blocks_per_req: Maximum number of blocks per request.
-            max_num_batched_tokens: Maximum number of tokens in a batch.
-            pin_memory: Whether to pin memory for faster GPU transfers.
-            device: Target device for the block table.
-            kernel_block_size: The block_size of underlying attention kernel.
-                Will be the same as `block_size` if `block_size` is supported
-                by the attention kernel.
-            slot_mapping_mode: How this cache group maps scheduled tokens to
-                cache slots. Mamba-like state caches do not use token slot
-                mappings and should use SlotMappingMode.NONE.
+        """Args:
+        block_size: Block size used for KV cache memory allocation
+        max_num_reqs: Maximum number of concurrent requests supported.
+        max_num_blocks_per_req: Maximum number of blocks per request.
+        max_num_batched_tokens: Maximum number of tokens in a batch.
+        pin_memory: Whether to pin memory for faster GPU transfers.
+        device: Target device for the block table.
+        kernel_block_size: The block_size of underlying attention kernel.
+            Will be the same as `block_size` if `block_size` is supported
+            by the attention kernel.
+        slot_mapping_mode: How this cache group maps scheduled tokens to
+            cache slots. Mamba-like state caches do not use token slot
+            mappings and should use SlotMappingMode.NONE.
+
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -254,6 +254,7 @@ class BlockTable:
             # kv_manager_block_id 0 → kernel block id [0, 1]
             # kv_manager_block_id 1 → kernel block id [2, 3]
             # kv_manager_block_id 2 → kernel block id [4, 5]
+
         """
         if blocks_per_kv_block == 1:
             return kv_manager_block_ids
@@ -394,7 +395,9 @@ class MultiGroupBlockTable:
         return self.block_tables[idx]
 
 
-class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKey"]):
+class ComputeSlotMappingKernel(
+    VllmTritonJitKernel["ComputeSlotMappingKernel.CompileKey"]
+):
     triton_block_size = 1024
 
     @dataclass(frozen=True)
@@ -490,37 +493,53 @@ class ComputeSlotMappingKernel(VllmJitKernel["ComputeSlotMappingKernel.CompileKe
     def get_warmup_keys(self, **dispatch_kwargs: int) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(**dispatch_kwargs)
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
         int64_ptr = TritonWarmupTensor(torch.int64)
-        warmup(
-            2,  # arbitrary, num_tokens in do_not_specialize
-            2,  # arbitrary, max_num_tokens in do_not_specialize
-            int32_ptr,
-            int64_ptr,
-            int32_ptr,
-            compile_key.block_table_stride,
-            compile_key.block_size,
-            int64_ptr,
-            KV_CACHE_BLOCK_SIZE=compile_key.kv_cache_block_size,
-            BLOCKS_PER_KV_BLOCK=compile_key.blocks_per_kv_block,
-            TOTAL_CP_WORLD_SIZE=compile_key.total_cp_world_size,
-            TOTAL_CP_RANK=compile_key.total_cp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=compile_key.cp_kv_cache_interleave_size,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=self.triton_block_size,
-            grid=(2,),
+        return dict(
+            num_reqs=1,
+            num_tokens=2,  # arbitrary, in do_not_specialize
+            max_num_tokens=2,  # arbitrary, in do_not_specialize
+            query_start_loc=int32_ptr,
+            positions=int64_ptr,
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(1, compile_key.block_table_stride),
+            ),
+            block_table_stride=compile_key.block_table_stride,
+            block_size=compile_key.block_size,
+            slot_mapping=int64_ptr,
+            kv_cache_block_size=compile_key.kv_cache_block_size,
+            blocks_per_kv_block=compile_key.blocks_per_kv_block,
+            total_cp_world_size=compile_key.total_cp_world_size,
+            total_cp_rank=compile_key.total_cp_rank,
+            cp_kv_cache_interleave_size=compile_key.cp_kv_cache_interleave_size,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         num_reqs: int,
-        *args: Any,
-    ) -> None:
-        self.kernel[(num_reqs + 1,)](
-            *args,
+        num_tokens: int,
+        max_num_tokens: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        block_table: torch.Tensor,
+        block_table_stride: int,
+        block_size: int,
+        slot_mapping: torch.Tensor,
+        kv_cache_block_size: int,
+        blocks_per_kv_block: int,
+        total_cp_world_size: int,
+        total_cp_rank: int,
+        cp_kv_cache_interleave_size: int,
+    ) -> LaunchSpec:
+        return (num_reqs + 1,), dict(
+            KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
+            BLOCKS_PER_KV_BLOCK=blocks_per_kv_block,
+            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+            TOTAL_CP_RANK=total_cp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=self.triton_block_size,
         )

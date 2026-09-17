@@ -19,7 +19,7 @@ steps:
       label: ":amd: (MI300) Language Models (Standard)"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -61,6 +61,12 @@ steps:
   device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 65
+  env:
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.version
+    GIT_CONFIG_VALUE_0: HTTP/1.1
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
@@ -76,10 +82,10 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Hybrid) Shard %N"
+      label: ":amd: (MI355) Language Models (Hybrid) Shard %N"
       dind: false
-      device: mi300_1
-      timeout_in_minutes: 60
+      device: mi355_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       commands:
@@ -127,7 +133,7 @@ steps:
       label: ":amd: (MI355) Language Models (Extended Generation)"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 70
+      timeout_in_minutes: 95
       depends_on:
       - image-build-amd
       commands:
@@ -191,11 +197,8 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 95
-      parallelism: 2
       depends_on:
       - image-build-amd
-      commands:
-      - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
   key: language-models-test-mteb

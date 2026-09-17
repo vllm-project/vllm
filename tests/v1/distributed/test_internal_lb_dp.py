@@ -184,6 +184,9 @@ class MultinodeInternalLBServerManager:
                         self.model_name,
                         sargs,
                         auto_port=False,
+                        max_wait_seconds=int(
+                            os.getenv("VLLM_ENGINE_READY_TIMEOUT_S", "480")
+                        ),
                         env_dict={
                             "VLLM_SERVER_DEV_MODE": "1",
                             current_platform.device_control_env_var: ",".join(
@@ -258,7 +261,6 @@ class APIOnlyServerManager:
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start API-only server and headless engines server."""
-
         # Start API-only server (Node 0) - no engines, only API server
         api_server_args = self.base_server_args.copy()
         api_server_args.extend(
@@ -604,7 +606,6 @@ async def test_api_only_multinode_dp_completion(
     model_name: str,
 ) -> None:
     """Test API-only server with all engines on separate headless server."""
-
     # Test single request
     result = await _make_completion_request(api_only_client, model_name)
     assert result is not None

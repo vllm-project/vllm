@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Multi-modal processors may be defined in this directory for the following
+"""Multi-modal processors may be defined in this directory for the following
 reasons:
 
 - There is no processing file defined by HF Hub or Transformers library.
@@ -18,6 +17,7 @@ __all__ = [
     "FireRedASR2Processor",
     "FunASRProcessor",
     "GLM4VProcessor",
+    "Glm5NextProcessor",
     "Granite4VisionProcessor",
     "H2OVLProcessor",
     "Moondream3Processor",
@@ -56,6 +56,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
     "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
+    "Glm5NextProcessor": "vllm.transformers_utils.processors.glm5next",
     "Granite4VisionProcessor": "vllm.transformers_utils.processors.granite4_vision",
     "H2OVLProcessor": "vllm.transformers_utils.processors.h2ovl",
     "InternVLProcessor": "vllm.transformers_utils.processors.internvl",
