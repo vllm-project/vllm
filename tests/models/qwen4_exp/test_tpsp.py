@@ -42,7 +42,7 @@ from vllm.models.qwen4_exp.nvidia.model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpModel,
     Qwen4ExpSparseMoeBlock,
-    is_sequence_parallel_enabled,
+    is_hc_sequence_parallel_enabled,
 )
 from vllm.models.qwen4_exp.nvidia.mtp import Qwen4ExpMultiTokenPredictor
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
@@ -111,9 +111,7 @@ def _make_decoder(
     nn.Module.__init__(layer)
     layer.layer_type = "full_attention"
     layer.ple = None
-    layer.use_sequence_parallel_moe = (
-        vllm_config.parallel_config.use_sequence_parallel_moe
-    )
+    layer.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
     hc_config = HyperConnectionConfig(
         hc_count=config.hc_count,
         hidden_size=config.hidden_size,
@@ -132,7 +130,7 @@ def _make_decoder(
         param.normal_(std=0.08)
     layer.self_attn.proj.weight.add_(rank * 0.01)
     experts = layer.mlp.experts.routed_experts
-    if layer.use_sequence_parallel_moe:
+    if layer.use_sequence_parallel:
         # Distinct expert owners expose wrong EP routing or duplicate reductions.
         experts.w13_weight.add_(rank * 0.01)
     experts.quant_method.process_weights_after_loading(experts)
@@ -154,7 +152,7 @@ def _check_decoder(vllm_config: VllmConfig, rank: int) -> None:
         reference = (hidden, None, None)
         local = (sp_shard(hidden), None, None)
         for _ in range(3):
-            layer.use_sequence_parallel = False
+            layer.use_hc_sequence_parallel = False
             layer.self_attn.proj.reduce_results = True
             layer.mlp.experts.moe_config.skip_final_all_reduce = False
             reference = layer(
@@ -164,7 +162,7 @@ def _check_decoder(vllm_config: VllmConfig, rank: int) -> None:
                 query_start_loc=None,
                 ngram_context=None,
             )
-            layer.use_sequence_parallel = True
+            layer.use_hc_sequence_parallel = True
             layer.self_attn.proj.reduce_results = False
             layer.mlp.experts.moe_config.skip_final_all_reduce = defer_moe_reduce
             local = layer(
@@ -191,9 +189,7 @@ def _make_mtp(vllm_config: VllmConfig, rank: int) -> Qwen4ExpMultiTokenPredictor
     model.hc_count = config.hc_count
     model.hidden_size = config.hidden_size
     model.num_mtp_layers = 1
-    model.use_sequence_parallel_moe = (
-        vllm_config.parallel_config.use_sequence_parallel_moe
-    )
+    model.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
     model.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
     model.pre_fc_norm_embedding = nn.Identity()
     model.pre_fc_norm_hidden = nn.Identity()
@@ -228,11 +224,11 @@ def _check_mtp(vllm_config: VllmConfig, rank: int) -> None:
         positions = torch.arange(num_tokens)
         for step in range(2):
             ids = torch.randint(0, config.vocab_size, (num_tokens,))
-            model.use_sequence_parallel = layer.use_sequence_parallel = False
+            model.use_hc_sequence_parallel = layer.use_hc_sequence_parallel = False
             layer.self_attn.proj.reduce_results = True
             layer.mlp.experts.moe_config.skip_final_all_reduce = False
             expected = model(ids, positions, reference_hidden, spec_step_idx=step)
-            model.use_sequence_parallel = layer.use_sequence_parallel = True
+            model.use_hc_sequence_parallel = layer.use_hc_sequence_parallel = True
             layer.self_attn.proj.reduce_results = False
             layer.mlp.experts.moe_config.skip_final_all_reduce = True
             actual = model(ids, positions, local_hidden, spec_step_idx=step)
@@ -358,7 +354,7 @@ def _check_ple(vllm_config: VllmConfig) -> None:
 def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
     """Compare native SP with the existing MoE wrapper across unequal DP batches."""
     config = vllm_config.model_config.hf_text_config
-    assert is_sequence_parallel_enabled(vllm_config)
+    assert is_hc_sequence_parallel_enabled(vllm_config)
     mtp = _make_mtp(vllm_config, rank)
     layer = mtp.layers[0]
     assert layer.mlp.shared_expert.gate_up_proj.tp_size == 1
@@ -379,8 +375,8 @@ def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
 
     def forward(model, use_sp: bool, **kwargs):
         """Use the current batch with full-token or local-token GR."""
+        model.use_hc_sequence_parallel = layer.use_hc_sequence_parallel = use_sp
         model.use_sequence_parallel = layer.use_sequence_parallel = use_sp
-        model.use_sequence_parallel_moe = layer.use_sequence_parallel_moe = use_sp
         layer.self_attn.proj.reduce_results = not use_sp
         # The baseline MoE wrapper chunks tokens internally and needs a local mask.
         with set_forward_context(
@@ -501,6 +497,5 @@ def test_tpsp_decoder_and_ple() -> None:
 @multi_gpu_test(num_gpus=4)
 def test_moe_sp_target_and_mtp(monkeypatch) -> None:
     """Validate automatic MoE SP, padding, and native EP outputs for target and MTP."""
-    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", "0")
     monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
     mp.spawn(_run_tpsp, args=(get_open_port(), True), nprocs=4)

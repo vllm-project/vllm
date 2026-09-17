@@ -312,6 +312,16 @@ def test_optional_handling(args, expected, dummy_config_kwargs):
     assert "None" in parser.format_help()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_enable_hc_sp_arg(enabled):
+    """Expose opt-in HC SP through engine arguments."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(["--enable-hc-sp"] if enabled else [])
+    )
+    assert args.enable_hc_sp is enabled
+
+
 def test_jit_monitor_verbose_arg():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(["--jit-monitor-verbose"])

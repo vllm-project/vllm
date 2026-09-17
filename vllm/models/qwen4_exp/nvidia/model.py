@@ -90,20 +90,18 @@ from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
 
-def is_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
+def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
     """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
     parallel_config = vllm_config.parallel_config
     if parallel_config.tensor_parallel_size == 1:
+        if parallel_config.enable_hc_sp:
+            raise ValueError("Qwen4Exp HC SP requires TP>1")
         return False
-    if (
-        parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size != 1
-    ):
-        # Reject configurations that disable model SP while leaving MoE SP enabled.
-        raise ValueError("Qwen4Exp SP with sequence-parallel MoE requires PP=1")
-    if parallel_config.pipeline_parallel_size != 1:
-        return False
-    return envs.VLLM_QWEN4_EXP_SP or parallel_config.use_sequence_parallel_moe
+    enabled = parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
+    if enabled and parallel_config.pipeline_parallel_size != 1:
+        # HC and MoE must agree on the token layout when MoE SP is enabled.
+        raise ValueError("Qwen4Exp HC SP requires PP=1")
+    return enabled
 
 
 def without_modelopt_fp4(
@@ -217,9 +215,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         self.config = config
         self.layer_type = layer_type
-        self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.layer_idx = extract_layer_index(prefix)
-        self.use_sequence_parallel_moe = (
+        self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
         self.ple: Qwen4ExpPLELayer | None = None
@@ -236,7 +235,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 layer_idx=self.layer_idx,
                 ple_dense_layer_id=ple_dense_layer_id,
                 prefix=f"{prefix}.ple",
-                use_sequence_parallel=self.use_sequence_parallel,
+                use_sequence_parallel=self.use_hc_sequence_parallel,
             )
 
         if layer_type == "linear_attention":
@@ -245,7 +244,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
-                reduce_results=not self.use_sequence_parallel,
+                reduce_results=not self.use_hc_sequence_parallel,
             )
         elif layer_type in ATTENTION_LAYER_TYPES:
             use_qsa = (
@@ -259,7 +258,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     cache_config=cache_config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
-                    reduce_results=not self.use_sequence_parallel,
+                    reduce_results=not self.use_hc_sequence_parallel,
                 )
             else:
                 self.self_attn = Qwen4ExpQSAAttention(
@@ -268,7 +267,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     layer_id=self.layer_idx,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
-                    reduce_results=not self.use_sequence_parallel,
+                    reduce_results=not self.use_hc_sequence_parallel,
                 )
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
@@ -283,10 +282,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
             self.mlp = Qwen4ExpSparseMoeBlock(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=not self.use_sequence_parallel,
+                reduce_results=not self.use_hc_sequence_parallel,
             )
         else:
-            assert not self.use_sequence_parallel, (
+            assert not self.use_hc_sequence_parallel, (
                 "Qwen4Exp SP does not support dense MLP layers"
             )
             self.mlp = Qwen3NextMLP(
@@ -295,7 +294,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=not self.use_sequence_parallel,
+                reduce_results=not self.use_hc_sequence_parallel,
             )
 
         hc_config = HyperConnectionConfig(
@@ -355,7 +354,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
-        if self.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             # Positions retain the full token axis for both text and MRoPE inputs.
             block_input = sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
@@ -369,19 +368,19 @@ class Qwen4ExpDecoderLayer(nn.Module):
             raise ValueError("Invalid layer_type")
 
         mlp_hc = self.mlp_hyper_connection
-        if self.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             attn_out = sp_reduce_scatter(attn_out)
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
-        if self.use_sequence_parallel_moe:
+        if self.use_sequence_parallel:
             # MoE consumes local tokens and returns complete local outputs.
             mlp_out = self.mlp(block_input, already_sequence_parallel=True)
         else:
-            if self.use_sequence_parallel:
+            if self.use_hc_sequence_parallel:
                 block_input = sp_all_gather(block_input)[: positions.shape[-1]]
             mlp_out = self.mlp(block_input)
-            if self.use_sequence_parallel:
+            if self.use_hc_sequence_parallel:
                 assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
                 reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
                 # Only sum partial outputs. Reduced outputs already include all ranks.
@@ -451,8 +450,9 @@ class Qwen4ExpModel(nn.Module):
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
-        self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
-        self.use_sequence_parallel_moe = (
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
+        self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
         self.vocab_size = config.vocab_size
@@ -561,9 +561,9 @@ class Qwen4ExpModel(nn.Module):
                 if input_ids is None:
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
-            if self.use_sequence_parallel:
+            if self.use_hc_sequence_parallel:
                 if (
-                    self.use_sequence_parallel_moe
+                    self.use_sequence_parallel
                     and envs.VLLM_MOE_SKIP_PADDING
                     and is_forward_context_available()
                 ):
@@ -616,7 +616,7 @@ class Qwen4ExpModel(nn.Module):
                 deepstack_embed = deepstack_input_embeds[
                     f"deepstack_input_embeds_{layer_idx}"
                 ]
-                if self.use_sequence_parallel:
+                if self.use_hc_sequence_parallel:
                     deepstack_embed = sp_shard(deepstack_embed)
                 deepstack_embed = (
                     deepstack_embed.unsqueeze(-2)
@@ -652,7 +652,7 @@ class Qwen4ExpModel(nn.Module):
         multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
-        if self.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             if self._mtp_hidden_buffer is not None:
                 # Gather LM-head and MTP states together when both are needed.
                 hidden_size = self.config.hidden_size

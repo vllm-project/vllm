@@ -63,7 +63,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
-    is_sequence_parallel_enabled,
+    is_hc_sequence_parallel_enabled,
 )
 
 
@@ -182,8 +182,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         config: Qwen4ExpTextConfig = model_config.hf_text_config
 
         self.config = config
-        self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
-        self.use_sequence_parallel_moe = (
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
+        self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
         )
         self.vocab_size = config.vocab_size
@@ -329,11 +330,11 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         full_num_tokens = positions.shape[-1]
-        if self.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             # SP requires PP=1, so the first-rank branch sets prev_block_output.
             assert prev_block_output is not None
             if (
-                self.use_sequence_parallel_moe
+                self.use_sequence_parallel
                 and envs.VLLM_MOE_SKIP_PADDING
                 and is_forward_context_available()
             ):
@@ -371,7 +372,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 hidden_states, block_output, injection
             )
         )
-        if self.use_sequence_parallel:
+        if self.use_hc_sequence_parallel:
             # Gather both outputs together, then restore their contiguous layouts.
             packed_hidden_states = torch.cat(
                 [sample_hidden_states, multi_hidden], dim=-1
