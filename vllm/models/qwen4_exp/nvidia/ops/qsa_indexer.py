@@ -200,6 +200,9 @@ def _qsa_mqa_paged_prefill_kernel(
             other=0.0,
             eviction_policy="evict_first",
         )
+        # With an fp8 cache, SM90 lowers this dot to reduced-precision wgmma
+        # accumulation; SM100 tcgen05 accumulates in fp32. The SM90 error
+        # (~1e-4 relative) is far below the e4m3 quantization noise floor.
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.reshape(scores, (BLOCK_N, TILE_R, NUM_HEADS_PADDED))
         score = tl.sum(tl.maximum(scores, 0.0), axis=2)
@@ -314,7 +317,6 @@ def warmup_qsa_mqa_paged_decode(
     max_num_batched_tokens: int,
 ) -> tuple[tuple[int, int], ...]:
     """Compile every reachable decode specialization without launching it."""
-
     page_size = k_cache.shape[1]
     page_table_width = page_table.shape[1]
     columns = page_table_width * page_size
@@ -337,7 +339,7 @@ def warmup_qsa_mqa_paged_decode(
     for decode_query_len, num_requests in profiles:
         num_rows = decode_query_len * num_requests
         q_ptr = TritonWarmupTensor(
-            torch.bfloat16,
+            k_cache.dtype,
             shape=(num_rows, num_heads, head_dim),
         )
         logits_ptr = TritonWarmupTensor(
@@ -365,7 +367,8 @@ def warmup_qsa_mqa_paged_decode(
             BLOCK_N=_DECODE_BLOCK_N,
             TILES_PER_PROG=tiles_per_program,
             STAGES=2,
-            num_warps=2,
+            # tuned on GB300
+            num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
             grid=(
                 num_requests,
                 triton.cdiv(columns, _DECODE_BLOCK_N * tiles_per_program),
@@ -393,7 +396,11 @@ def _prefill_logits(
     logits = torch.empty(
         (num_queries, logits_width), dtype=torch.float32, device=q.device
     )
-    TILE_R = 64
+    # tuned on GB300
+    if k_cache.dtype == torch.float8_e4m3fn:
+        TILE_R, STAGES, num_warps = 32, 2, 8
+    else:
+        TILE_R, STAGES, num_warps = 64, 2, 4
     BLOCK_N = 64
     K_TILES = 16
     grid = (
@@ -421,8 +428,8 @@ def _prefill_logits(
         TILE_R=TILE_R,
         BLOCK_N=BLOCK_N,
         K_TILES=K_TILES,
-        STAGES=2,
-        num_warps=4,
+        STAGES=STAGES,
+        num_warps=num_warps,
     )
     return logits
 
@@ -436,7 +443,6 @@ def expand_qsa_block_indices(
     out: torch.Tensor,
 ) -> None:
     """Expand compressed blocks and compact the causal tail of the open group."""
-
     assert token_topk % compress_ratio == 0
     block_topk = token_topk // compress_ratio
     output_width = token_topk + compress_ratio - 1
@@ -516,11 +522,12 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
-    """
 
+    """
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
+    assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     num_requests = q.shape[0] // decode_query_len
     assert page_table.shape[0] == num_requests
     assert visible_blocks.shape == (q.shape[0],)
@@ -550,7 +557,8 @@ def qsa_select_paged_decode(
         BLOCK_N=_DECODE_BLOCK_N,
         TILES_PER_PROG=tiles_per_program,
         STAGES=2,
-        num_warps=2,
+        # tuned on GB300
+        num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
     )
     _topk(
         logits,
@@ -589,10 +597,11 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
-    """
 
+    """
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
+    assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     rows = q.shape[0]
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
     # columns. Round up to 64 to keep the logits row stride

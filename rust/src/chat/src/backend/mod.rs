@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
+use vllm_text::backend::hf::HfOverrides;
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -61,6 +62,10 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 /// Frontend-side chat backend loading options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadModelBackendsOptions {
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    pub revision: Option<String>,
+    /// JSON Merge Patch applied to the model config before loading any backend.
+    pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Which chat renderer implementation to use.
@@ -73,8 +78,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default chat template override, provided either as an
     /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
-    /// Optional server-default keyword arguments merged into every
-    /// chat-template render before request-level `chat_template_kwargs`.
+    /// Server-default keyword arguments. HF merges these before request kwargs;
+    /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.

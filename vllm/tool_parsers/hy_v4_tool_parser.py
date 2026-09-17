@@ -101,8 +101,8 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         RuntimeError: The tokenizer declares the structural tokens through
             ``model_specific_special_tokens``, which transformers 5 no longer
             round-trips.
-    """
 
+    """
     import transformers
 
     if int(transformers.__version__.split(".")[0]) >= 5:
@@ -611,6 +611,7 @@ class HYV4ToolExtractor:
         Returns:
             A streaming delta carrying content and/or the tool calls drained
             from the buffer, or None when nothing can be emitted yet.
+
         """
         content_delta: str | None = None
         tool_calls: list[StreamToolCall] = []
@@ -1022,6 +1023,7 @@ class HYV4ToolParser(ToolParser):
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
+
         """
         if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
             return None
@@ -1081,6 +1083,7 @@ class HYV4ToolParser(ToolParser):
 
         Returns:
             True when the streaming parser must use the string-marker path.
+
         """
         structured_outputs = getattr(request, "structured_outputs", None)
         return (
