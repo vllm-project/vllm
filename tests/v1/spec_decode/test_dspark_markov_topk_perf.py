@@ -338,6 +338,48 @@ def test_opt_b_union_walk_latency():
 
 
 # ===========================================================================
+# Opt C: flashinfer top_k vs torch.topk on the base-logit candidate selection
+# ===========================================================================
+
+
+@requires_cuda
+@pytest.mark.parametrize("batch", [1, 4, 32, 128])
+def test_opt_c_flashinfer_topk_faster_than_torch_topk(batch):
+    """flashinfer's radix top_k should beat torch.topk for the large-vocab
+    candidate-selection step in _sample_sequential_topk."""
+    from flashinfer import top_k as flashinfer_topk
+
+    n_spec = 8
+    vocab = 152064
+    k = 32
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    base_logits = torch.randn(batch, n_spec, vocab, dtype=dtype, device=device)
+    cand_values = torch.empty(batch, n_spec, k, dtype=dtype, device=device)
+    cand_ids = torch.empty(batch, n_spec, k, dtype=torch.int64, device=device)
+
+    def torch_topk():
+        torch.topk(base_logits, k, dim=-1, sorted=False,
+                   out=(cand_values, cand_ids))
+
+    def fi_topk():
+        flat = base_logits.view(-1, vocab)
+        fi_v, fi_i = flashinfer_topk(flat, k)
+        cand_values.copy_(fi_v.view(batch, n_spec, -1))
+        cand_ids.copy_(fi_i.view(batch, n_spec, -1))
+
+    torch_ms = _cuda_time(torch_topk, repeats=50, warmup=20)
+    fi_ms = _cuda_time(fi_topk, repeats=50, warmup=20)
+    print(
+        f"\n[opt-c batch={batch}]  torch.topk: {torch_ms:.3f} ms, "
+        f"flashinfer: {fi_ms:.3f} ms  (torch/fi = {torch_ms / fi_ms:.1f}x)"
+    )
+    torch.cuda.empty_cache()
+    assert fi_ms < torch_ms
+
+
+# ===========================================================================
 # Opt D: O(k) cache kernel vs full-vocab cache write
 # ===========================================================================
 
