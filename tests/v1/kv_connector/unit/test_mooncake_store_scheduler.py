@@ -166,6 +166,25 @@ def test_scheduler_only_tracks_token_ids_for_kv_events():
             assert req_meta.token_ids is None
 
 
+@pytest.mark.parametrize("token_len", [4, 12, 15, 16, 20, 32])
+def test_scheduler_saves_only_at_common_hybrid_boundaries(token_len):
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    out = _make_new_scheduler_output()
+    out.num_scheduled_tokens["req-0"] = token_len
+    scheduler._unfinished_requests["req-0"] = (out.request, out.request.block_ids)
+
+    meta = scheduler.build_connector_meta(out)
+
+    checkpoint_len = token_len // scheduler._block_size * scheduler._block_size
+    assert scheduler._request_trackers["req-0"].num_saved_tokens == checkpoint_len
+    if checkpoint_len:
+        assert len(meta.requests) == 1
+        assert meta.requests[0].token_len_chunk == checkpoint_len
+    else:
+        assert meta.requests == []
+        assert scheduler._pinned_saves == {}
+
+
 def _make_preemption_scheduler_output():
     return SimpleNamespace(
         finished_req_ids=set(),
@@ -1397,6 +1416,23 @@ def test_boundary_state_never_claimed_without_a_send_thread():
     assert scheduler.build_connector_meta(out).requests == []
     assert scheduler._pinned_saves == {}
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+
+
+def test_decode_consumer_claims_only_decode_boundary_state():
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        kv_role="kv_consumer",
+        save_decode_cache=True,
+    )
+    _register_offload_request(scheduler, prefill_end_tokens=12, num_prompt_tokens=12)
+    out = _make_offload_only_output([(1, 7, 8), (1, 9, 16)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests[0].boundary_state_offloads == [(1, 9, 16)]
+    store_job_id = meta.requests[0].store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [9]
 
 
 def test_resumed_partial_tail_uses_exact_boundary():
