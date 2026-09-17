@@ -165,11 +165,6 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
-        # Groups that opt out of prefix caching (GLM-5.3-Flash kpool tail,
-        # Qwen3.8-Flash-Next QSA ring: per-request scratch blocks whose
-        # block_size need not divide hash_block_size) hold no hashed blocks and
-        # are never stored or loaded; skip them wherever blocks are mapped to
-        # token ranges.
         self.prefix_cacheable_group_ids = (
             self.cpu_kv_cache_config.prefix_cacheable_group_ids
         )
