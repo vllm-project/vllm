@@ -11,7 +11,8 @@ import importlib
 import importlib.util
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import Any, NoReturn
 
 import requests
@@ -26,6 +27,24 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
+_bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "flashinfer_bf16_autotune_buckets", default=None
+)
+
+
+@contextlib.contextmanager
+def autotune_bf16_only(
+    tuning_buckets: tuple[int, ...], *, skip_ops: set[str] | None = None
+) -> Iterator[None]:
+    """Tune BF16 calls with bounded buckets, outside full-model autotuning."""
+    token = _bf16_autotune_buckets.set(tuning_buckets)
+    try:
+        with autotune(tune_mode=False, skip_ops=skip_ops):
+            yield
+    finally:
+        _bf16_autotune_buckets.reset(token)
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -35,14 +54,21 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    return mm_bf16(
-        a,
-        b,
-        bias=bias,
-        pdl=pdl,
-        out_dtype=torch.bfloat16,
-        backend=backend,
+    tuning_buckets = _bf16_autotune_buckets.get()
+    tuning = (
+        autotune(tune_mode=True, tuning_buckets=tuning_buckets)
+        if tuning_buckets is not None
+        else contextlib.nullcontext()
     )
+    with tuning:
+        return mm_bf16(
+            a,
+            b,
+            bias=bias,
+            pdl=pdl,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+        )
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -1237,6 +1263,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "autotune_bf16_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
