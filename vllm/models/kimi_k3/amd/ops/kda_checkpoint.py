@@ -89,6 +89,7 @@ def store_conv_checkpoints(
             ``conv_state.shape[-1]``, which speculative decoding widens by
             ``num_spec``: a checkpoint sized off the row would sit ``num_spec``
             tokens in the past, which every reader would silently accept.
+
     """
     num_seqs = checkpoint_offsets.numel()
     width = conv_state.shape[-2]
