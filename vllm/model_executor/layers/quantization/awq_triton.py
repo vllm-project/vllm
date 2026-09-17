@@ -13,14 +13,14 @@ AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def awq_gemm_fused_fp32_kernel(
     input_ptr,
     qweight_ptr,
     scales_ptr,
     zeros_ptr,
     output_ptr,
-    M: tl.constexpr,
+    M,
     N: tl.constexpr,
     K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
