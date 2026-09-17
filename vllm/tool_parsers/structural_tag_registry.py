@@ -118,7 +118,6 @@ def get_model_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
-
     if not tools or tool_choice == "none":
         return None
 
@@ -212,7 +211,6 @@ def _dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
-
     if tool_choice is None:
         return None
 
@@ -817,6 +815,7 @@ def get_hy_v4_structural_tag(
             leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
             tokenizer vocab and passes it to ``get_model_structural_tag``.
+
     """
     del builtin_tools
 
