@@ -978,9 +978,6 @@ class GemmRsAr:
             assert w_sf.dtype == torch.uint8 and w_sf.device == self.device
             assert w_sf.ndim == 1 and w_sf.is_contiguous()
             assert w_sf.numel() == N * (K // 32)
-            # CuTe-DSL stores [K, N] column-major, including when K == N.
-            if not w.is_contiguous():
-                w = w.t()
             assert w.shape == (N, K) and K % 128 == 0
             assert w.is_contiguous()
             x, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)

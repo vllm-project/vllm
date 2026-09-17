@@ -27,26 +27,14 @@ _SHAPES = (
 _N = 512
 
 
-def _round_to_mxfp8(x: torch.Tensor) -> torch.Tensor:
-    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-        dequant_mxfp8_to_bf16,
-        mxfp8_e4m3_quantize,
-    )
-
-    values, scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
-    return dequant_mxfp8_to_bf16(values, scales)
-
-
 def _reference(
     x: torch.Tensor,
     weight: torch.Tensor,
+    weight_scale: torch.Tensor | None,
     world_size: int,
     group: dist.ProcessGroup,
     all_reduce: bool,
-    mxfp8: bool,
 ) -> torch.Tensor:
-    if mxfp8:
-        x = _round_to_mxfp8(x)
     M = x.shape[0]
     padded_M = (M + world_size - 1) // world_size * world_size
     partial = torch.empty(
@@ -54,7 +42,21 @@ def _reference(
         dtype=x.dtype,
         device=x.device,
     )
-    torch.mm(x, weight.T, out=partial[:M])
+    if weight_scale is None:
+        torch.mm(x, weight.T, out=partial[:M])
+    else:
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            mxfp8_e4m3_quantize,
+        )
+
+        x_q, x_sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+        partial[:M] = torch._scaled_mm(
+            x_q,
+            weight.T,
+            x_sf.view(torch.float8_e8m0fnu),
+            weight_scale.view(torch.float8_e8m0fnu),
+            out_dtype=x.dtype,
+        )
     if padded_M > M:
         partial[M:].zero_()
 
@@ -113,17 +115,10 @@ def _run_mode(
         mxfp8_e4m3_quantize,
     )
 
-    operands = {}
-    reference_weights = {}
-    for K, w in weights.items():
-        if mxfp8:
-            w_q, w_sf = mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=True)
-            # Exercise column-major square weights as well as row-major weights.
-            operands[K] = (w_q.t() if K == _N else w_q, w_sf)
-            reference_weights[K] = _round_to_mxfp8(w)
-        else:
-            operands[K] = (w, None)
-            reference_weights[K] = w
+    operands: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {
+        K: mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=True) if mxfp8 else (w, None)
+        for K, w in weights.items()
+    }
 
     input_generator = torch.Generator(device=device)
 
@@ -138,9 +133,7 @@ def _run_mode(
             device=device,
             generator=input_generator,
         )
-        expected = _reference(
-            x, reference_weights[K], world_size, group, all_reduce, mxfp8
-        )
+        expected = _reference(x, *operands[K], world_size, group, all_reduce)
         actual = gemm_rs_ar(x, *operands[K])
         torch.accelerator.synchronize(device)
         _assert_valid_rows_close(actual, expected, M, rank, all_reduce)
@@ -174,11 +167,10 @@ def _run_mode(
     )
     graph_expected = _reference(
         graph_x,
-        reference_weights[graph_K],
+        *operands[graph_K],
         world_size,
         group,
         all_reduce,
-        mxfp8,
     )
     graph_output = torch.empty_like(graph_expected)
 
