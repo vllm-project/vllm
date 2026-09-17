@@ -1838,17 +1838,31 @@ def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
     }
 
 
-def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
-    import aiter
+def _install_fake_aiter_qknorm(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Stub ``aiter.fused_qknorm_idxrqknorm`` so mapping tests run without AITER."""
+    import sys
+    import types
+    from typing import Any
 
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    calls = []
+    calls: list[dict] = []
 
     def fake_op(*args, **kwargs):
-        calls.append((args, kwargs))
+        calls.append(kwargs)
 
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
+    existing = sys.modules.get("aiter")
+    if existing is not None:
+        monkeypatch.setattr(existing, "fused_qknorm_idxrqknorm", fake_op, raising=False)
+    else:
+        fake_mod: Any = types.ModuleType("aiter")
+        fake_mod.fused_qknorm_idxrqknorm = fake_op
+        monkeypatch.setitem(sys.modules, "aiter", fake_mod)
+    return calls
+
+
+def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
     call_args = _fake_aiter_qknorm_args()
     call_args["kv_cache_k"] = torch.empty(2, 1)
     call_args["kv_cache_v"] = torch.empty(1, 1)
@@ -1868,16 +1882,9 @@ def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
 def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
     monkeypatch, kv_cache_dtype, aiter_dtype, passes_scales
 ):
-    import aiter
-
     from vllm._aiter_ops import rocm_aiter_ops
 
-    calls = []
-
-    def fake_op(*args, **kwargs):
-        calls.append((args, kwargs))
-
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
+    calls = _install_fake_aiter_qknorm(monkeypatch)
     call_args = _fake_aiter_qknorm_args(kv_cache_dtype)
     k_scale = torch.tensor([0.25])
     v_scale = torch.tensor([0.5])
@@ -1885,7 +1892,7 @@ def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
 
     rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
     assert len(calls) == 1
-    kwargs = calls[0][1]
+    kwargs = calls[0]
     assert kwargs["kv_cache_dtype"] == aiter_dtype
     assert kwargs["index_cache_dtype"] == "auto"
     assert kwargs["block_size"] == 16
@@ -1899,17 +1906,10 @@ def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
 
 
 def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
-    import aiter
-
     from vllm._aiter_ops import rocm_aiter_ops
 
-    calls = []
-
-    def fake_op(*args, **kwargs):
-        calls.append(kwargs)
-
+    calls = _install_fake_aiter_qknorm(monkeypatch)
     fp8 = current_platform.fp8_dtype()
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
     call_args = _fake_aiter_qknorm_args("fp8")
     call_args.update(
         k_scale=torch.tensor([0.25]),
@@ -1928,16 +1928,9 @@ def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
 def test_aiter_consolidated_qknorm_full_and_skip_index_args(
     monkeypatch, skip_index_branch
 ):
-    import aiter
-
     from vllm._aiter_ops import rocm_aiter_ops
 
-    calls = []
-
-    def fake_op(*args, **kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
+    calls = _install_fake_aiter_qknorm(monkeypatch)
     call_args = _fake_aiter_qknorm_args()
     if skip_index_branch:
         call_args.update(skip_index_branch=True)
