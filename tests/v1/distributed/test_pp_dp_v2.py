@@ -37,8 +37,8 @@ _GPU_SKIP = _gpu_skip_reason()
 
 pytestmark = [
     pytest.mark.skipif(
-        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1",
-        reason="VLLM_USE_V2_MODEL_RUNNER=1 required",
+        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "1") == "0",
+        reason="V2 model runner disabled via VLLM_USE_V2_MODEL_RUNNER=0",
     ),
     pytest.mark.skipif(_GPU_SKIP is not None, reason=_GPU_SKIP or ""),
 ]
@@ -113,7 +113,6 @@ async def test_pp_dp_v2_mid_concurrency(async_scheduling: bool):
 async def test_pp_dp_v2_abort_mid_decode():
     """Cancel half the in-flight requests mid-stream and confirm the
     engine survives the abort storm."""
-
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)
@@ -154,7 +153,6 @@ async def test_pp_dp_v2_abort_mid_decode():
 async def test_pp_dp_v2_pause_resume():
     """Pause an engine with a request in flight, then resume and confirm
     new requests still work."""
-
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)

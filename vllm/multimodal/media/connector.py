@@ -35,7 +35,7 @@ from vllm.utils.registry import ExtensionManager
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
 logger = init_logger(__name__)
 
@@ -73,6 +73,7 @@ def _wrap_media_fetch_error(
             408/429, invalid URL)
         Original exception for transient errors (5xx, 408, 429, network blips)
             or other exceptions
+
     """
     if isinstance(exc, VLLMValidationError):
         return exc
@@ -162,16 +163,16 @@ class MediaConnector:
         allowed_local_media_path: str = "",
         allowed_media_domains: list[str] | None = None,
     ) -> None:
-        """
-        Args:
-            media_io_kwargs: Additional args passed to process media
-                             inputs, keyed by modalities. For example,
-                             to set num_frames for video, set
-                             `--media-io-kwargs '{"video":{"num_frames":40}}'`
-            connection: HTTP connection client to download media contents.
-            allowed_local_media_path: A local directory to load media files from.
-            allowed_media_domains: If set, only media URLs that belong to this
-                                   domain can be used for multi-modal inputs.
+        """Args:
+        media_io_kwargs: Additional args passed to process media
+                         inputs, keyed by modalities. For example,
+                         to set num_frames for video, set
+                         `--media-io-kwargs '{"video":{"num_frames":40}}'`
+        connection: HTTP connection client to download media contents.
+        allowed_local_media_path: A local directory to load media files from.
+        allowed_media_domains: If set, only media URLs that belong to this
+                               domain can be used for multi-modal inputs.
+
         """
         super().__init__()
 
@@ -468,9 +469,7 @@ class MediaConnector:
         self,
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
-        """
-        Load audio from a URL.
-        """
+        """Load audio from a URL."""
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
@@ -483,9 +482,7 @@ class MediaConnector:
         self,
         audio_url: str,
     ) -> tuple[np.ndarray, int | float]:
-        """
-        Asynchronously fetch audio from a URL.
-        """
+        """Asynchronously fetch audio from a URL."""
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
@@ -500,8 +497,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
     ) -> Image.Image:
-        """
-        Load a PIL image from an HTTP or base64 data URL.
+        """Load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
@@ -527,8 +523,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
     ) -> Image.Image:
-        """
-        Asynchronously load a PIL image from an HTTP or base64 data URL.
+        """Asynchronously load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
@@ -555,9 +550,7 @@ class MediaConnector:
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-        """
-        Load video from an HTTP or base64 data URL.
-        """
+        """Load video from an HTTP or base64 data URL."""
         image_io = ImageMediaIO(
             **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
@@ -581,8 +574,7 @@ class MediaConnector:
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-        """
-        Asynchronously load video from an HTTP or base64 data URL.
+        """Asynchronously load video from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
@@ -608,9 +600,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """
-        Load image embedding from a URL.
-        """
+        """Load image embedding from a URL."""
         image_embedding_io = ImageEmbeddingMediaIO()
 
         return image_embedding_io.load_base64("", data)
@@ -619,9 +609,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """
-        Asynchronously load image embedding from a URL.
-        """
+        """Asynchronously load image embedding from a URL."""
         image_embedding_io = ImageEmbeddingMediaIO()
         loop = asyncio.get_running_loop()
 
@@ -633,9 +621,7 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """
-        Load audio embedding from a URL.
-        """
+        """Load audio embedding from a URL."""
         audio_embedding_io = AudioEmbeddingMediaIO()
 
         return audio_embedding_io.load_base64("", data)
@@ -644,12 +630,31 @@ class MediaConnector:
         self,
         data: str,
     ) -> torch.Tensor:
-        """
-        Asynchronously load audio embedding from a URL.
-        """
+        """Asynchronously load audio embedding from a URL."""
         audio_embedding_io = AudioEmbeddingMediaIO()
         loop = asyncio.get_running_loop()
 
         return await loop.run_in_executor(
             global_thread_pool, audio_embedding_io.load_base64, "", data
+        )
+
+    def fetch_video_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """Load video embedding from a URL."""
+        video_embedding_io = VideoEmbeddingMediaIO()
+
+        return video_embedding_io.load_base64("", data)
+
+    async def fetch_video_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """Asynchronously load video embedding from a URL."""
+        video_embedding_io = VideoEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, video_embedding_io.load_base64, "", data
         )

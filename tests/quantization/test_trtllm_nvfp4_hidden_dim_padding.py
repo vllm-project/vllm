@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 
@@ -107,3 +108,53 @@ def test_align_trtllm_fp4_moe_hidden_dim_pads_to_256_multiple():
     assert torch.count_nonzero(out_w13_scale[:, :, hidden_dim // 16 :]) == 0
     assert torch.count_nonzero(out_w2[:, hidden_dim:, :]) == 0
     assert torch.count_nonzero(out_w2_scale[:, hidden_dim:, :]) == 0
+
+
+def test_align_trtllm_fp4_moe_intermediate_pads_gate_and_up_separately():
+    # Qwen3.8-Flash-Next has intermediate_size=640. At TP4 each rank owns
+    # 160 values, which TRTLLM pads to the next 64-value boundary (192).
+    intermediate = 160
+    padded_intermediate = 192
+    hidden_dim = 32
+
+    gate = torch.ones((1, intermediate, hidden_dim // 2), dtype=torch.uint8)
+    up = torch.full_like(gate, 2)
+    w13 = torch.cat((gate, up), dim=1)
+    gate_scale = torch.full((1, intermediate, hidden_dim // 16), 3, dtype=torch.uint8)
+    up_scale = torch.full_like(gate_scale, 4)
+    w13_scale = torch.cat((gate_scale, up_scale), dim=1)
+    w2 = torch.full((1, hidden_dim, intermediate // 2), 5, dtype=torch.uint8)
+    w2_scale = torch.full((1, hidden_dim, intermediate // 16), 6, dtype=torch.uint8)
+
+    out_w13, out_w13_scale, out_w2, out_w2_scale, out_intermediate = (
+        align_fp4_moe_weights_for_fi(
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            is_act_and_mul=True,
+            min_alignment=64,
+        )
+    )
+
+    assert out_intermediate == padded_intermediate
+    torch.testing.assert_close(out_w13[:, :intermediate], gate)
+    torch.testing.assert_close(
+        out_w13[:, padded_intermediate : padded_intermediate + intermediate], up
+    )
+    torch.testing.assert_close(out_w13_scale[:, :intermediate], gate_scale)
+    torch.testing.assert_close(
+        out_w13_scale[:, padded_intermediate : padded_intermediate + intermediate],
+        up_scale,
+    )
+
+    assert torch.count_nonzero(out_w13[:, intermediate:padded_intermediate]) == 0
+    assert torch.count_nonzero(out_w13[:, padded_intermediate + intermediate :]) == 0
+    assert torch.count_nonzero(out_w13_scale[:, intermediate:padded_intermediate]) == 0
+    assert (
+        torch.count_nonzero(out_w13_scale[:, padded_intermediate + intermediate :]) == 0
+    )
+    torch.testing.assert_close(out_w2[:, :, : intermediate // 2], w2)
+    torch.testing.assert_close(out_w2_scale[:, :, : intermediate // 16], w2_scale)
+    assert torch.count_nonzero(out_w2[:, :, intermediate // 2 :]) == 0
+    assert torch.count_nonzero(out_w2_scale[:, :, intermediate // 16 :]) == 0

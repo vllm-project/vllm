@@ -47,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -294,6 +295,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             patches: (batch, num_patches, patch_dim)
+
         """
         patch_size = self.config.enc_patch_size
         batch, channels, height, width = images.shape
@@ -320,6 +322,7 @@ class Moondream3VisionEncoder(nn.Module):
 
         Returns:
             features: (batch, num_patches, hidden_size)
+
         """
         # Create patches and embed
         patches = self.create_patches(pixel_values)
@@ -488,7 +491,6 @@ class Moondream3TextMoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with expert parallelism and custom GeGLU activation."""
-
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
         topk_logits, topk_ids = torch.topk(
@@ -497,7 +499,13 @@ class Moondream3TextMoE(nn.Module):
         # Softmax over selected experts
         topk_weights = F.softmax(topk_logits, dim=-1, dtype=torch.float32).to(x.dtype)
 
+        out = None
         if self._use_fused_moe and x.is_cuda:
+            # Only the expert computation may fall back. The all-reduce below
+            # is deliberately outside this `try`: if it were inside and raised
+            # on a single rank, that rank would run the fallback loop and issue
+            # a *second* all-reduce while its peers issued one, desyncing the
+            # TP group and hanging it for good.
             try:
                 out = fused_experts(
                     hidden_states=x.contiguous(),
@@ -510,8 +518,6 @@ class Moondream3TextMoE(nn.Module):
                     expert_map=self._expert_map,
                     quant_config=biased_moe_quant_config(self._fused_w1_bias, None),
                 )
-                out = tensor_model_parallel_all_reduce(out)
-                return out
             except (NotImplementedError, RuntimeError) as exc:
                 self._use_fused_moe = False
                 logger.warning_once(
@@ -520,11 +526,27 @@ class Moondream3TextMoE(nn.Module):
                     str(exc),
                 )
 
+        if out is None:
+            out = self._expert_loop(x, topk_weights, topk_ids)
+
+        # Combine each rank's partial expert outputs. Reached exactly once per
+        # forward, on every rank, whichever expert path ran above.
+        return tensor_model_parallel_all_reduce(out)
+
+    def _expert_loop(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fallback for environments where fused kernels are unavailable.
+
+        Returns this rank's partial output; the caller performs the all-reduce.
+        """
         tp_rank = get_tensor_model_parallel_rank()
         # Compute local expert range
         local_expert_start = tp_rank * self.experts_per_rank
 
-        # Fallback path for environments where fused kernels are unavailable.
         out = x.new_zeros(x.shape)
 
         for local_expert_idx in range(self.num_local_experts):
@@ -557,9 +579,6 @@ class Moondream3TextMoE(nn.Module):
 
             # Accumulate output
             out.index_add_(0, token_pos, y)
-
-        # All-reduce to combine results from all experts across GPUs
-        out = tensor_model_parallel_all_reduce(out)
 
         return out
 
@@ -1087,11 +1106,15 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> nn.Module:
         return self.text
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds
 
     def _split_pixel_values(
         self,
@@ -1296,7 +1319,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
