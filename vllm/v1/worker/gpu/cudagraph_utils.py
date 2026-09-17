@@ -140,6 +140,34 @@ def _is_compatible(
     )
 
 
+def allow_rocm_deepseek_v4_piecewise_without_compile(
+    vllm_config: VllmConfig,
+) -> bool:
+    """Allow the historical gfx1151 DeepSeek V4 piecewise path on ROCm.
+
+    The validated non-stage1 DSpark route on gfx1151 used
+    ``VLLM_USE_BREAKABLE_CUDAGRAPH=0`` and still reached successful PIECEWISE
+    capture on DeepSeek V4. Newer startup logic requires either breakable
+    cudagraphs or an active compiled submodule and otherwise downgrades
+    ``FULL_AND_PIECEWISE`` to ``FULL_DECODE_ONLY``. That regresses the known
+    working ROCm route.
+
+    Keep the bypass tightly scoped:
+    - ROCm only
+    - explicit launcher opt-in via ``VLLM_GFX1151_ALLOW_FP8_MQA_CUDAGRAPH=1``
+    - DeepSeek V4 main / MTP architectures only
+    """
+    if not current_platform.is_rocm():
+        return False
+
+    if os.environ.get("VLLM_GFX1151_ALLOW_FP8_MQA_CUDAGRAPH", "0") != "1":
+        return False
+
+    model_config = vllm_config.model_config
+    architectures = set(model_config.architectures if model_config else [])
+    return bool(architectures & {"DeepseekV4ForCausalLM", "DeepSeekV4MTPModel"})
+
+
 class CudaGraphManager:
     def __init__(
         self,
@@ -533,6 +561,46 @@ class ModelCudaGraphManager(CudaGraphManager):
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
 
+        if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
+            self.use_breakable_cg
+            or has_compiled_submodule(model)
+            or allow_rocm_deepseek_v4_piecewise_without_compile(self.vllm_config)
+        ):
+            raise RuntimeError(
+                f"{type(model).__name__}: piecewise CUDA graphs "
+                f"(cudagraph_mode={self.cudagraph_mode.name}) unavailable, "
+                "model is not torch-compiled and breakable CUDA graph is off. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
+            )
+
+        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+            """Copy outputs to persistent buffers, allocating on first use."""
+            if self.is_last_pp_rank:
+                # Last PP rank (common case).
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, aux_hidden_states = model_output
+                else:
+                    hidden_states = model_output
+                    aux_hidden_states = []
+                if self.hidden_states is None:
+                    self.hidden_states = torch.empty_like(hidden_states)
+                self.hidden_states[:num_tokens] = hidden_states
+                if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                    self.aux_hidden_states = [
+                        torch.empty_like(x) for x in aux_hidden_states
+                    ]
+                for i, aux in enumerate(aux_hidden_states):
+                    self.aux_hidden_states[i][:num_tokens] = aux
+            else:
+                # Non-last PP rank.
+                assert isinstance(model_output, IntermediateTensors)
+                intermediate_tensors = model_output
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = IntermediateTensors.empty_like(
+                        intermediate_tensors
+                    )
+                for k, v in intermediate_tensors.tensors.items():
+                    self.intermediate_tensors[k][:num_tokens] = v
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
