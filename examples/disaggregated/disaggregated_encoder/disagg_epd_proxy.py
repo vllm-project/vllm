@@ -397,6 +397,21 @@ async def fanout_encoder_primer(
                         matched = (mm_hash, params[mm_hash])
                     elif len(indices) == 1 and len(params) == 1:
                         matched = next(iter(params.items()))
+                    elif (
+                        mm_items[idx]["type"] == "video_url"
+                        and (orig_request.get("mm_processor_kwargs") or {}).get(
+                            "use_audio_in_video"
+                        )
+                        and len(params) == 2
+                        and consumer_zmq is None
+                        and all(
+                            entry.keys() <= {"metadata", "item_indices"}
+                            for entry in params.values()
+                        )
+                    ):
+                        # Keep raw video for its audio/video features when no transfer
+                        # handles need to be forwarded.
+                        continue
                     else:
                         raise HTTPException(502, "Encoder metadata cannot be matched")
                 ec_mm_hash, reported = matched

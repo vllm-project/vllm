@@ -449,3 +449,62 @@ def test_pooled_connections_are_retired_before_the_server_closes_them(
         assert proxy.decode_session.connector._keepalive_timeout == pooled_for
     finally:
         asyncio.run(proxy.on_shutdown())
+
+
+@pytest.mark.parametrize(
+    "no_rewrite, transfer",
+    [(False, None), (True, None), (False, "push"), (False, "handle")],
+)
+def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
+    """Keep raw video and neighboring images, but never discard transfer handles."""
+    import copy
+
+    from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
+
+    video = {"type": "video_url", "video_url": {"url": "video-with-audio"}}
+    images = [{"type": "image_url", "image_url": {"url": key}} for key in ("A", "B")]
+    body = {
+        "messages": [{"content": [images[0], video, images[1]]}],
+        "mm_processor_kwargs": {"use_audio_in_video": True},
+    }
+    original = copy.deepcopy(body)
+    # Collector indices describe two processed features from one video item.
+    video_metadata = collect_ec_item_metadata(
+        [SimpleNamespace(identifier=key, data=None) for key in ("video", "audio")], None
+    )
+    if transfer == "handle":
+        video_metadata["audio"]["transfer_id"] = "reservation"
+    image_metadata = {
+        key: {"metadata": {"image_grid_thw": [1, 2, size]}, "item_indices": [i]}
+        for i, (key, size) in enumerate((("A", 2), ("B", 4)))
+    }
+    # Images form the first group, the singleton video the second.
+    monkeypatch.setattr(proxy, "ENCODER_MAX_BATCH_SIZE", 0)
+    monkeypatch.setattr(proxy, "NO_REWRITE", no_rewrite)
+    replies = _EncoderSession([image_metadata, video_metadata])
+    monkeypatch.setattr(proxy, "encode_session", replies)
+    consumer = "tcp://consumer:1" if transfer == "push" else None
+    preparation = proxy.prepare_for_decode(body, "r", ["http://e0"], "", consumer)
+    if transfer:
+        with pytest.raises(proxy.HTTPException, match="cannot be matched"):
+            asyncio.run(preparation)
+        return
+
+    prepared, _, _ = asyncio.run(preparation)
+    assert body == original
+    assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
+    final = prepared["messages"][0]["content"]
+    assert final[1] == video
+    handles = prepared["ec_transfer_params"]
+    assert not video_metadata.keys() & handles.keys()
+    if no_rewrite:
+        assert final == original["messages"][0]["content"]
+        assert "ec_items" not in handles
+    else:
+        for position, image, key in ((0, images[0], "A"), (2, images[1], "B")):
+            assert final[position] == {
+                "type": "image_embeds",
+                "image_embeds": image_metadata[key]["metadata"],
+                "uuid": proxy.content_uuid(image),
+            }
+        assert [item["mm_hash"] for item in handles["ec_items"]] == ["A", "B"]
