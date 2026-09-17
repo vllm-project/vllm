@@ -870,6 +870,13 @@ class QSACompressedKeyCache(_QSAStateCache):
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            # Replicated under DCP, for two reasons. This cache addresses its
+            # slots globally through `_logical_to_physical_qsa_slots`, which
+            # has no notion of ownership, so sharding it would shift every row
+            # within its virtual block. And the selector has to score the whole
+            # sequence: a sharded rank would choose from its own slice only,
+            # which changes the selection rather than distributing it.
+            dcp_transparent=True,
         )
 
 

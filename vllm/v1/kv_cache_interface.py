@@ -662,6 +662,17 @@ class MLAAttentionSpec(FullAttentionSpec):
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
+    dcp_transparent: bool = False
+    """Replicate this cache on every DCP rank instead of sharding it.
+
+    Full-attention KV shards across DCP ranks, and a cache that shares that spec
+    type inherits the behaviour. A cache whose addressing is global cannot: its
+    write path and its read path would disagree about ownership, and every row
+    would shift within its virtual block.
+
+    Set this when a cache must stay whole on each rank -- for example a selector
+    cache that has to score the entire sequence, where sharding would make each
+    rank choose from only its own slice."""
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 

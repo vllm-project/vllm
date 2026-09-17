@@ -703,12 +703,21 @@ def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> 
     Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
     ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
     draft group would need a different spec, not this helper.
+
+    ``dcp_transparent`` on the spec overrides the type rule and forces 1. Use it
+    for a cache that shares a sharded spec type but addresses its slots
+    globally, or that must see the whole sequence.
     """
     if dcp_world_size <= 1:
         return 1
     inner = spec
     if isinstance(spec, UniformTypeKVCacheSpecs):
         inner = next(iter(spec.kv_cache_specs.values()))
+    if getattr(inner, "dcp_transparent", False):
+        # Replicated on every rank. The spec type alone cannot decide this: a
+        # selector cache and the KV it selects from can share a spec type and
+        # still need opposite treatment.
+        return 1
     if isinstance(inner, FullAttentionSpec):
         return dcp_world_size
     return 1
