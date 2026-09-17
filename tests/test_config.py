@@ -654,6 +654,124 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+@pytest.fixture
+def extract_hidden_states_target_model(tmp_path: Path) -> ModelConfig:
+    _write_json(
+        tmp_path / "config.json",
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "num_hidden_layers": 60,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "vocab_size": 128,
+            "max_position_embeddings": 4096,
+        },
+    )
+    return ModelConfig(model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(("target_tp", "target_pp"), [(4, 2), (8, 1)])
+def test_extract_hidden_states_draft_parallel_config(
+    extract_hidden_states_target_model: ModelConfig, target_tp: int, target_pp: int
+):
+    target_model = extract_hidden_states_target_model
+    target_parallel = ParallelConfig(
+        tensor_parallel_size=target_tp,
+        pipeline_parallel_size=target_pp,
+        distributed_executor_backend="mp",
+        disable_custom_all_reduce=True,
+    )
+    original_hf_config = target_model.hf_config.to_dict()
+    original_parallel_config = asdict(target_parallel)
+    target_model.verify_with_parallel_config(target_parallel)
+
+    config = SpeculativeConfig(
+        method="extract_hidden_states",
+        num_speculative_tokens=1,
+        target_model_config=target_model,
+        target_parallel_config=target_parallel,
+        draft_model_config={
+            "hf_config": {"eagle_aux_hidden_state_layer_ids": [0, 30, 60]}
+        },
+    )
+
+    assert config.draft_model_config.architectures == ["ExtractHiddenStatesModel"]
+    assert config.draft_parallel_config.pipeline_parallel_size == 1
+    assert config.draft_parallel_config.tensor_parallel_size == target_tp
+    assert config.draft_parallel_config.world_size == target_tp
+    assert config.draft_parallel_config.disable_custom_all_reduce
+    assert config.draft_parallel_config is not target_parallel
+    assert config.draft_model_config is not target_model
+    assert config.target_parallel_config is target_parallel
+    assert config.target_model_config is target_model
+    assert target_model.hf_config.to_dict() == original_hf_config
+    assert asdict(target_parallel) == original_parallel_config
+    assert config.method == "extract_hidden_states"
+    assert config.num_speculative_tokens == 1
+    assert config.draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids == [
+        0,
+        30,
+        60,
+    ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("draft_tp", "draft_pp", "error", "message"),
+    [
+        (4, 2, NotImplementedError, "SupportsPP"),
+        (3, 1, ValueError, "must be divisible by tensor parallel size"),
+    ],
+)
+def test_extract_hidden_states_rejects_invalid_draft_parallel_config(
+    extract_hidden_states_target_model: ModelConfig, draft_tp, draft_pp, error, message
+):
+    config = SpeculativeConfig(
+        method="extract_hidden_states",
+        num_speculative_tokens=1,
+        target_model_config=extract_hidden_states_target_model,
+        target_parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        draft_model_config={
+            "hf_config": {"eagle_aux_hidden_state_layer_ids": [0, 30, 60]}
+        },
+    )
+    invalid_parallel = ParallelConfig(
+        tensor_parallel_size=draft_tp,
+        pipeline_parallel_size=draft_pp,
+        distributed_executor_backend="mp",
+    )
+
+    with pytest.raises(error, match=message):
+        config.draft_model_config.verify_with_parallel_config(invalid_parallel)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_extract_hidden_states_model_does_not_claim_target_pp_support(
+    extract_hidden_states_target_model: ModelConfig,
+):
+    unsupported_target = ModelConfig(
+        model=extract_hidden_states_target_model.model,
+        runner="draft",
+        skip_tokenizer_init=True,
+        hf_overrides={"architectures": ["ExtractHiddenStatesModel"]},
+    )
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        pipeline_parallel_size=2,
+        distributed_executor_backend="mp",
+    )
+
+    with pytest.raises(NotImplementedError, match="SupportsPP"):
+        unsupported_target.verify_with_parallel_config(parallel_config)
+
+
 def test_dflash2_draft_forces_v2_model_runner():
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
