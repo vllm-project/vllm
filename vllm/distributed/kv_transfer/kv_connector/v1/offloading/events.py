@@ -5,12 +5,11 @@
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
 :class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive and publishes stores as block-granular
-payloads: a chunk event may carry multiple constituent per-block hashes, and
-evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
-shared prefix re-announce the shared hashes once per chunk; consumers are
-expected to deduplicate (reference-count) repeated store/remove announcements
-of the same hash. Opt-in via
+payload while the ``Request`` is alive. Complete chunks are advertised as
+single retrievable units, using the final hash and the whole chunk's size;
+removals use the same hash. Interior GPU-block hashes are not independently
+retrievable from the offloader. Partial recurrent tails retain their
+hash-aligned prefix representation. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 """
@@ -30,7 +29,6 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
-    resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -81,7 +79,7 @@ class _OffloadEventMetadata:
     Request is available and kept until the final matching removal event.
     ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
 
-    # The chunk's constituent block hashes; the last one is the OffloadKey.
+    # Complete chunks use only the OffloadKey's hash; partial tails may expand it.
     block_hashes: tuple[BlockHash, ...]
     parent_block_hash: BlockHash | None
     token_ids: tuple[int, ...]
@@ -264,29 +262,17 @@ class OffloadingEventsTracker:
         group_config: "GroupOffloadConfig",
         chunk_idx: int,
     ) -> _OffloadEventMetadata:
-        """Build the payload snapshot for one offloaded chunk: its
-        constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``."""
+        """Describe one retrievable chunk, not its constituent GPU blocks."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0
-        tokens_per_hash = group_config.tokens_per_chunk // hashes_per_chunk
         # Each chunk's final raw hash is its OffloadKey.
         first_hash_idx = chunk_idx * hashes_per_chunk
         last_hash_idx = first_hash_idx + hashes_per_chunk
         assert first_hash_idx >= 0
         assert last_hash_idx <= len(req.block_hashes)
-        raw_chunk_hashes = req.block_hashes[first_hash_idx:last_hash_idx]
-        chunk_hashes = resolve_block_hashes(
-            raw_chunk_hashes,
-            tokens_per_hash,
-            group_config.tokens_per_block,
-        )
-        for block_hash in chunk_hashes:
-            assert block_hash is not None
-        assert len(chunk_hashes) == (
-            group_config.tokens_per_chunk // group_config.tokens_per_block
-        )
+        chunk_hash = req.block_hashes[last_hash_idx - 1]
+        assert chunk_hash is not None
 
         if group_config.sliding_window_size_in_chunks is not None:
             # The recording methods filter these out before calling this helper.
@@ -311,10 +297,10 @@ class OffloadingEventsTracker:
             lora_name = req.lora_request.name
 
         return _OffloadEventMetadata(
-            block_hashes=tuple(chunk_hashes),
+            block_hashes=(chunk_hash,),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=group_config.tokens_per_block,
+            block_size=group_config.tokens_per_chunk,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
