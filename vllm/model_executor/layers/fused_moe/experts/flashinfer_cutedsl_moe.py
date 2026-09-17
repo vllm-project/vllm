@@ -29,8 +29,7 @@ from vllm.utils.flashinfer import (
 
 
 class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
-    """
-    CuteDSL NvFP4 MoE experts using the FlashInfer functional API.
+    """CuteDSL NvFP4 MoE experts using the FlashInfer functional API.
 
     Uses Standard activation format (non-batched). The kernel handles
     routing, expert computation, and reduction internally.
