@@ -119,14 +119,6 @@ class VocabMapping:
         self.intersection_mask_draft = intersection_mask_draft.to(device)
         self.intersection_size = int(intersection_mask_draft.sum().item())
 
-        # Pre-allocated scalar buffers for torch.where
-        self._target_unk_value = torch.tensor(
-            self.target_unk_token_id, dtype=torch.long, device=device
-        )
-        self._draft_unk_value = torch.tensor(
-            self.draft_unk_token_id, dtype=torch.long, device=device
-        )
-
         logger.info(
             "VocabMapping initialized: target_vocab=%d, draft_vocab=%d, "
             "intersection=%d (%.1f%% of draft, %.1f%% of target)",
@@ -145,14 +137,12 @@ class VocabMapping:
 
     def map_target_to_draft_ids(self, target_ids):
         draft_ids = self.target_to_draft_ids[target_ids]  # new tensor; no clone needed
-        missing = draft_ids == -1
-        draft_ids = torch.where(missing, self._draft_unk_value, draft_ids)
+        draft_ids[draft_ids == -1] = self.draft_unk_token_id
         return draft_ids.to(target_ids.dtype)
 
     def map_draft_to_target_ids(self, draft_ids):
         target_ids = self.draft_to_target_ids[draft_ids]  # new tensor; no clone needed
-        missing = target_ids == -1
-        target_ids = torch.where(missing, self._target_unk_value, target_ids)
+        target_ids[target_ids == -1] = self.target_unk_token_id
         return target_ids.to(draft_ids.dtype)
 
     def constrain_draft_logits(self, logits):
