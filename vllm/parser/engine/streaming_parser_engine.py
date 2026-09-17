@@ -51,7 +51,7 @@ def _build_drop_info(
 
     configured_texts = (
         set(config.token_id_terminals.values())
-        | set(config.terminals.values())
+        | config.terminal_literals
         | config.preserve_tokens
     )
 

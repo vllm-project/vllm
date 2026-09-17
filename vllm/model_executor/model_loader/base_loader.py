@@ -39,6 +39,19 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
+    def create_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
+        """Create a model with the given configurations."""
+        model = initialize_model(
+            vllm_config=vllm_config,
+            model_config=model_config,
+            prefix=prefix,
+        )
+        log_online_quantization(vllm_config)
+        log_model_inspection(model)
+        return model
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -52,14 +65,11 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(
+                model = self.create_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
                     prefix=prefix,
                 )
-
-            log_online_quantization(vllm_config)
-            log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
@@ -100,6 +110,11 @@ def log_online_quantization(vllm_config: VllmConfig) -> None:
     )
 
     quant_config = vllm_config.quant_config
+    online_quantization_config = getattr(
+        quant_config, "online_quantization_config", None
+    )
+    if isinstance(online_quantization_config, OnlineQuantizationConfig):
+        quant_config = online_quantization_config
     if not isinstance(quant_config, OnlineQuantizationConfig):
         return
 

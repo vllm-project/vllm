@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file demonstrates the usage of text generation with an LLM model,
+"""This file demonstrates the usage of text generation with an LLM model,
 comparing the performance with and without speculative decoding.
 
 Note that this example is out of date and not supported in vLLM v1.

@@ -77,6 +77,11 @@ def test_sampling_mask_lists_to_nested_list():
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="CI failed on XPU with Triton, Skipped until sycl kernel merged. "
+    "See https://github.com/vllm-project/vllm/pull/55851",
+)
 def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     """Whatever its size (empty, one, around the compact width, beyond the
     cap, the whole vocab), a sampled row's mask is exactly the ascending set
@@ -104,7 +109,10 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
 
 
-def test_sampling_mask_preserves_top_k_boundary_ties():
+def test_sampling_mask_matches_processed_top_k_top_p_support():
+    """The mask must exactly mirror whatever support `apply_top_k_top_p`
+    (the real logits-processing function used by the sampler) actually
+    produces, whatever backend implements it."""
     processed_logits = apply_top_k_top_p(
         logits=torch.tensor(
             [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
@@ -115,7 +123,27 @@ def test_sampling_mask_preserves_top_k_boundary_ties():
     expected_token_ids = (
         torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
     )
-    assert len(expected_token_ids) > 3
+    assert 0 < len(expected_token_ids) <= processed_logits.shape[1]
+
+    tensors = SamplingMaskTensors.from_logits(
+        processed_logits,
+        num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
+        max_num_kept=3,
+    )
+    result = tensors.tolists()
+
+    assert result.to_nested_list() == [expected_token_ids]
+
+
+def test_sampling_mask_preserves_top_k_boundary_ties():
+    """When the kept support is wider than `max_num_kept` (e.g. a top-k
+    boundary tie keeps more than k logits), the mask must fall back to the
+    exact bitmask instead of silently truncating to `max_num_kept` ids."""
+    processed_logits = torch.tensor(
+        [[6.0, 5.0, 4.0, 4.0, 4.0, float("-inf"), float("-inf"), float("-inf")]],
+        device=DEVICE_TYPE,
+    )
+    expected_token_ids = [0, 1, 2, 3, 4]
 
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
@@ -157,7 +185,7 @@ class TestLogprobsLists(TestCase):
         )
 
     def test_slice_without_cu_num_generated_tokens(self):
-        """Test slicing without cu_num_generated_tokens"""
+        """Test slicing without cu_num_generated_tokens."""
         logprobsLists = LogprobsLists(
             logprob_token_ids=[[1], [2], [3]],
             logprobs=[[0.1], [0.2], [0.3]],
@@ -172,7 +200,7 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_from_start(self):
-        """Test slicing from the start position"""
+        """Test slicing from the start position."""
         sliced = self.logprobsLists.slice_request(0, num_positions=5)
         assert len(sliced.logprob_token_ids) == 5
         assert sliced.logprob_token_ids == [
@@ -185,7 +213,7 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_from_middle(self):
-        """Test slicing from the middle position"""
+        """Test slicing from the middle position."""
         sliced = self.logprobsLists.slice_request(1, num_positions=7)
         assert len(sliced.logprob_token_ids) == 7
         assert sliced.logprob_token_ids == [
@@ -200,21 +228,21 @@ class TestLogprobsLists(TestCase):
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_single_request(self):
-        """Test slicing a single request"""
+        """Test slicing a single request."""
         sliced = self.logprobsLists.slice_request(1, num_positions=3)
         assert len(sliced.logprob_token_ids) == 3
         assert sliced.logprob_token_ids == [[5, 6], [7, 8], [9, 10]]
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_last_request(self):
-        """Test slicing the last request"""
+        """Test slicing the last request."""
         sliced = self.logprobsLists.slice_request(2, num_positions=4)
         assert len(sliced.logprob_token_ids) == 4
         assert sliced.logprob_token_ids == [[11, 12], [13, 14], [15, 16], [17, 18]]
         assert sliced.cu_num_generated_tokens is None
 
     def test_slice_all_requests(self):
-        """Test slicing all requests (full slice)"""
+        """Test slicing all requests (full slice)."""
         sliced = self.logprobsLists.slice_request(0, num_positions=9)
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids

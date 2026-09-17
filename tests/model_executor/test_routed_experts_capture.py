@@ -278,7 +278,7 @@ def test_routed_experts_capturer_single_dp_no_metadata():
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
-    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -295,7 +295,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
-    """n == token_num_per_dp: topk is already local to this DP rank."""
+    """N == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -453,6 +453,7 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             distributed_executor_backend=None,
             pipeline_parallel_size=1,
             enable_dbo=False,
+            use_ubatching=False,
             enable_elastic_ep=False,
         ),
         compilation_config=SimpleNamespace(

@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -83,9 +84,7 @@ logger = init_logger(__name__)
 
 
 class FusedMoEActivationFormat(Enum):
-    """
-    The standard activation format (num_tokens, hidden dim).
-    """
+    """The standard activation format (num_tokens, hidden dim)."""
 
     Standard = ("standard",)
     """
@@ -96,9 +95,7 @@ class FusedMoEActivationFormat(Enum):
 
 @dataclass
 class ExpertTokensMetadata:
-    """
-    Metadata regarding expert-token routing.
-    """
+    """Metadata regarding expert-token routing."""
 
     expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
@@ -109,7 +106,10 @@ class ExpertTokensMetadata:
         expert_num_tokens_list: list[int], device: str
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
-            expert_num_tokens_list, device="cpu", dtype=torch.int32
+            expert_num_tokens_list,
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
         )
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
@@ -118,9 +118,7 @@ class ExpertTokensMetadata:
 
 
 class TopKWeightAndReduce(ABC):
-    """
-    An abstract base class for weight application and reduction implementations.
-    """
+    """An abstract base class for weight application and reduction implementations."""
 
     @abstractmethod
     def apply(
@@ -131,8 +129,7 @@ class TopKWeightAndReduce(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
-        """
-        Apply topk_weights to the fused_experts_outputs and/or reduce.
+        """Apply topk_weights to the fused_experts_outputs and/or reduce.
         If an output tensor is not passed, it will be created in the
         function.
         """
@@ -181,8 +178,7 @@ ReceiverType = Callable[[], PrepareResultType]
 
 
 class FusedMoEPrepareAndFinalize(ABC):
-    """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    """An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
 
     There are two variants of this class:
@@ -191,8 +187,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     """
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
-        """
-        Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
+        """Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
         FusedMoEExpertsModular experts object.
         The FusedMoEPrepareAndFinalizeModular implementations that have such
         dependencies may choose to override this function.
@@ -202,16 +197,14 @@ class FusedMoEPrepareAndFinalize(ABC):
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
-        """
-        A property indicating the output format of the activations for the
+        """A property indicating the output format of the activations for the
         'prepare' method.
         """
         raise NotImplementedError
 
     @abstractmethod
     def topk_indices_dtype(self) -> torch.dtype | None:
-        """
-        The PrepareFinalize All2All implementations generally constrain the
+        """The PrepareFinalize All2All implementations generally constrain the
         dtype of the topk_ids they support. This function returns the
         required topk indices dtype so it can be respected.
         Return None if there are no such restrictions.
@@ -220,8 +213,7 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     @abstractmethod
     def max_num_tokens_per_rank(self) -> int | None:
-        """
-        Some PrepareFinalize All2All implementations are batched. Meaning,
+        """Some PrepareFinalize All2All implementations are batched. Meaning,
         they can process only as set of tokens at a time. This
         function returns the batch size i.e the maximum number of tokens
         the implementation can process at a time.
@@ -235,31 +227,21 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     @abstractmethod
     def output_is_reduced(self) -> bool:
-        """
-        Indicates whether or not the output of finalize is reduced across all
+        """Indicates whether or not the output of finalize is reduced across all
         ranks.
         """
         raise NotImplementedError
 
     def supports_async(self) -> bool:
-        """
-        Indicates whether or not this class implements prepare_async and
+        """Indicates whether or not this class implements prepare_async and
         finalize_async.
         """
         return False
 
-    def on_commit(self) -> None:
-        """
-        Runs after this prepare/finalize has been committed to the active
-        MoE kernel.
-        """
-        return
-
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
-    """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    """An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the Modular case.
     """
 
@@ -275,8 +257,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> PrepareResultType:
-        """
-        Perform any quantization (and/or) dispatching needed for this kernel.
+        """Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
         - topk_ids: The topk ids.
         - topk_weights: The topk weights.
@@ -312,8 +293,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> tuple[Callable, ReceiverType] | ReceiverType:
-        """
-        Perform any quantization (and/or) dispatching needed for this kernel
+        """Perform any quantization (and/or) dispatching needed for this kernel
         but do not wait for results from other workers.
         - a1: The (unquantized) input to the MoE layer.
         - a1_scale: Optional scales for a1
@@ -363,8 +343,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
     ) -> None:
-        """
-        Perform any combine plus apply weights and perform a reduction on the
+        """Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
         - output: The output tensor, written in place.  Must be (M, K) shape.
         - fused_expert_output: The unweighted, unreduced output of the fused
@@ -387,8 +366,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
     ) -> tuple[Callable, Callable] | Callable:
-        """
-        Perform any combine plus apply weights and perform a reduction on the
+        """Perform any combine plus apply weights and perform a reduction on the
         fused experts output but do not wait for results from other workers.
         - output: The output tensor, written in place.  Must be (M, K) shape.
         - fused_expert_output: The unweighted, unreduced output of the fused
@@ -422,8 +400,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
 
 
 class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
-    """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    """An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the monolithic case.
     """
 
@@ -438,8 +415,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> PrepareMonolithicResultType:
-        """
-        Optional method for subclasses compatible with monolithic
+        """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
 
         Perform any quantization (and/or) dispatching needed for this kernel.
@@ -456,8 +432,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
     @abstractmethod
     def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
-        """
-        Optional method for subclasses compatible with monolithic
+        """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
 
         Perform any combine plus apply weights and perform a reduction on the
@@ -488,8 +463,7 @@ class FusedMoEExperts(ABC):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        """
-        moe_config: MoE layer configuration.
+        """moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
         if self.activation_format() == FusedMoEActivationFormat.Standard and (
@@ -524,8 +498,7 @@ class FusedMoEExperts(ABC):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        """
-        Whether or not the PrepareFinalize should defer input quantization
+        """Whether or not the PrepareFinalize should defer input quantization
         in the prepare step. If True, then the Experts kernel will
         execute the input quantization itself.
 
@@ -536,8 +509,7 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
-        """
-        A property which is a tuple of the input and output activation formats
+        """A property which is a tuple of the input and output activation formats
         for the 'apply' method.
         """
         raise NotImplementedError
@@ -598,8 +570,7 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def _supports_current_device() -> bool:
-        """
-        Whether the kernel supports the current device type
+        """Whether the kernel supports the current device type
         (compute cability and current platform).
         """
         raise NotImplementedError
@@ -607,8 +578,7 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def _supports_no_act_and_mul() -> bool:
-        """
-        Whether the kernel supports act_and_mul=False, i.e.
+        """Whether the kernel supports act_and_mul=False, i.e.
         non-gated MoE models like Nemotron-Nano.
         """
         raise NotImplementedError
@@ -624,16 +594,13 @@ class FusedMoEExperts(ABC):
     @staticmethod
     @abstractmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """
-        Whether the kernel supports a particular act function.
-        """
+        """Whether the kernel supports a particular act function."""
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """
-        Whether the kernel supports deployment in particular parallel config.
+        """Whether the kernel supports deployment in particular parallel config.
 
         Can be overridden if a kernel does not support EP, SP or some other
         configuration.
@@ -646,8 +613,7 @@ class FusedMoEExperts(ABC):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """
-        Whether the kernel supports a routing method (e.g. GroupedTopK).
+        """Whether the kernel supports a routing method (e.g. GroupedTopK).
 
         Can be overridden by monolithic kernels that execute the router
         in addition to the experts if certain routers are not supported.
@@ -659,8 +625,7 @@ class FusedMoEExperts(ABC):
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        """
-        Whether a kernel supports a particular dtype for router logits input.
+        """Whether a kernel supports a particular dtype for router logits input.
 
         Can be overridden by monolithic kernels that execute the router
         in addition to the experts if certain dtypes are not supported.
@@ -669,16 +634,14 @@ class FusedMoEExperts(ABC):
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
-        """
-        Whether a kernel supports a particular shape. Can be overridden if a kernel
+        """Whether a kernel supports a particular shape. Can be overridden if a kernel
         has specific shape requirements.
         """
         return True
 
     @staticmethod
     def _supports_batch_invariance() -> bool:
-        """
-        Whether the kernel supports batch invariance, i.e. the output does not
+        """Whether the kernel supports batch invariance, i.e. the output does not
         depend on the order of the tokens in the input batch. This is useful
         for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
         """
@@ -767,17 +730,15 @@ class FusedMoEExperts(ABC):
         return False
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
-        """
-        A flag indicating whether or not this class can process packed ue8m0
+        """A flag indicating whether or not this class can process packed ue8m0
         activation scales.
         """
         return False
 
 
 class FusedMoEExpertsModular(FusedMoEExperts):
-    """
-    An abstract base class for the [Permute-Experts-Unpermute] step described
-        above.
+    """An abstract base class for the [Permute-Experts-Unpermute] step described
+    above.
     """
 
     @staticmethod
@@ -791,8 +752,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
+        """Extract the MoE problem size from the given tensor arguments:
         - a: The hidden states, input to the MoE layer.
         - w1: The first set of expert weights.
         - w2: The second set of expert weights.
@@ -828,9 +788,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         return E, M, N, K, topk
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
-        """
-        Workspace type: The dtype to use for the workspace tensors.
-        """
+        """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
 
     @abstractmethod
@@ -845,8 +803,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         expert_tokens_meta: ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.
@@ -876,8 +833,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
 
     @staticmethod
     def adjust_N_for_activation(N: int, activation: MoEActivation) -> int:
-        """
-        Calculate the output dimension for the activation function.
+        """Calculate the output dimension for the activation function.
 
         For *_no_mul activations (e.g. relu2_no_mul),
         there's no gate/up split, so output size equals input size (N).
@@ -891,6 +847,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
 
         Returns:
             The output dimension after activation.
+
         """
         return N if not activation.is_gated else N // 2
 
@@ -937,49 +894,50 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        This function computes the intermediate result of a Mixture of Experts
+        """This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
 
-        Parameters:
-        - output: (torch.Tensor): The unweighted, unreduced output tensor.
-        - hidden_states: (torch.Tensor): The (quantized) input tensor to the MoE
-          layer.
-        - w1 (torch.Tensor): The first set of expert weights.
-        - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights: A map of row to expert weights. Some implementations
-          choose to do weight application.
-        - topk_ids (torch.Tensor): A map of row to expert id.
-        - activation (str): The activation function to apply after the first
-          MoE layer.
-        - global_num_experts (int): The total number of experts in the global
-          expert space.
-        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-          from the global expert space to the local expert space of the expert
-          parallel shard.
-        - a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-          used for a1.  Result of quantization from prepare/finalize and not
-          from the FusedMoEQuantConfig.
-        - workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
-          must be large enough to hold output of either MoE gemm.
-        - workspace2 (torch.Tensor): A scratch tensor used for the activation
-          function.
-        - expert_tokens_meta (Optional[ExpertTokensMetadata]) - An optional
-          ExpertTokensMetadata object containing gpu/cpu tensors
-          as big as the number of local experts with the information about the
-          number of tokens assigned to each local expert.
-        - apply_router_weight_on_input: True if router weights are already
-          applied on the input. This is relevant if the implementation
-          chooses to do weight application.
+        Args:
+            output: (torch.Tensor): The unweighted, unreduced output tensor.
+            hidden_states: (torch.Tensor): The (quantized) input tensor to the MoE
+                layer.
+            w1 (torch.Tensor): The first set of expert weights.
+            w2 (torch.Tensor): The second set of expert weights.
+            topk_weights: A map of row to expert weights. Some implementations
+                choose to do weight application.
+            topk_ids (torch.Tensor): A map of row to expert id.
+            activation (str): The activation function to apply after the first
+                MoE layer.
+            global_num_experts (int): The total number of experts in the global
+                expert space.
+            expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
+                from the global expert space to the local expert space of the
+                expert parallel shard.
+            a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
+                used for a1. Result of quantization from prepare/finalize and not
+                from the FusedMoEQuantConfig.
+            a2_scale (Optional[torch.Tensor]): Optional quantized scale to be
+                used for the second gemm's activations.
+            workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
+                must be large enough to hold output of either MoE gemm.
+            workspace2 (torch.Tensor): A scratch tensor used for the activation
+                function.
+            expert_tokens_meta (Optional[ExpertTokensMetadata]): An optional
+                ExpertTokensMetadata object containing gpu/cpu tensors
+                as big as the number of local experts with the information about
+                the number of tokens assigned to each local expert.
+            apply_router_weight_on_input: True if router weights are already
+                applied on the input. This is relevant if the implementation
+                chooses to do weight application.
+
         """
         raise NotImplementedError
 
 
 class FusedMoEExpertsMonolithic(FusedMoEExperts):
-    """
-    An abstract base class for the [Permute-Experts-Unpermute] step described
-        above, but with the monolithic interface (accepts router logits
-        rather than topk ids and weights).
+    """An abstract base class for the [Permute-Experts-Unpermute] step described
+    above, but with the monolithic interface (accepts router logits
+    rather than topk ids and weights).
     """
 
     @staticmethod
@@ -988,8 +946,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """
-        Whether the kernel supports a routing method (e.g. GroupedTopK).
+        """Whether the kernel supports a routing method (e.g. GroupedTopK).
 
         Monolithic kernels should explicitly opt-in to support.
         """
@@ -1000,8 +957,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        """
-        Whether the kernel supports a dtype for router logits.
+        """Whether the kernel supports a dtype for router logits.
 
         Modular kernels should opt-in to support.
         """
@@ -1086,8 +1042,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """
-        Same as apply(), except uses router_logits as opposed
+        """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
         """
@@ -1131,8 +1086,7 @@ class FusedMoEKernelModularImpl:
         expert_tokens_meta: ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Allocate temporary and output buffers for the fused experts op.
+        """Allocate temporary and output buffers for the fused experts op.
         Inputs:
         - out_dtype: output type of workspace and output tensors.
         - device: the device of the workspace and output tensors.
@@ -1171,6 +1125,24 @@ class FusedMoEKernelModularImpl:
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+
+        if current_platform.is_cpu():
+            # Every CPU FusedMoEExpertsModular kernel reports zero-sized
+            # workspace13/workspace2 (it manages its own scratch space
+            # internally) and just needs the output buffer, so skip the
+            # workspace manager entirely here -- it's the one part of this
+            # call graph Dynamo can't trace (ContextVar-based lane lookup),
+            # and CPU never actually needs its cross-chunk memory reuse.
+            common_workspace = torch.empty(
+                (max_shape_size,), dtype=workspace_dtype, device=device
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=workspace_dtype, device=device
+            )
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+            return workspace13, workspace2, fused_out
+
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),
@@ -1208,11 +1180,9 @@ class FusedMoEKernelModularImpl:
         torch.Tensor,
         torch.Tensor,
     ]:
-        """
-        The _prepare method is a wrapper around self.prepare_finalize.prepare
+        """The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -1377,17 +1347,24 @@ class FusedMoEKernelModularImpl:
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        The _finalize method is a wrapper around self.prepare_finalize.finalize
+        """The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
 
         Args:
+            output: Tensor the finalized result is written into.
+            fused_out: The unweighted, unreduced output of the fused experts.
+            hidden_states: The input tensor to the MoE layer.
+            topk_weights: A map of row to expert weights.
+            topk_ids: A map of row to expert id.
+            apply_router_weight_on_input: True if the router weights were
+                already applied on the input.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input: Optional separate input for shared experts.
                 When latent MoE is used, hidden_states is the latent-projected
                 tensor (smaller dimension) used by routed experts, while
                 shared_experts_input is the original hidden_states (full
                 dimension) needed by the shared expert MLP.
+
         """
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
@@ -1448,33 +1425,34 @@ class FusedMoEKernelModularImpl:
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        This function computes a Mixture of Experts (MoE) layer using two sets
+        """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
 
-        Parameters:
-        - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
-        - w1 (torch.Tensor): The first set of expert weights.
-        - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights (torch.Tensor): The topk weights applied at the end of the layer.
-        - topk_ids (torch.Tensor): A map of row to expert id.
-        - activation (MoEActivation): The activation function to apply after the first
-          MoE layer.
-        - global_num_experts (int): The total number of experts in the global
-          expert space.
-        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-          from the global expert space to the local expert space of the expert
-          parallel shard.
-        - apply_router_weight_on_input (bool): When true, the topk weights are
-          applied directly on the inputs. This is only applicable when topk is
-          1.
-        - shared_experts: SharedExperts | None. The shared experts if any.
-        - shared_experts_input (Optional[torch.Tensor]): Optional separate
-          input for shared experts. For latent MoE, this is the original
-          hidden_states before latent projection.
+        Args:
+            hidden_states: (torch.Tensor): The input tensor to the MoE layer.
+            w1 (torch.Tensor): The first set of expert weights.
+            w2 (torch.Tensor): The second set of expert weights.
+            topk_ids (torch.Tensor): A map of row to expert id.
+            topk_weights (torch.Tensor): The topk weights applied at the end of
+                the layer.
+            activation (MoEActivation): The activation function to apply after
+                the first MoE layer.
+            global_num_experts (int): The total number of experts in the global
+                expert space.
+            expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
+                from the global expert space to the local expert space of the
+                expert parallel shard.
+            apply_router_weight_on_input (bool): When true, the topk weights are
+                applied directly on the inputs. This is only applicable when
+                topk is 1.
+            shared_experts: SharedExperts | None. The shared experts if any.
+            shared_experts_input (Optional[torch.Tensor]): Optional separate
+                input for shared experts. For latent MoE, this is the original
+                hidden_states before latent projection.
 
         Returns:
-        - torch.Tensor: The output tensor after applying the MoE layer.
+            torch.Tensor: The output tensor after applying the MoE layer.
+
         """
         output = torch.empty_like(hidden_states)
 
@@ -1556,12 +1534,10 @@ class FusedMoEKernelMonolithicImpl:
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """
-        Same as forward(), except uses router_logits as opposed
+        """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
-
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1659,8 +1635,7 @@ class FusedMoEKernel:
         return self.fused_experts.supports_lora()
 
     def _post_init_setup(self):
-        """
-        Resolve any leftover setup dependencies between self.prepare_finalize
+        """Resolve any leftover setup dependencies between self.prepare_finalize
         and self.fused_experts here.
         """
         self.prepare_finalize.post_init_setup(self.impl.fused_experts)
@@ -1670,8 +1645,7 @@ class FusedMoEKernel:
         )
 
     def output_is_reduced(self) -> bool:
-        """
-        Indicates whether or not the output of fused MoE kernel
+        """Indicates whether or not the output of fused MoE kernel
         is reduced across all ranks.
         """
         return self.prepare_finalize.output_is_reduced()
