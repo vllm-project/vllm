@@ -52,8 +52,7 @@ behaviour is covered by `tests/v1/core/test_scheduler.py`,
 `tests/v1/spec_decode/test_uno_tail_worker.py` and
 `tests/v1/spec_decode/test_uno_preemption.py`.
 
-The result of the pass is the core touch below (the working branch also carries
-one internal markdown note that is not part of the PR); everything else is
+The result of the pass is the core touch below; everything else is
 Uno-specific code, configuration validation and tests.
 
 ```text
@@ -88,7 +87,7 @@ $ git diff --stat upstream/main HEAD
  vllm/v1/worker/gpu/spec_decode/uno_lora.py        |  514 ++++
  vllm/v1/worker/gpu/spec_decode/uno_prepare.py     |  532 ++++
  vllm/v1/worker/gpu/warmup.py                      |  135 +-
- 31 files changed, 11508 insertions(+), 59 deletions(-)
+ 31 files changed, 11520 insertions(+), 59 deletions(-)
 ```
 
 The non-Uno core touch is the configuration validation, the runner's
