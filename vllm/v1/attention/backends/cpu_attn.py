@@ -17,7 +17,6 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -343,8 +342,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         vllm_config = get_current_vllm_config()
         self.use_zentorch_sdpa = should_use_zentorch_sdpa(
             attn_type,
-            self.alibi_slopes,
-            self.sliding_window,
             vllm_config.model_config.dtype,
         )
 
@@ -397,7 +394,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             AttentionType.ENCODER,
         )
         if is_encoder_attention:
-            if self.use_zentorch_sdpa and has_zentorch_op(["zentorch_sdpa_attn"]):
+            if self.use_zentorch_sdpa:
                 # Encoder attention never reads the KV cache back, so the
                 # zentorch path attends the packed QKV directly instead of
                 # staging it through the scratch encoder cache.
