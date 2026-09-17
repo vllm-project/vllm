@@ -111,6 +111,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     namespace.value, topology, layout_descriptor
                 ),
                 layout,
+                layerwise_load=runtime.capabilities.layerwise_load,
             )
 
     def get_num_new_matched_tokens(

@@ -25,6 +25,11 @@ class UMBPRuntimeCapabilities:
     load: bool = True
     store: bool = True
     publish: bool = True
+    ranged_io: bool = False
+    layerwise_load: bool = False
+    cancellation: bool = False
+    async_transfer: bool = False
+    eviction_events: bool = False
 
 
 class UMBPSchedulerHandle(Protocol):

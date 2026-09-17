@@ -615,6 +615,32 @@ def test_worker_waits_for_layers_independently():
     assert worker.get_finished({"req"}) == (None, {"req"})
 
 
+def test_worker_falls_back_to_bulk_when_layerwise_is_unsupported():
+    handle = _LayerRecordingWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle, layerwise_load=False)
+    plan = BlockTransferPlan(
+        key="bulk",
+        block_id=1,
+        ranges=(
+            KVRange("layer1", 0, 1, 1000, 16, 16, 0),
+            KVRange("layer2", 0, 1, 2000, 16, 16, 16),
+        ),
+    )
+
+    worker.start_load_kv(
+        None,
+        UMBPConnectorMetadata(
+            load_plans=[plan],
+            load_requests={"req": [plan]},
+        ),
+    )
+    worker.wait_for_layer_load("layer1")
+
+    assert len(handle.load_calls) == 1
+    assert handle.loaded_plans == [plan]
+    assert worker.get_finished({"req"}) == (None, {"req"})
+
+
 class _EmbeddedSchedulerHandle:
     def __init__(self, store):
         self.store = store
