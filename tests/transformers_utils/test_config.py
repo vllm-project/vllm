@@ -5,6 +5,7 @@ only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
 
+import json
 import math
 from types import SimpleNamespace
 from typing import cast
@@ -29,6 +30,50 @@ from vllm.transformers_utils.configs.glm5_next import (
     Glm5NextVisionConfig,
 )
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
+
+@pytest.mark.parametrize("layout", ["mixed", "flat"])
+def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
+    """Remove redundant shared entries while preserving per-layer and flat RoPE."""
+    from transformers import Gemma4TextConfig
+
+    per_layer = {
+        "full_attention": {
+            "rope_type": "proportional",
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 1000000.0,
+        },
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+    }
+    rope_parameters: dict[str, object] = dict(per_layer)
+    if layout == "mixed":
+        rope_parameters.update(rope_type="default", rope_theta=None)
+    else:
+        rope_parameters = {"rope_type": "default", "rope_theta": 12345.0}
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma4_text",
+                "architectures": ["Gemma4DSparkModel"],
+                "num_hidden_layers": 1,
+                "layer_types": ["full_attention"],
+                "rope_parameters": rope_parameters,
+            }
+        )
+    )
+    _, config = config_module.HFConfigParser().parse(
+        tmp_path, trust_remote_code=False, max_position_embeddings=8192
+    )
+    assert isinstance(config, Gemma4TextConfig)
+    assert config.name_or_path == str(tmp_path)
+    assert config.max_position_embeddings == 8192
+    if layout == "flat":
+        assert config.rope_parameters["rope_theta"] == 12345.0
+    else:
+        for layer_type, expected in per_layer.items():
+            for key, value in expected.items():
+                assert config.rope_parameters[layer_type][key] == value
+        assert set(config.rope_parameters) == set(per_layer)
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
