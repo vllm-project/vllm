@@ -325,6 +325,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
             **spec_cls.build_metric_definitions(extra_config),
+            **spec_cls.build_info_metric_definition(extra_config),
             **get_connector_metric_definitions(),
         }
         from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -393,6 +394,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             metric_cls = self._counter_cls
         elif isinstance(metadata, OffloadingGaugeMetadata):
             metric_cls = self._gauge_cls
+            kwargs["multiprocess_mode"] = metadata.multiprocess_mode
         elif isinstance(metadata, OffloadingHistogramMetadata):
             metric_cls = self._histogram_cls
             if metadata.buckets is not None:

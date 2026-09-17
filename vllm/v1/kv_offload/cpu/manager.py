@@ -21,10 +21,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_group_idx,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 

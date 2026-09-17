@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -20,9 +22,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.v1.kv_offload.base import (
+    KV_OFFLOAD_CONFIG_INFO,
+    CanonicalKVCaches,
+    OffloadingConfigInfo,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingSpec,
+    OffloadingWorker,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
@@ -123,6 +131,10 @@ def _spec_cls_with_metric_definitions(
         @staticmethod
         def build_metric_definitions(extra_config):
             return metric_definitions
+
+        @staticmethod
+        def build_info_metric_definition(extra_config):
+            return {}
 
     return _FakeOffloadingSpec
 
@@ -638,6 +650,98 @@ def test_prom_metrics_lazily_observes_labeled_metric():
     assert counter_def.kwargs["labelnames"] == ["model_name", "engine", MY_LABEL]
 
 
+def test_prom_metrics_declares_the_info_gauge_as_most_recent():
+    """The info gauge must merge across frontends by freshest write.
+
+    Offloading stats reach one frontend per step as complete per-engine
+    snapshots, so summing would report the number of participating API-server
+    processes instead of the 1 an info gauge is pinned to -- wrong only under
+    multiprocess deployment, and silently, since the facts ride the labels.
+    """
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["multiprocess_mode"] == "mostrecent"
+
+
+def test_prom_metrics_keeps_a_gauge_declared_multiprocess_mode():
+    """A gauge that declares its own multiprocess_mode keeps it.
+
+    The value on OffloadingGaugeMetadata must stay a default. A hardcoded
+    "mostrecent" in _create_metric passes the test above and silently overrides
+    a gauge that needs another merge, for example a real cross-frontend sum.
+    """
+    metric_definitions = {
+        PENDING_STORES: OffloadingGaugeMetadata(
+            documentation="gauge declaring a non-default multiprocess mode.",
+            multiprocess_mode="sum",
+        ),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    gauge_def = prom_metrics._offloading_metric_defs[PENDING_STORES]
+    assert gauge_def.kwargs["multiprocess_mode"] == "sum"
+
+
+def test_prom_metrics_omits_multiprocess_mode_outside_a_gauge():
+    """multiprocess_mode reaches a gauge only.
+
+    prometheus_client accepts the argument on Gauge alone, so hoisting the
+    kwarg out of the gauge branch breaks construction of a real Counter or
+    Histogram.
+    """
+    metric_definitions = {
+        MY_COUNTER: OffloadingCounterMetadata(documentation="a counter."),
+        LOOKUP_LATENCY: OffloadingHistogramMetadata(
+            documentation="a histogram.",
+            buckets=(0.1, 1),
+        ),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
+    assert "multiprocess_mode" not in counter_def.kwargs
+    assert "multiprocess_mode" not in histogram_def.kwargs
+
+
 def test_prom_metrics_rejects_wrong_label_count():
     metric_definitions = {
         MY_COUNTER: OffloadingCounterMetadata(
@@ -784,3 +888,102 @@ def test_prom_metrics_rejects_undeclared_metric():
                 _StatsKey.DATA: {"unknown:metric": {(): 1}},
             }
         )
+
+
+def test_scheduler_stats_report_the_info_metric(request_runner):
+    """The info metric appears with no labels, because MockOffloadingSpec
+    declares no tiers."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+
+    stats = runner.connector_scheduler.get_stats()
+
+    assert stats is not None
+    assert stats.data[_StatsKey.TYPES][KV_OFFLOAD_CONFIG_INFO] == _MetricType.GAUGE
+    assert stats.data[_StatsKey.DATA][KV_OFFLOAD_CONFIG_INFO] == {(): 1}
+
+
+@dataclass(frozen=True)
+class _CPUCacheInfo(OffloadingConfigInfo):
+    num_chunks: int
+    policy: str
+
+
+@dataclass(frozen=True)
+class _FsTierInfo(OffloadingConfigInfo):
+    path: str
+
+
+class _MultiSourceOffloadingSpec(OffloadingSpec):
+    """Spec with a CPU cache and two file-system tiers.
+
+    This is the shape a tiering spec reports once every source publishes its own
+    configuration.
+    """
+
+    def __init__(self):
+        self.extra_config: Mapping[str, Any] = {}
+
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return (("cpu", _CPUCacheInfo), ("fs", _FsTierInfo), ("fs", _FsTierInfo))
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return (
+            _CPUCacheInfo(num_chunks=512, policy="lru"),
+            _FsTierInfo(path="/mnt/a"),
+            _FsTierInfo(path="/mnt/b"),
+        )
+
+
+def test_prom_metrics_binds_the_info_labels_of_every_config_source():
+    """The spec class declares the label names in the API-server process, the
+    spec instance reports the values in the engine process, and Prometheus binds
+    the two by position."""
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_MultiSourceOffloadingSpec,
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == [
+        "model_name",
+        "engine",
+        "cpu0_num_chunks",
+        "cpu0_policy",
+        "fs1_path",
+        "fs2_path",
+    ]
+
+    stats = OffloadingConnectorStats()
+    stats.set_gauge(
+        KV_OFFLOAD_CONFIG_INFO, 1, _MultiSourceOffloadingSpec().info_labelvalues()
+    )
+    prom_metrics.observe(stats.data)
+
+    labelvalues = ("512", "lru", "/mnt/a", "/mnt/b")
+    gauge = prom_metrics.offloading_metrics[(0, KV_OFFLOAD_CONFIG_INFO, labelvalues)]
+    assert gauge.set_values == [1]
+    assert gauge.labelvalues == ("model", "0") + labelvalues
