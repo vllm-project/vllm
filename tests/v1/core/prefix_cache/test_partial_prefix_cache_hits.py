@@ -185,7 +185,8 @@ def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
         (16, 1, 32, 95, 64, 64),
         (16, 1, None, 96, 64, 80),
         (16, 1, 32, 96, 64, 80),
-        (64, 1, None, 160, 64, 144),
+        # Attention has no key at 144; the resend loses the coarse fallback.
+        (64, 1, None, 160, 0, 144),
     ],
 )
 def test_eagle_fine_hit_retention_preserves_materialized_replay_states(
@@ -196,7 +197,7 @@ def test_eagle_fine_hit_retention_preserves_materialized_replay_states(
     resend_hit,
     extension_hit,
 ):
-    """Latest-only retention keeps fine replay states and coarse fallback states."""
+    """Latest-only retention uses the fine replay alignment without coarse fallbacks."""
     attention_args = dict(
         block_size=attention_block_size,
         num_kv_heads=1,
@@ -264,7 +265,8 @@ def test_eagle_fine_hit_retention_preserves_materialized_replay_states(
 
     resend = make_request("resend", token_ids, 16, sha256)
     assert manager.get_computed_blocks(resend)[1] == resend_hit
-    assert any(group == 1 and boundary == resend_hit for group, _, boundary in offloads)
+    for hit in {resend_hit, extension_hit} - {0}:
+        assert any(group == 1 and boundary == hit for group, _, boundary in offloads)
     extension = make_request("extension", token_ids + [999] * 16, 16, sha256)
     assert manager.get_computed_blocks(extension)[1] == extension_hit
 
