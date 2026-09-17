@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-disagg_encoder_proxy.py
+"""disagg_encoder_proxy.py
 
 Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
 clusters:
@@ -200,8 +199,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
-    """
-    Return *all* image/audio/video items that appear anywhere in `messages`.
+    """Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
@@ -224,8 +222,7 @@ async def fanout_encoder_primer(
     req_id: str,
     consumer_zmq: str | None = None,
 ) -> tuple[dict[int, dict], dict[str, Any]]:
-    """
-    1. Build one request *per MM item* with all text removed.
+    """1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
 
@@ -278,7 +275,6 @@ async def fanout_encoder_primer(
         item_transfer_ids[idx] = transfer_id
 
         encoder_req = {
-            # You *may* need to keep additional fields
             "model": orig_request.get("model"),
             "messages": [
                 {
@@ -292,6 +288,14 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        for key in (
+            "mm_processor_kwargs",
+            "media_io_kwargs",
+            "priority",
+            "session_id",
+        ):
+            if key in orig_request:
+                encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
             # No mm_hash here on purpose. The encoder's own
             # `mm_features[i].identifier` is derived from the uuid *and* the
@@ -378,7 +382,7 @@ async def fanout_encoder_primer(
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
                 # looks it up by mm_hash on the request, so carry it through.
-                ec_params[item_uuids.get(idx, ec_mm_hash)] = reported
+                ec_params[ec_mm_hash] = reported
                 if NO_REWRITE and consumer_zmq is not None:
                     ec_params.setdefault("ec_items", []).append(
                         {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
@@ -395,8 +399,7 @@ async def maybe_prefill(
     p_url: str,
     req_id: str,
 ) -> dict:
-    """
-    - Do prefill-only task if p_url exist;
+    """- Do prefill-only task if p_url exist;
     - Return a new body carrying kv transfer params (for nixl connector)
     - Else, skip and return the original request data for decode
 
@@ -842,14 +845,14 @@ async def _post_if_available(
     payload: dict,
     headers: dict,
 ) -> dict | None:
-    """
-    POST `payload` to `url`.
+    """POST `payload` to `url`.
 
     Returns
     -------
     • The decoded JSON body on success (2xx)
     • None if the endpoint does not exist (404)
     • Raises for anything else.
+
     """
     try:
         resp = await session.post(url, json=payload, headers=headers)
@@ -870,9 +873,7 @@ async def _post_if_available(
 
 
 async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: str):
-    """
-    Fire & forget to both clusters, tolerate 404.
-    """
+    """Fire & forget to both clusters, tolerate 404."""
     headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
 
     encode_task = _post_if_available(

@@ -60,6 +60,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -70,13 +71,15 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
-    get_physical_device_id,
+    get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
 )
 from vllm.platforms import current_platform
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
@@ -90,15 +93,19 @@ def export_entries(
     ``named_parameters``/``named_buffers`` are iterated with
     ``remove_duplicate=False`` so tied weights (e.g. ``lm_head.weight`` sharing
     storage with ``embed_tokens.weight``) are not silently dropped. Each unique
-    tensor is exported once; every additional name that refers to the same
+    tensor is exported once per call; every additional name that refers to the same
     tensor object is recorded in the returned alias map so the client can
     re-establish the shared identity instead of allocating uninitialized
     memory for it.
+
+    CUDA reduction arguments must be exported separately for each consumer so
+    that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
         A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
         its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
         canonical name.
+
     """
     entries: dict[str, TensorEntry] = {}
     aliases: dict[str, str] = {}
@@ -164,8 +171,6 @@ class WeightCacheDaemon:
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
         self.model: torch.nn.Module | None = None
-        self.entries: dict[str, TensorEntry] = {}
-        self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -187,16 +192,10 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
             self.model = get_daemon_model(self.vllm_config)
-        self._export_entries()
         logger.info(
-            "Weight cache daemon rank %d cached %d tensors",
+            "Weight cache daemon rank %d loaded model",
             self.tp_rank,
-            len(self.entries),
         )
-
-    def _export_entries(self) -> None:
-        assert self.model is not None
-        self.entries, self.aliases = export_entries(self.model)
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
         """Serve requests until terminated.
@@ -208,8 +207,9 @@ class WeightCacheDaemon:
         Args:
             ready_callback: Invoked once the socket is bound and listening,
                 so the launcher can report overall readiness.
+
         """
-        socket_path = self._socket_path()
+        socket_path = self._socket_path
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
         )
@@ -268,12 +268,9 @@ class WeightCacheDaemon:
             ) from e
         return lock_fd
 
+    @property
     def _socket_path(self) -> str:
-        device_index = torch.accelerator.current_device_index()
-        gpu_id = get_physical_device_id(device_index)
-        if gpu_id is None:
-            gpu_id = device_index
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(get_current_device_uuid(), self.socket_dir)
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -295,38 +292,32 @@ class WeightCacheDaemon:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
-        if not self.entries:
+        if self.model is None:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
+        gpu_uuid = get_current_device_uuid()
+        entries, aliases = export_entries(self.model)
         send_msg(
             conn,
             {
                 "status": "ok",
-                "entries": self.entries,
-                "aliases": self.aliases,
-                "gpu_uuid": self._gpu_uuid(),
+                "entries": entries,
+                "aliases": aliases,
+                "gpu_uuid": gpu_uuid,
             },
         )
         logger.info_once(
             "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
             self.tp_rank,
-            len(self.entries),
-            len(self.aliases),
+            len(entries),
+            len(aliases),
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
-        self.entries.clear()
-        self.aliases.clear()
         self.model = None
         torch.accelerator.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
         send_msg(conn, {"status": "ok"})
-
-    def _gpu_uuid(self) -> str:
-        props = torch.cuda.get_device_properties(
-            torch.accelerator.current_device_index()
-        )
-        return str(props.uuid)
 
 
 def _run_daemon(
@@ -359,10 +350,6 @@ def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
 
 
 def main() -> None:
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.utils.network_utils import get_distributed_init_method, get_open_port
-
     parser = FlexibleArgumentParser(
         description="Launch weight cache daemons (one per TP rank)."
     )

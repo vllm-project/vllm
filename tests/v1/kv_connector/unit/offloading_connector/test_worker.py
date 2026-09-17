@@ -97,10 +97,9 @@ def _make_worker(
     kv_cache_config: KVCacheConfig,
     replicated_layout: bool = False,
     rank: int = 0,
+    canonical_layout: bool = False,
 ):
-    """
-    Create an OffloadingConnectorWorker with mocked dependencies.
-    """
+    """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
     )
@@ -108,6 +107,7 @@ def _make_worker(
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
     spec.config = MagicMock()
+    spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 
@@ -206,11 +206,13 @@ def test_prepare_store_kv_non_writer_marks_completed_without_submit():
     assert meta.completed_jobs == {7: 1}
 
 
-def test_prepare_store_kv_writer_submits_store():
+@pytest.mark.parametrize("rank,canonical_layout", [(0, False), (0, True), (1, True)])
+def test_prepare_store_kv_writer_submits_store(rank, canonical_layout):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=0,
+        rank=rank,
+        canonical_layout=canonical_layout,
     )
 
     worker.prepare_store_kv(_store_metadata(8))

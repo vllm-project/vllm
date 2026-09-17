@@ -246,6 +246,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The quantization config.
+
     """
 
     supports_pre_processed_weights = True
@@ -485,6 +486,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     Args:
         quant_config: The quantization config.
+
     """
 
     supports_pre_processed_weights = True
@@ -860,9 +862,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from FP8 checkpoints."""
 
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)

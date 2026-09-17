@@ -23,8 +23,7 @@ logger = init_logger(__name__)
 def _get_hasher_factory(
     algorithm: MMHasherAlgorithm,
 ) -> Callable[[], "hashlib._Hash"]:
-    """
-    Get the hasher factory based on the configured algorithm.
+    """Get the hasher factory based on the configured algorithm.
 
     Args:
         algorithm: Hash algorithm name (blake3, sha256, or sha512)
@@ -33,8 +32,8 @@ def _get_hasher_factory(
     Supports blake3 (default), sha256, and sha512 for FIPS compliance.
 
     See: https://github.com/vllm-project/vllm/issues/18334
-    """
 
+    """
     if algorithm == "blake3":
         from blake3 import blake3
 
@@ -46,6 +45,19 @@ def _get_hasher_factory(
     else:
         # This should never happen due to config validation
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+
+
+def _get_image_id_bytes(image: Image.Image) -> bytes | None:
+    try:
+        exif = image.getexif()
+        image_id = exif.get(Image.ExifTags.Base.ImageID)
+        if isinstance(image_id, uuid.UUID):
+            return image_id.bytes
+    except Exception:
+        # Tolerate malformed EXIF metadata (e.g. invalid TIFF header)
+        # and fall back to serializing raw image data or bytes.
+        pass
+    return None
 
 
 class MultiModalHasher:
@@ -60,11 +72,9 @@ class MultiModalHasher:
             return (np.array(obj).tobytes(),)
 
         if isinstance(obj, Image.Image):
-            exif = obj.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            image_id = _get_image_id_bytes(obj)
+            if image_id is not None:
+                return (image_id,)
 
             data = {"mode": obj.mode, "data": np.asarray(obj)}
             palette = obj.palette
@@ -76,11 +86,9 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("image", data)
 
         if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
-            exif = obj.media.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            image_id = _get_image_id_bytes(obj.media)
+            if image_id is not None:
+                return (image_id,)
 
             if obj.io_config:
                 return cls.iter_item_to_bytes(
