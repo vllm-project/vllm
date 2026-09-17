@@ -615,7 +615,6 @@ class EmbeddedRuntime(IUMBPRuntime):
     capabilities = UMBPRuntimeCapabilities(
         ranged_io=True,
         layerwise_load=True,
-        layerwise_store=True,
         partial_hash_hits=True,
         cancellation=True,
         async_transfer=True,
@@ -648,7 +647,6 @@ class _MoriEmbeddedRuntime(IUMBPRuntime):
     capabilities = UMBPRuntimeCapabilities(
         ranged_io=True,
         layerwise_load=True,
-        layerwise_store=True,
         partial_hash_hits=True,
         cancellation=True,
         async_transfer=True,
