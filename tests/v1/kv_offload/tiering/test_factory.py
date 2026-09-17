@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for SecondaryTierFactory.
+"""Unit tests for SecondaryTierFactory.
 
 These tests verify:
 1. Pre-registration integrity — registered tier module paths can import
@@ -10,6 +9,7 @@ These tests verify:
 3. Error paths — missing tier_type, unknown tier_type, duplicate registration.
 """
 
+from importlib.util import find_spec
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,8 +42,11 @@ def _make_mock_args():
 
 
 def test_pre_registered_tiers_can_be_imported():
-    """CI sentinel: example/fs/obj paths must import and yield SecondaryTierManager."""
+    """CI sentinel: registered tiers import and yield SecondaryTierManager."""
     for tier_type in SecondaryTierFactory._registry:
+        # KVCR is an optional external dependency and may not be installed.
+        if tier_type == "kvcr" and find_spec("kvcr") is None:
+            continue
         cls = SecondaryTierFactory._registry[tier_type]()
         assert issubclass(cls, SecondaryTierManager)
 
