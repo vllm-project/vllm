@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class LogitsProcessorRequestState:
+class LogitsProcRequestState:
     """State associated with active requests, shared with logits processors.
 
     Wraps the model runner's per-slot buffers, which are mutated in place,
@@ -27,6 +27,7 @@ class LogitsProcessorRequestState:
     device: torch.device
     max_num_reqs: int
     vocab_size: int
+
     # [max_num_reqs, max_model_len] committed token ids per request slot.
     all_token_ids: StagedWriteTensor
     # [max_num_reqs] tokens in the user-provided prompt.
@@ -38,9 +39,7 @@ class LogitsProcessorRequestState:
     total_len: StagedWriteTensor
 
     @classmethod
-    def from_request_state(
-        cls, req_states: RequestState
-    ) -> "LogitsProcessorRequestState":
+    def from_request_state(cls, req_states: RequestState) -> "LogitsProcRequestState":
         return cls(
             device=req_states.device,
             max_num_reqs=req_states.max_num_reqs,
@@ -95,11 +94,11 @@ class LogitsProcessor(ABC):
     """
 
     def __init__(  # noqa: B027
-        self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState
+        self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState
     ):
         """Capture what stays constant for the processor's lifetime.
 
-        ``req_state`` exposes the on-device token history and batch constants a
+        ``req_states`` exposes the on-device token history and batch constants a
         processor may read. Treat it as read-only.
         """
 

@@ -16,7 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -51,9 +51,7 @@ def _make_state(bad_words_token_ids: list[list[int]]) -> tuple[BadWordsState, in
     req_states.apply_staged_writes()
 
     req_idx = req_states.req_id_to_index["req"]
-    state = BadWordsState(
-        None, LogitsProcessorRequestState.from_request_state(req_states)
-    )
+    state = BadWordsState(None, LogitsProcRequestState.from_request_state(req_states))
     state.add_request(req_idx, SamplingParams(_bad_words_token_ids=bad_words_token_ids))
     state.apply_staged_writes()
     return state, req_idx

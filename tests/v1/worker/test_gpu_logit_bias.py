@@ -16,7 +16,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -61,9 +61,7 @@ def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
     # add_request() reads prompt_len per slot; every slot here uses the same one.
     req_states.prompt_len.np[:] = PROMPT_LEN
 
-    state = LogitBiasState(
-        None, LogitsProcessorRequestState.from_request_state(req_states)
-    )
+    state = LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
     for req_idx, is_structured in enumerate(structured):
         state.add_request(req_idx, _params(is_structured))
     state.apply_staged_writes()

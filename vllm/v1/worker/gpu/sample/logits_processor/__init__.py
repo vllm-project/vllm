@@ -11,7 +11,7 @@ from vllm.v1.sample.logits_processor import STR_POOLING_REJECTS_LOGITSPROCS
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 __all__ = [
-    "LogitsProcessorRequestState",
+    "LogitsProcRequestState",
     "LogitsContext",
     "LogitsProcessor",
     "build_custom_logits_processors",
@@ -156,5 +156,5 @@ def build_custom_logits_processors(
         return []
 
     custom_logitsprocs_classes = _load_v2_logitsprocs(custom_logitsprocs)
-    lp_req_state = LogitsProcessorRequestState.from_request_state(req_states)
+    lp_req_state = LogitsProcRequestState.from_request_state(req_states)
     return [ctor(vllm_config, lp_req_state) for ctor in custom_logitsprocs_classes]

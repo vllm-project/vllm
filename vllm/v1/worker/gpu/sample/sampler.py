@@ -23,7 +23,7 @@ from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
@@ -58,18 +58,21 @@ class Sampler:
 
         self.req_states = req_states
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+
+        lp_req_state = LogitsProcRequestState.from_request_state(req_states)
+        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
+        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
+        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.
-        lp_req_state = LogitsProcessorRequestState.from_request_state(req_states)
-        # Assigned as a field since model runner reads output_bin_counts off
-        # it for penalty bookkeeping.
-        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
         self.logits_processors: list[LogitsProcessor] = [
-            LogitBiasState(vllm_config, lp_req_state),
+            logit_bias_state,
             self.penalties_state,
-            BadWordsState(vllm_config, lp_req_state),
+            bad_words_state,
             *custom_logits_processors,
         ]
+
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(
             req_states, vllm_config.reasoning_config

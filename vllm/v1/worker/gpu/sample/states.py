@@ -39,13 +39,17 @@ class SamplingStates:
         self.num_logprobs.fill(NO_LOGPROBS)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
-        self.temperature.np[req_idx] = sampling_params.temperature
-        self.top_p.np[req_idx] = sampling_params.top_p
+        temperature = sampling_params.temperature
         top_k = sampling_params.top_k
+        top_p = sampling_params.top_p
+        min_p = sampling_params.min_p
+
+        self.temperature.np[req_idx] = temperature
+        self.top_p.np[req_idx] = top_p
         if top_k <= 0 or top_k > self.vocab_size:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
-        self.min_p.np[req_idx] = sampling_params.min_p
+        self.min_p.np[req_idx] = min_p
 
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None
@@ -60,13 +64,8 @@ class SamplingStates:
             num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
 
-        # Mirrors the early-outs in apply_temperature(), apply_min_p() and
-        # get_top_k_top_p().
-        temperature = self.temperature.np[req_idx]
-        min_p = self.min_p.np[req_idx]
-        top_p = self.top_p.np[req_idx]
-        return bool(
-            (temperature != 0.0 and temperature != 1.0)
+        return temperature != 0.0 and (
+            temperature != 1.0
             or min_p != 0.0
             or top_k != self.vocab_size
             or top_p != 1.0

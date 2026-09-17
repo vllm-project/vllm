@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 
 if TYPE_CHECKING:
@@ -23,51 +23,39 @@ MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState(LogitsProcessor):
-    def __init__(
-        self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState
-    ):
-        self.req_state = req_state
+    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
+        self.prompt_len_np = req_states.prompt_len.np
+        max_num_reqs = req_states.max_num_reqs
+        device = req_states.device
 
         # Allowed token IDs.
-        self.num_allowed_token_ids = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.int32
-        )
+        self.num_allowed_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.allowed_token_ids = StagedWriteTensor(
-            (req_state.max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS),
-            dtype=torch.int32,
-            device=req_state.device,
+            (max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS), dtype=torch.int32, device=device
         )
         # Logit bias.
-        self.num_logit_bias = UvaBackedTensor(req_state.max_num_reqs, dtype=torch.int32)
+        self.num_logit_bias = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.logit_bias_token_ids = StagedWriteTensor(
-            (req_state.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
-            dtype=torch.int32,
-            device=req_state.device,
+            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS), dtype=torch.int32, device=device
         )
         self.logit_bias = StagedWriteTensor(
-            (req_state.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
+            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
             dtype=torch.float32,
-            device=req_state.device,
+            device=device,
         )
         # Min tokens.
-        self.min_lens = UvaBackedTensor(req_state.max_num_reqs, dtype=torch.int32)
-        self.num_stop_token_ids = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.int32
-        )
-        self.restore_when_all_masked = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.int32
-        )
+        self.min_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.num_stop_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.restore_when_all_masked = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.stop_token_ids = StagedWriteTensor(
-            (req_state.max_num_reqs, MAX_NUM_STOP_TOKEN_IDS),
-            dtype=torch.int32,
-            device=req_state.device,
+            (max_num_reqs, MAX_NUM_STOP_TOKEN_IDS), dtype=torch.int32, device=device
         )
 
         # Using any of the above.
-        self.use_logit_bias = np.zeros(req_state.max_num_reqs, dtype=bool)
+        self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
-        prompt_len = int(self.req_state.prompt_len.np[req_idx])
+        prompt_len = int(self.prompt_len_np[req_idx])
         # Using any logit bias.
         use_logit_bias = False
 

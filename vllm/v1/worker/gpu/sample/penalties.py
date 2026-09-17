@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
-    LogitsProcessorRequestState,
+    LogitsProcRequestState,
 )
 
 if TYPE_CHECKING:
@@ -21,21 +21,16 @@ if TYPE_CHECKING:
 
 
 class PenaltiesState(LogitsProcessor):
-    def __init__(
-        self, vllm_config: "VllmConfig", req_state: LogitsProcessorRequestState
-    ):
-        self.req_state = req_state
+    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
+        self.req_states = req_states
+        self.device = req_states.device
+        max_num_reqs = req_states.max_num_reqs
+        vocab_size = req_states.vocab_size
 
-        self.repetition_penalty = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.float32
-        )
-        self.frequency_penalty = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.float32
-        )
-        self.presence_penalty = UvaBackedTensor(
-            req_state.max_num_reqs, dtype=torch.float32
-        )
-        self.use_penalty = np.zeros(req_state.max_num_reqs, dtype=bool)
+        self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.use_penalty = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize repetition penalty manually because 0 is an invalid value for it.
         self.repetition_penalty.np.fill(1.0)
@@ -43,18 +38,12 @@ class PenaltiesState(LogitsProcessor):
 
         # Statistics for penalties.
         self.prompt_bin_mask = torch.zeros(
-            req_state.max_num_reqs,
-            cdiv(req_state.vocab_size, 32),
-            dtype=torch.int32,
-            device=req_state.device,
+            max_num_reqs, cdiv(vocab_size, 32), dtype=torch.int32, device=self.device
         )
         # TODO(woosuk): This tensor is rarely used but can be very large, taking up
         # GBs of GPU memory. Optimize the memory usage.
         self.output_bin_counts = torch.zeros(
-            req_state.max_num_reqs,
-            req_state.vocab_size,
-            dtype=torch.int32,
-            device=req_state.device,
+            max_num_reqs, vocab_size, dtype=torch.int32, device=self.device
         )
 
         self._new_penalties_reqs: list[int] = []
@@ -73,18 +62,16 @@ class PenaltiesState(LogitsProcessor):
     def apply_staged_writes(self) -> None:
         if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(
-                self._new_penalties_reqs,
-                dtype=torch.int32,
-                device=self.req_state.device,
+                self._new_penalties_reqs, dtype=torch.int32, device=self.device
             )
 
-            prefill_lens = self.req_state.prefill_len.np[self._new_penalties_reqs]
+            prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
             max_prefill_len = int(prefill_lens.max())
             bincount(
                 idx_mapping,
-                self.req_state.all_token_ids.gpu,
-                self.req_state.prompt_len.gpu,
-                self.req_state.prefill_len.gpu,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prompt_len.gpu,
+                self.req_states.prefill_len.gpu,
                 self.prompt_bin_mask,
                 self.output_bin_counts,
                 max_prefill_len,
