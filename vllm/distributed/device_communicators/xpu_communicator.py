@@ -53,9 +53,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             dtype=input_.dtype,
             device=input_.device,
         )
-        dist.all_gather_into_tensor(
-            gathered.view(-1), flat_input, group=self.device_group
-        )
+        dist.all_gather_single(gathered.view(-1), flat_input, group=self.device_group)
         output = gathered[0].clone()
         for rank in range(1, self.world_size):
             output.add_(gathered[rank])
@@ -213,7 +211,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             (self.world_size,) + input_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        dist.all_gather_single(output_tensor, input_, group=self.device_group)
         if self.rank_in_group == dst:
             # Reshape
             output_tensor = output_tensor.movedim(0, dim)

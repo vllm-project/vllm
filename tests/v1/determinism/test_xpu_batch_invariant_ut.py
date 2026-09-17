@@ -150,13 +150,11 @@ def test_collectives_preserve_rank_order_and_partition(monkeypatch, operation, r
     ]
     inputs[2].add_(torch.arange(24, device="xpu").reshape(8, 3))
 
-    def all_gather_into_tensor(output, input_, group):
+    def all_gather_single(output, input_, group):
         torch.testing.assert_close(input_, inputs[rank].reshape(-1), rtol=0, atol=0)
         output.copy_(torch.stack(inputs).reshape(-1))
 
-    monkeypatch.setattr(
-        xpu_communicator.dist, "all_gather_into_tensor", all_gather_into_tensor
-    )
+    monkeypatch.setattr(xpu_communicator.dist, "all_gather_single", all_gather_single)
     communicator = XpuCommunicator.__new__(XpuCommunicator)
     communicator.world_size = 4
     communicator.rank_in_group = rank
