@@ -3,6 +3,7 @@
 
 mod config;
 mod model_files;
+mod overrides;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub use self::config::{
     load_tokenizer_config,
 };
 pub use self::model_files::{ResolvedModelFiles, TokenizerSource};
+pub use self::overrides::HfOverrides;
 use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
 
