@@ -449,7 +449,9 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            self.requested_memory = request_memory(
+                init_snapshot, self.cache_config, self.load_config
+            )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)

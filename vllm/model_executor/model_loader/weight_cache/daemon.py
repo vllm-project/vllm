@@ -45,6 +45,7 @@ node.
 
 import contextlib
 import fcntl
+import gc
 import multiprocessing
 import os
 import queue
@@ -79,6 +80,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -192,9 +194,16 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(tp_size, 1)
             self.model = get_daemon_model(self.vllm_config)
+        # Loading and post-processing leave freed transients in the caching
+        # allocator; return them so engines sharing the GPU can use them.
+        gc.collect()
+        torch.accelerator.empty_cache()
         logger.info(
-            "Weight cache daemon rank %d loaded model",
+            "Weight cache daemon rank %d loaded model (%s GiB allocated, "
+            "%s GiB reserved)",
             self.tp_rank,
+            format_gib(torch.accelerator.memory_allocated()),
+            format_gib(torch.accelerator.memory_reserved()),
         )
 
     def serve_forever(self, ready_callback: Callable[[], None] | None = None) -> None:
