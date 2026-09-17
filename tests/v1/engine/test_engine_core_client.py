@@ -158,7 +158,10 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         local_engines_only=False,
         enable_elastic_ep=False,
     )
-    vllm_config = SimpleNamespace(parallel_config=parallel_config)
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        cache_config=SimpleNamespace(effective_attention_block_size=None),
+    )
 
     client = core_client_mod.MPClient(
         asyncio_mode=False,
@@ -259,6 +262,66 @@ def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
 
 
+@pytest.mark.asyncio
+async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
+    """A coordinator snapshot during scale-down must only route to survivors."""
+    import msgspec
+    import zmq.asyncio
+
+    client = _make_dplb_client(num_engines=4)
+    client.engine_ranks_managed = list(range(4))
+    client.engines_running = True
+    client.current_wave = 0
+    client.resources = SimpleNamespace(stats_update_task=None)
+    client.stats_update_address = "inproc://scale-down-stats"
+    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    pause_started = asyncio.Event()
+
+    async def pause_scheduler(*args, **kwargs):
+        pause_started.set()
+        await asyncio.Future()
+
+    client._call_utility_async = pause_scheduler
+
+    with (
+        zmq.asyncio.Context() as ctx,
+        ctx.socket(zmq.XPUB) as coordinator,
+        ctx.socket(zmq.PAIR) as first_req_socket,
+    ):
+        client.ctx = ctx
+        coordinator.bind(client.stats_update_address)
+        first_req_socket.bind(client.first_req_sock_addr)
+        client._ensure_stats_update_task()
+        scale_task = None
+        try:
+            # Wait for subscription so the snapshot cannot be dropped.
+            await asyncio.wait_for(coordinator.recv(), timeout=5)
+            scale_task = asyncio.create_task(client._commit_scale_down_elastic_ep(2))
+            await asyncio.wait_for(pause_started.wait(), timeout=5)
+
+            # The coordinator still knows about all four engines while the
+            # client has already stopped routing to the two removed engines.
+            counts = [[0, 0, 0.0], [0, 0, 0.0], [1, 0, 0.0], [1, 0, 0.0]]
+            await coordinator.send(msgspec.msgpack.encode((counts, 1, True)))
+
+            async def wait_for_snapshot():
+                while client.current_wave != 1:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_snapshot(), timeout=5)
+            chosen = client.get_core_engine_for_request(
+                _make_pooling_request("scale-down-request")
+            )
+            assert chosen == client.core_engines[0]
+        finally:
+            tasks = [client.resources.stats_update_task]
+            if scale_task is not None:
+                tasks.append(scale_task)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def test_dplb_snapshot_backpressure_overrides_inflight():
     """An engine reported heavily loaded by the coordinator is avoided even
     when this client has routed nothing to it."""
@@ -308,10 +371,15 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-def test_apply_ready_response_syncs_block_size():
+@pytest.mark.parametrize(
+    ("effective_size", "other_size"),
+    [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
+)
+def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -339,14 +407,31 @@ def test_apply_ready_response_syncs_block_size():
             max_loras=0,
         )
     )
-    client._apply_ready_response(payload)
+    fields = msgspec.msgpack.decode(payload)
+    if effective_size is None:
+        del fields["effective_attention_block_size"]
+    else:
+        fields["effective_attention_block_size"] = effective_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
     assert client.vllm_config.cache_config.block_size == 1056
+    cache_config = client.vllm_config.cache_config
+    assert cache_config.effective_attention_block_size == effective_size
+
+    fields["effective_attention_block_size"] = other_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
+    assert cache_config.effective_attention_block_size == (
+        effective_size if effective_size == other_size else None
+    )
+
+    client._apply_ready_response(b"")
+    assert cache_config.effective_attention_block_size is None
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -1307,11 +1392,9 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 @create_new_process_for_each_test()
 def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    """Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
     is empty. This ensures the engine frontend does not need access to GPUs.
     """
-
     from vllm.v1.engine.core import EngineCoreProc
     from vllm.v1.executor.abstract import Executor
 
@@ -1369,3 +1452,41 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         )
 
         engine_core_proc.shutdown()
+
+
+def _ready_response_with_weight_transfer(weight_transfer_config):
+    """Build a ready response against a mock executor."""
+    from vllm.v1.engine.core import EngineCoreProc
+
+    executor = MagicMock()
+    executor.supports_draft_weight_updates.return_value = True
+
+    proc = MagicMock()
+    proc.model_executor = executor
+    proc.vllm_config = MagicMock()
+    proc.vllm_config.weight_transfer_config = weight_transfer_config
+    proc.vllm_config.lora_config = None
+    proc.vllm_config.model_config.enable_sleep_mode = False
+    proc.scheduler = MagicMock()
+
+    response = EngineCoreProc._make_ready_response(proc)
+    return response, executor
+
+
+def test_ready_response_skips_draft_rpc_without_weight_transfer():
+    """No weight-transfer config: the executor must not be consulted."""
+    response, executor = _ready_response_with_weight_transfer(None)
+
+    executor.supports_draft_weight_updates.assert_not_called()
+    assert response.supports_draft_weight_updates is False
+
+
+def test_ready_response_queries_executor_with_weight_transfer():
+    """Weight transfer configured: the executor is still consulted."""
+    weight_transfer_config = MagicMock()
+    weight_transfer_config.backend = "nixl"
+
+    response, executor = _ready_response_with_weight_transfer(weight_transfer_config)
+
+    executor.supports_draft_weight_updates.assert_called_once()
+    assert response.supports_draft_weight_updates is True

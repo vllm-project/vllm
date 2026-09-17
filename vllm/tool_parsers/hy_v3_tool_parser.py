@@ -8,17 +8,17 @@ from typing import Any
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -181,6 +181,7 @@ class HYV3ToolParser(ToolParser):
             "-3"   → int(-3)
 
         Return None on failure.
+
         """
         try:
             if "." in value or "e" in value or "E" in value:

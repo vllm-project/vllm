@@ -500,10 +500,8 @@ template <typename scalar_t>
 __global__ void situ_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const int d, const float beta, const float linear_beta,
-    const int64_t* __restrict__ valid_rows_ptr) {
+    const int d, const float beta, const float linear_beta) {
   const int64_t row = blockIdx.x;
-  if (valid_rows_ptr != nullptr && row >= *valid_rows_ptr) return;
   const scalar_t* gate_ptr = input + row * 2 * d;
   const scalar_t* up_ptr = gate_ptr + d;
   scalar_t* out_ptr = out + row * d;
@@ -558,15 +556,16 @@ template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
 __global__ void situ_and_mul_quant_group_pipelined_kernel(
     fp8_type* __restrict__ out, float* __restrict__ scale_out,
     const scalar_t* __restrict__ input, const int64_t num_rows,
-    const int32_t* __restrict__ valid_rows_ptr, const int64_t topk) {
+    const int32_t* __restrict__ num_valid_tokens_ptr, const int64_t topk) {
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
   static constexpr int NUM_GROUPS = D / GROUP_SIZE;
   const int64_t row_bound =
-      valid_rows_ptr != nullptr
-          ? max((int64_t)0, min((int64_t)(*valid_rows_ptr) * topk, num_rows))
+      num_valid_tokens_ptr != nullptr
+          ? max((int64_t)0,
+                min((int64_t)(*num_valid_tokens_ptr) * topk, num_rows))
           : num_rows;
 
   static_assert(NUM_GROUPS % 4 == 0,
@@ -710,15 +709,16 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
     const scalar_t* __restrict__ input,  // [num_tokens, 2, d]
     const int d, const int num_groups, const float beta,
     const float linear_beta, const int64_t num_rows,
-    const int32_t* __restrict__ valid_rows_ptr, const int64_t topk) {
+    const int32_t* __restrict__ num_valid_tokens_ptr, const int64_t topk) {
   static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   const int num_warps = blockDim.x / WARP_SIZE;
   const int64_t row_bound =
-      valid_rows_ptr != nullptr
-          ? max((int64_t)0, min((int64_t)(*valid_rows_ptr) * topk, num_rows))
+      num_valid_tokens_ptr != nullptr
+          ? max((int64_t)0,
+                min((int64_t)(*num_valid_tokens_ptr) * topk, num_rows))
           : num_rows;
 
   const bool clamp_up = linear_beta > 0.0f;
@@ -768,24 +768,61 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
   }
 }
 
-template <typename scalar_t>
+constexpr int kMaxMaskedTokenBlocks = 32;
+
+template <bool BATCHED_EXPERTS>
+__device__ __forceinline__ bool get_masked_row_range(
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
+    int64_t& first_row, int64_t& end_row, int64_t& row_stride) {
+  if constexpr (BATCHED_EXPERTS) {
+    // [E, T, *]: z lanes grid-stride over one expert's valid token prefix.
+    const int expert = blockIdx.y;
+    const int num_tokens =
+        max(0, min(valid_token_counts[expert], max_num_tokens));
+    const int token_block = blockIdx.z;
+    if (token_block >= num_tokens) {
+      return false;
+    }
+    const int64_t expert_first_row =
+        static_cast<int64_t>(expert) * max_num_tokens;
+    first_row = expert_first_row + token_block;
+    end_row = expert_first_row + num_tokens;
+    row_stride = gridDim.z;
+  } else {
+    // [T, *]: y lanes grid-stride over the single valid token prefix.
+    const int num_tokens = max(0, min(valid_token_counts[0], max_num_tokens));
+    const int token_block = blockIdx.y;
+    if (token_block >= num_tokens) {
+      return false;
+    }
+    first_row = token_block;
+    end_row = num_tokens;
+    row_stride = gridDim.y;
+  }
+  return first_row < end_row;
+}
+
+__device__ __forceinline__ int get_masked_feature_index() {
+  return blockIdx.x * blockDim.x + threadIdx.x;
+}
+
+template <typename scalar_t, bool BATCHED_EXPERTS>
 __global__ void masked_situ_and_mul_kernel(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
-    const int* __restrict__ expert_num_tokens, const int max_num_tokens,
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
     const int d, const float beta, const float linear_beta) {
-  const int expert = blockIdx.y;
-  const int num_tokens = expert_num_tokens[expert];
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= d || num_tokens == 0) {
+  int64_t first_row, end_row, row_stride;
+  const int idx = get_masked_feature_index();
+  if (idx >= d ||
+      !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
+                                             first_row, end_row, row_stride)) {
     return;
   }
 
   const bool clamp_up = linear_beta > 0.0f;
   const float inv_beta = 1.0f / beta;
   const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
-  const int64_t expert_row = static_cast<int64_t>(expert) * max_num_tokens;
-  for (int token = 0; token < num_tokens; ++token) {
-    const int64_t row = expert_row + token;
+  for (int64_t row = first_row; row < end_row; row += row_stride) {
     const scalar_t* gate_ptr = input + row * 2 * d;
     const scalar_t* up_ptr = gate_ptr + d;
     scalar_t* out_ptr = out + row * d;
@@ -793,6 +830,119 @@ __global__ void masked_situ_and_mul_kernel(
     const float u = (float)VLLM_LDG(&up_ptr[idx]);
     out_ptr[idx] = (scalar_t)situ_activation(g, u, beta, linear_beta, clamp_up,
                                              inv_beta, inv_linear_beta);
+  }
+}
+
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float),
+          bool act_first, bool HAS_CLAMP, bool BATCHED_EXPERTS>
+__global__ void masked_act_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
+    const int d, const float limit, const float alpha, const float beta) {
+  int64_t first_row, end_row, row_stride;
+  const int idx = get_masked_feature_index();
+  if (idx >= d ||
+      !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
+                                             first_row, end_row, row_stride)) {
+    return;
+  }
+
+  for (int64_t row = first_row; row < end_row; row += row_stride) {
+    const scalar_t* x_ptr = input + row * 2 * d;
+    const scalar_t* y_ptr = x_ptr + d;
+    scalar_t* out_ptr = out + row * d;
+    const scalar_t x = VLLM_LDG(&x_ptr[idx]);
+    const scalar_t y = VLLM_LDG(&y_ptr[idx]);
+    out_ptr[idx] = compute<scalar_t, ACT_FN, act_first, HAS_CLAMP>(x, y, limit,
+                                                                   alpha, beta);
+  }
+}
+
+template <typename scalar_t, bool BATCHED_EXPERTS>
+__global__ void masked_swigluoai_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
+    const int d, const float alpha, const float limit) {
+  int64_t first_row, end_row, row_stride;
+  const int idx = get_masked_feature_index();
+  if (idx >= d ||
+      !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
+                                             first_row, end_row, row_stride)) {
+    return;
+  }
+
+  for (int64_t row = first_row; row < end_row; row += row_stride) {
+    const scalar_t* in_ptr = input + row * 2 * d;
+    scalar_t* out_ptr = out + row * d;
+    out_ptr[idx] =
+        swigluoai_and_mul(in_ptr[2 * idx], in_ptr[2 * idx + 1], alpha, limit);
+  }
+}
+
+template <typename scalar_t, bool BATCHED_EXPERTS>
+__global__ void masked_swiglustep_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
+    const int d, const float limit) {
+  int64_t first_row, end_row, row_stride;
+  const int idx = get_masked_feature_index();
+  if (idx >= d ||
+      !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
+                                             first_row, end_row, row_stride)) {
+    return;
+  }
+
+  for (int64_t row = first_row; row < end_row; row += row_stride) {
+    const scalar_t* gate_ptr = input + row * 2 * d;
+    const scalar_t* up_ptr = gate_ptr + d;
+    scalar_t* out_ptr = out + row * d;
+    const float gate = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float up = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_silu = gate / (1.0f + expf(-gate));
+    const float gate_clamped = fminf(gate_silu, limit);
+    const float up_clamped = fmaxf(fminf(up, limit), -limit);
+    out_ptr[idx] = (scalar_t)(gate_clamped * up_clamped);
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ T silu_no_mul_kernel(const T& x) {
+  return silu_kernel(x, 1.0f);
+}
+
+template <typename T>
+__device__ __forceinline__ T gelu_no_mul_kernel(const T& x) {
+  return gelu_kernel(x, 1.0f);
+}
+
+template <typename T>
+__device__ __forceinline__ T gelu_tanh_no_mul_kernel(const T& x) {
+  return gelu_tanh_kernel(x, 1.0f);
+}
+
+template <typename T>
+__device__ __forceinline__ T relu2_no_mul_kernel(const T& x) {
+  const float value = fmaxf((float)x, 0.0f);
+  return (T)(value * value);
+}
+
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+          bool BATCHED_EXPERTS>
+__global__ void masked_activation_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ valid_token_counts, const int max_num_tokens,
+    const int d) {
+  int64_t first_row, end_row, row_stride;
+  const int idx = get_masked_feature_index();
+  if (idx >= d ||
+      !get_masked_row_range<BATCHED_EXPERTS>(valid_token_counts, max_num_tokens,
+                                             first_row, end_row, row_stride)) {
+    return;
+  }
+
+  for (int64_t row = first_row; row < end_row; row += row_stride) {
+    const int64_t offset = row * d + idx;
+    out[offset] = ACT_FN(VLLM_LDG(&input[offset]));
   }
 }
 
@@ -890,8 +1040,7 @@ void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
 // through), matching SituAndMul(linear_beta=None) on the Python side.
 void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
                   torch::stable::Tensor& input,  // [..., 2 * d]
-                  double beta, double linear_beta,
-                  std::optional<torch::stable::Tensor> valid_rows) {
+                  double beta, double linear_beta) {
   int d = input.size(-1) / 2;
   int64_t num_tokens = input.numel() / input.size(-1);
   if (num_tokens == 0) {
@@ -899,14 +1048,6 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
   }
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
-  const int64_t* valid_rows_ptr = nullptr;
-  if (valid_rows.has_value()) {
-    STD_TORCH_CHECK(valid_rows->is_cuda() && valid_rows->get_device_index() ==
-                                                 input.get_device_index(),
-                    "situ_and_mul: valid_rows must be a CUDA tensor on the "
-                    "same device as input");
-    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
-  }
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -914,7 +1055,7 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
       input.scalar_type(), "situ_and_mul_kernel", [&] {
         vllm::situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
-            d, (float)beta, (float)linear_beta, valid_rows_ptr);
+            d, (float)beta, (float)linear_beta);
       });
 }
 
@@ -925,7 +1066,7 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
   int num_experts = input.size(0);
   int max_num_tokens = input.size(1);
   int d = input.size(2) / 2;
-  if (num_experts == 0 || max_num_tokens == 0) {
+  if (num_experts == 0 || max_num_tokens == 0 || d == 0) {
     return;
   }
   constexpr int block_size = 256;
@@ -936,21 +1077,128 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
   const cudaStream_t stream = get_current_cuda_stream();
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "masked_situ_and_mul_kernel", [&] {
-        vllm::masked_situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
-            expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
-            (float)beta, (float)linear_beta);
+        vllm::masked_situ_and_mul_kernel<scalar_t, true>
+            <<<grid, block, 0, stream>>>(
+                out.mutable_data_ptr<scalar_t>(),
+                input.const_data_ptr<scalar_t>(),
+                expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
+                (float)beta, (float)linear_beta);
       });
 }
 
+#define LAUNCH_MASKED_ACT_AND_MUL(KERNEL, ACT_FIRST, HAS_CLAMP, LIMIT, ALPHA, \
+                                  BETA)                                       \
+  vllm::masked_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST,      \
+                                  HAS_CLAMP, BATCHED_EXPERTS>                 \
+      <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),          \
+                                   input.const_data_ptr<scalar_t>(),          \
+                                   valid_token_counts.const_data_ptr<int>(),  \
+                                   max_num_tokens, d, LIMIT, ALPHA, BETA)
+
+#define LAUNCH_MASKED_ACTIVATION(KERNEL)                                      \
+  vllm::masked_activation_kernel<scalar_t, KERNEL<scalar_t>, BATCHED_EXPERTS> \
+      <<<grid, block, 0, stream>>>(                                           \
+          out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(), \
+          valid_token_counts.const_data_ptr<int>(), max_num_tokens, d)
+
+void masked_moe_activation(
+    torch::stable::Tensor& out,    // [T, d] or [E, T, d]
+    torch::stable::Tensor& input,  // [T, d] or [E, T, d], gated has 2 * d
+    const torch::stable::Tensor& valid_token_counts,
+    const std::string& activation, double clamp_limit, double alpha,
+    double beta, double situ_beta, double situ_linear_beta) {
+  const bool batched_experts = input.dim() == 3;
+  const int num_experts = batched_experts ? input.size(0) : 1;
+  const int max_num_tokens = batched_experts ? input.size(1) : input.size(0);
+  const int d = out.size(-1);
+  if (num_experts == 0 || max_num_tokens == 0 || d == 0) {
+    return;
+  }
+
+  constexpr int block_size = 256;
+  const int feature_blocks = (d + block_size - 1) / block_size;
+  const int token_blocks =
+      std::min(max_num_tokens, vllm::kMaxMaskedTokenBlocks);
+  // Batched grid: (feature tile, expert, token lane); flat grid: (feature
+  // tile, token lane). Token lanes grid-stride each valid prefix.
+  dim3 grid = batched_experts ? dim3(feature_blocks, num_experts, token_blocks)
+                              : dim3(feature_blocks, token_blocks);
+  dim3 block(block_size);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  auto launch = [&]<bool BATCHED_EXPERTS>() {
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+        input.scalar_type(), "masked_moe_activation", [&] {
+          if (activation == "silu") {
+            LAUNCH_MASKED_ACT_AND_MUL(vllm::silu_kernel, true, false, 0.0f,
+                                      1.0f, 0.0f);
+          } else if (activation == "silu_with_clamp") {
+            LAUNCH_MASKED_ACT_AND_MUL(vllm::silu_kernel, true, true,
+                                      (float)clamp_limit, (float)alpha,
+                                      (float)beta);
+          } else if (activation == "gelu") {
+            LAUNCH_MASKED_ACT_AND_MUL(vllm::gelu_kernel, true, false, 0.0f,
+                                      1.0f, 0.0f);
+          } else if (activation == "gelu_tanh") {
+            LAUNCH_MASKED_ACT_AND_MUL(vllm::gelu_tanh_kernel, true, false, 0.0f,
+                                      1.0f, 0.0f);
+          } else if (activation == "situ") {
+            vllm::masked_situ_and_mul_kernel<scalar_t, BATCHED_EXPERTS>
+                <<<grid, block, 0, stream>>>(
+                    out.mutable_data_ptr<scalar_t>(),
+                    input.const_data_ptr<scalar_t>(),
+                    valid_token_counts.const_data_ptr<int>(), max_num_tokens, d,
+                    (float)situ_beta, (float)situ_linear_beta);
+          } else if (activation == "swigluoai") {
+            vllm::masked_swigluoai_and_mul_kernel<scalar_t, BATCHED_EXPERTS>
+                <<<grid, block, 0, stream>>>(
+                    out.mutable_data_ptr<scalar_t>(),
+                    input.const_data_ptr<scalar_t>(),
+                    valid_token_counts.const_data_ptr<int>(), max_num_tokens, d,
+                    (float)alpha, (float)clamp_limit);
+          } else if (activation == "swigluoai_uninterleave") {
+            LAUNCH_MASKED_ACT_AND_MUL(vllm::silu_kernel, true, true,
+                                      (float)clamp_limit, (float)alpha,
+                                      (float)beta);
+          } else if (activation == "swiglustep") {
+            vllm::masked_swiglustep_and_mul_kernel<scalar_t, BATCHED_EXPERTS>
+                <<<grid, block, 0, stream>>>(
+                    out.mutable_data_ptr<scalar_t>(),
+                    input.const_data_ptr<scalar_t>(),
+                    valid_token_counts.const_data_ptr<int>(), max_num_tokens, d,
+                    (float)clamp_limit);
+          } else if (activation == "silu_no_mul") {
+            LAUNCH_MASKED_ACTIVATION(vllm::silu_no_mul_kernel);
+          } else if (activation == "gelu_no_mul") {
+            LAUNCH_MASKED_ACTIVATION(vllm::gelu_no_mul_kernel);
+          } else if (activation == "gelu_tanh_no_mul") {
+            LAUNCH_MASKED_ACTIVATION(vllm::gelu_tanh_no_mul_kernel);
+          } else if (activation == "relu2_no_mul") {
+            LAUNCH_MASKED_ACTIVATION(vllm::relu2_no_mul_kernel);
+          } else {
+            STD_TORCH_CHECK(false,
+                            "Unsupported masked MoE activation: ", activation);
+          }
+        });
+  };
+  if (batched_experts) {
+    launch.template operator()<true>();
+  } else {
+    launch.template operator()<false>();
+  }
+}
+
+#undef LAUNCH_MASKED_ACT_AND_MUL
+#undef LAUNCH_MASKED_ACTIVATION
 // Fused SITU activation and block-FP8 quantization for Humming w2.
-// `valid_rows` is the int32 DeepEP token count (psum[-1]); rows = it * `topk`,
-// so padding is excluded on-device and skipped rows receive scale 1.
+// `num_valid_tokens` is the int32 DeepEP token count (psum[-1]); rows = it *
+// `topk`, so padding is excluded on-device and skipped rows receive scale 1.
 void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         torch::stable::Tensor& scale,  // [..., 1 or d/128]
                         torch::stable::Tensor& input,  // [..., 2 * d]
                         double beta, double linear_beta, int64_t group_size,
-                        std::optional<torch::stable::Tensor> valid_rows,
+                        std::optional<torch::stable::Tensor> num_valid_tokens,
                         int64_t topk) {
   STD_TORCH_CHECK(
       out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
@@ -974,16 +1222,17 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
   }
   STD_TORCH_CHECK(out.size(-1) == d && out.numel() == num_tokens * (int64_t)d,
                   "situ_and_mul_quant: out shape must be [num_tokens, d]");
-  const int32_t* valid_rows_ptr = nullptr;
-  if (valid_rows.has_value()) {
-    STD_TORCH_CHECK(valid_rows->is_cuda() && valid_rows->get_device_index() ==
-                                                 input.get_device_index(),
-                    "situ_and_mul_quant: valid_rows must be a CUDA tensor on "
-                    "the same device as input");
+  const int32_t* num_valid_tokens_ptr = nullptr;
+  if (num_valid_tokens.has_value()) {
     STD_TORCH_CHECK(
-        valid_rows->scalar_type() == torch::headeronly::ScalarType::Int,
-        "situ_and_mul_quant: valid_rows must be int32 (psum count)");
-    valid_rows_ptr = valid_rows->const_data_ptr<int32_t>();
+        num_valid_tokens->is_cuda() &&
+            num_valid_tokens->get_device_index() == input.get_device_index(),
+        "situ_and_mul_quant: num_valid_tokens must be a CUDA tensor on the "
+        "same device as input");
+    STD_TORCH_CHECK(
+        num_valid_tokens->scalar_type() == torch::headeronly::ScalarType::Int,
+        "situ_and_mul_quant: num_valid_tokens must be int32 (psum count)");
+    num_valid_tokens_ptr = num_valid_tokens->const_data_ptr<int32_t>();
   }
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -1031,7 +1280,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         out.mutable_data_ptr<fp8_t>(),
                         scale.mutable_data_ptr<float>(),
                         input.const_data_ptr<scalar_t>(), num_tokens,
-                        valid_rows_ptr, topk);
+                        num_valid_tokens_ptr, topk);
                     return;
                   }
                 }
@@ -1045,7 +1294,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         scale.mutable_data_ptr<float>(),
                         input.const_data_ptr<scalar_t>(), d, num_groups,
                         (float)beta, (float)linear_beta, num_tokens,
-                        valid_rows_ptr, topk);
+                        num_valid_tokens_ptr, topk);
               });
         });
   }
