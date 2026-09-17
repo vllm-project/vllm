@@ -126,7 +126,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     expected: int,
 ):
     """Mamba/GDN block-table rows index global positions, unlike DCP KV."""
-
     max_model_len = 1_048_576
     attention_block_size = 1_536
     mamba_block_size = 16

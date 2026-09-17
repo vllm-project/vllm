@@ -1826,8 +1826,7 @@ def _test_partial_request_hit(
 def _make_hybrid_kv_cache_config(
     block_size: int, num_blocks: int, spec_types: list[str]
 ) -> KVCacheConfig:
-    """
-    Create a KVCacheConfig with the specified spec types.
+    """Create a KVCacheConfig with the specified spec types.
 
     Args:
         block_size: The block size for KV cache.
@@ -1837,6 +1836,7 @@ def _make_hybrid_kv_cache_config(
             - "sliding_window": SlidingWindowSpec with window=2*block_size
             - "sliding_window_large": SlidingWindowSpec with window=4*block_size
             - "mamba": MambaSpec
+
     """
     spec_map = {
         "full": lambda: FullAttentionSpec(
@@ -1938,8 +1938,7 @@ _HYBRID_MODEL_TEST_CASES = [
 
 @pytest.mark.parametrize("spec_types", _HYBRID_MODEL_TEST_CASES)
 def test_prefill_hybrid_model_combinations(spec_types: list[str]):
-    """
-    Test prefix caching with hybrid models containing various combinations of
+    """Test prefix caching with hybrid models containing various combinations of
     KV cache spec types.
 
     This unified test covers:
@@ -2021,8 +2020,7 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
 def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
-    """
-    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
+    """Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
     More complex hybrid models with EAGLE are not yet supported (see issue #32802).
     """
     block_size = 16
@@ -2489,8 +2487,7 @@ def test_evict():
 
 
 def test_hash_block_correct_reuse():
-    """
-    This tests when a previously cached block is reused as a new block,
+    """This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
     """
     block_size = 16
@@ -2530,8 +2527,7 @@ def test_hash_block_correct_reuse():
 
 
 def test_computed_blocks_not_evicted():
-    """
-    Test that the computed blocks are not evicted when getting new blocks
+    """Test that the computed blocks are not evicted when getting new blocks
     for a request if there are any other free blocks.
     """
     block_size = 16
@@ -2590,9 +2586,7 @@ def test_computed_blocks_not_evicted():
 
 
 def test_basic_prefix_caching_disabled():
-    """
-    This tests that the prefix caching is disabled.
-    """
+    """This tests that the prefix caching is disabled."""
     block_size = 4
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 5),
@@ -2639,11 +2633,9 @@ def test_basic_prefix_caching_disabled():
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_cache_blocks(hash_fn):
-    """
-    This is a unit test that tests the correctness of the _cache_full_blocks
+    """This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
-
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=5,
@@ -2688,9 +2680,7 @@ def test_cache_blocks(hash_fn):
 
 
 def test_cache_blocks_multi_group():
-    """
-    This tests that blocks are cached correctly for different kv cache groups.
-    """
+    """This tests that blocks are cached correctly for different kv cache groups."""
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
@@ -2773,10 +2763,7 @@ def test_cache_blocks_multi_group():
 
 
 def test_mm_prefix_caching():
-    """
-    This tests that the multi-modal prefix caching is correct.
-    """
-
+    """This tests that the multi-modal prefix caching is correct."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
@@ -2881,8 +2868,7 @@ def test_mm_prefix_caching():
 
 
 def test_cache_key_salting():
-    """
-    This tests that cache salts are applied during hashing and the cache
+    """This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
     """
     block_size = 16
@@ -2961,8 +2947,7 @@ def test_cache_key_salting():
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
-    """
-    This is a unit test that tests the correctness of the allocate_slots
+    """This is a unit test that tests the correctness of the allocate_slots
     when there is not enough free blocks. Specifically, when a request
     has computed blocks but cannot be allocated due to not enough free blocks,
     the computed blocks should not be touched.
@@ -3462,8 +3447,7 @@ def test_session_id_does_not_affect_prefix_cache_identity():
 
 
 def test_block_stored_event_group_idx_multiple_groups():
-    """
-    Test BlockStored events for separate HMA groups that each carry the
+    """Test BlockStored events for separate HMA groups that each carry the
     correct group_idx.
 
     Simulates the HMA scenario where full-attention blocks (group 0) and
@@ -3585,8 +3569,7 @@ def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_removed_event_group_idx(group_id: int):
-    """
-    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    """Test BlockRemoved events emitted on eviction carry the group_idx extracted
     from the evicted block's BlockHashWithGroupId via get_group_id().
     """
     block_size = 4

@@ -352,7 +352,6 @@ class DiffusionGemmaForConditionalGeneration(
         skip duplicate decoder backbone weights, handle vision tower and
         self-conditioning separately.
         """
-
         sc_params = dict(
             (n, p)
             for n, p in self.named_parameters()
