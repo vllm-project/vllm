@@ -20,8 +20,8 @@ from vllm.model_executor.models.pixtral import _make_packed_sequence_metadata
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from ....utils import VLLM_PATH, large_gpu_test
-from ...utils import check_logprobs_close
+from .....utils import VLLM_PATH, large_gpu_test
+from ....utils import check_logprobs_close
 
 if TYPE_CHECKING:
     from _typeshed import StrPath

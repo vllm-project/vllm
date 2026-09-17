@@ -3,7 +3,6 @@
 
 import json
 
-import pytest
 from mistral_common.protocol.instruct.chunk import AudioChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.tokens.tokenizers.audio import Audio
@@ -14,8 +13,8 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from ....conftest import AudioTestAssets
 from ....utils import RemoteOpenAIServer
 from ...utils import check_logprobs_close
-from .test_ultravox import MULTI_AUDIO_PROMPT, run_multi_audio_test
-from .vlm_utils import model_utils
+from ..generation.omni.test_ultravox import MULTI_AUDIO_PROMPT, run_multi_audio_test
+from ..generation.vlm_utils import model_utils
 
 MODEL_NAME = "mistralai/Voxtral-Mini-3B-2507"
 MISTRAL_FORMAT_ARGS = [
@@ -44,11 +43,7 @@ def _get_prompt(audio_assets: AudioTestAssets, question: str) -> list[int]:
     return tokenizer.apply_chat_template(messages=messages)
 
 
-@pytest.mark.core_model
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_models_with_multiple_audios(
+def run_models_with_multiple_audios(
     vllm_runner,
     audio_assets: AudioTestAssets,
     dtype: str,
@@ -67,7 +62,7 @@ def test_models_with_multiple_audios(
     )
 
 
-def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
+def run_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     """Two-layer accuracy and serving validation using Mistral format.
 
     1. Offline vLLM greedy output (runs first to avoid CUDA fork issues
@@ -146,11 +141,7 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     )
 
 
-@pytest.mark.skip(
-    reason="VoxtralProcessor.apply_chat_template() in transformers v5 "
-    "doesn't resolve chat_template=None to the default template"
-)
-def test_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
+def run_hf_reference(hf_runner, vllm_runner, audio_assets: AudioTestAssets):
     """Compare vLLM Mistral-format output against HF Transformers reference.
 
     Instead of requiring an exact text match (which is brittle across
