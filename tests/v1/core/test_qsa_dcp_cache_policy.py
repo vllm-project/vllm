@@ -375,3 +375,68 @@ def test_a_replicated_cache_still_gets_the_whole_sequence() -> None:
     assert selector.logical_block_span == selector.block_size, "never sharded"
     # 168 blocks of 196 states covers all 32,768 states
     assert 168 * (selector.block_size // 8) >= 262144 // 8
+
+
+# --- merge must carry the resolved shard count ------------------------------
+#
+# `dcp_shard_count` is resolved before grouping, so it is a real field and the
+# trailing `fields(AttentionSpec)` equality check in merge() compares it. A
+# merge that drops it leaves None against a stamped member and asserts, which
+# breaks any dense model started with DCP.
+
+
+@pytest.mark.parametrize("world", [2, 4])
+def test_merging_stamped_specs_keeps_the_shard_count(world: int) -> None:
+    """Merge the specs AFTER stamping, which is the order the engine uses.
+
+    Merging unstamped specs passes whatever merge() does, because both sides
+    are then None. That is why this defect reached a GPU.
+    """
+    from vllm.v1.core.kv_cache_utils import stamp_dcp_shard_counts
+
+    specs = stamp_dcp_shard_counts({"a": _main_kv_spec(), "b": _main_kv_spec()}, world)
+    members = list(specs.values())
+    assert all(m.dcp_shard_count == world for m in members), "stamped"
+
+    merged = type(members[0]).merge(members)
+    assert merged.dcp_shard_count == world, "merge dropped the shard count"
+
+
+def test_merging_disagreeing_shard_counts_is_refused() -> None:
+    from dataclasses import replace
+
+    a = replace(_main_kv_spec(), dcp_shard_count=2)
+    b = replace(_main_kv_spec(), dcp_shard_count=1)
+    with pytest.raises(AssertionError, match="One DCP shard count"):
+        type(a).merge([a, b])
+
+
+def test_the_group_block_is_the_sharded_members_not_a_gcd() -> None:
+    """A gcd equals it only by luck of the member set.
+
+    A third member with a smaller block would drag the gcd below the sharded
+    member's block, and the slot mapper would then multiply the wrong number by
+    the world size -- the mirror of the bug that scored 0.0000 on MRCR.
+    """
+    from dataclasses import replace
+
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    sharded = replace(_main_kv_spec(), dcp_shard_count=2)  # block 784
+    selector = _aligned_selector(2)  # block 1568, transparent
+    group = UniformTypeKVCacheSpecs.from_specs({"main": sharded, "sel": selector})
+    assert group is not None, "the spans agree, so they group"
+    assert group.block_size == 784, "the sharded member's block, not gcd(784, 1568)"
+
+
+def test_storage_block_size_must_divide_the_block() -> None:
+    """The one drift that misplaces writes without raising anything."""
+    with pytest.raises(AssertionError, match="storage_block_size"):
+        MLAAttentionSpec(
+            block_size=784,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=DTYPE,
+            tokens_per_state=8,
+            storage_block_size=1568,
+        )

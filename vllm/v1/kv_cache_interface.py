@@ -9,8 +9,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
-from functools import cached_property, reduce
-from math import gcd, prod
+from functools import cached_property
+from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
@@ -556,6 +556,20 @@ class AttentionSpec(KVCacheSpec):
         return cdiv(max_len, self.logical_block_span)
 
 
+def _one_shard_count(specs: list) -> int | None:
+    """The DCP shard count a merged group carries.
+
+    Resolved before grouping, so it is a real field and the trailing
+    ``fields(AttentionSpec)`` equality check compares it. A merge that drops it
+    leaves ``None`` against a stamped member and asserts.
+    """
+    counts = {spec.dcp_shard_count for spec in specs}
+    assert len(counts) == 1, (
+        f"One DCP shard count per group, got {sorted(map(str, counts))}."
+    )
+    return counts.pop()
+
+
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):
     """
@@ -639,6 +653,7 @@ class FullAttentionSpec(AttentionSpec):
             # If any layer in the group is non-causal, treat the group as
             # non-causal so the engine core disables incompatible scheduling.
             non_causal=any(spec.non_causal for spec in specs),
+            dcp_shard_count=_one_shard_count(specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -701,6 +716,15 @@ class MLAAttentionSpec(FullAttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
+        if self.storage_block_size is not None:
+            # storage_block_size overrides the group's kernel block for this
+            # layer's view, its builder and its store kernel. They agree only
+            # because all three derive the state count from this one number.
+            # A drift misplaces writes and raises nothing.
+            assert self.block_size % self.storage_block_size == 0, (
+                f"storage_block_size {self.storage_block_size} must divide "
+                f"block_size {self.block_size}."
+            )
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -717,6 +741,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         # A group gets one ownership policy, so a replicated and a sharded cache
         # cannot share one. Mixing them silently shards the replicated cache.
         dcp_transparent_set = {spec.dcp_transparent for spec in specs}
+
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -752,6 +777,7 @@ class MLAAttentionSpec(FullAttentionSpec):
                 spec.non_causal_multi_token_decode for spec in specs
             ),
             dcp_transparent=dcp_transparent_set.pop(),
+            dcp_shard_count=_one_shard_count(specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -1213,6 +1239,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
+            dcp_shard_count=_one_shard_count(specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -1316,21 +1343,24 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         of KV cache spec. Return None if not.
         """
         if cls.is_uniform_type(kv_cache_specs):
-            # The manager block size, handed to each member as its kernel
-            # block. It is NOT the logical span: the slot mapper multiplies
-            # this by the DCP world size itself, so putting the span here
-            # counts the world size twice and every write lands in the wrong
-            # slot.
+            # The manager block size. The slot mapper multiplies it by the DCP
+            # world size itself, so it must be the SHARDED member's block. Put
+            # the span here instead and the world size is counted twice, and
+            # every write lands in the wrong slot.
             #
-            # It only has to DIVIDE each member's block, not equal it, so take
-            # the gcd. A replicated member whose block spans several of these
-            # is then viewed as that many kernel blocks, which is the existing
-            # `blocks_per_page` path.
-            block_sizes = {spec.block_size for spec in kv_cache_specs.values()}
-            block_size = reduce(gcd, block_sizes)
-            assert all(bs % block_size == 0 for bs in block_sizes), (
-                f"A KV cache group's block must divide every member's, "
-                f"got {sorted(block_sizes)} -> {block_size}."
+            # A gcd is not enough. It equals the sharded member's block only by
+            # luck of the member set, and a third member with a smaller block
+            # would drag it down and break the mapper the same way.
+            specs = list(kv_cache_specs.values())
+            sharded = {
+                spec.block_size
+                for spec in specs
+                if not getattr(spec, "dcp_transparent", False)
+            }
+            block_size = sharded.pop() if len(sharded) == 1 else specs[0].block_size
+            assert all(spec.block_size % block_size == 0 for spec in specs), (
+                "A KV cache group's block must divide every member's, got "
+                f"{sorted({spec.block_size for spec in specs})} -> {block_size}."
             )
             return cls(block_size=block_size, kv_cache_specs=kv_cache_specs)
         else:

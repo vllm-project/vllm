@@ -885,25 +885,16 @@ class QSACompressedKeyCache(_QSAStateCache):
             # which changes the selection rather than distributing it.
             #
             dcp_transparent=True,
-            # NOT aligned to the sharded main KV block yet. Widening this to
-            # 784*W matches the block-table widths and would merge the groups,
-            # which is worth about 1.8x the DCP=1 capacity. It does not work on
-            # its own: the group's block size is applied as each member's
-            # KERNEL block, and `compute_layer_kv_cache_shape_bytes` requires a
-            # kernel block to DIVIDE the member's own block. A 1568 group
-            # against this model's 784-slot main KV fails that.
-            #
-            # Aligning needs the main KV spec to express its span too, with its
-            # 784 slots as the kernel block inside it. See DCP-FIX-PLAN-REV3.md.
-            # Span the same tokens as the sharded main KV block so the two
-            # share a group. The main KV keeps its physical 784-slot block,
-            # which is what the slot mapper needs; the group takes the gcd of
-            # the two, so this block is simply viewed as several kernel blocks.
+            # Span the same tokens as the sharded main KV block, so both block
+            # tables are 168 entries wide and the two share one group. The main
+            # KV keeps its physical 784-slot block, which is what the slot
+            # mapper needs, and this block is a whole multiple of it.
             #
             # `dcp_shard_count=1` says the span is stated here and must not be
-            # scaled again. `storage_block_size` pins the builder's view to the
-            # whole span, so it addresses all 196 states of it rather than the
-            # 98 in one kernel block.
+            # scaled again. `storage_block_size` must EQUAL block_size: it is
+            # what pins the builder, the layer view and the store kernel to the
+            # same 196 states. If the two ever drift, writes are misplaced with
+            # no error at all.
             dcp_shard_count=1,
             block_size=(
                 self.cache_config.block_size
