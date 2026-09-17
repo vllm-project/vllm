@@ -219,6 +219,14 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
         validate_parsed_serve_args(args)
 
 
+def test_per_request_output_token_metrics_requires_log_stats(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--per-request-output-token-metrics", "--disable-log-stats"]
+    )
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
 def _build_launch_render_parser():
     """Mirror `vllm launch render`.
 

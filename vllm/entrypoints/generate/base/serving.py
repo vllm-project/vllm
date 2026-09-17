@@ -14,8 +14,9 @@ from starlette.datastructures import Headers
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    OutputTokenCategoryMetrics,
+    OutputTokenMetrics,
     PerRequestMetrics,
-    PerRequestPhaseMetrics,
     SpeculativeDecodingMetrics,
     TokenPhaseCounts,
 )
@@ -105,17 +106,21 @@ def build_per_request_timing_metrics(
 
 
 @dataclass
-class _PhaseTimingState:
+class _OutputCategoryTimingState:
     token_count: int = 0
     observations: list[tuple[int, float]] = field(default_factory=list)
 
 
 @dataclass
-class RequestPhaseMetricsTracker:
-    """Track parser-classified phases at engine output-batch resolution."""
+class OutputTokenMetricsTracker:
+    """Track parser-classified output categories at engine batch resolution."""
 
-    reasoning: _PhaseTimingState = field(default_factory=_PhaseTimingState)
-    content: _PhaseTimingState = field(default_factory=_PhaseTimingState)
+    reasoning: _OutputCategoryTimingState = field(
+        default_factory=_OutputCategoryTimingState
+    )
+    content: _OutputCategoryTimingState = field(
+        default_factory=_OutputCategoryTimingState
+    )
     scheduled_ts: float = 0.0
     unclassified_token_count: int = 0
     classification_available: bool = False
@@ -134,12 +139,12 @@ class RequestPhaseMetricsTracker:
         if metrics is not None and metrics.scheduled_ts > 0:
             self.scheduled_ts = metrics.scheduled_ts
         batch_ts = metrics.last_token_ts if metrics is not None else 0.0
-        self._update_phase(self.reasoning, counts.reasoning, batch_ts)
-        self._update_phase(self.content, counts.content, batch_ts)
+        self._update_category(self.reasoning, counts.reasoning, batch_ts)
+        self._update_category(self.content, counts.content, batch_ts)
 
     @staticmethod
-    def _update_phase(
-        state: _PhaseTimingState,
+    def _update_category(
+        state: _OutputCategoryTimingState,
         cumulative_count: int,
         batch_ts: float,
     ) -> None:
@@ -149,22 +154,18 @@ class RequestPhaseMetricsTracker:
         state.token_count = cumulative_count
         state.observations.append((cumulative_count, batch_ts))
 
-    def build(
-        self,
-    ) -> tuple[
-        PerRequestPhaseMetrics | None,
-        PerRequestPhaseMetrics | None,
-        int | None,
-    ]:
+    def build(self) -> OutputTokenMetrics | None:
         if not self.classification_available:
-            return None, None, None
-        return (
-            self._build_phase(self.reasoning),
-            self._build_phase(self.content),
-            self.unclassified_token_count,
+            return None
+        return OutputTokenMetrics(
+            reasoning=self._build_category(self.reasoning),
+            content=self._build_category(self.content),
+            unclassified_token_count=self.unclassified_token_count,
         )
 
-    def _build_phase(self, state: _PhaseTimingState) -> PerRequestPhaseMetrics:
+    def _build_category(
+        self, state: _OutputCategoryTimingState
+    ) -> OutputTokenCategoryMetrics:
         ttft_ms: float | None = None
         generation_time_ms: float | None = None
         mean_itl_ms: float | None = None
@@ -208,7 +209,7 @@ class RequestPhaseMetricsTracker:
                 mean_itl_ms = generation_time_ms / (state.token_count - 1)
                 tokens_per_second = (state.token_count - 1) / generation_time_ms * 1000
 
-        return PerRequestPhaseMetrics(
+        return OutputTokenCategoryMetrics(
             token_count=state.token_count,
             time_to_first_token_ms=ttft_ms,
             generation_time_ms=generation_time_ms,
