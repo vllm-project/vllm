@@ -1858,8 +1858,12 @@ class GPUModelRunner(
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if self.enable_prompt_embeds:
             # The multimodal embed path reads is_token_ids.gpu; its .cpu copy is
-            # refreshed every step but the async fast paths below only scatter
-            # input_ids.gpu, so refresh is_token_ids.gpu here too.
+            # refreshed every step but the async fast path below replaces draft
+            # tokens directly on the GPU. Mark those positions as token IDs before
+            # refreshing the GPU mask so their embeddings are rebuilt. Sampled
+            # tokens are already marked by bookkeeping.
+            if spec_flattened_indices:
+                self.is_token_ids.np[spec_flattened_indices] = True
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
