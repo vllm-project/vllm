@@ -8,9 +8,9 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    Mxfp8LinearKernel,
     MxFp4LinearKernel,
     MxFp6LinearKernel,
+    Mxfp8LinearKernel,
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
     init_mxfp8_linear_kernel,
