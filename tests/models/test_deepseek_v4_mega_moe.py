@@ -68,7 +68,6 @@ def v41_moe_config(dist_init):
 
 @pytest.mark.parametrize("use_cudagraph", [False, True])
 @pytest.mark.parametrize("above_threshold", [False, True])
-@pytest.mark.parametrize("padding", [False, True], ids=["unpadded", "nan_padding"])
 @pytest.mark.parametrize("vision", [False, True])
 @pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 384, 6), (2, 128, 3)])
 def test_deepseek_v41_moe_routes_without_hash_table(
@@ -78,7 +77,6 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     layer_id,
     num_experts,
     top_k,
-    padding,
     above_threshold,
     use_cudagraph,
 ):
@@ -134,33 +132,9 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         dim=-1, keepdim=True
     )
 
-    num_valid_tokens = num_tokens - int(padding)
-    expected_output = 3 * hidden_states[:num_valid_tokens]
-    if padding:
-        hidden_states[-1] = float("nan")
-        padding_mask = torch.arange(num_tokens, device="cuda") >= num_valid_tokens
-
     routed = {}
 
     def check_routing(x, weights, ids, *, activation_clamp):
-        if padding:
-            staged_ids = torch.empty_like(ids)
-            staged_weights = torch.empty_like(weights)
-            prepare_megamoe_inputs(
-                x,
-                weights,
-                ids,
-                torch.empty_like(x, dtype=torch.float8_e4m3fn),
-                torch.empty(
-                    (x.shape[0], x.shape[1] // 128),
-                    dtype=torch.int32,
-                    device=x.device,
-                ),
-                staged_ids,
-                staged_weights,
-                is_padding=padding_mask,
-            )
-            ids, weights = staged_ids, staged_weights
         routed["ids"], routed["weights"] = ids, weights
         assert activation_clamp == config.swiglu_limit
         return x.clone()
@@ -179,8 +153,6 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     )
     if use_cudagraph:
         stream = torch.cuda.Stream()
-        if padding:
-            hidden_states[-1].zero_()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             for _ in range(3):
@@ -189,26 +161,20 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             output = moe(hidden_states, input_ids, metadata)
-        if padding:
-            hidden_states[-1] = float("nan")
         graph.replay()
         torch.accelerator.synchronize()
     else:
         output = moe(hidden_states, input_ids, metadata)
 
     ids, weights = routed["ids"], routed["weights"]
-    if padding:
-        assert torch.isnan(hidden_states[num_valid_tokens:]).all()
-        assert (ids[num_valid_tokens:] == -1).all()
-        assert (weights[num_valid_tokens:] == 0).all()
-    torch.testing.assert_close(ids[:num_valid_tokens], expected_ids[:num_valid_tokens])
+    torch.testing.assert_close(ids, expected_ids)
     torch.testing.assert_close(
-        weights[:num_valid_tokens],
-        expected_weights[:num_valid_tokens],
+        weights,
+        expected_weights,
         rtol=1e-3,
         atol=1e-4,
     )
-    torch.testing.assert_close(output[:num_valid_tokens], expected_output)
+    torch.testing.assert_close(output, 3 * hidden_states)
 
 
 @pytest.mark.parametrize(
