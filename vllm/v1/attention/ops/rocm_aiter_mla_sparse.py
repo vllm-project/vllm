@@ -813,6 +813,8 @@ def rocm_fp8_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         compress_ratio: C4A (4) takes block-flat Triton; 1 and 2 stay on AITER.
+        use_workspace: If True, allocate logits from the persistent workspace.
+            False avoids aliasing fused ``q_fp8`` at workspace offset 0.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -1349,7 +1351,8 @@ def rocm_aiter_sparse_attn_indexer(
             "use_qk_rope_cache_fusion are both False"
         )
 
-    _k_fp8_prefill = _k_scale_prefill = None
+    _k_fp8_prefill: torch.Tensor | None = None
+    _k_scale_prefill: torch.Tensor | None = None
     if use_qk_rope_cache_fusion:
         if (
             k_norm_weight is None
@@ -1431,7 +1434,7 @@ def rocm_aiter_sparse_attn_indexer(
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
 
-        if _k_fp8_prefill is not None:
+        if _k_fp8_prefill is not None and _k_scale_prefill is not None:
             k_fp8_full = _k_fp8_prefill
             k_scale_full = _k_scale_prefill
         else:

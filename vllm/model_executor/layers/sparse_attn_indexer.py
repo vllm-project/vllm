@@ -956,9 +956,7 @@ class SparseAttnIndexer(CustomOp):
                 raise NotImplementedError(
                     "The ROCm sparse-indexer path does not support PCP+DCP."
                 )
-            return self.forward_hip(
-                hidden_states, q_quant, k, weights, **fusion_kwargs
-            )
+            return self.forward_hip(hidden_states, q_quant, k, weights, **fusion_kwargs)
         elif current_platform.is_cpu():
             return self.forward_cpu(hidden_states, q_quant, k, weights)
         else:
