@@ -304,6 +304,9 @@ class Worker(WorkerBase):
 
         self.synchronize_device()
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self.sleep_mode_backend.discard(tags)
+
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
 
@@ -1449,7 +1452,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:

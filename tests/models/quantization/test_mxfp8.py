@@ -111,11 +111,6 @@ def test_mxfp8_aiter_requires_swigluoai_activation(
         "_supports_current_device",
         staticmethod(lambda: True),
     )
-    monkeypatch.setattr(
-        aiter_mxfp8_moe,
-        "is_aiter_mxfp8_moe_available",
-        lambda: True,
-    )
 
     config = FusedMoEConfig(
         num_experts=8,
@@ -163,11 +158,6 @@ def test_mxfp8_aiter_requires_swigluoai_params(
         aiter_mxfp8_moe.AiterMxfp8Experts,
         "_supports_current_device",
         staticmethod(lambda: True),
-    )
-    monkeypatch.setattr(
-        aiter_mxfp8_moe,
-        "is_aiter_mxfp8_moe_available",
-        lambda: True,
     )
 
     config = FusedMoEConfig(
@@ -217,11 +207,6 @@ def test_mxfp8_aiter_accepts_swigluoai_params(
         aiter_mxfp8_moe.AiterMxfp8Experts,
         "_supports_current_device",
         staticmethod(lambda: True),
-    )
-    monkeypatch.setattr(
-        aiter_mxfp8_moe,
-        "is_aiter_mxfp8_moe_available",
-        lambda: True,
     )
 
     config = FusedMoEConfig(
