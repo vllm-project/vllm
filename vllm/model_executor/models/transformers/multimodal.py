@@ -235,12 +235,20 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _get_size_candidates(
         self, sub_processor: Any, divisors: tuple[int, ...]
     ) -> list[ImageSize]:
-        """Sizes a sub-processor's `size` bounds its output to.
+        """Candidate sizes read off a sub-processor's `size`.
 
-        The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either
-        exact or an area budget, which `divisors` splits over its items.
-        `shortest_edge` bounds only the small side, so it says nothing about
-        the largest output and is no candidate at all.
+        `size` bounds the resized output, not the token count, because a tiling
+        processor applies it per tile and emits more tiles for a larger input.
+        The caller picks between the candidates by token count rather than
+        trusting any one of them.
+
+        The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either exact
+        or an area budget, which `divisors` splits over its items.
+
+        `shortest_edge` bounds only the small side, so it is no candidate at all.
+        `longest_edge` is read as the area budget Qwen and GLM use it for, so a
+        processor using it as an edge length (SmolVLM) yields a candidate far too
+        small to win, leaving the caller on its own large fallback size.
         """
         size = getattr(sub_processor, "size", None) or {}
         height = size.get("height", size.get("max_height"))
