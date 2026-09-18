@@ -84,7 +84,8 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
 
 
 @requires_flashinfer_mla
-def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch):
+@pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
+def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
@@ -106,7 +107,7 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch):
     seq_lens = torch.tensor([4, 5], dtype=torch.int32)
     global_causal_seq_lens = torch.tensor([31, 35], dtype=torch.int32)
     attn_metadata = MagicMock()
-    attn_metadata.causal = True
+    attn_metadata.causal = causal
     attn_metadata.num_decode_tokens = num_tokens
     attn_metadata.num_decodes = num_reqs
     attn_metadata.max_seq_len = 9
@@ -116,10 +117,23 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch):
 
     query = torch.ones(num_tokens, 24, 576, dtype=torch.bfloat16)
     kv_cache = torch.ones(2, 128, 576, dtype=torch.bfloat16)
+    kernel_batch = num_reqs if causal else num_tokens
+    kernel_query_len = query_len if causal else 1
     kernel = MagicMock(
         return_value=(
-            torch.ones(num_reqs, query_len, 24, 512, dtype=torch.bfloat16),
-            torch.ones(num_reqs, query_len, 24, dtype=torch.float32),
+            torch.ones(
+                kernel_batch,
+                kernel_query_len,
+                24,
+                512,
+                dtype=torch.bfloat16,
+            ),
+            torch.ones(
+                kernel_batch,
+                kernel_query_len,
+                24,
+                dtype=torch.float32,
+            ),
         )
     )
     monkeypatch.setattr(flashinfer_mla, "_get_workspace_buffer", MagicMock())
@@ -130,14 +144,25 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch):
     )
 
     call = kernel.call_args.kwargs
-    assert call["query"].shape == (num_reqs, query_len, 24, 576)
-    assert call["block_tables"] is block_table
-    assert call["seq_lens"] is seq_lens
+    assert call["query"].shape == (kernel_batch, kernel_query_len, 24, 576)
+    expected_block_table = (
+        block_table if causal else block_table.repeat_interleave(query_len, dim=0)
+    )
+    expected_seq_lens = seq_lens if causal else seq_lens.repeat_interleave(query_len)
+    expected_global_seq_lens = (
+        global_causal_seq_lens
+        if causal
+        else global_causal_seq_lens.repeat_interleave(query_len)
+    )
+    torch.testing.assert_close(call["block_tables"], expected_block_table)
+    torch.testing.assert_close(call["seq_lens"], expected_seq_lens)
     assert call["backend"] == "cute-dsl"
     assert call["enable_dcp"] is True
     assert call["cp_world"] == 8
     assert call["cp_rank"] == 3
-    assert call["causal_seqlens_kv_global"] is global_causal_seq_lens
+    torch.testing.assert_close(
+        call["causal_seqlens_kv_global"], expected_global_seq_lens
+    )
     assert "multi_ctas_kv_counter_buffer" not in call
     assert flashinfer_mla.FlashInferMLAImpl.lse_base_on_e
     assert output.shape == (num_tokens, 24, 512)

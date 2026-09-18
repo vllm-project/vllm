@@ -64,8 +64,7 @@ def test_ngram_gpu_default_with_async_scheduling(
     async_scheduling: bool,
     vllm_runner,
 ):
-    """
-    Test ngram_gpu speculative decoding (k=3) correctness with and without
+    """Test ngram_gpu speculative decoding (k=3) correctness with and without
     async scheduling, validated via GSM8K accuracy.
     Uses Qwen/Qwen3-8B (ref GSM8K accuracy: 87%-92%).
     """
@@ -99,8 +98,7 @@ def test_suffix_decoding_acceptance(
     model_name: str,
     vllm_runner,
 ):
-    """
-    Check that suffix decoding caching takes effect and improves acceptance
+    """Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
     """
     test_prompts = get_test_prompts(mm_enabled=False)

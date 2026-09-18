@@ -22,8 +22,8 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
-    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
-    SliceSpec,
+    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
+    PlaceholderRange, SliceSpec,
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
@@ -31,7 +31,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::SchedulerStats;
+use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -151,6 +151,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         prompt_token_ids: Some(vec![11, 22]),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
+            watermarking: false,
             top_p: 0.9,
             top_k: 8,
             max_tokens: 32,
@@ -191,7 +192,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
                     }),
                 },
             )])),
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "mm-cache-key".to_string(),
             mm_position: PlaceholderRange {
                 offset: 1,
@@ -2635,7 +2636,12 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
+    let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let multi_connector_stats_hex =
+        lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2658,6 +2664,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         sampling,
         EngineCoreSamplingParams {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
@@ -2705,17 +2712,25 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
-    let decoded_sampling_mask_outputs: EngineCoreOutputs =
-        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let decoded_sampling_mask_outputs =
+        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
-    assert!(matches!(
-        sampling_mask_output.new_sampling_mask.as_ref(),
-        Some(Value::Array(fields)) if fields.len() == 3
-    ));
+    assert_eq!(
+        sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
+        vec![vec![2, 12, 16, 17, 18]]
+    );
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    // Match msgspec's base-schema result for the same extended Python message.
+    let extended_frames = [bytes::Bytes::from(
+        hex::decode(extended_outputs_hex).unwrap(),
+    )];
+    assert_eq!(
+        decode_engine_core_outputs(&extended_frames).unwrap(),
+        decoded_outputs
+    );
     expect_test::expect![[r#"
         RequestBatch(
             RequestBatchOutputs {
@@ -2799,6 +2814,28 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .expect("multipart prompt logprobs decoded"),
     );
 
+    let nixl_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(nixl_stats_hex).unwrap()).unwrap();
+    assert!(matches!(nixl_stats, KvConnectorStats::Nixl(_)));
+
+    let mooncake_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_stats,
+        KvConnectorStats::Mooncake(stats)
+            if stats.0.contains_key(&MooncakeOperation::LoadGet)
+    ));
+
+    let multi_connector_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        multi_connector_stats,
+        KvConnectorStats::Multi(stats)
+            if stats.nixl.is_some()
+                && stats.mooncake.is_some()
+                && stats.other.contains_key("UnsupportedConnector")
+    ));
+
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {
             Value::Map(entries) => entries
@@ -2818,6 +2855,11 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
+    legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
+    let legacy_ready: EngineCoreReadyResponse =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
+    assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -2826,6 +2868,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     );
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
+    assert_eq!(ready_response.effective_attention_block_size, Some(64));
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");

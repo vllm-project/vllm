@@ -131,6 +131,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         git \
         curl \
         sudo \
+        elfutils-devel \
         rdma-core-devel \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -230,10 +231,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         echo "Installing Rubin prerelease requirements..." \
         && /opt/venv/bin/python3 use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 \
+            --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt \
         && uv pip install --python /opt/venv/bin/python3 \
             -r requirements/cuda.txt \
         && uv pip install --python /opt/venv/bin/python3 \
+            --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     elif [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
@@ -640,7 +643,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         python3 use_existing_torch.py --prefix; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\])[[:space:]]*==/Id' \
+        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\]|quack-kernels)[[:space:]]*==/Id' \
             requirements/cuda.txt; \
     fi
 
@@ -797,6 +800,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         cuda-nvcc-${CUDA_VERSION_DASH} \
         cuda-cudart-${CUDA_VERSION_DASH} \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
+        # FlashInfer's runtime JIT-compiled kernels (e.g. trtllm_fmha_kernel_launcher.cu)
+        # #include <nvrtc.h>, which only the -dev package ships.
+        cuda-nvrtc-dev-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
         libcublas-dev-${CUDA_VERSION_DASH} \
@@ -806,10 +812,21 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
+# Ensures nvcc/ptxas (installed above, needed at runtime for FlashInfer/
+# DeepGEMM/EP kernel JIT compilation) are reachable on PATH. Harmless no-op
+# if already set by FINAL_BASE_IMAGE.
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
 # stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
 # under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory.
+# subdirectory - but that symlink is only possible when NCCL is already
+# present (e.g. nvcr.io/nvidia/cuda-dl-base bundles it; a bare-CUDA image
+# doesn't, and gets it later via the standard nvidia-nccl-cu* pip package,
+# UV_OVERRIDE below). Check reality (whether libnccl.so.2 is actually found)
+# and tolerate not finding it instead of failing the build.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
         && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
@@ -827,10 +844,13 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
             echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
             exit 1; \
         fi \
-        && NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
-        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
+        && if NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
+            && [ -n "${NCCL_LIBRARY}" ]; then \
+            if [ "${NCCL_LIBRARY}" != "/usr/lib/libnccl.so.2" ]; then \
+                ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2; \
+            fi \
+            && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
+        fi \
         && ldconfig; \
     fi
 
@@ -923,11 +943,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         uv pip install --system \
+            --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt \
         && sed -Ei '/^[[:space:]]*(torch|torchvision|torchaudio)[[:space:]]*==/Id' \
             /tmp/requirements-cuda.txt \
         && uv pip install --system -r /tmp/requirements-cuda.txt \
         && uv pip install --system \
+            --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt \
         && printf '%s\n' \
             "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/nvpl/lib" \
@@ -943,7 +965,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.17
+ARG FLASHINFER_VERSION=0.6.18.post1
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
         uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
@@ -961,10 +983,13 @@ ARG GDRCOPY_CUDA_VERSION=12.8
 ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
+# Some Rubin FINAL_BASE_IMAGE choices (internal Rubin CUDA images,
+# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; others don't, so it
+# falls through to the normal install below. Check reality (ldconfig) rather
+# than inferring from which FINAL_BASE_IMAGE flag is set.
 RUN set -eux; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        # The Rubin CUDA image already provides GDRCopy. \
-        ldconfig -p | grep -q 'libgdrapi\.so'; \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && ldconfig -p | grep -q 'libgdrapi\.so'; then \
+        true; \
     else \
         case "${TARGETPLATFORM}" in \
           linux/arm64) UUARCH="aarch64" ;; \
@@ -1241,6 +1266,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
+            --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     fi
 

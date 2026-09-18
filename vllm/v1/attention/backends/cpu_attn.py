@@ -13,7 +13,6 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
@@ -59,7 +58,7 @@ class CPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        return [MultipleOf(32)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -152,7 +151,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
         self.window_size = self._group_sliding_window()
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = kv_cache_spec.block_size
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
@@ -160,10 +159,20 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             self.head_dim,
             self.kv_cache_dtype,
         )
+        self._set_isa_to_layers(layer_names)
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
+
+    def _set_isa_to_layers(self, layer_names: list[str]) -> None:
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            Attention,
+            layer_names,
+        )
+        for layer in attn_layers.values():
+            layer.isa = self.isa  # type: ignore
 
     def _group_sliding_window(self) -> int:
         """The window shared by every layer in this group, else -1 (no window).
@@ -325,14 +334,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        vllm_config = get_current_vllm_config()
-        self.isa = _get_attn_isa(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.block_size,
-            self.head_size,
-            self.kv_cache_dtype,
-        )
-
     def forward(
         self,
         layer: AttentionLayer,
@@ -348,14 +349,22 @@ class CPUAttentionBackendImpl(AttentionImpl):
         """Forward pass for CPU attention backend.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -391,7 +400,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                self.isa,
+                layer.isa,  # type: ignore
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 kv_cache_dtype=self.kv_cache_dtype,
@@ -440,7 +449,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key_cache,
             value_cache,
             slot_mapping,
-            self.isa,
+            layer.isa,  # type: ignore
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             kv_cache_dtype=self.kv_cache_dtype,

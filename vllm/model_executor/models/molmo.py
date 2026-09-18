@@ -93,13 +93,12 @@ POOLING_SIZE = 2
 
 
 class MolmoImageInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnc: Batch size * number of images * number of crops (dynamic)
-        - np: Number of patches
-        - tp: Token sequence positions
-        - pd: Patch dimension
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnc: Batch size * number of images * number of crops (dynamic)
+    - np: Number of patches
+    - tp: Token sequence positions
+    - pd: Patch dimension
     """
 
     images: Annotated[torch.Tensor, TensorShape("bnc", "np", "pd")]
@@ -332,7 +331,7 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         scale = config.image_emb_dim**-0.5
-        self.patch_num = config.image_num_patch
+        self.patch_num: tuple[int, int] = config.image_num_patch
         self.class_embedding = nn.Parameter(torch.randn(config.image_emb_dim) * scale)
         self.num_prefix_tokens: int = NUM_PREFIX_TOKENS
         self.positional_embedding = nn.Parameter(
@@ -349,7 +348,7 @@ class VisionTransformer(nn.Module):
             config, quant_config, prefix=f"{prefix}.transformer"
         )
 
-    def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
+    def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:
         cls_emb = self.positional_embedding[0:1]
         pos_emb = self.positional_embedding[1:]
 
@@ -380,11 +379,9 @@ class VisionTransformer(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, patch_num: int | None = None
+        self, x: torch.Tensor, patch_num: tuple[int, int] | None = None
     ) -> list[torch.Tensor]:
-        """
-        : param x: (batch_size, num_patch, n_pixels)
-        """
+        """: param x: (batch_size, num_patch, n_pixels)."""
         if patch_num is None:
             patch_num = self.patch_num
         B, N, D = x.shape
@@ -484,12 +481,15 @@ class MolmoAttention(nn.Module):
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.q_norm is not None
+        assert self.k_norm is not None
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
         q = self.q_norm(q)
         k = self.k_norm(k)
         if self.tp_size > 1:
+            assert self.tp_rank is not None
             splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
@@ -725,9 +725,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        : param images: (batch_size, num_crops, num_patch, n_pixels)
-        """
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)."""
         B, T, N, D = images.shape
 
         mask = ~torch.all(images.view(B * T, N, D) == -1, dim=(1, 2), keepdim=True)
@@ -1124,6 +1122,9 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
 
 
 class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
 
@@ -1142,28 +1143,28 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             dict(tokens=tokens),
         )["input_ids"].tolist()
 
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_counts = mm_items.get_all_counts()
-
-        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not processor_data:
-            return BatchFeature(dict(passthrough_data))
-
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
-
-        processed_data = self.info.ctx.call_hf_processor(
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        return self.info.ctx.call_hf_processor(
             hf_processor.process,
-            dict(text=prompt_text, **processor_data),
-            hf_processor_mm_kwargs,
+            hf_data,
+            hf_kwargs,
         )
 
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = hf_processor.tokenizer
         image_patch_id = tokenizer.vocab[IMAGE_PATCH_TOKEN]
 
@@ -1171,7 +1172,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         processed_data.pop("input_ids")
 
-        if (images := processor_data.get("images")) is not None:
+        if (images := hf_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
@@ -1194,8 +1195,6 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
             processed_data["num_crops"] = num_crops
             processed_data["img_patch_id"] = image_patch_id
-
-        processed_data.update(passthrough_data)
 
         return processed_data
 
@@ -1345,7 +1344,7 @@ class MolmoForCausalLM(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
-        self.img_patch_id = None
+        self.img_patch_id: int | None = None
 
         self.lm_head = ParallelLMHead(
             config.embedding_size or config.vocab_size,
@@ -1453,9 +1452,7 @@ class MolmoForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector="vision_backbone.image_projector",

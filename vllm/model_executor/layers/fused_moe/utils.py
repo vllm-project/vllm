@@ -69,6 +69,7 @@ def resolve_layer_fused_shared_expert(
 
     Raises:
         ValueError: If requested shared-expert fusion is quantization-incompatible.
+
     """
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
@@ -86,7 +87,7 @@ def resolve_layer_fused_shared_expert(
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled: %s.",
+            "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
         )
     return is_fused_shared_expert_enabled
@@ -164,20 +165,19 @@ def _count_expert_num_tokens(
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
-    """
-    Count the number to tokens assigned to each expert.
+    """Count the number to tokens assigned to each expert.
 
-    Parameters:
-    - topk_ids (torch.Tensor): Tensor mapping each token to its
-    list of experts.
-    - num_local_experts (int): Number of experts in this rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-    from the global expert space to the local expert space of the expert
-    parallel shard.
+    Args:
+        topk_ids (torch.Tensor): Tensor mapping each token to its list of experts.
+        num_local_experts (int): Number of experts in this rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
 
     Returns:
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
+
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     expert_num_tokens = torch.empty(
@@ -202,8 +202,7 @@ def count_expert_num_tokens(
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
-    """
-    Shrink the given tensor and apply the given view to it.  This is
+    """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
     assert prod(v) <= x.numel(), (
@@ -226,8 +225,7 @@ def _fp8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
+    """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
@@ -252,11 +250,9 @@ def _int8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
+    """Perform int8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
-
     # If weights are per-channel (per_channel_quant=True), then
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
@@ -500,36 +496,8 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
 
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
-    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
-
-
-def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
-) -> torch.Tensor:
-    assert topk_ids.shape == topk_weights.shape
-    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
-
-    original_shape = topk_ids.shape
-    ids_flat = topk_ids.reshape(-1)
-    weights_flat = topk_weights.reshape(-1)
-
-    n_elements = ids_flat.numel()
-    output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
-
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
+    dp_size = moe_config.elastic_ep_max_dp_size or moe_config.dp_size
+    return max(moe_config.max_num_tokens * dp_size, 8192)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

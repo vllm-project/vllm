@@ -23,8 +23,7 @@ from vllm.model_executor.parameter import SharedWeightParameter
 
 
 class HadamardTransform(torch.nn.Module):
-    """
-    Class which handles weight loading, postprocessing, and application of
+    """Class which handles weight loading, postprocessing, and application of
     transforms. Meant to be used with `CompressedTensorsLinearTransformMethod`
     and attention transforms method (not implemented yet)
     """

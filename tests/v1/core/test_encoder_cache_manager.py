@@ -167,6 +167,38 @@ def test_get_freed_mm_hashes_clears_freed_list():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_referencing_a_freeable_entry_protects_it_from_eviction():
+    """A waiting request can hold an entry it is not scheduled for yet.
+
+    Entries with no referent are evictable. A request that is deferred (e.g.
+    by an EC connector waiting on another item) still needs the items it
+    already has, and a connector that hands out one transfer per request
+    cannot always produce the same item a second time.
+    """
+    manager = EncoderCacheManager(cache_size=10)
+    owner = MockRequest("owner", ["a"], [5])
+    waiter = MockRequest("waiter", ["a"], [5])
+    newcomer = MockRequest("newcomer", ["b"], [6])
+
+    manager.allocate(owner, 0)
+    manager.free_encoder_input(owner, 0)
+    assert "a" in manager.freeable
+
+    # The waiting request references it; it is no longer reclaimable.
+    assert manager.check_and_update_cache(waiter, 0)
+    assert "a" not in manager.freeable
+
+    # 'b' no longer fits, and 'a' must not be taken away to make room.
+    assert not manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert "a" in manager.cached
+    assert manager.get_freed_mm_hashes() == []
+
+    # Once the waiter is done with it, the entry is reclaimable again.
+    manager.free_encoder_input(waiter, 0)
+    assert manager.can_allocate(newcomer, 0, int(1e9), 0)
+    assert manager.get_freed_mm_hashes() == ["a"]
+
+
 def test_reallocated_hash_is_not_reported_as_freed():
     manager = EncoderCacheManager(cache_size=8)
     req_a = MockRequest("reqA", ["a"], [4])
@@ -347,6 +379,43 @@ def test_free_request_with_duplicate_mm_hashes():
 
     manager.free(req)
     assert "r1" not in manager.request_cached_ids
+
+
+def test_duplicate_mm_hash_stays_referenced_until_last_free():
+    """`cached` holds one reference per request, not per position, so freeing
+    the first of two occurrences must not release the entry."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
+
+    manager.allocate(req, 0)
+    assert manager.check_and_update_cache(req, 1)
+
+    manager.free_encoder_input(req, 0)
+    assert manager.cached["imgA"] == {"r1"}
+    assert "imgA" not in manager.freeable
+    assert manager.num_freeable_slots == 16
+
+    manager.free_encoder_input(req, 1)
+    assert not manager.cached["imgA"]
+    assert manager.freeable["imgA"] == 4
+    assert manager.num_freeable_slots == 20
+
+
+def test_duplicate_mm_hash_is_not_evicted_before_last_use():
+    """An item repeated within one request (an image carried across
+    conversation turns) must not become reclaimable capacity while a later
+    occurrence still has to be spliced in, or the encoder recomputes it."""
+    manager = EncoderCacheManager(cache_size=8)
+    req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
+    other = MockRequest("r2", ["imgB"], [8])
+
+    manager.allocate(req, 0)
+    assert manager.check_and_update_cache(req, 1)
+    manager.free_encoder_input(req, 0)
+
+    assert not manager.can_allocate(other, 0, int(1e9), 0)
+    assert manager.check_and_update_cache(req, 1)
+    assert manager.get_freed_mm_hashes() == []
 
 
 def test_encoder_decoder_cache_manager_reset():
