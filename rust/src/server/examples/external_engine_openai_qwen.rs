@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
         revision: None,
+        hf_overrides: Default::default(),
         generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {

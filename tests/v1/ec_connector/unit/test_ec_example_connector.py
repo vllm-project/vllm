@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for ECExampleConnector.
-"""
+"""Unit tests for ECExampleConnector."""
 
 import os
 from unittest.mock import Mock, patch
@@ -18,6 +16,7 @@ from vllm.distributed.ec_transfer.ec_connector.example_connector import (
     ECExampleConnectorMetadata,
     MMMeta,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -41,6 +40,20 @@ class MockRequest:
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self._token_counts)
         return self._token_counts[input_id]
+
+
+def test_metadata_preserves_repeated_item_positions():
+    request = MockRequest("request", ["A", "B", "A"], [4, 4, 4])
+    resolver = Mock()
+    resolver.fields_for.return_value = {"image_grid_thw"}
+    for feature in request.mm_features:
+        feature.data = Mock()
+        feature.data.get_data.return_value = {"image_grid_thw": torch.tensor([1, 2, 2])}
+    items = collect_ec_item_metadata(request.mm_features, resolver)
+    assert items == {
+        "A": {"metadata": {"image_grid_thw": [1, 2, 2]}, "item_indices": [0, 2]},
+        "B": {"metadata": {"image_grid_thw": [1, 2, 2]}, "item_indices": [1]},
+    }
 
 
 @pytest.fixture

@@ -176,3 +176,8 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+def test_a_non_causal_block_never_routes_to_gluon(gluon_available):
+    """A small-head block that normally uses Gluon must use ASM when non-causal."""
+    assert not AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=False)

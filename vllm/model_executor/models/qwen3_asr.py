@@ -67,6 +67,7 @@ from vllm.multimodal.inputs import (
     AudioItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -617,24 +618,25 @@ class Qwen3ASRForConditionalGeneration(
         return llm_positions, mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             tower_model=["audio_tower."],
         )
 
-    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
-        """Return the number of tokens processed by the audio tower encoder.
-
-        Required for LoRA support on the tower module.
-        """
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         # For Qwen3-ASR, the audio tower produces one embedding per audio
         # placeholder token inserted into the prompt (no additional
         # merge/downsample step like vision towers). Therefore, the encoder
         # token budget is identity.
-        return num_audio_tokens
+        return num_mm_embeds, None
 
     @classmethod
     def get_speech_to_text_config(
@@ -699,8 +701,7 @@ class Qwen3ASRForConditionalGeneration(
 
     @classmethod
     def post_process_output(cls, text: str) -> str:
-        """
-        Post-process Qwen3-ASR raw output to extract clean transcription.
+        """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"
         This method strips the language prefix and asr_text tags.

@@ -263,6 +263,7 @@ def run_dp_sharded_vision_tower(
 
     Returns:
         One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
+
     """
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()

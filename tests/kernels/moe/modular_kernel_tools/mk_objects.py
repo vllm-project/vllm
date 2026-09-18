@@ -86,14 +86,14 @@ MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
 common_float_types: list[torch.dtype | str] = [
-    torch.float8_e4m3fn,
+    current_platform.fp8_dtype(),
     torch.bfloat16,
     torch.float16,
     torch.float32,
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
 nvfp4_types = ["nvfp4"]
-fp8_types = [torch.float8_e4m3fn]
+fp8_types = [current_platform.fp8_dtype()]
 
 
 def register_prepare_and_finalize(
@@ -324,7 +324,9 @@ if has_aiter():
     register_experts(
         AiterExperts,
         standard_format,
-        fp8_types,
+        # AiterExperts also supports the fully-unquantized (None, None)
+        # scheme (see SUPPORTED_W_A in rocm_aiter_moe.py), not just fp8.
+        common_float_types,
         blocked_quantization_support=True,
         needs_aiter=True,
     )
@@ -397,35 +399,35 @@ MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
     # per-channel / per-column weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-channel / per-column weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=True,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # per-tensor weights and per-tensor activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=None,
     ),
     # per-tensor weights and per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=True,
         block_shape=None,
     ),
     # block-quantized weights and 128 block per-token activations
     TestMoEQuantConfig(
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         per_act_token_quant=False,
         block_shape=[128, 128],

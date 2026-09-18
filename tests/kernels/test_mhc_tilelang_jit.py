@@ -24,19 +24,26 @@ class _PassConfigKey:
 def _install_tilelang_stub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> dict[str, int]:
-    calls = {"jit_decorate": 0, "compiled_call": 0}
+    calls = {"jit_decorate": 0, "compiled_call": 0, "compiled_compile": 0}
 
     tilelang: Any = ModuleType("tilelang")
+
+    class _JitImpl:
+        def __init__(self, func: Any) -> None:
+            self.func = func
+
+        def __call__(self, *args: Any, **kw: Any) -> Any:
+            calls["compiled_call"] += 1
+            return self.func.__name__
+
+        def compile(self, *args: Any, **kw: Any) -> Any:
+            calls["compiled_compile"] += 1
+            return self.func.__name__
 
     def jit(**kwargs: Any) -> Any:
         def decorate(func: Any) -> Any:
             calls["jit_decorate"] += 1
-
-            def compiled(*args: Any, **kw: Any) -> Any:
-                calls["compiled_call"] += 1
-                return func.__name__
-
-            return compiled
+            return _JitImpl(func)
 
         return decorate
 
@@ -76,6 +83,21 @@ def test_tilelang_jit_decorator_is_lazy_only_on_rocm(
     else:
         assert calls["jit_decorate"] == decorated_calls
     assert calls["compiled_call"] == 1
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Test requires ROCm")
+def test_tilelang_jit_proxies_compile_only_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_tilelang_stub(monkeypatch)
+    module_name = "vllm.model_executor.kernels.mhc.tilelang_kernels"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    module = importlib.import_module(module_name)
+
+    assert module.mhc_post_tilelang.compile() == "mhc_post_tilelang"
+    assert calls["jit_decorate"] == 1
+    assert calls["compiled_compile"] == 1
+    assert calls["compiled_call"] == 0
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Test requires ROCm")

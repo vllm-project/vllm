@@ -127,8 +127,7 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 # Utility to extract reasoning and tool calls
 # ==========================================================
 def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]]:
-    """
-    Extract accumulated reasoning text and tool call arguments
+    """Extract accumulated reasoning text and tool call arguments
     from streaming chunks.
     """
     reasoning: str = ""
@@ -165,7 +164,6 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
 @pytest.mark.asyncio
 async def test_calculator_tool_call_and_argument_accuracy(client: openai.AsyncOpenAI):
     """Verify calculator tool call is made and arguments are accurate."""
-
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
@@ -205,7 +203,6 @@ async def test_calculator_tool_call_and_argument_accuracy(client: openai.AsyncOp
 @pytest.mark.asyncio
 async def test_streaming_tool_call_get_time_with_reasoning(client: openai.AsyncOpenAI):
     """Verify streamed reasoning and tool call behavior for get_time."""
-
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_GET_TIME,
@@ -258,8 +255,7 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_invalid_tool_call(client: openai.AsyncOpenAI):
-    """
-    Verify that ambiguous instructions that should not trigger a tool
+    """Verify that ambiguous instructions that should not trigger a tool
     do not produce any tool calls.
     """
     response = await client.chat.completions.create(
@@ -283,8 +279,7 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
-    """
-    Verify model produces valid tool or text output
+    """Verify model produces valid tool or text output
     under non-deterministic sampling.
     """
     response = await client.chat.completions.create(

@@ -250,6 +250,7 @@ def make_scheduler_output(
         cached_req_new_blocks: For returning (cached) requests, maps
             req_id -> new_block_ids (incremental) or None.
             These are placed into ``scheduled_cached_reqs``.
+
     """
     scheduled_new_reqs: list[NewRequestData] = []
     if new_reqs:

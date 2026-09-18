@@ -38,8 +38,7 @@ logger = init_logger(__name__)
 
 
 class Granite20bFCToolParser(ToolParser):
-    """
-    Tool call parser for the granite-20b-functioncalling model intended
+    """Tool call parser for the granite-20b-functioncalling model intended
     for use with the examples/tool_chat_template_granite20b_fc.jinja
     template.
 

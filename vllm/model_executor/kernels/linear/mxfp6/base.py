@@ -21,6 +21,7 @@ class MxFp6LinearLayerConfig:
             kMxfp6E2M3Static or kMxfp6E3M2Static.
         activation_quant_key: Identifies the activation quantization format,
             or `None` when activations must not be quantized.
+
     """
 
     weight_quant_key: QuantKey

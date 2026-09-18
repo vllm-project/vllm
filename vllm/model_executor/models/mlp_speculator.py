@@ -19,10 +19,10 @@ from .utils import maybe_prefix
 
 
 class MLPSpeculatorLayerNorm(nn.Module):
-    """
-    A L2 normalization implementation
+    """A L2 normalization implementation
     ...
-    Args
+
+    Args:
     ----
     normalized_shape : int
         Dimensionality of input data (size of final tensor axis)
@@ -32,6 +32,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
          (i.e. fp16 requires eps >= 6e-8).
     elementwise_scale_and_shift : bool
         Include a learned scaling and shift term after normalization.
+
     """
 
     def __init__(
@@ -58,8 +59,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
 
 
 class MLPSpeculator(nn.Module):
-    """
-    An implementation of the speculative models introduced in
+    """An implementation of the speculative models introduced in
     "Accelerating Production LLMs with Combined Token/Embedding
     Speculators"
     https://arxiv.org/pdf/2404.19124

@@ -70,6 +70,7 @@ def overlay_modality_mm_kwargs(
 
     Returns:
         A new dict with the modality-scoped keys overlaid when present.
+
     """
     merged = dict(kwargs)
     if modality is None:
@@ -128,8 +129,7 @@ _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 @dataclass(frozen=True)
 class InputProcessingContext:
-    """
-    Contains information about the model which may be used to
+    """Contains information about the model which may be used to
     modify the inputs.
     """
 
@@ -162,13 +162,13 @@ class InputProcessingContext:
         typ: type[Any] | tuple[type[Any], ...] | None = None,
         /,
     ) -> Any:
-        """
-        Get the HuggingFace configuration
+        """Get the HuggingFace configuration
         (`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
             TypeError: If the configuration is not of the specified type.
+
         """
         if typ is None:
             from transformers.configuration_utils import PretrainedConfig
@@ -186,17 +186,15 @@ class InputProcessingContext:
         return hf_config
 
     def get_hf_image_processor_config(self) -> dict[str, Any]:
-        """
-        Get the HuggingFace image processor configuration of the model.
-        """
+        """Get the HuggingFace image processor configuration of the model."""
         return self.model_config.hf_image_processor_config
 
     def get_mm_config(self):
-        """
-        Get the multimodal config of the model.
+        """Get the multimodal config of the model.
 
         Raises:
             RuntimeError: If the model is not a multimodal model.
+
         """
         mm_config = self.model_config.multimodal_config
         if mm_config is None:
@@ -221,13 +219,13 @@ class InputProcessingContext:
         /,
         **kwargs: object,
     ) -> Any:
-        """
-        Get the HuggingFace processor
+        """Get the HuggingFace processor
         (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
         Raises:
             TypeError: If the processor is not of the specified type.
+
         """
         if typ is None:
             from transformers.processing_utils import ProcessorMixin
@@ -254,8 +252,7 @@ class InputProcessingContext:
         /,
         **kwargs: object,
     ) -> _T:
-        """
-        Initialize a HuggingFace-like processor class, merging the
+        """Initialize a HuggingFace-like processor class, merging the
         keyword arguments with those in the model's configuration.
         """
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
@@ -317,19 +314,12 @@ class InputProcessingContext:
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
     ) -> BatchFeature:
-        """
-        Call `hf_processor` on the prompt `data`
+        """Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
         """
         assert callable(hf_processor)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
-
-        # vLLM needs the full untruncated sequence to keep multi-modal
-        # placeholder tokens aligned; note that the text inputs in
-        # call_hf_processor are just dummy text, not the original prompt.
-        # The original prompt is already tokenized by the renderer.
-        merged_kwargs.setdefault("truncation", False)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -385,8 +375,7 @@ class BaseProcessingInfo:
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
-        """
-        Subclasses can override this method to handle
+        """Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
@@ -409,8 +398,7 @@ class BaseProcessingInfo:
         return self.get_default_tok_params()
 
     def _get_expected_hidden_size(self) -> int | None:
-        """
-        Get expected hidden size for embedding validation if `mm_embeds` are enabled.
+        """Get expected hidden size for embedding validation if `mm_embeds` are enabled.
 
         This validates hidden dimensions to prevent a vulnerability where embeddings
         with correct `ndim` but wrong `shape` could cause crashes at inference time.
@@ -430,10 +418,9 @@ class BaseProcessingInfo:
         return mm_config is not None and mm_config.allow_missing_mm_embeddings
 
     def get_data_parser(self) -> MultiModalDataParser:
-        """
-        Constructs a parser to preprocess multi-modal data items
+        """Constructs a parser to preprocess multi-modal data items
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
 
         You can support additional modalities by creating a subclass
         of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
@@ -453,8 +440,7 @@ class BaseProcessingInfo:
         return False
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        """
-        Return the maximum supported number of items for each modality.
+        """Return the maximum supported number of items for each modality.
 
         A value of `None` means unlimited number of items.
 
@@ -486,8 +472,7 @@ class BaseProcessingInfo:
         return allowed_limits
 
     def validate_num_items(self, modality: str, num_items: int) -> None:
-        """
-        Raise `ValueError` if the number of input items for the given modality
+        """Raise `ValueError` if the number of input items for the given modality
         is invalid.
         """
         supported_limit = self.supported_mm_limits.get(modality, 0)
@@ -512,11 +497,10 @@ class BaseProcessingInfo:
         *,
         validate: bool = True,
     ) -> MultiModalDataItems:
-        """
-        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+        """Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        [`_get_hf_mm_inputs`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_inputs].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
@@ -546,8 +530,7 @@ class BaseProcessingInfo:
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
-        """
-        Return the maximum number of tokens per item of for each modality.
+        """Return the maximum number of tokens per item of for each modality.
 
         When `None` (the default) is returned, vLLM will generate dummy inputs
         (images/videos) at maximum possible sizes and process them to determine
@@ -564,5 +547,6 @@ class BaseProcessingInfo:
             length and the maximum number of items of each modality allowed,
             and agree with dummy inputs (images/videos) at maximum possible
             sizes.
+
         """
         return None

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Vision tower implementation for Kimi-K2.5 model.
+"""Vision tower implementation for Kimi-K2.5 model.
 
 This module provides the vision encoder components for Kimi-K2.5,
 including 3D patch embedding, RoPE position embedding, and
@@ -284,12 +283,12 @@ class Rope2DPosEmbRepeated(nn.Module):
     def get_freqs_cis(
         self, grid_thws: torch.Tensor | list[list[int]], device: torch.device
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             grid_thws (torch.Tensor): grid time, height and width
 
         Returns:
             freqs_cis: tensor of shape (sum(t * height * width), dim//2)
+
         """
         if not hasattr(self, "freqs_cis"):
             self.register_buffer(
@@ -449,6 +448,10 @@ class MoonViTEncoderLayer(nn.Module):
         Args:
             x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor): cumulative sequence lengths
+            rope_freqs_cis (torch.Tensor): rotary embedding frequencies
+            max_seqlen (torch.Tensor | None): longest sequence in the batch
+            sequence_lengths (torch.Tensor | None): per-sequence lengths
+
         """
         seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
@@ -753,13 +756,13 @@ class MoonViT3dPretrainedModel(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             pixel_values (torch.Tensor): The input pixel values.
             grid_thws (torch.Tensor): Temporal, height and width.
 
         Returns:
             torch.Tensor: The output tokens.
+
         """
         if encoder_metadata is not None and "pos_embeds" in encoder_metadata:
             hidden_states = self.patch_embed(

@@ -227,6 +227,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         Returns:
             The matching method class, or None when ``spec`` has no weight
             quantization.
+
         """
         if spec is None or spec.weight is None:
             return None
@@ -260,6 +261,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             A tuple of source, quantization key string, target pattern, spec,
             and method class. Returns None when online quantization does not
             apply to the layer.
+
         """
         quant_spec: QuantSpec | None
         if self.args.targets is not None:
@@ -313,6 +315,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             A tuple of source, quantization key string, target pattern, spec,
             and dispatch table. Returns None when no pattern applies or the
             layer is ignored.
+
         """
         assert self.args.targets is not None
         ignored = should_ignore_layer(

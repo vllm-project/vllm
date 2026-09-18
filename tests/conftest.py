@@ -935,7 +935,7 @@ def hf_runner():
 
 
 def _default_block_size() -> int:
-    if torch.xpu.is_available():
+    if current_platform.is_xpu():
         return 64
     if current_platform.is_cpu():
         return 128

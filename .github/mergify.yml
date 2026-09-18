@@ -343,9 +343,8 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      # The 4.1 sources spell the model three ways: deepseek_v4_1 (models),
-      # deepseek_v41 (most) and deepseekv41 (tool parsers).
-      - files~=^vllm/models/deepseek_v4_1/
+      # The 4.1 sources use deepseek_v41 and deepseekv41 (tool parsers).
+      - files~=^vllm/models/deepseek_v41/
       - files~=^vllm/(?:parser|tokenizers|reasoning|transformers_utils/configs)/deepseek_v41.*\.py
       - files~=^vllm/tool_parsers/deepseekv41.*\.py
       - files~=^rust/src/(?:chat|parser)/src/.*deepseek_v41

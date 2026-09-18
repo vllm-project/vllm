@@ -288,6 +288,7 @@ class VideoBackend(VideoLoader):
         Returns:
             Tuple of ``(frames, metadata_dict)``, where ``frames`` is a
             CPU ``np.ndarray`` unless TorchCodec decodes on ``device="cuda"``.
+
         """
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
@@ -357,6 +358,9 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
     video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
 )
 class Qwen3VLVideoBackend(VideoBackend):
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -366,10 +370,10 @@ class Qwen3VLVideoBackend(VideoBackend):
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
-        fps = target.fps
+        fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
@@ -420,6 +424,9 @@ class Qwen2VLVideoBackend(VideoBackend):
     clip); it is clamped to the last valid frame.
     """
 
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -433,7 +440,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         original_fps = source.original_fps
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # vLLM reports original_fps == 0 for clips with unknown/variable fps
         # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
@@ -447,7 +454,7 @@ class Qwen2VLVideoBackend(VideoBackend):
             math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
             * temporal_patch_size
         )
-        n = total_frames_num / original_fps * target.fps
+        n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
         n = min(max(n, min_frames), max_frames, total_frames_num)
         n = math.floor(n / temporal_patch_size) * temporal_patch_size
 
@@ -909,8 +916,7 @@ class Molmo2VideoBackend(VideoLoader):
         sampling_fps: float,
         max_fps: float = 8.0,
     ) -> list[float]:
-        """
-        Return the subset of `video_fps` factors that remain multiples
+        """Return the subset of `video_fps` factors that remain multiples
         of `sampling_fps`.
 
         Examples:
@@ -925,6 +931,7 @@ class Molmo2VideoBackend(VideoLoader):
                 ...
             ValueError: sampling_fps=2 must divide video_fps=5 to produce
                 consistent frame steps.
+
         """
         if sampling_fps is None:
             raise ValueError("sampling_fps must be provided")
@@ -961,8 +968,8 @@ class Molmo2VideoBackend(VideoLoader):
         frame_sample_mode: str,
         candidate_target_fps: list[float],
     ) -> float | None:
-        """
-        Get the target fps that best spans the videoand has the most frames sampled
+        """Get the target fps that best spans the video and samples the most
+        frames.
         """
         num_frames_sampled = 0
         selected_target_fps = None
@@ -1266,8 +1273,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
         frame_recovery: bool = False,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """
-        Load video frames with dynamic sampling based on duration.
+        """Load video frames with dynamic sampling based on duration.
 
         Args:
             data: Raw video bytes
@@ -1278,6 +1284,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
 
         Returns:
             Tuple of (frames_array, metadata_dict)
+
         """
         # recompute source metadata with adjusted duration to ensure correct
         # sampling indices computation

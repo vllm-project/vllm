@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the fused_qk_norm_rope helion kernel
+"""Tests for the fused_qk_norm_rope helion kernel.
 
 Run `pytest tests/kernels/helion/test_fused_qk_norm_rope.py`.
 """

@@ -426,6 +426,7 @@ def _remap_tiling(
 
     Returns:
         (single_tile, block_n, tiles_per_row, num_warps)
+
     """
     single_tile = (
         count_valid and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
@@ -454,8 +455,7 @@ def triton_convert_req_index_to_global_index(
     out: torch.Tensor | None = None,
     valid_counts_out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    out[token_id, indice_id] =
+    """out[token_id, indice_id] =
         block_table[req_id[token_id],
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE

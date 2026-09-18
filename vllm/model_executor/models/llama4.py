@@ -406,8 +406,7 @@ class Llama4Model(LlamaModel):
         expert_params_mapping: list[tuple[str, str, int, str]],
         fused: bool = True,
     ) -> bool:
-        """
-        Load MoE expert weights.
+        """Load MoE expert weights.
 
         Args:
             name: The name of the weight to load.
@@ -427,8 +426,8 @@ class Llama4Model(LlamaModel):
         Returns:
             True if loaded_weight is one of MoE weights and the MoE expert
             weights are loaded successfully, False otherwise.
-        """
 
+        """
         # Whether the MoE expert weights are loaded successfully.
         expert_param_loaded = False
 

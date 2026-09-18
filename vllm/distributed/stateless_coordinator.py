@@ -59,8 +59,7 @@ def _fetch_group_ports(key: str, coord_store: Store) -> list[int]:
 
 
 class StatelessGroupCoordinator(GroupCoordinator):
-    """
-    A stateless version of the GroupCoordinator class in parallel_state,
+    """A stateless version of the GroupCoordinator class in parallel_state,
     It will create CPU, device and TCPStore based communication groups
     that are independent of PyTorch's WORLD group. Hence,
     communication groups with a different set of participants GPUs

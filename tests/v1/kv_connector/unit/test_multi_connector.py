@@ -20,7 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorPromMetrics,
@@ -171,7 +174,7 @@ def test_register_finished_partial_tail_notifies_every_connector():
 
 @pytest.fixture
 def mc() -> MultiConnector:
-    """MultiConnector using two mocked connectors"""
+    """MultiConnector using two mocked connectors."""
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",
@@ -215,8 +218,7 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
 
 
 def test_multi_example_connector_consistency():
-    """
-    Tests that MultiConnector with two ExampleConnectors saves
+    """Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
     storage_1_path = Path("storage_1/")
@@ -455,8 +457,7 @@ def test_engine_id_conflict():
 
 
 def test_multi_connector_handle_preemptions_integration():
-    """
-    Integration test: verify MultiConnector delegates handle_preemptions
+    """Integration test: verify MultiConnector delegates handle_preemptions
     to all sub-connectors.
 
     Uses TestExampleConnector which logs all method calls to temp files.
@@ -819,6 +820,36 @@ class TestMultiConnectorStats:
         assert "Num successful transfers" in reduced["NixlConnector"]
         assert reduced["NixlConnector"]["Num successful transfers"] == 2
 
+    def test_log_renders_plain_scalars(self):
+        """Reduced stats must render as plain numbers in the CLI log, not
+        numpy reprs (eg np.float64(2.338))."""
+        stats = MultiKVConnectorStats(
+            data={
+                "NixlConnector": NixlKVConnectorStats(
+                    data={
+                        "transfer_duration": [1.0, 2.0],
+                        "post_duration": [0.1, 0.2],
+                        "bytes_transferred": [1024, 2048],
+                        "num_descriptors": [10, 20],
+                        "num_failed_transfers": [],
+                        "num_failed_notifications": [],
+                    }
+                )
+            }
+        )
+
+        kv_logging = KVConnectorLogging(kv_transfer_config=None)
+        kv_logging.transfer_stats_accumulator = stats
+        log_records: list[tuple] = []
+        kv_logging.log(log_fn=lambda *args: log_records.append(args))
+
+        assert len(log_records) == 1
+        msg = log_records[0][1]
+        assert "np.float" not in msg
+        assert "'Avg xfer time (ms)': 1500.0" in msg
+        # The accumulator is reset after logging.
+        assert kv_logging.transfer_stats_accumulator is None
+
     def test_reset(self):
         """Test that reset() resets all nested connector stats."""
         stats = MultiKVConnectorStats(
@@ -863,9 +894,7 @@ class TestMultiConnectorStats:
 
 
 def test_multi_connector_overrides_all_base_methods():
-    """
-    Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
-    """
+    """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
@@ -1045,12 +1074,10 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
 
 
 def test_multi_connector_hma_support_detection():
-    """
-    At runtime, _all_support_hma is True only when every sub-connector
+    """At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
     """
-
     assert supports_hma(MultiConnector)
 
     # -- All non-HMA connectors => _all_support_hma is False --
@@ -1092,8 +1119,7 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )
 def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
-    """
-    When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
+    """When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
     (MockConnector) sub-connectors, verify that:
     1. The scheduler's MultiConnector has _all_support_hma == False.
     2. vLLM auto-disables the hybrid KV cache manager (no preference expressed by user)

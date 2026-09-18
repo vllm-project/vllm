@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Isolated GSM8K evaluation script for vLLM serve endpoint.
-"""
+"""Isolated GSM8K evaluation script for vLLM serve endpoint."""
 
 import argparse
 import ast
@@ -45,7 +43,7 @@ def download_and_cache_file(url: str, filename: str | None = None) -> str:
 
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
-    """Load GSM8K train and test data"""
+    """Load GSM8K train and test data."""
     train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
     test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
@@ -91,6 +89,7 @@ async def call_vllm_api(
 
     Returns:
         Tuple of (response_text, completion_tokens)
+
     """
     data = {
         "prompt": prompt,
@@ -221,8 +220,7 @@ def evaluate_gsm8k(
     gen_prefix: str = "",
     max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
-    """
-    Evaluate GSM8K accuracy using vLLM serve endpoint.
+    """Evaluate GSM8K accuracy using vLLM serve endpoint.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
     """

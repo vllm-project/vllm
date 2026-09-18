@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for cutlass kernels
+"""Tests for cutlass kernels.
 
 Run `pytest tests/kernels/quantization/test_cutlass_scaled_mm.py`.
 """

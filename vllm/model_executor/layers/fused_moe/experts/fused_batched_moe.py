@@ -551,8 +551,7 @@ def invoke_moe_batched_triton_kernel(
 
 
 class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
-    """
-    A reference MoE expert class that operates on expert batched format,
+    """A reference MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
@@ -775,8 +774,7 @@ def batched_moe_kernel_quantize_input(
 
 
 class BatchedTritonExperts(mk.FusedMoEExpertsModular):
-    """
-    A Triton based MoE expert class that operates on expert batched format,
+    """A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """

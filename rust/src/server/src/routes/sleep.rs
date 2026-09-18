@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::utility::PauseMode;
@@ -25,12 +25,6 @@ pub(crate) struct SleepParams {
     level: u32,
     #[serde(default)]
     mode: PauseMode,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct WakeUpParams {
-    #[serde(default)]
-    tags: Option<Vec<String>>,
 }
 
 const fn default_sleep_level() -> u32 {
@@ -57,14 +51,35 @@ pub async fn sleep(
     Ok(StatusCode::OK)
 }
 
-/// Wake the engine from sleep mode.
-pub async fn wake_up(
+/// Release KV cache memory while keeping model weights resident.
+pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<WakeUpParams>,
 ) -> Result<StatusCode, ApiError> {
     state
         .engine_core_client()
-        .wake_up(params.tags)
+        .release_kv_cache_memory()
+        .await
+        .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Wake the engine from sleep mode.
+pub async fn wake_up(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+) -> Result<StatusCode, ApiError> {
+    let tags = query.and_then(|query| {
+        let tags = url::form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == "tags")
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>();
+        (!tags.is_empty()).then_some(tags)
+    });
+
+    state
+        .engine_core_client()
+        .wake_up(tags)
         .await
         .map_err(|error| utility_call_error("wake_up", error))?;
 

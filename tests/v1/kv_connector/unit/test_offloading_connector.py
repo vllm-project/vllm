@@ -76,7 +76,7 @@ _EVENT_DRAIN_TIMEOUT = 60
 
 
 class MockSubscriber:
-    """Helper class to receive and verify published events"""
+    """Helper class to receive and verify published events."""
 
     def __init__(
         self,
@@ -121,7 +121,7 @@ class MockSubscriber:
         return cpu_stored_events
 
     def close(self):
-        """Clean up resources"""
+        """Clean up resources."""
         self.sub.close()
 
 
@@ -261,9 +261,7 @@ def test_cpu_offloading(
     cpu_block_size: int | None,
     uses_hma: bool,
 ) -> None:
-    """
-    Tests OffloadingConnector with CPUOffloadingSpec.
-    """
+    """Tests OffloadingConnector with CPUOffloadingSpec."""
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict = {"cpu_bytes_to_use": 500 << 20}
     if cpu_block_size is not None:

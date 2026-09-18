@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Streaming SSE event builders for the Responses API.
+"""Streaming SSE event builders for the Responses API.
 
 Pure functions that translate streaming state + delta data into
 OpenAI Response API SSE events. Used by the streaming event
@@ -125,8 +124,7 @@ def is_mcp_tool_by_namespace(
     recipient: str | None,
     allowed_function_tool_names: frozenset[str] | None = None,
 ) -> bool:
-    """
-    Determine if a tool call is an MCP tool based on recipient prefix.
+    """Determine if a tool call is an MCP tool based on recipient prefix.
 
     Inverse of :func:`is_function_recipient` — everything that is not
     a function call is an MCP tool.
@@ -1145,8 +1143,7 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
 
 class SimpleStreamingEventProcessor:
-    """
-    State-machine processor for the simple (non-Harmony) streaming path.
+    """State-machine processor for the simple (non-Harmony) streaming path.
 
     Core flow:
       1. Resolve the target state from the delta_message
@@ -1188,8 +1185,7 @@ class SimpleStreamingEventProcessor:
     def resolve_target_state(
         self, delta_message: DeltaMessage
     ) -> tuple[_StateType, Any]:
-        """
-        Decide which state the next delta belongs to.
+        """Decide which state the next delta belongs to.
 
         Priority: TOOL_CALL > REASONING > CONTENT, fallback to NONE.
         For TOOL_CALL the first tool_call object is also returned so
@@ -1207,8 +1203,7 @@ class SimpleStreamingEventProcessor:
         return _StateType.NONE, None
 
     def needs_transition(self, target_state: _StateType, tool_call: Any) -> bool:
-        """
-        Return True when we must close the current state and open a new one.
+        """Return True when we must close the current state and open a new one.
 
         Two cases trigger a transition:
           1. The target state differs from the current state

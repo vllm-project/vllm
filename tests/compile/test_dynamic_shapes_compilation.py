@@ -22,7 +22,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def get_test_models():
-    """Get list of models to test based on PyTorch version"""
+    """Get list of models to test based on PyTorch version."""
     models = [
         "Qwen/Qwen3-0.6B",
         "openai-community/gpt2",
@@ -172,7 +172,6 @@ def test_model_specialization_with_evaluate_guards(
     """Test that evaluate_guards correctly detects shape specialization
     violations.
     """
-
     if (
         use_aot_compile
         and dynamic_shapes_type == DynamicShapesType.BACKED

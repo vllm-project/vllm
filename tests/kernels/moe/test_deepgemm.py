@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit-test DeepGEMM FP8 and FP4 kernels (no DeepEP).
+"""Unit-test DeepGEMM FP8 and FP4 kernels (no DeepEP).
 Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 """
 
@@ -27,6 +26,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
+    ep_gather,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+    _fp8_workspace_shape,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -42,6 +45,42 @@ from vllm.utils.deep_gemm import (
 )
 
 BLOCK_SIZE = [128, 128]
+
+
+def test_ep_gather_uses_64_bit_row_offsets():
+    hidden_size = 4096
+    source_row = 1 << 18
+    input_tensor = torch.empty(
+        (source_row + 1, hidden_size),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    input_tensor[source_row].fill_(1)
+    output = torch.empty((1, hidden_size), device="cuda", dtype=torch.bfloat16)
+
+    ep_gather(
+        input_tensor=input_tensor,
+        recv_topk_ids=torch.zeros((1, 1), device="cuda", dtype=torch.int64),
+        recv_topk_weight=torch.ones((1, 1), device="cuda", dtype=torch.float32),
+        input_index=torch.full((1, 1), source_row, device="cuda", dtype=torch.int32),
+        expert_map=None,
+        output_tensor=output,
+    )
+
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("workspace_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_columns", [2048, 6144, 6145])
+def test_fp8_workspace_shape(workspace_dtype, num_columns):
+    num_rows = 17
+    shape = _fp8_workspace_shape(num_rows, num_columns, workspace_dtype)
+
+    allocated_bytes = math.prod(shape) * workspace_dtype.itemsize
+    required_bytes = num_rows * num_columns * torch.float8_e4m3fn.itemsize
+
+    assert allocated_bytes >= required_bytes
+    assert allocated_bytes - required_bytes < num_rows * workspace_dtype.itemsize
 
 
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
@@ -79,8 +118,7 @@ def make_block_quant_fp8_weights(
     k: int,
     block_size: list[int],
 ):
-    """
-    Generate (w1, w2) expert weights and their per-block scale tensors
+    """Generate (w1, w2) expert weights and their per-block scale tensors
     in FP8 block-quantized format.
 
       w1 shape: (E, 2N, K)
@@ -121,8 +159,7 @@ def make_block_quant_fp8_weights(
 
 
 def run_single_case(m, n, k, topk, num_experts, block_size):
-    """
-    Run one (M,N,K) configuration on a single GPU and assert DeepGEMM ==
+    """Run one (M,N,K) configuration on a single GPU and assert DeepGEMM ==
     Triton baseline within tolerance.
     """
     tokens_bf16 = (
@@ -248,8 +285,7 @@ def make_mxfp4_weights(
     n: int,
     k: int,
 ):
-    """
-    Generate (w1, w2) expert weights in MXFP4 packed format with float32 scales,
+    """Generate (w1, w2) expert weights in MXFP4 packed format with float32 scales,
     plus BF16 reference weights for validation.
 
       w1 shape: (E, 2N, K//2) uint8    — packed FP4
@@ -310,8 +346,7 @@ def _bf16_moe_reference(x, w1, w2, topk_weights, topk_ids):
 
 
 def run_single_fp4_case(m, n, k, topk, num_experts):
-    """
-    Run one (M,N,K) configuration with FP4 weights on DeepGEMM and assert
+    """Run one (M,N,K) configuration with FP4 weights on DeepGEMM and assert
     DeepGEMM FP4 == BF16 reference within tolerance.
     """
     tokens_bf16 = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * (k**-0.5)

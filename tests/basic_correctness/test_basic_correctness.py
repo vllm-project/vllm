@@ -89,7 +89,7 @@ TARGET_TEST_SUITE = _resolve_target_test_suite()
     condition=current_platform.is_rocm(),
 )
 def test_vllm_gc_ed():
-    """Verify vllm instance is GC'ed when it is deleted"""
+    """Verify vllm instance is GC'ed when it is deleted."""
     llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm

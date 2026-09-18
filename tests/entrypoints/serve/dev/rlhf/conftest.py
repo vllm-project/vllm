@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared fixtures and helpers for the RL lifecycle test suite.
+"""Shared fixtures and helpers for the RL lifecycle test suite.
 
 All test modules under this directory import from here to avoid duplication.
 
@@ -92,6 +91,7 @@ def server(
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS

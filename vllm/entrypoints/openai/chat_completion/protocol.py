@@ -659,6 +659,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            skip_special_tokens=self.skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:

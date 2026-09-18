@@ -50,6 +50,8 @@ message ServerInfo {
   uint64 max_batched_tokens = 9;
   uint32 max_loras = 10;
   RlCapabilities rl_capabilities = 11;
+  // Full-attention block size in tokens after initialization; absent if unavailable.
+  optional uint64 effective_attention_block_size = 14;
 }
 
 message RlCapabilities {
@@ -66,6 +68,7 @@ message ParallelismInfo {
   uint32 data_parallel_rank = 4;
   uint32 decode_context_parallel_size = 5;
   uint64 world_size = 6;
+  uint32 data_parallel_size_local = 7;
 }
 
 message GetModelInfoRequest {}

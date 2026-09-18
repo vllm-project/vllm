@@ -54,8 +54,19 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
+def get_mlp_layer_types(config) -> list[str]:
+    """Return which layers are MoE, rejecting configs predating Transformers support."""
+    mlp_layer_types = getattr(config, "mlp_layer_types", None)
+    if mlp_layer_types is None:
+        raise ValueError(
+            "Laguna requires the `LagunaConfig` from Transformers, which is "
+            "available from v5.17.0. Please update Transformers to run this model."
+        )
+    return mlp_layer_types
+
+
 class LagunaMLP(nn.Module):
-    """Dense MLP for Laguna (used in mlp_only_layers)."""
+    """Dense MLP for Laguna."""
 
     def __init__(
         self,
@@ -206,7 +217,7 @@ class LagunaMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
+            renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
@@ -293,13 +304,12 @@ class LagunaAttention(nn.Module):
         else:
             self.sliding_window = None
 
-        # QKV projection (no bias for Laguna)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=config.qkv_bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -506,14 +516,9 @@ class LagunaDecoderLayer(nn.Module):
             ),
         )
 
-        # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)
-        mlp_only_layers = (
-            [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
-        )
         self.is_moe_layer = (
-            (layer_idx not in mlp_only_layers)
-            and (config.num_experts > 0)
-            and ((layer_idx + 1) % config.decoder_sparse_step == 0)
+            get_mlp_layer_types(config)[layer_idx] == "sparse"
+            and config.num_experts > 0
         )
 
         if self.is_moe_layer:

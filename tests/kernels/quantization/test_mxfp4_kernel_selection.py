@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MXFP4 linear kernel selection logic (CPU-only)
+"""Tests for MXFP4 linear kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_mxfp4_kernel_selection.py`.
 """

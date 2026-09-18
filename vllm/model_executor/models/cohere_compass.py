@@ -338,8 +338,7 @@ def pos_embed_interpolate_native(
 
 
 class Cohere_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - ni: Number of images
         - cps: Number of channels * patch_size * patch_size
@@ -365,8 +364,7 @@ class Cohere_VLImagePixelInputs(TensorSchema):
 
 
 class Cohere_VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of image features
         - hs: Hidden size
         - ni: Number of images
@@ -895,6 +893,7 @@ class Cohere_VisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -1744,8 +1743,7 @@ class CohereCompassForConditionalGeneration(
         image_embeds_split: tuple[torch.Tensor, ...],
         image_input: Cohere_VLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Append mrope positions for each for images.
+        """Append mrope positions for each for images.
         This is necessary to recover correct mrope positions
 
         Args:
@@ -1757,6 +1755,7 @@ class CohereCompassForConditionalGeneration(
             Tuple of image embeddings for each image item.
             Resulting embeddings will have extra 5 channels for
             computed mrope positions, consistent with video embeddings.
+
         """
         if self.is_multimodal_pruning_enabled:
             merge_size = self.visual.spatial_merge_size
@@ -1837,8 +1836,7 @@ class CohereCompassForConditionalGeneration(
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -1856,6 +1854,7 @@ class CohereCompassForConditionalGeneration(
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         return self._recompute_mrope_positions(
             input_ids=input_ids,
@@ -2046,8 +2045,8 @@ class CohereCompassForConditionalGeneration(
                     `None` if no images are passed.
                 - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
                     LLM. `None` if no images are passed.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2083,9 +2082,7 @@ class CohereCompassForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=["visual.merger", "visual.deepstack_merger_list"],

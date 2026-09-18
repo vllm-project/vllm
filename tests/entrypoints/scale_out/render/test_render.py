@@ -337,7 +337,6 @@ async def test_chat_completion_render_multi_turn(client):
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_stream_true(client):
     """Render accepts stream params but still returns JSON (non-streamed)."""
-
     response = await client.post(
         "/v1/chat/completions/render",
         json={

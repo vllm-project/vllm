@@ -57,8 +57,7 @@ def get_sequence_parallelism_threshold(
     tp_size: int,
     element_size: int,
 ) -> int | None:
-    """
-    Calculate the minimum token threshold for applying sequence parallelism.
+    """Calculate the minimum token threshold for applying sequence parallelism.
 
     Returns None if sequence parallelism should not be applied based on model size.
 
@@ -496,8 +495,7 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
 
 
 class SequenceParallelismPass(VllmPatternMatcherPass):
-    """
-    This pass enables sequence parallelism for models.
+    """This pass enables sequence parallelism for models.
     It identifies patterns where an AllReduce operation is followed by
     an RMSNorm (or RMSNorm and then Quantization) operation.
     These patterns are replaced with a ReduceScatter operation, followed by
@@ -590,8 +588,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        """
-        Determines if sequence parallelism should be applied for the given
+        """Determines if sequence parallelism should be applied for the given
         compile range.
 
         SP is only beneficial for larger batch sizes where the communication

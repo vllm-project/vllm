@@ -106,6 +106,22 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
+The proxy batches images from the same user request assigned to the same encoder.
+Set the proxy environment variable `ENCODER_MAX_BATCH_SIZE` to limit the number
+of images per encoder subrequest. It defaults to `0` (unlimited); `1` sends each
+image separately. Audio and video remain separate subrequests.
+
+For encoders with a smaller `--limit-mm-per-prompt` image limit than P/PD, set
+`ENCODER_MAX_BATCH_SIZE` no higher than the smallest encoder image limit.
+For example, for encoders configured with `--limit-mm-per-prompt '{"image": 2}'`:
+
+```bash
+ENCODER_MAX_BATCH_SIZE=2 python disagg_epd_proxy.py \
+    --encode-servers-urls "http://e1:8001,http://e2:8002" \
+    --prefill-servers-urls disable \
+    --decode-servers-urls "http://pd1:8003"
+```
+
 Example usage:
 For E + PD setup:
 

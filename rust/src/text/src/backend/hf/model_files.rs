@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use hf_hub::{Cache, Repo, RepoType};
 use thiserror_ext::AsReport as _;
 
+use super::HfOverrides;
 use super::config::{HfTokenizerConfig, load_tokenizer_config};
 use crate::error::{Error, Result};
 
@@ -50,9 +52,27 @@ pub struct ResolvedModelFiles {
     pub processor_config_path: Option<PathBuf>,
     pub chat_template_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
+    /// Keep a patched config alive across clones and backend ownership.
+    config_temp_path: Option<Arc<tempfile::TempPath>>,
 }
 
 impl ResolvedModelFiles {
+    /// Materialize a merge-patched config owned by these resolved model files.
+    pub fn apply_overrides(&mut self, overrides: &HfOverrides) -> Result<()> {
+        if overrides.is_empty() {
+            return Ok(());
+        }
+        let path = materialize_config(self.config_path.as_deref(), overrides).map_err(|error| {
+            Error::Tokenizer(format!(
+                "failed to materialize HF overrides: {}",
+                error.as_report()
+            ))
+        })?;
+        self.config_path = Some(path.to_path_buf());
+        self.config_temp_path = Some(Arc::new(path));
+        Ok(())
+    }
+
     /// Resolve tokenizer/config files from a local model directory first when
     /// `model_id` points to one, otherwise consult the local HF cache and
     /// finally the Hub.
@@ -84,6 +104,24 @@ impl ResolvedModelFiles {
     }
 }
 
+fn materialize_config(
+    path: Option<&Path>,
+    overrides: &HfOverrides,
+) -> anyhow::Result<tempfile::TempPath> {
+    let mut config: serde_json::Value = match path {
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+        None => serde_json::json!({}),
+    };
+    anyhow::ensure!(config.is_object(), "HF model config must be a JSON object");
+    overrides.apply(&mut config);
+    let file = tempfile::Builder::new()
+        .prefix("vllm-rs-hf-config-")
+        .suffix(".json")
+        .tempfile()?;
+    serde_json::to_writer(file.as_file(), &config)?;
+    Ok(file.into_temp_path())
+}
+
 fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
     let tokenizer_config_path = local_file_if_exists(model_dir, "tokenizer_config.json");
     let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
@@ -101,6 +139,7 @@ fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
         processor_config_path: local_file_if_exists(model_dir, "processor_config.json"),
         chat_template_path: discover_chat_template_in_dir(model_dir),
         config_path: local_file_if_exists(model_dir, "config.json"),
+        config_temp_path: None,
     })
 }
 
@@ -164,6 +203,7 @@ async fn resolve_remote_model_files(
         processor_config_path,
         chat_template_path,
         config_path,
+        config_temp_path: None,
     })
 }
 
@@ -204,6 +244,7 @@ fn resolve_cached_model_files(cache: &Cache, repo: &Repo) -> Result<Option<Resol
         processor_config_path,
         chat_template_path,
         config_path,
+        config_temp_path: None,
     }))
 }
 
@@ -433,6 +474,37 @@ mod tests {
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
     use super::{ResolvedModelFiles, TokenizerSource};
+
+    #[tokio::test]
+    async fn overrides_keep_configs_alive_across_clones_and_isolate_instances() {
+        let source = tempdir().unwrap();
+        let original = r#"{"vocab_size":10}"#;
+        fs::write(source.path().join("config.json"), original).unwrap();
+        fs::write(source.path().join("tokenizer.json"), "{}").unwrap();
+        let mut first =
+            ResolvedModelFiles::new(source.path().to_str().unwrap(), None).await.unwrap();
+        let patch = serde_json::from_value(serde_json::json!({"vocab_size":20})).unwrap();
+        first.apply_overrides(&patch).unwrap();
+        let first_path = first.config_path.clone().unwrap();
+
+        let mut second = first.clone();
+        second.apply_overrides(&patch).unwrap();
+        let second_path = second.config_path.clone().unwrap();
+        assert_ne!(first_path, second_path);
+
+        let retained = first.clone();
+        drop(first);
+        assert!(first_path.exists());
+        drop(second);
+        assert!(!second_path.exists());
+        assert!(first_path.exists());
+        drop(retained);
+        assert!(!first_path.exists());
+        assert_eq!(
+            fs::read_to_string(source.path().join("config.json")).unwrap(),
+            original
+        );
+    }
 
     #[tokio::test]
     async fn resolved_model_files_prefers_absolute_local_model_dir() {

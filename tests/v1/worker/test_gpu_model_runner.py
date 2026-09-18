@@ -80,9 +80,7 @@ def _restore_default_dtype():
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
-    """
-    Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
-    """
+    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()."""
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
@@ -174,6 +172,20 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
             gc.enable()
         else:
             gc.disable()
+
+
+def test_prepare_padding_mask_marks_sequence_parallel_padding():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_padding = torch.empty(8, dtype=torch.bool)
+
+    mask = runner._prepare_padding_mask(1, 8)
+
+    assert mask.tolist() == [False, True, True, True, True, True, True, True]
+    assert mask.data_ptr() == runner.is_padding.data_ptr()
+
+    mask = runner._prepare_padding_mask(0, 8)
+
+    assert mask.all()
 
 
 @pytest.fixture
@@ -1193,14 +1205,12 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
-    """
-    The GPU model runner creates different views into the
+    """The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
     (via _allocate_kv_caches). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
-
     set_random_seed(42)
 
     update_environment_variables(

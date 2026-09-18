@@ -968,8 +968,7 @@ def test_hf_processor_call_kwargs(
 
 
 def test_apply_matches_no_match_exits_quickly():
-    """
-    Test that _apply_matches exits quickly when no matches are found.
+    """Test that _apply_matches exits quickly when no matches are found.
 
     Previously, _apply_matches had O(n²) behavior when no match was found
     because it would increment start_idx by 1 each iteration while
@@ -1027,8 +1026,7 @@ def test_iter_token_matches_rejects_negative_start_idx():
 
 
 def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
-    """
-    Test that placeholder scanning stays linear under adversarial candidates.
+    """Test that placeholder scanning stays linear under adversarial candidates.
 
     The fast-forward scan must not rescan the prompt tail per position when
     one candidate's first token never occurs (forcing a full search) while
@@ -1061,8 +1059,7 @@ def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
     ],
 )
 def test_find_mm_placeholders_stops_at_missing_item(prompt):
-    """
-    Test that the scan returns no placeholders once it fails to find
+    """Test that the scan returns no placeholders once it fails to find
     an item's placeholder, leaving later items unresolved.
     """
     result = find_mm_placeholders(
@@ -1079,8 +1076,7 @@ def test_find_mm_placeholders_stops_at_missing_item(prompt):
 
 
 class _FakeTokenizer:
-    """
-    Character-level tokenizer where "foo" merges into one token differently
+    """Character-level tokenizer where "foo" merges into one token differently
     depending on whether it is followed by "d", like BPE merging "foo" in
     "food" across the search-text boundary.
     """
@@ -1145,8 +1141,7 @@ def _text_fallback_processor() -> BaseMultiModalProcessor:
 
 
 def test_apply_prompt_updates_falls_back_to_text_matching():
-    """
-    Test that the fallback in `_apply_prompt_updates` finds targets that
+    """Test that the fallback in `_apply_prompt_updates` finds targets that
     tokenize differently inside the prompt ("foo" in "food").
     """
     processor = _text_fallback_processor()
@@ -1166,8 +1161,7 @@ def test_apply_prompt_updates_falls_back_to_text_matching():
 
 
 def test_apply_prompt_updates_falls_back_with_prefix_target():
-    """
-    Test that `PromptIndexTargets.prefix` targets are resolved against the
+    """Test that `PromptIndexTargets.prefix` targets are resolved against the
     decoded text in the fallback path of `_apply_prompt_updates`.
     """
     processor = _text_fallback_processor()
@@ -1192,8 +1186,7 @@ def test_apply_prompt_updates_falls_back_with_prefix_target():
 
 
 def test_apply_prompt_updates_falls_back_with_index_targets():
-    """
-    Test that the text resolvers of `PromptIndexTargets.start`/`end`
+    """Test that the text resolvers of `PromptIndexTargets.start`/`end`
     match against the decoded text when another item forces the
     fallback in `_apply_prompt_updates`.
     """

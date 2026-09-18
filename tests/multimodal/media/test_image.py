@@ -105,7 +105,6 @@ def test_image_media_io_no_mode_conversion(tmp_path):
 
 def test_image_media_io_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
-
     # Test invalid types
     with pytest.raises(
         ValueError, match="rgba_background_color must be a list or tuple"

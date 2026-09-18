@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -46,8 +47,7 @@ class UnquantizedMoeBackend(Enum):
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
@@ -208,11 +208,9 @@ def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary Unquantized MoE backend.
+    """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -308,7 +306,33 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            return _return_or_raise(backend, moe_config, activation_format)
+            reason = None
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, moe_config, None, None, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+            # AITER was explicitly requested but does not support this
+            # deployment configuration (e.g. a non-gated MoE activation,
+            # which AiterExperts._supports_no_act_and_mul() rejects
+            # unconditionally). Rather than hard-crashing at engine init,
+            # warn — explicitly stating that this is falling back, and
+            # which backends will be tried next — and fall back to the
+            # remaining backends in priority order below.
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
+                "Falling back to try the remaining available MoE backends: %s.",
+                _make_log_unsupported(backend, reason),
+                ", ".join(
+                    b.value
+                    for b in AVAILABLE_BACKENDS
+                    if b != UnquantizedMoeBackend.AITER
+                ),
+            )
+            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
@@ -324,6 +348,17 @@ def select_unquantized_moe_backend(
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."
     )
+
+
+def unquantized_round_up_hidden_size_and_intermediate_size(
+    backend: UnquantizedMoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round up dimensions before allocation to satisfy the selected kernel."""
+    if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        intermediate_size = round_up(intermediate_size, 128)
+    return hidden_size, intermediate_size
 
 
 def convert_to_unquantized_kernel_format(
@@ -354,13 +389,26 @@ def convert_to_unquantized_kernel_format(
         )
         moe_config.intermediate_size_per_partition = padded_intermediate
 
+        # Reloads only overwrite checkpoint slices. An earlier in-place
+        # permutation can leave nonzero values in the raw padding slots.
+        unpadded = moe_config.intermediate_size_per_partition_unpadded
+        assert unpadded is not None
+        if padded_intermediate > unpadded:
+            w13_weight[:, unpadded:padded_intermediate].zero_()
+            if is_act_and_mul:
+                w13_weight[:, padded_intermediate + unpadded :].zero_()
+            w2_weight[:, :, unpadded:].zero_()
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
             is_gated_act_gemm=is_act_and_mul,
         )
+        # Keep checkpoint-shaped parameters for reload/IPC. The experts create
+        # BlockMajorK views at dispatch without changing the underlying storage.
+        return w13_weight, w2_weight
 
     if (
         unquantized_backend == UnquantizedMoeBackend.TRITON

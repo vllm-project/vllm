@@ -116,6 +116,7 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     Returns:
         (q_fp8 ``[rows, 128]`` float8_e4m3fn, scale ``[rows, 1]`` float32).
+
     """
     assert q.ndim == 2 and q.shape[1] == 128, q.shape
     assert q.dtype == torch.bfloat16
@@ -276,6 +277,13 @@ def kpool_compress_and_write_cache(
         slot_score: ``[n_pools, pool_size, head_dim]`` — per-token gate score.
         ape: ``[pool_size, head_dim]`` fp32 — per-slot position bias.
         loc: ``[n_pools]`` int64 — flat physical slot per pool.
+        pool_size: Number of tokens compressed into one cache entry.
+        head_dim: Indexer head dimension.
+        write_mask: ``[n_pools]`` bool — pools to write, or None for all.
+        round_scale: Round each fp8 scale down to a power of two.
+        return_compressed: Also return the compressed K and scales.
+        write_cache: Write the compressed result into ``kv_cache``.
+
     """
     assert slot_k.ndim == 3
     assert slot_score.shape == slot_k.shape
@@ -642,6 +650,10 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         ape: ``[pool_size, head_dim]`` fp32.
         slot_mapping: ``[num_requests, next_n]`` int32.
         positions: ``[num_requests, next_n]`` int32.
+        pool_size: Number of tokens compressed into one cache entry.
+        head_dim: Indexer head dimension.
+        round_scale: Round each fp8 scale down to a power of two.
+
     """
     num_requests, next_n = key.shape[0], key.shape[1]
     if num_requests == 0 or next_n == 0:

@@ -53,6 +53,9 @@ message GenerateRequest {
 
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 15;
+
+  // Apply the engine's configured watermark. Defaults to true when omitted.
+  optional bool watermarking = 16;
 }
 
 message RandomSampling {

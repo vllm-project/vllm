@@ -136,7 +136,7 @@ steps:
       label: ":amd: (MI355) Rust Frontend Core Correctness"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 20
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -166,7 +166,7 @@ steps:
       label: ":amd: (MI355) Rust Frontend Tool Use"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 25
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:

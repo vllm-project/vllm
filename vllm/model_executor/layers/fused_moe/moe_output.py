@@ -57,8 +57,8 @@ def convert_flashinfer_moe_output(
 
     Raises:
         ValueError: If FlashInfer returns an unexpected layout.
-    """
 
+    """
     if num_tokens < 0:
         raise ValueError("num_tokens must be non-negative.")
     if top_k <= 0:

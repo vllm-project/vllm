@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ScaledMM kernel selection logic (CPU-only)
+"""Tests for ScaledMM kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
@@ -12,18 +12,88 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
+    HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
+    _get_linear_backend,
+    _resolve_backend_kernels,
+    init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_auto_linear_backend_is_unchanged_without_overrides():
+    kernels = [object]
+    quantizations = (
+        "fp8_block_w8a8",
+        "fp8_w8a8",
+        "int8_w8a8",
+        "mixed_precision",
+        "mxfp8",
+        "mxfp4",
+        "mxfp6",
+        "w8a16_fp8",
+        "nvfp4_w4a4",
+        "nvfp4_w4a16",
+    )
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
+
+    with set_current_vllm_config(config):
+        for quantization in quantizations:
+            assert _get_linear_backend(quantization=quantization) == "auto"
+            assert (
+                _resolve_backend_kernels(kernels, "test", quantization=quantization)
+                is kernels
+            )
+
+
+def test_linear_backend_override_is_quantization_specific():
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend="cutlass",
+            linear_backend_per_quant={"nvfp4_w4a16": "humming"},
+        )
+    )
+
+    with set_current_vllm_config(config):
+        assert _get_linear_backend(quantization="nvfp4_w4a16") == "humming"
+        assert _get_linear_backend(quantization="nvfp4_w4a4") == "cutlass"
+        assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
+
+
+@patch.object(HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_fp8_linear_backend_override(platform_mock, _):
+    platform_mock._enum = PlatformEnum.CUDA
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend="cutlass",
+            linear_backend_per_quant={"fp8_w8a8": "humming"},
+        )
+    )
+
+    with set_current_vllm_config(config):
+        kernel = init_fp8_linear_kernel(
+            activation_quant_key=kFp8StaticTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+            weight_shape=(128, 128),
+        )
+
+    assert type(kernel) is HummingFP8ScaledMMLinearKernel
 
 
 def test_is_supported_is_abstract():

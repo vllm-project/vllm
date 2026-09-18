@@ -124,6 +124,7 @@ def _create_nvfp4_hnd_kv_cache(
 
     Returns:
         ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
+
     """
     # First create a bf16 cache so block tables are populated.
     bf16_cache = create_and_prepopulate_kv_cache(

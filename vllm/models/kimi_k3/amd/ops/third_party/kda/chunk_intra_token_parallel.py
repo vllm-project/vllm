@@ -151,8 +151,7 @@ def chunk_kda_fwd_intra_token_parallel(
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
 ) -> None:
-    """
-    Token-parallel implementation: each token gets its own thread block.
+    """Token-parallel implementation: each token gets its own thread block.
     Supports both fixed-length and variable-length sequences.
     Reduces wasted computation on padding.
 
@@ -164,10 +163,12 @@ def chunk_kda_fwd_intra_token_parallel(
         gk: [B, T, HV, K] cumsum of gates (HV >= H for GVA)
         beta: [B, T, HV]
         Aqk: [B, T, HV, BT] output tensor to write to
+        cu_seqlens: cumulative sequence lengths for variable-length input
         Akk: [B, T, HV, BC] output tensor for diagonal blocks (fp32)
         scale: attention scale
         chunk_size: BT (default 64)
         sub_chunk_size: BC (default 16)
+
     """
     B, T, H, K, HV = *q.shape, gk.shape[2]
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B

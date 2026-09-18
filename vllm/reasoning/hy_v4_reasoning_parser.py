@@ -46,8 +46,8 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         RuntimeError: The tokenizer declares the structural tokens through
             ``model_specific_special_tokens``, which transformers 5 no longer
             round-trips.
-    """
 
+    """
     import transformers
 
     if int(transformers.__version__.split(".")[0]) >= 5:

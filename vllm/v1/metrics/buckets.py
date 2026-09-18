@@ -177,6 +177,7 @@ def build_buckets(mantissa_lst: list[int], max_value: int) -> list[float]:
 
     Returns:
         Bucket values in increasing order, capped at `max_value`.
+
     """
     exponent = 0
     buckets: list[float] = []
@@ -196,6 +197,7 @@ def build_1_2_5_buckets(max_value: int) -> list[float]:
     Example:
         >>> build_1_2_5_buckets(100)
         [1, 2, 5, 10, 20, 50, 100]
+
     """
     return build_buckets([1, 2, 5], max_value)
 
@@ -218,6 +220,7 @@ def histogram_buckets(
     Raises:
         ValueError: If `family` is `request_tokens` and `max_model_len`
             is None.
+
     """
     if family == "request_tokens":
         if max_model_len is None:

@@ -45,6 +45,9 @@ Below ready-to-run scripts shows the workflow:
 
 ## 3  Test Script
 
+For optional cross-Encoder output reuse while retaining Mooncake P2P delivery,
+see [Cross-encoder output reuse](cross_encoder_cache.md).
+
 Please refer to the directories `tests/v1/ec_connector`
 
 ## 4  Development

@@ -227,6 +227,7 @@ class ViTPatchGenerator(nn.Module):
 
         Returns:
             Embedded patches with temporal compression applied.
+
         """
         assert self.temporal_patch_size > 1
         T = self.temporal_patch_size

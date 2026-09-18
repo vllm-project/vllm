@@ -19,8 +19,7 @@ def get_mm_max_toks_per_item(
     processor: BaseMultiModalProcessor,
     mm_counts: Mapping[str, int],
 ) -> Mapping[str, int]:
-    """
-    Get the maximum number of tokens per data item from each modality based
+    """Get the maximum number of tokens per data item from each modality based
     on underlying model configuration.
     """
     max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the rms_norm_per_block_quant helion kernel
+"""Tests for the rms_norm_per_block_quant helion kernel.
 
 Run `pytest tests/kernels/helion/test_rms_norm_per_block_quant.py`.
 """

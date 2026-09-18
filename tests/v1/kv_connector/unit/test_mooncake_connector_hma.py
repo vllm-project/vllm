@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeXferMetadata,
+    PullReqMeta,
     SendBlockMeta,
     TransferRegion,
 )
@@ -216,7 +217,6 @@ def test_metadata_hma_block_ids():
 )
 async def test_build_transfer_params_multi_group_trimming(monkeypatch):
     """_build_transfer_params trims per-group blocks when local > remote."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
@@ -313,7 +313,6 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
 )
 async def test_build_transfer_params_group_count_mismatch(monkeypatch):
     """_build_transfer_params reports an error when group counts differ."""
-
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
@@ -436,3 +435,79 @@ def test_request_finished_with_hma_groups():
     assert stored_blocks[0] == fa_blocks
     # SW: clipped to last 9 blocks (sw_size=128, block_size=16 → 8+1=9)
     assert stored_blocks[1] == sw_blocks[-9:]
+
+
+# ---------------------------------------------------------------------------
+#  Worker-side load-failure reporting (HMA vs non-HMA)
+# ---------------------------------------------------------------------------
+def _make_kv_consumer_worker(swa_enabled: bool, disable_hma: bool = False):
+    block_size = 16
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=block_size,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size, swa_enabled=swa_enabled
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+    return connector.connector_worker
+
+
+def _make_pull_meta(d_req_id: str, local_block_ids: list[list[int]]) -> PullReqMeta:
+    return PullReqMeta(
+        d_req_id=d_req_id,
+        transfer_id="tx-1",
+        local_block_ids=local_block_ids,
+        remote_engine_id="engine-0",
+        remote_bootstrap_addr="127.0.0.1:1234",
+    )
+
+
+# The tests below construct a MooncakeConnectorWorker, whose __init__
+# requires an accelerator device, so (like the worker tests in
+# test_mooncake_connector.py) they run on the GPU KV-connectors job only.
+@pytest.mark.parametrize(
+    "swa_enabled,disable_hma,expected_is_hma",
+    [
+        (True, False, True),  # SWA group present, HMA enabled
+        (True, True, False),  # SWA group present, but HMA disabled
+        (False, False, False),  # FA only, HMA not needed
+    ],
+)
+def test_worker_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
+    """Worker-side _is_hma_required mirrors the scheduler's derivation."""
+    worker = _make_kv_consumer_worker(swa_enabled, disable_hma)
+    assert worker._is_hma_required is expected_is_hma
+
+
+def test_worker_failed_recv_reports_request_level_failure_with_hma():
+    """With HMA, load failures report the request, not ambiguous block IDs."""
+    worker = _make_kv_consumer_worker(swa_enabled=True)
+    assert worker._is_hma_required
+
+    pull_meta = _make_pull_meta("d-req-1", [[1, 2], [3, 4]])
+    worker._handle_failed_recv({"p-req-1": pull_meta}, ["p-req-1"], "boom")
+
+    assert worker.get_block_ids_with_load_errors() == set()
+    results = worker.get_transfer_results()
+    assert results.failed_recving == {"d-req-1"}
+    assert results.finished_recving == {"d-req-1"}
+
+
+def test_worker_failed_recv_reports_block_ids_without_hma():
+    """Without HMA, load failures keep reporting block-level errors."""
+    worker = _make_kv_consumer_worker(swa_enabled=False)
+    assert not worker._is_hma_required
+
+    pull_meta = _make_pull_meta("d-req-1", [[1, 2], [3, 4]])
+    worker._handle_failed_recv({"p-req-1": pull_meta}, ["p-req-1"], "boom")
+
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3, 4}
+    results = worker.get_transfer_results()
+    assert results.failed_recving == set()
+    assert results.finished_recving == {"d-req-1"}

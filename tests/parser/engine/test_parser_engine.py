@@ -185,8 +185,8 @@ class TestReasoningEndTokenIds:
     def test_find_reasoning_end_offset_returns_first_match(self):
         engine = _make_engine()
         assert engine.find_reasoning_end_offset([5, 201, 6, 201]) == 1
-        assert engine.find_reasoning_end_offset([5, 6]) is None
-        assert engine.find_reasoning_end_offset([]) is None
+        assert engine.find_reasoning_end_offset([5, 6]) == 2
+        assert engine.find_reasoning_end_offset([]) == 0
         # Rejected-draft placeholders never match.
         assert engine.find_reasoning_end_offset([-1, 201]) == 1
 

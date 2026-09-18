@@ -99,7 +99,6 @@ def smart_resize(
     3. The aspect ratio of the image is maintained as closely as possible.
 
     """
-
     if height < factor:
         width = round((width * factor) / height)
         height = factor
@@ -244,36 +243,37 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
 class PaddleOCRVLMultiModalProcessor(
     BaseMultiModalProcessor[PaddleOCRVLProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        final_mm_kwargs = dict(hf_processor_mm_kwargs or {})
+        final_mm_kwargs = dict(hf_kwargs or {})
         final_mm_kwargs.setdefault("images_kwargs", {})
         # vLLM use PIL.Image, always set channel_last
         final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
-        processed_data = self.info.ctx.call_hf_processor(
+        return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**final_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            hf_data,
+            hf_kwargs,
         )
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
         num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
         processed_data["pixel_values"] = processed_data["pixel_values"].split(
             num_patches_per_image.tolist()
         )
-        processed_data.update(passthrough_data)
-
         return processed_data
 
     def _get_mm_fields_config(
@@ -1015,14 +1015,14 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int, float]]:
-        """
-        Iterate over multimodal features and yield grid information.
+        """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
             Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)

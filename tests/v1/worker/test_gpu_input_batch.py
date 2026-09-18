@@ -66,11 +66,9 @@ def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_bui
 def _remove_requests(
     input_batch: InputBatch, batch_size: int, reqs: list[CachedRequestState]
 ) -> set[str]:
-    """
-    Remove some requests randomly from the batch and returns
+    """Remove some requests randomly from the batch and returns
     set of request removed
     """
-
     num_reqs_to_remove = np.random.randint(0, batch_size)
     req_indices_to_remove: set[int] = set()
     for _ in range(num_reqs_to_remove):
@@ -90,8 +88,7 @@ def _construct_expected_sampling_metadata(
     req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
 ) -> SamplingMetadata:
-    """
-    Constructs and returns the expected SamplingMetadata for this
+    """Constructs and returns the expected SamplingMetadata for this
     batch.
     """
     num_reqs = len(req_ids_retained)
@@ -219,8 +216,7 @@ def _construct_cached_request_state(req_id_suffix: int):
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32, 64])
 def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
-    """
-    Tests the logic for managing sampling metadata in the InputBatch.
+    """Tests the logic for managing sampling metadata in the InputBatch.
 
     This test involves adding a set of requests to the InputBatch,
     followed by removing a subset of them. Afterward, the batch is compacted,
@@ -314,8 +310,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("swap_list", [((0, 1),)])
 def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: list):
-    """
-    Tests the logic for managing sampling metadata in the InputBatch.
+    """Tests the logic for managing sampling metadata in the InputBatch.
 
     This test involves adding a set of requests to the InputBatch,
     followed by removing a subset of them. Afterward, the batch is compacted,

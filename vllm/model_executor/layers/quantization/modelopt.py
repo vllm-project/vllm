@@ -153,9 +153,7 @@ def algos_owned_by(config_name: str) -> tuple[str, ...]:
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints."""
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
         super().__init__(quant_config)
@@ -178,8 +176,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self.exclude_modules: list[str] = exclude_modules
 
     def is_layer_excluded(self, prefix: str) -> bool:
-        """
-        Check if a layer should be excluded from quantization.
+        """Check if a layer should be excluded from quantization.
 
         Handles both exact matching (for fused layers) and ModelOpt wildcard matching.
 
@@ -472,8 +469,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale.
+
     Args:
         quant_config: The ModelOpt quantization config.
+
     """
 
     def __init__(
@@ -818,10 +817,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
-    """
-    MoE Method for FP4 Quantization.
+    """MoE Method for FP4 Quantization.
+
     Args:
         quant_config: NVFP4 Quant Config
+
     """
 
     supports_pre_processed_weights = True
@@ -851,9 +851,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """
-        FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
-        """
+        """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
 
     def create_weights(
@@ -973,9 +971,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        """
-        Convert NVFP4 MoE weights into kernel format and setup the kernel.
-        """
+        """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise RuntimeError(
@@ -1942,7 +1938,9 @@ class KNvfp4Static(QuantKeyScheme):
             PerTensorScaleParameter,
             wl,
         )
-        # Per-block (group_size) weight scale.
+        # Per-block (group_size) weight scale. Initialized to NaN (rather than
+        # left as torch.empty garbage) so an unloaded scale is unambiguously
+        # detectable in process() below, matching the sentinel pattern in #45320.
         self.register_params(
             layer,
             "weight_scale",
@@ -1955,11 +1953,26 @@ class KNvfp4Static(QuantKeyScheme):
             wl,
             input_dim=1,
             output_dim=0,
+            init=float("nan"),
         )
 
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
+        # Sanity-check: weight_scale must have been overwritten by the weight
+        # loader. A value still equal to the NaN sentinel it was created with
+        # means the FP4 weights were never actually loaded (e.g. the
+        # checkpoint stores this layer as BF16 and the weight loader silently
+        # skipped it).
+        if torch.isnan(layer.weight_scale.float()).any():
+            raise RuntimeError(
+                f"NVFP4 weight_scale for layer "
+                f"{getattr(layer, 'name', repr(layer))!r} was never loaded "
+                "(still NaN). The checkpoint likely stores this layer as "
+                "BF16 (not FP4). Fix: pass quant_config=None when "
+                "constructing this layer, or add it to the quantization "
+                "ignore list."
+            )
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
@@ -2280,7 +2293,7 @@ SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
 
 
 def maybe_fuse_global_scales(layer) -> None:
-    """alpha = input_global_scale * weight_global_scale, presence-gated.
+    """Alpha = input_global_scale * weight_global_scale, presence-gated.
 
     W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
     """

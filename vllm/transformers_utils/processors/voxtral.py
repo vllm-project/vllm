@@ -18,8 +18,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 
 
 class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
-    """
-    Provide a HF-compatible interface for
+    """Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.AudioEncoder`.
     """
 

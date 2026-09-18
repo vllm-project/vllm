@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_metrics::{
     EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, LoraAdapterNames,
     LoraInfoLabels, MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily,
-    MooncakeOperationLabels, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
-    WaitingReasonLabels,
+    MooncakeOperationLabels, RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics,
+    U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
@@ -19,6 +19,23 @@ use crate::transport::ConnectedEngine;
 
 const WAITING_REASON_CAPACITY: &str = "capacity";
 const WAITING_REASON_DEFERRED: &str = "deferred";
+
+/// Cached output-batch metric handles for one model and engine index.
+pub(crate) struct IterationMetricHandles {
+    pub iteration_tokens_total: HistogramMetric,
+}
+
+impl IterationMetricHandles {
+    pub(crate) fn new(metrics: &RequestMetrics, model_name: &str, engine: u32) -> Self {
+        let labels = EngineLabels {
+            model_name: model_name.to_string(),
+            engine,
+        };
+        Self {
+            iteration_tokens_total: metrics.iteration_tokens_total.get_or_create_owned(&labels),
+        }
+    }
+}
 
 /// Cached scheduler-stats metric handles for all engines connected to one
 /// frontend client.

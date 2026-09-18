@@ -106,6 +106,7 @@ def _resolve_fused_expert_param(
 
     Returns:
         The matching draft parameter name, or None when there is none.
+
     """
     if not ckpt_suffix:
         return param_base if param_base in params_dict else None
@@ -164,6 +165,7 @@ def _create_mtp_quant_config(
     Returns:
         The quantization config to use for the MTP layers, or None when the MTP
         layers are unquantized.
+
     """
     mtp_quant_algo = getattr(hf_config, "mtp_quant_algo", None)
 
@@ -241,6 +243,7 @@ def _remap_mtp_quant_exclusions(
 
     Returns:
         A shallow copy with the translated exclusions, or the input unchanged.
+
     """
     if quant_config is None:
         return None
@@ -671,6 +674,7 @@ class HYV4MTP(nn.Module):
         Returns:
             True when the weight was consumed (even if this rank holds none of
             the addressed experts).
+
         """
         base = name.split(".experts.")[0]
         for ckpt_proj, tag in (
