@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -93,11 +94,24 @@ def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
     return [spec] if _is_replicated_mla_spec(spec) else None
 
 
-def _all_groups_are_mla(groups) -> bool:
-    """Whether every KV cache group holds only MLA layers."""
-    return bool(groups) and all(
-        _mla_layer_specs(group.kv_cache_spec) is not None for group in groups
-    )
+def _is_replicated_group(group: "KVCacheGroupSpec") -> bool:
+    """True when every layer in the group is TP-replicated.
+
+    Two cases qualify:
+    - All-MLA groups: every layer spec is an MLA type with ``num_kv_heads == 1``
+      (no head dimension to shard across TP ranks).
+    - Mamba groups with ``tp_replicated=True``: the SSM state is not sharded
+      (e.g. GLM5 PLE conv state); every TP rank holds the full state.
+    """
+    spec = group.kv_cache_spec
+    if isinstance(spec, MambaSpec):
+        return spec.tp_replicated
+    return _mla_layer_specs(spec) is not None
+
+
+def _all_groups_are_replicated(groups) -> bool:
+    """Whether every KV cache group is TP-replicated (MLA or Mamba)."""
+    return bool(groups) and all(_is_replicated_group(g) for g in groups)
 
 
 def _expected_mla_bytes_per_block(groups) -> int:
@@ -218,14 +232,14 @@ def build_offloading_config(
     )
     replicated_layout = (
         vllm_config.model_config.use_mla
-        # Every group must be MLA (MLAAttentionSpec or SlidingWindowMLASpec).
-        # Both store a replicated latent with no head dimension to shard.
-        # Other wrappers and non-MLA types fail closed via _all_groups_are_mla.
-        and _all_groups_are_mla(kv_cache_config.kv_cache_groups)
-        # Page accounting: one MLA page per layer, no packed/mixed rows.
+        # Every group must be TP-replicated (MLA with num_kv_heads==1, or Mamba
+        # with tp_replicated=True). Other wrappers and non-replicated types fail
+        # closed via _all_groups_are_replicated.
+        and _all_groups_are_replicated(kv_cache_config.kv_cache_groups)
+        # worker_kv_bytes_per_block > 0 guards an empty/zero allocation.
+        # _all_groups_are_replicated already ensures no non-replicated data is
+        # packed into the block, so no further byte accounting is needed.
         and worker_kv_bytes_per_block > 0
-        and worker_kv_bytes_per_block
-        == _expected_mla_bytes_per_block(kv_cache_config.kv_cache_groups)
         # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.tensor_parallel_size > 1
         and parallel_config.pipeline_parallel_size == 1

@@ -802,14 +802,15 @@ def test_replicated_layout_excludes_unproven_cache_shapes(
     assert not _replicated_layout(kv_cache_config), case
 
 
-def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
+def test_replicated_layout_bare_mla_with_packed_indexer_qualifies():
     num_blocks = 4
     main_spec = _mla_spec(head_size=512)
     indexer_spec = _mla_spec(head_size=128, dtype=torch.uint8)
     main_layers = [f"main_{i}" for i in range(61)]
     indexer_layers = [f"indexer_{i}" for i in range(61)]
     # A DSA-style group: the main pages and the smaller indexer pages are packed one
-    # after the other, so a block holds more than 61 MLA pages.
+    # after the other. Both specs are MLAAttentionSpec with num_kv_heads==1, so all
+    # TP ranks hold identical data. replicated_layout=True is correct.
     main_bytes = main_spec.page_size_bytes * len(main_layers)
     indexer_bytes = indexer_spec.page_size_bytes * len(indexer_layers)
     size = (main_bytes + indexer_bytes) * num_blocks
@@ -833,7 +834,7 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
         kv_cache_groups=[KVCacheGroupSpec(main_layers + indexer_layers, main_spec)],
     )
 
-    assert not _replicated_layout(kv_cache_config)
+    assert _replicated_layout(kv_cache_config)
 
 
 @pytest.mark.parametrize(
