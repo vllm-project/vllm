@@ -83,12 +83,9 @@ class LogitsContext:
     input_ids: torch.Tensor
     # [num_logits_rows] position of each row within its sequence.
     pos: torch.Tensor
-    # [num_reqs] UPPER BOUND on tokens visible to the token being sampled
-    # this step, per batch position, on the host: the scheduler's
-    # num_computed + num_scheduled, which overcounts when spec decode
-    # schedules tokens it later rejects. Exact for engines without
-    # speculative decoding. For sizing device work without a sync;
-    # per-row lengths on device are ``pos + 1``.
+    # [num_reqs] batch position -> upper bound of tokens visible to the token
+    # being sampled this step, on the host. Exact when spec decoding isn't in use.
+    # Exact per-row lengths on device are `pos + 1`.
     seq_lens_upper_bound_np: np.ndarray
 
 

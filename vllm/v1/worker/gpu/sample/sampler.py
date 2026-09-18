@@ -241,18 +241,14 @@ class Sampler:
             pos=pos,
             seq_lens_upper_bound_np=seq_lens_upper_bound_np,
         )
+
+        # Apply logits processors (native + any custom).
         for processor in self.logits_processors:
             logits = processor.apply(logits, ctx)
+
         # Forcing runs last so no stage can overwrite the forced end marker
         # or weaken it by scaling.
-        self.thinking_budget_state.apply(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            expanded_local_pos,
-        )
+        self.thinking_budget_state.apply(logits, ctx)
 
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
