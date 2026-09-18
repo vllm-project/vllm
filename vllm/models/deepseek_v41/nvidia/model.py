@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from functools import partial
 from itertools import islice
 
 import regex as re
@@ -9,7 +10,8 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
@@ -76,6 +78,7 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -84,6 +87,7 @@ from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
 from .ops.mega_mhc import mhc_shifted_post_pre
+from .ops.mhc import MHC_OVERLAP_MAX_TOKENS, mhc_pre_delayed_overlap
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -179,6 +183,23 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _use_mhc_overlap(vllm_config: VllmConfig) -> bool:
+    config = vllm_config.model_config.hf_config
+    parallel = vllm_config.parallel_config
+    return (
+        current_platform.is_device_capability_family(100)
+        and is_deep_gemm_supported()
+        and config.hidden_size == 5120
+        and config.hc_mult == 4
+        and parallel.tensor_parallel_size == 4
+        and parallel.data_parallel_size == parallel.pipeline_parallel_size == 1
+        and not parallel.enable_expert_parallel
+        and not parallel.use_ubatching
+        and vllm_config.lora_config is None
+        and _select_dsv4_attn_cls(vllm_config) is DeepseekV4FlashInferMLAAttention
+    )
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -188,11 +209,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        mhc_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.mhc_stream = mhc_stream
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -269,19 +292,30 @@ class DeepseekV4DecoderLayer(nn.Module):
                 variants.append(
                     {**hc_stream, "use_pre_mix_in": True, "write_aux": True}
                 )
+            # Shifted mHC splits the epilogue in two: the input collapse on the
+            # caller stream and coefficient generation on a side stream.
+            split_modes = (
+                ("fused", "stats", "input") if mhc_stream is not None else ("fused",)
+            )
             for variant in variants:
-                MHC_PRE_NORM_KERNEL.register_warmup(
-                    max_tokens=max_tokens,
-                    hidden_size=self.hidden_size,
-                    rms_eps=self.rms_norm_eps,
-                    hc_pre_eps=self.hc_eps,
-                    hc_sinkhorn_eps=self.hc_eps,
-                    hc_post_mult_value=self.hc_post_alpha,
-                    sinkhorn_repeat=self.hc_sinkhorn_iters,
-                    norm_eps=self.rms_norm_eps,
-                    hc_mult=self.hc_mult,
-                    **variant,
-                )
+                for split_mode in split_modes:
+                    MHC_PRE_NORM_KERNEL.register_warmup(
+                        split_mode=split_mode,
+                        max_tokens=(
+                            max_tokens
+                            if split_mode == "fused"
+                            else min(max_tokens, MHC_OVERLAP_MAX_TOKENS)
+                        ),
+                        hidden_size=self.hidden_size,
+                        rms_eps=self.rms_norm_eps,
+                        hc_pre_eps=self.hc_eps,
+                        hc_sinkhorn_eps=self.hc_eps,
+                        hc_post_mult_value=self.hc_post_alpha,
+                        sinkhorn_repeat=self.hc_sinkhorn_iters,
+                        norm_eps=self.rms_norm_eps,
+                        hc_mult=self.hc_mult,
+                        **variant,
+                    )
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
         self.hc_attn_fn = nn.Parameter(
@@ -351,6 +385,19 @@ class DeepseekV4DecoderLayer(nn.Module):
         torch.Tensor | None,
     ]:
         previous_aux: torch.Tensor | None = None
+        mhc_stream = self.mhc_stream
+        if mhc_stream is not None and (
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            or BreakableCUDAGraphCapture.is_active()
+            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+        ):
+            # A side stream cannot remain unjoined across breakable graph segments.
+            mhc_stream = None
+        mhc_pre = (
+            partial(mhc_pre_delayed_overlap, stream=mhc_stream)
+            if mhc_stream is not None
+            else mhc_pre_delayed_tilelang
+        )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -360,7 +407,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+                post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -376,7 +423,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+                post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -403,7 +450,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
             )
-            post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+            post_mix, res_mix, x, attn_pre = mhc_pre(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
@@ -418,28 +465,50 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=self.attn_norm.variance_epsilon,
             )
         else:
-            # The collapse already reads the post-mapped streams, so the mean
-            # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
-                norm_weight=self.attn_norm.weight,
-                norm_eps=self.attn_norm.variance_epsilon,
-                capture_aux=capture_previous_aux,
-            )
-            if capture_previous_aux:
-                previous_aux = aux
+            if mhc_stream is None:
+                # The collapse already reads the post-mapped streams, so the
+                # mean aux consumers want comes out of the same kernel.
+                residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+                    x,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                    capture_aux=capture_previous_aux,
+                )
+                if capture_previous_aux:
+                    previous_aux = aux
+            else:
+                # Shifted mHC keeps the post unfused: the input collapse runs
+                # on the caller stream while coefficient generation overlaps
+                # the sublayer on the side stream.
+                residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
+                if capture_previous_aux:
+                    previous_aux = residual.mean(dim=1)
+                post_mix, res_mix, x, attn_pre = mhc_pre(
+                    residual,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                )
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -448,24 +517,44 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-            pre_mix=attn_pre,
-            norm_weight=self.ffn_norm.weight,
-            norm_eps=self.ffn_norm.variance_epsilon,
-        )
+        if mhc_stream is None:
+            residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=attn_pre,
+                norm_weight=self.ffn_norm.weight,
+                norm_eps=self.ffn_norm.variance_epsilon,
+            )
+        else:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
+            residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
+            post_mix, res_mix, x, ffn_pre = mhc_pre(
+                residual,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=attn_pre,
+                norm_weight=self.ffn_norm.weight,
+                norm_eps=self.ffn_norm.variance_epsilon,
+            )
         x = self.ffn(x, input_ids, mega_gate_metadata)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
 
@@ -497,6 +586,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj). fused_wqa_wkv stays on
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # Keep mHC independent of the streams used inside attention.
+        mhc_stream = torch.cuda.Stream() if _use_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -541,6 +632,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                mhc_stream=mhc_stream,
             ),
             prefix=f"{prefix}.layers",
         )
