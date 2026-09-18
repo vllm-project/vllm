@@ -183,18 +183,28 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
-def _use_mhc_overlap(vllm_config: VllmConfig) -> bool:
+def _supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
+    """Check kernel requirements and safety of sharing the coefficient stream."""
     config = vllm_config.model_config.hf_config
-    parallel = vllm_config.parallel_config
     return (
         current_platform.is_device_capability_family(100)
         and is_deep_gemm_supported()
         and config.hidden_size == 5120
         and config.hc_mult == 4
-        and parallel.tensor_parallel_size == 4
+        and not vllm_config.parallel_config.use_ubatching
+    )
+
+
+def _use_mhc_overlap(vllm_config: VllmConfig) -> bool:
+    """Select the topology/backend where the 16-token cutoff was measured."""
+    if not _supports_mhc_overlap(vllm_config):
+        return False
+    parallel = vllm_config.parallel_config
+    # Performance coverage, not additional kernel restrictions.
+    return (
+        parallel.tensor_parallel_size == 4
         and parallel.data_parallel_size == parallel.pipeline_parallel_size == 1
         and not parallel.enable_expert_parallel
-        and not parallel.use_ubatching
         and vllm_config.lora_config is None
         and _select_dsv4_attn_cls(vllm_config) is DeepseekV4FlashInferMLAAttention
     )
