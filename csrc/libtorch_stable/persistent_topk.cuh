@@ -1665,10 +1665,18 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                               IdType* __restrict__ output,
                               const IdType* __restrict__ lengths,
                               uint32_t num_rows, uint32_t top_k,
-                              uint32_t max_len) {
+                              uint32_t max_len, uint32_t max_seq_len,
+                              uint32_t smem_bytes) {
   const uint32_t bid = blockIdx.x;
   if (bid >= num_rows) return;
-  const int length = lengths ? lengths[bid] : static_cast<int>(max_len);
+  // CLAMP TO THE ROW. The row stride is `max_len`, so a `lengths[bid]` above it would read into the
+  // next row. The pre-split code could not overrun this way because the histogram path it called
+  // never indexed past its own vector loop bound; the rescanning select does index `length`
+  // directly, so the bound has to be stated here.
+  int length = lengths ? lengths[bid] : static_cast<int>(max_len);
+  if (length < 0) length = 0;
+  const int row_cap = static_cast<int>(max_len < max_seq_len ? max_len : max_seq_len);
+  if (length > row_cap) length = row_cap;
 
   // DETERMINISTIC PATH. Every filtered row -- any length, including the launcher's occupancy
   // fallback -- goes through the rescanning select instead of filtered_topk_row's histogram.
@@ -1690,7 +1698,15 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
                                    static_cast<int>(BLOCK_SIZE)>(
       reinterpret_cast<const float*>(input + bid * max_len), length,
       reinterpret_cast<int32_t*>(output + bid * top_k), _smem_reg,
-      FILTERED_TOPK_SMEM_DYNAMIC);
+      // THE GRANTED SIZE, not the request floor. FILTERED_TOPK_SMEM_DYNAMIC is documented above as
+      // the MINIMUM the launcher asks for; the launcher then clamps to the device with
+      // `smem_size = min(want, cap)`, so on any device whose opt-in shared memory is below 128 KB
+      // the grant is smaller than the constant and det_select_row would cache past the end of what
+      // it was given. The launcher already passed this value -- the port added it to `args[]` and
+      // never added the parameter, so cudaLaunchKernel silently ignored it. Found by MaCoredroid
+      // reading the port (PR #55122, 2026-09-18); latent here because GB10's 101,376 B opt-in limit
+      // means the launcher never selects FilteredTopK on this box.
+      smem_bytes);
 }
 
 // Helper to compute GCD for VEC_SIZE selection
