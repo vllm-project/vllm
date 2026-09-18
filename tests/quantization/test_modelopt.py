@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
@@ -126,6 +127,23 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
@@ -222,6 +240,37 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
     )
 
     assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
+def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "mtp.layers.48.mlp.experts": {
+                        "quant_algo": algo,
+                        "group_size": 128,
+                    }
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    expected = object()
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.Fp8MoEMethod",
+        return_value=expected,
+    ) as method_cls:
+        method = config.get_quant_method(layer, "mtp.layers.48.mlp.experts")
+
+    assert method is expected
+    fp8_config, called_layer = method_cls.call_args.args
+    assert called_layer is layer
+    assert fp8_config.weight_block_size == [128, 128]
+    assert fp8_config.activation_scheme == "dynamic"
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():

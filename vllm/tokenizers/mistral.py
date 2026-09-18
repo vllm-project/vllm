@@ -34,6 +34,7 @@ from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
 
@@ -144,15 +145,19 @@ def _validate_apply_chat_template_args(
 
 def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
-        raise ValueError("chat_template is not supported for Mistral tokenizers.")
+        raise VLLMValidationError(
+            "chat_template is not supported for Mistral tokenizers.",
+            parameter="chat_template",
+        )
 
     if request.reasoning_effort and request.reasoning_effort not in list(
         ReasoningEffort
     ):
-        raise ValueError(
+        raise VLLMValidationError(
             f"reasoning_effort={request.reasoning_effort} is not supported by "
             "Mistral models. Supported values are: "
-            f"{[e.value for e in ReasoningEffort]}."
+            f"{[e.value for e in ReasoningEffort]}.",
+            parameter="reasoning_effort",
         )
 
 

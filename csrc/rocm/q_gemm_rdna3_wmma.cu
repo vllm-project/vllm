@@ -373,7 +373,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -471,25 +471,16 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
 
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-        // Permuted (act-order): scattered global reads, no vectorization.
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        // Sequential A reads: replace 16 single-element global_load_b16 with
-        // a bulk 32-byte copy. The AMDGPU backend lowers a memcpy of this
-        // size + alignment to two `global_load_b128` instructions. size_k is
-        // a multiple of 16 (TORCH_CHECK above) and k_tile increments by 16,
-        // so k_tile + 16 is always within bounds — no tail handling needed.
-        // Note: we memcpy into the whole vector (`&a_frag`) rather than
-        // `&a_frag[0]`; ext_vector_type element addresses aren't reliably
-        // valid C pointers across compiler versions.
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes (16 × 2)");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      // Sequential A reads: replace 16 single-element global_load_b16 with
+      // a bulk 32-byte copy. The AMDGPU backend lowers a memcpy of this
+      // size + alignment to two `global_load_b128` instructions. size_k is
+      // a multiple of 16 (TORCH_CHECK above) and k_tile increments by 16,
+      // so k_tile + 16 is always within bounds — no tail handling needed.
+      // Note: we memcpy into the whole vector (`&a_frag`) rather than
+      // `&a_frag[0]`; ext_vector_type element addresses aren't reliably
+      // valid C pointers across compiler versions.
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes (16 × 2)");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -597,25 +588,24 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_16x16_1w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // 1 wave per block (32 lanes), 16x16 C tile per block. gridDim.z splits
   // K so that more blocks (and therefore more waves) are in flight; with
   // K_SPLIT > 1 the kernel switches to atomic write-back at the epilogue.
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(32);
   dim3 grid((size_n + 15) / 16, (size_m + 15) / 16, k_split);
-  gemm_q4_wmma_kernel_16x16_1w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_wmma_kernel_16x16_1w<T>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -657,7 +647,7 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -757,16 +747,8 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     V16 a_frag, b_frag;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -844,16 +826,15 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_32x16_2w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fallback to v1 for size_m < 32. With M-tile=32 the v2 block has 2 waves
   // working on rows [0..15] and [16..31]; at M < 32 the second wave processes
   // out-of-range M rows (zero-padded a_frag → wmma produces nothing useful)
@@ -862,9 +843,9 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
   // max-num-seqs=32 lands at M≈32 steady-state; the M=16 sliver is edge),
   // but the fallback costs nothing and is the right shape.
   if (size_m < 32) {
-    launch_gemm_q4_wmma_16x16_1w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_16x16_1w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -875,9 +856,9 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(64);
   dim3 grid((size_n + 15) / 16, (size_m + 31) / 32, k_split);
-  gemm_q4_wmma_kernel_32x16_2w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_wmma_kernel_32x16_2w<T>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -917,7 +898,7 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1019,16 +1000,8 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     V16 a_frag, b_frag;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1100,21 +1073,20 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x16_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v2 for M < 64 (would waste 1+ waves on out-of-range rows).
   if (size_m < 64) {
-    launch_gemm_q4_wmma_32x16_2w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_32x16_2w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -1122,9 +1094,9 @@ void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 16);
   dim3 block(128);
   dim3 grid((size_n + 15) / 16, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_64x16_4w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_wmma_kernel_64x16_4w<T>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -1158,7 +1130,7 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1264,16 +1236,8 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     V16 a_frag, b_frag0, b_frag1;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1352,23 +1316,22 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x32_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v3 when M < 64 (small-M decode/prefill stays on the
   // narrower 64M × 16N path) or when N < 32 (tile would waste a wave on
   // out-of-range cols).
   if (size_m < 64 || size_n < 32) {
-    launch_gemm_q4_wmma_64x16_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_64x16_4w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -1376,9 +1339,9 @@ void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 32);
   dim3 block(128);
   dim3 grid((size_n + 31) / 32, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_64x32_4w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_wmma_kernel_64x32_4w<T>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -1412,7 +1375,7 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1510,16 +1473,8 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1611,7 +1566,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1712,8 +1667,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
       dequant_into(next_buf, k_next);
     }
 
-    // A-load: vectorized 256-bit. b_q_perm branch removed from V7 hot path
-    // to eliminate ~450 ISA instructions of dead code (6× icache bloat).
+    // A-load: vectorized 256-bit.
     V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
     if (a_row_ptr) {
       __builtin_memcpy(&a_frag, a_row_ptr + k_tile, sizeof(a_frag));
@@ -1810,7 +1764,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -2006,40 +1960,36 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x64_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k16(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               const int*) {}
+                                               const int, const int) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k32(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               const int*) {}
+                                               const int, const int) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v4 when N < 64 (would waste 1+ waves on out-of-range cols).
   if (size_m < 64 || size_n < 64) {
-    launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
   // V8 (128M × 64N, K=32/iter, 8-wave dequant) when K%32==0 and gs≥32.
-  // Falls back to V7 otherwise. V7/V8 read A sequentially, so act-order
-  // (b_q_perm != null) must skip them and use v5, which honors the perm.
-  if (size_m >= 128 && b_q_perm == nullptr) {
+  // Falls back to V7 otherwise.
+  if (size_m >= 128) {
     const int k_split =
         compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
     const int groupsize = size_k / groups;
@@ -2048,11 +1998,11 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
     if (size_k % 32 == 0 && groupsize >= 32 && (size_k / k_split) % 32 == 0) {
       gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm);
+          zero_offset);
     } else {
       gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm);
+          zero_offset);
     }
     return;
   }
@@ -2061,9 +2011,9 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 64);
   dim3 block(128);
   dim3 grid((size_n + 63) / 64, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_64x64_4w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_wmma_kernel_64x64_4w<T>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 }  // namespace gptq_rdna3_wmma
@@ -2078,7 +2028,6 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
 //   b_q_weight[K/8, N]          uint32 (already shuffled via gptq_shuffle)
 //   b_qzeros  [groups, N/8]     uint32 (packed 4-bit zeros)
 //   b_scales  [groups, N]       half or bfloat16
-//   b_g_idx   [K] or empty      int32 (act-order permutation; empty=identity)
 //   use_v2_format               bool   (true = GPTQv2, no +1 zero offset)
 //
 // Output:
@@ -2091,8 +2040,7 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
 
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
-                                   torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx, bool use_v2_format) {
+                                   torch::Tensor b_scales, bool use_v2_format) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
@@ -2128,13 +2076,6 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   // negligible (< 1.5% of prefill time on gfx1100).
   at::Tensor c = torch::zeros({size_m, size_n}, opts);
 
-  const int* g_idx_ptr = nullptr;
-  if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
-    TORCH_CHECK(b_g_idx.scalar_type() == torch::kInt32,
-                "b_g_idx must be int32");
-    g_idx_ptr = (const int*)b_g_idx.data_ptr();
-  }
-
   const int zero_offset = use_v2_format ? 0 : 1;
 
   // launch_gemm_q4_wmma_64x64_4w dispatches:
@@ -2148,15 +2089,15 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
-        g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
-        zero_offset, stream);
+        (half*)c.data_ptr(), size_m, size_n, size_k, groups, zero_offset,
+        stream);
   } else {
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<
         vllm::gptq_rdna3_wmma::bf16_t>(
         (const vllm::gptq_rdna3_wmma::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(),
-        (const vllm::gptq_rdna3_wmma::bf16_t*)b_scales.data_ptr(), g_idx_ptr,
+        (const vllm::gptq_rdna3_wmma::bf16_t*)b_scales.data_ptr(),
         (vllm::gptq_rdna3_wmma::bf16_t*)c.data_ptr(), size_m, size_n, size_k,
         groups, zero_offset, stream);
   }

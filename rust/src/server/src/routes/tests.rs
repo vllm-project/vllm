@@ -54,8 +54,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
-    render::build_router as build_render_router,
+    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::LoadLoraError;
@@ -518,6 +517,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -541,6 +541,7 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
             effective_template_kwargs: Default::default(),
         })
     }
@@ -692,11 +693,24 @@ fn test_render_app_with_parser_selections(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+}
+
+fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
+    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
-        text: TextRequestProcessor::new(backend.clone(), 128),
+        max_model_len,
+        text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
@@ -718,23 +732,36 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
-#[test]
-fn scale_out_flag_accepts_unset_empty_zero_one_and_whitespace() {
-    assert_eq!(parse_scale_out_endpoints_flag(None), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("0")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("1")), Ok(true));
-    assert_eq!(parse_scale_out_endpoints_flag(Some(" 1 ")), Ok(true));
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_follows_api_server_options() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-api-server-options",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_scale_out: true,
+            ..Default::default()
+        }),
+    );
+    let mut app = build_router(state);
 
-#[test]
-fn scale_out_flag_rejects_values_other_than_zero_or_one() {
-    for value in ["-1", "2", "01", "+1", "invalid", " "] {
-        assert_eq!(
-            parse_scale_out_endpoints_flag(Some(value)),
-            Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string())
-        );
-    }
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1412,6 +1439,26 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_list_models_reports_configured_max_model_len() {
+    for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
+        let mut app = test_render_app_with_max_model_len(configured);
+        let response = app
+            .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let card = json["data"][0].as_object().expect("card object");
+        assert!(card.contains_key("max_model_len"));
+        assert_eq!(
+            card["max_model_len"], expected,
+            "configured: {configured:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2692,6 +2739,49 @@ async fn non_stream_chat_returns_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(
@@ -2703,7 +2793,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].modality.as_str(), "image");
             assert_eq!(features[0].identifier, "image-1");
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -2766,7 +2856,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
             qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmModality::Image,
                 vllm_chat::multimodal::MmLimitSpec::Count(1),
             )])),
         )),
@@ -3079,6 +3169,64 @@ async fn http_metrics_group_error_statuses() {
             Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
         ),
         1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_collapse_unknown_methods() {
+    let mut app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    for (method, path) in [
+        ("XVULNCARD000001", "/tokenize"),
+        ("XVULNCARD000002", "/tokenize"),
+        ("XVULNCARD000003", "/detokenize"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let after = METRICS.render().unwrap();
+    assert!(
+        !after.contains("XVULNCARD"),
+        "raw method tokens must not appear in metrics: {after}"
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/tokenize\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/detokenize\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"other\",handler=\"/tokenize\""),
+        ),
+        2.0
     );
 }
 
@@ -5658,7 +5806,46 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn wake_up_route_without_tags_sends_none() {
+async fn release_kv_cache_memory_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("release_kv_cache_memory"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_accepts_bool_result() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5671,7 +5858,7 @@ async fn wake_up_route_without_tags_sends_none() {
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
 
-            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
         })
     })
     .await;
@@ -5682,6 +5869,51 @@ async fn wake_up_route_without_tags_sends_none() {
             Request::builder()
                 .method("POST")
                 .uri("/wake_up")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_accepts_repeated_tags() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("wake_up"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("weights"),
+                    Value::from("kv_cache"),
+                ])])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up?tags=weights&tags%5B%5D=ignored&tags=kv_cache")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -6013,6 +6245,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     for (method, uri) in [
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
+        ("POST", "/release_kv_cache_memory"),
         ("POST", "/wake_up"),
         ("GET", "/is_paused"),
         ("POST", "/pause"),
@@ -6022,6 +6255,13 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
+        ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/start_weight_update"),
+        ("POST", "/start_draft_weight_update"),
+        ("POST", "/update_weights"),
+        ("POST", "/finish_weight_update"),
+        ("POST", "/update_weight_version"),
+        ("GET", "/weight_info"),
     ] {
         let response = app
             .clone()
@@ -6039,6 +6279,248 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_support_the_http_training_lifecycle() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let mut calls = Vec::new();
+            for _ in 0..10 {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                calls.push(format!("{} {args}", array[2].as_str().expect("method")));
+                let result = if array[2] == Value::from("get_weight_version") {
+                    utility_result_value("step-2")
+                } else if array[2] == Value::from("collective_rpc") {
+                    utility_result_value(vec![(), ()])
+                } else {
+                    utility_none_result()
+                };
+                send_outputs(push, utility_outputs(call_id, result)).await;
+            }
+            expect_test::expect![[r#"
+                [
+                    "collective_rpc [\"init_weight_transfer_engine\",null,[],{\"init_info\":{\"master_address\":\"127.0.0.1\",\"master_port\":29500,\"rank_offset\":1,\"world_size\":3}}]",
+                    "collective_rpc [\"start_weight_update\",null,[],{}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":{\"names\":[\"model.embed_tokens.weight\"],\"dtype_names\":[\"bfloat16\"],\"shapes\":[[32,16]],\"is_checkpoint_format\":true}}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":[{\"rank\":0,\"ipc_handles_pickled\":\"opaque-handle-0\"},{\"rank\":1,\"ipc_handles_pickled\":\"opaque-handle-1\"}]}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-1\"]",
+                    "collective_rpc [\"start_draft_weight_update\",null,[],{}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-2\"]",
+                    "get_weight_version []",
+                ]
+            "#]].assert_debug_eq(&calls);
+        })
+    })
+    .await;
+
+    let mut responses = Vec::new();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/init_weight_transfer_engine",
+            Some(json!({
+                "init_info": {"master_address": "127.0.0.1", "master_port": 29500,
+                    "rank_offset": 1, "world_size": 3}
+            })),
+        ),
+        ("POST", "/start_weight_update", None),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": {"names": ["model.embed_tokens.weight"],
+                    "dtype_names": ["bfloat16"], "shapes": [[32, 16]],
+                    "is_checkpoint_format": true}
+            })),
+        ),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": [{"rank": 0, "ipc_handles_pickled": "opaque-handle-0"},
+                    {"rank": 1, "ipc_handles_pickled": "opaque-handle-1"}]
+            })),
+        ),
+        (
+            "POST",
+            "/finish_weight_update",
+            Some(json!({"weight_version": "step-1"})),
+        ),
+        ("POST", "/start_draft_weight_update", None),
+        ("POST", "/finish_weight_update", None),
+        (
+            "POST",
+            "/update_weight_version",
+            Some(json!({"new_version": "step-2"})),
+        ),
+        ("GET", "/weight_info", None),
+    ] {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response =
+            app.call(request.body(body).expect("build request")).await.expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        responses.push(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("decode json")
+                .to_string(),
+        );
+    }
+    engine_task.await.expect("mock engine task");
+    expect_test::expect![[r#"
+        [
+            "{\"message\":\"Weight transfer initialized\"}",
+            "{\"message\":\"Weight update started\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"message\":\"Draft weight update started\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"success\":true,\"new_version\":\"step-2\"}",
+            "{\"weight_version\":\"step-2\"}",
+        ]
+    "#]]
+    .assert_debug_eq(&responses);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid payload reached engine: {message:?}");
+        })
+    })
+    .await;
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "{"),
+        ("/init_weight_transfer_engine", "{}"),
+        ("/init_weight_transfer_engine", r#"{"init_info":null}"#),
+        ("/init_weight_transfer_engine", r#"{"init_info":[]}"#),
+        ("/update_weights", "{"),
+        ("/update_weights", "{}"),
+        ("/update_weights", r#"{"update_info":null}"#),
+        ("/update_weights", r#"{"update_info":1}"#),
+        ("/update_weights", r#"{"update_info":[{},null]}"#),
+        ("/finish_weight_update", "{"),
+        ("/finish_weight_update", r#"{"weight_version":1}"#),
+        ("/update_weight_version", "{}"),
+        ("/update_weight_version", r#"{"new_version":null}"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3].as_array().expect("args")[0],
+                Value::from("finish_weight_update")
+            );
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: array[1].as_u64().expect("call id").into(),
+                        failure_message: Some("weight reload failed".to_string()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("get_weight_version"));
+            send_outputs(
+                push,
+                utility_outputs(
+                    array[1].as_u64().expect("call id"),
+                    utility_result_value("step-0"),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"weight_version":"step-1"}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("weight reload failed")
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/weight_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({"weight_version": "step-0"})
+    );
+    engine_task.await.expect("mock engine task");
 }
 
 // ========================= Stop string tests =========================
