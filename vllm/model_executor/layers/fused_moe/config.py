@@ -1391,10 +1391,11 @@ class FusedMoEConfig:
                 )
             self.use_mxfp4_w4a4_dsv4 = True
 
-        if self.use_mori_kernels or self.use_mori_epv2_kernels:
+        if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "MORI transport currently requires AITER fused expert compute."
             )
+        if self.use_mori_kernels or self.use_mori_epv2_kernels:
             assert not self.aiter_fmoe_shared_expert_enabled, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"

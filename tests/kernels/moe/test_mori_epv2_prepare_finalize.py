@@ -1,14 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
+from vllm.platforms import current_platform
+
+
+def test_mori_epv2_accepts_non_gated_experts(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+    parallel = replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        dp_size=4,
+        ep_size=4,
+        use_ep=True,
+        all2all_backend="mori_epv2",
+    )
+    config = replace(config, moe_parallel_config=parallel)
+    assert config.use_mori_epv2_kernels
+    assert not config.rocm_aiter_fmoe_enabled
+    with pytest.raises(AssertionError, match="requires AITER"):
+        replace(
+            config,
+            moe_parallel_config=replace(parallel, all2all_backend="mori_low_latency"),
+        )
 
 
 class FakeMoriEPv2Op:
