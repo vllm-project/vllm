@@ -129,7 +129,8 @@ def test_mtp_speculative_decoding_runs():
     strict=True,
     reason="fused_recurrent_kda_fwd launches grid.z = num_seqs * local KDA heads; "
     "64 heads x 1024 seqs (the default max_num_seqs on >=70GiB GPUs) exceeds the "
-    "CUDA limit of 65535 -> 'Triton Error [CUDA]: invalid argument'",
+    "CUDA limit of 65535 -> 'Triton Error [CUDA]: invalid argument' "
+    "(vllm-project/vllm#56973, fixed by #56974; drop this marker once it lands)",
 )
 def test_default_max_num_seqs_tp1():
     llm = _make_llm(max_num_seqs=1024)
