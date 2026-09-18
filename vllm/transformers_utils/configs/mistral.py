@@ -137,6 +137,9 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     # spells as an explicit attention_factor of 1.
     if not yarn_config.pop("apply_scale", True):
         config["rope_parameters"]["attention_factor"] = 1.0
+        # DeepseekV2Attention keys its rope-type choice on this flag.
+        config["rope_parameters"]["apply_yarn_scaling"] = False
+        config["ignore_keys_at_rope_validation"] = {"apply_yarn_scaling"}
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
