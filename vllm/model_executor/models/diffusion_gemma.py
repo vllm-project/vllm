@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch._dynamo
 from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModel
@@ -371,6 +372,11 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
+# Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
+# on compute_sc and on sizes that coincide with the state buffers. That set
+# is small but passes Dynamo's default of 8, after which every step would run
+# eager: about twice as slow for a self-conditioned step.
+@torch._dynamo.config.patch(recompile_limit=64)
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
@@ -561,7 +567,10 @@ def _compiled_sample_step(
         soft_embeds = soft_embeds * normalizer
         # A pinned position holds its seed token as input. Zero its soft embed
         # too, or the model's own prediction there reaches the next step
-        # through self-conditioning.
+        # through self-conditioning. The buffer is fp32 while the embedding is
+        # in the model dtype: compiled code casts on the store but eager does
+        # not, and the step runs eager once torch.compile hits its recompile
+        # limit.
         sc_pin = (~pin_mask[decode_slots]).unsqueeze(-1)
         sc_embeds[decode_slots] = (soft_embeds * sc_keep * sc_pin).to(sc_embeds.dtype)
     else:
