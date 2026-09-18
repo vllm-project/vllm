@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +163,55 @@ def test_log_level_cli_field_overrides_json(serve_parser):
     logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
 
     assert logging_config.log_level == "DEBUG"
+
+
+def test_cli_can_disable_initial_logging_configuration():
+    script = """
+import logging
+import sys
+
+from vllm.entrypoints.cli import main as cli_main
+from vllm.entrypoints.cli.serve import ServeSubcommand
+
+
+def probe(args):
+    logger = logging.getLogger("vllm")
+    print(f"vllm={logger.level}:{logger.propagate}:{len(logger.handlers)}")
+    logging.getLogger("vllm.probe").info("logging probe")
+
+
+ServeSubcommand.cmd = staticmethod(probe)
+sys.argv = [
+    "vllm",
+    "serve",
+    "Qwen/Qwen3-0.6B",
+    "--logging-config.configure_logging",
+    "false",
+]
+cli_main.main()
+"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "VLLM_CONFIGURE_LOGGING": "1",
+            "VLLM_LOGGING_COLOR": "0",
+            "VLLM_TARGET_DEVICE": "cpu",
+        }
+    )
+    env.pop("VLLM_LOGGING_CONFIG_PATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        check=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+
+    assert "vllm=0:True:0" in result.stdout
+    assert "logging probe" not in result.stdout
+    assert "logging probe" not in result.stderr
 
 
 ### Tests for LoRA module parsing

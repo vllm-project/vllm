@@ -24,6 +24,7 @@ from vllm.logger import (
     _configure_vllm_root_logger,
     _use_color,
     configure_logging,
+    configure_logging_if_needed,
     enable_trace_function_call,
     init_logger,
 )
@@ -186,6 +187,16 @@ def test_logging_config_can_disable_logger_configuration(monkeypatch):
         configure_logging(LoggingConfig(configure_logging=False))
 
     dict_config_mock.assert_not_called()
+
+
+def test_logging_config_is_not_applied_twice():
+    config = LoggingConfig(log_level="DEBUG")
+
+    with patch("vllm.logger.dictConfig") as dict_config_mock:
+        configure_logging(config)
+        configure_logging_if_needed(config)
+
+    dict_config_mock.assert_called_once()
 
 
 def test_logging_config_file_requires_logger_configuration():
@@ -389,6 +400,12 @@ def mp_logging_config_function(config, queue):
     queue.put(logging.getLogger("vllm").level)
 
 
+def mp_disabled_logging_config_function(queue):
+    configure_logging(LoggingConfig(configure_logging=False))
+    logger = logging.getLogger("vllm")
+    queue.put((logger.level, logger.propagate, len(logger.handlers)))
+
+
 def test_logging_config_mp_spawn():
     ctx = multiprocessing.get_context("spawn")
     queue = ctx.Queue()
@@ -402,6 +419,21 @@ def test_logging_config_mp_spawn():
 
     assert process.exitcode == 0
     assert queue.get() == logging.DEBUG
+
+
+def test_disabled_logging_config_leaves_spawned_process_unconfigured(monkeypatch):
+    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
+    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
+
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    process = ctx.Process(target=mp_disabled_logging_config_function, args=(queue,))
+
+    process.start()
+    process.join()
+
+    assert process.exitcode == 0
+    assert queue.get() == (logging.NOTSET, True, 0)
 
 
 def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
