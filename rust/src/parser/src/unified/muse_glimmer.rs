@@ -135,9 +135,11 @@ enum ChannelKind {
     Reasoning,
     /// `to=user` or an untagged `<|message|>`: visible content. Only an
     /// untagged body may be reclassified into a tool channel: a `to=user`
-    /// final answer must never yield a real tool call (Python contract),
-    /// while an untagged ATEM block mirrors the Python fallback of scanning
-    /// unframed output.
+    /// final answer must never yield a real tool call (Python contract).
+    /// Note the untagged reclassification deliberately differs from the
+    /// Python fallback, which scans unframed output only when NO channel
+    /// header exists at all; the Rust parser instead reclassifies an ATEM
+    /// block inside an untagged channel (and never scans headerless text).
     Content { reclassify: bool },
     /// Any other recipient: an ATEM tool call.
     Tool,
@@ -505,8 +507,9 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
         match self.mode {
             MuseGlimmerMode::Idle | MuseGlimmerMode::Content { .. } => {
                 // The stream ended: a trailing ` to=…` fragment can no longer
-                // grow into a header, so it is flushed; only trailing
-                // truncated framing stays dropped.
+                // grow into a header, so it is flushed; a trailing COMPLETE
+                // anchored bare header (a channel that never got a body) and
+                // trailing truncated framing stay dropped.
                 let text = strip_complete_bare_header(
                     strip_trailing_truncated_framing(&self.buffer.text),
                     self.bare_header_anchor,
@@ -543,7 +546,7 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
             MuseGlimmerMode::Done => self.buffer.clear(),
         }
 
-        self.mode = MuseGlimmerMode::Idle;
+        self.reset_state();
         Ok(output)
     }
 
@@ -2104,6 +2107,31 @@ mod tests {
         let raw = parser.reset();
 
         assert_eq!(raw, "<|eo");
+    }
+
+    #[test]
+    fn muse_glimmer_finish_fully_resets_cross_delta_state() {
+        // A parser reused after finish() (without initialize/reset) must
+        // behave exactly like a fresh one: mode, anchor, and counters all
+        // reset, so a bare header at the new stream start fires. Stream 1
+        // deliberately ends on non-whitespace with no held fragment: a stale
+        // anchor would keep the bare header from firing (no call), unlike a
+        // fresh parser.
+        let reused = {
+            let mut parser = test_parser();
+            parser.parse_chunk(" to=self<|message|>think").unwrap();
+            parser.finish().unwrap();
+            parser
+                .parse_chunk("to=calc<|message|><atem:invoke name=\"calc\"></atem:invoke><|eot|>")
+                .unwrap()
+        };
+        let fresh = test_parser()
+            .parse_complete("to=calc<|message|><atem:invoke name=\"calc\"></atem:invoke><|eot|>")
+            .unwrap();
+
+        assert_eq!(reused, fresh);
+        assert_eq!(reused.calls().len(), 1);
+        assert_eq!(reused.calls()[0].name.as_deref(), Some("calc"));
     }
 
     #[test]

@@ -27,8 +27,8 @@ use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
 use super::{
-    EOM, EOT, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN, INVOKE_CLOSE, INVOKE_OPEN, MESSAGE,
-    PARAMETER_CLOSE, PARAMETER_OPEN, START,
+    EOM, EOT, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN, INVOKE_CLOSE, INVOKE_OPEN,
+    MAX_CANDIDATE_LEN, MESSAGE, PARAMETER_CLOSE, PARAMETER_OPEN, START,
 };
 use crate::tool::Tool;
 
@@ -68,8 +68,9 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
     }
 }
 
-/// Reasoning, answer, and tool channels in any order; an empty generation
-/// stays valid unless a caller schema must be honored.
+/// Reasoning and tool channels in any order, with the answer channel last
+/// when present; an empty generation stays valid unless a caller schema must
+/// be honored.
 fn auto_turn(
     tools: &[Tool],
     caller_schema: Option<&Value>,
@@ -104,14 +105,17 @@ fn auto_turn(
 }
 
 /// Reject tool names the streaming parser could not round-trip as channel
-/// recipients (`[A-Za-z0-9_.\-]+`): the grammar interpolates them verbatim
-/// into channel begins and invoke wrappers. `self` and `user` are reserved:
-/// the parser classifies those recipients as reasoning/content channels, so a
-/// tool channel with that begin would never be parsed as a tool call.
+/// recipients (`[A-Za-z0-9_.\-]+` and at most `MAX_CANDIDATE_LEN` bytes — the
+/// parser definitively rejects longer runs): the grammar interpolates them
+/// verbatim into channel begins and invoke wrappers. `self` and `user` are
+/// reserved: the parser classifies those recipients as reasoning/content
+/// channels, so a tool channel with that begin would never be parsed as a
+/// tool call.
 fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
     for tool in tools {
         let valid = !tool.name.is_empty()
             && !matches!(tool.name.as_str(), "self" | "user")
+            && tool.name.len() <= MAX_CANDIDATE_LEN
             && tool
                 .name
                 .chars()
@@ -236,9 +240,7 @@ fn typed_encoding_is_faithful(parameters: &Value, properties: &Map<String, Value
     !extra_properties_allowed
         && parameters.get("patternProperties").is_none()
         && required_names(parameters).iter().all(|name| properties.contains_key(*name))
-        && properties.keys().all(|key| {
-            !key.is_empty() && !key.contains(['"', '<', '>'])
-        })
+        && properties.keys().all(|key| !key.is_empty() && !key.contains(['"', '<', '>']))
 }
 
 /// One or more typed invokes, newline-separated. The repetition is expressed
@@ -419,7 +421,7 @@ mod tests {
     use serde_json::json;
     use xgrammar_structural_tag::builders::StructuralTagOptions;
 
-    use super::super::ASSISTANT;
+    use super::super::{ASSISTANT, MAX_CANDIDATE_LEN};
     use super::{
         ANSWER_BEGIN, CHANNEL_SEPARATOR, MESSAGE, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
         START, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
@@ -776,6 +778,26 @@ mod tests {
                 "{reserved}: {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn overlong_tool_names_are_rejected_as_unmatchable_recipients() {
+        // The parser definitively rejects recipient runs over
+        // MAX_CANDIDATE_LEN bytes, so the grammar must not bake one in.
+        let tools = vec![tool(
+            &"a".repeat(MAX_CANDIDATE_LEN + 1),
+            json!({"type": "object"}),
+        )];
+        let error = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(&error, xgrammar_structural_tag::Error::Custom(_)));
     }
 
     #[test]
