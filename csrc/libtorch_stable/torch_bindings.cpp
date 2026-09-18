@@ -425,12 +425,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
+  // q_head_padded is the padded Q head count of the returned tensor, or 0 to
+  // do the KV insert alone and return an empty tensor.  The Q knobs are
+  // independent: apply_q_norm and apply_q_rope each drop that step for Q
+  // alone (KV is always rotated), and is_q_interleaved reads and writes Q in
+  // FlashMLA's mega-attention chunk-interleaved layout, which moves the
+  // padding heads to the tail of every head-dim chunk.
+  ops.def(
+      "fused_deepseek_v4_kv_rope_insert("
+      "Tensor kv, Tensor! k_cache, Tensor slot_mapping, Tensor position_ids, "
+      "Tensor cos_sin_cache, int cache_block_size, Tensor? fp8_scale=None, "
+      "bool kv_mxfp8=False) -> "
+      "()");
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size, "
-      "bool apply_q_norm=True) -> Tensor");
+      "bool apply_q_norm=True, bool kv_mxfp8=False, bool apply_q_rope=True, "
+      "bool is_q_interleaved=False) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -807,6 +820,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+  ops.impl("fused_deepseek_v4_kv_rope_insert",
+           TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
   ops.impl(
@@ -999,16 +1014,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? attention_indices=None,"
+      "                 Tensor(b!)? stats=None,"
+      "                 Tensor(c!)? attention_indices=None,"
       "                 int attention_block_stride=0,"
       "                 Tensor? request_ids=None,"
       "                 Tensor? source_block_table=None,"
       "                 int source_block_size=0,"
-      "                 Tensor(c!)? resolved_global_indices=None,"
-      "                 Tensor(d!)? valid_counts=None,"
-      "                 Tensor(e!)? swap_host_physical_rows=None,"
-      "                 Tensor(f!)? swap_device_physical_rows=None,"
-      "                 Tensor(g!)? swap_counts=None,"
+      "                 Tensor(d!)? resolved_global_indices=None,"
+      "                 Tensor(e!)? valid_counts=None,"
+      "                 Tensor(f!)? swap_host_physical_rows=None,"
+      "                 Tensor(g!)? swap_device_physical_rows=None,"
+      "                 Tensor(h!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
       "                 int resident_null_block=0) -> ()");
