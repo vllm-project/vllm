@@ -213,6 +213,49 @@ def select_unquantized_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
+    def _make_log_backend(
+        backend: UnquantizedMoeBackend,
+        is_lora: bool = False,
+    ) -> str:
+        available_strs = [b.value for b in AVAILABLE_BACKENDS]
+        lora = "" if not is_lora else "LoRA "
+        return (
+            f"Using {backend.value} Unquantized MoE {lora}backend out "
+            f"of potential backends: {available_strs}."
+        )
+
+    def _make_log_unsupported(
+        backend: UnquantizedMoeBackend,
+        reason: str | None,
+        is_lora: bool = False,
+    ) -> str:
+        lora = "" if not is_lora else "LoRA "
+        if reason:
+            return (
+                f"Unquantized MoE {lora}backend {backend.value} does not support the "
+                f"deployment configuration since {reason}."
+            )
+        return (
+            f"Unquantized MoE {lora}backend '{backend.value}' does not support the "
+            "deployment configuration."
+        )
+
+    def _return_or_raise(
+        backend: UnquantizedMoeBackend,
+        config: FusedMoEConfig,
+        activation_format: mk.FusedMoEActivationFormat,
+        is_lora: bool = False,
+    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+        reason = None
+        for k_cls in backend_to_kernel_cls(backend):
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, None, None, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(backend, is_lora))
+                return backend, k_cls
+        raise ValueError(_make_log_unsupported(backend, reason, is_lora))
+
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -230,10 +273,12 @@ def select_unquantized_moe_backend(
                 "(TrtLlmBf16LoRAExperts)."
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
-        logger.info_once("Using TRITON Unquantized MoE LoRA backend")
-        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
-            UnquantizedMoeBackend.TRITON
-        )[0]
+
+        return _return_or_raise(
+            UnquantizedMoeBackend.TRITON,
+            moe_config,
+            mk.FusedMoEActivationFormat.Standard,
+        )
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
@@ -242,41 +287,6 @@ def select_unquantized_moe_backend(
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
     activation_format = moe_config.activation_format
-
-    def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
-        available_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using {backend.value} Unquantized MoE backend out "
-            f"of potential backends: {available_strs}."
-        )
-
-    def _make_log_unsupported(
-        backend: UnquantizedMoeBackend, reason: str | None
-    ) -> str:
-        if reason:
-            return (
-                f"Unquantized MoE backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Unquantized MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: UnquantizedMoeBackend,
-        config: FusedMoEConfig,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        reason = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, None, None, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
 
     runner_backend = moe_config.moe_backend
     # 'humming' is quantization-only; an unquantized layer (e.g. excluded via

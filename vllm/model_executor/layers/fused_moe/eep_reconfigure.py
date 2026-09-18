@@ -69,7 +69,7 @@ def make_eep_staged_quant_method(
 
     old_format = module.moe_config.activation_format
     new_format = moe_config.activation_format
-    assert new_format.is_superset(old_format)
+    assert new_format == old_format
 
     moe_kernel = quant_method.moe_kernel
     if moe_kernel is None:
