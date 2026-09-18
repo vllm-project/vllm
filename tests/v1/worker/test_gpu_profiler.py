@@ -197,6 +197,26 @@ def test_worker_creates_platform_torch_profiler(worker_type, expected):
     )
 
 
+def test_worker_forwards_configured_torch_profiler_activities():
+    worker = object.__new__(Worker)
+    worker.local_rank = 0
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=["CUDA"],
+    )
+
+    with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
+        worker._create_profiler(config, "rank0")
+
+    wrapper.assert_called_once_with(
+        config,
+        worker_name="rank0",
+        local_rank=0,
+        activities=("CUDA",),
+    )
+
+
 @pytest.mark.parametrize("worker_type", [Worker, CPUWorker, XPUWorker])
 def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
     worker = object.__new__(worker_type)
