@@ -28,8 +28,8 @@ def main() -> int:
     missing = []
     if not shim.is_file():
         missing.append("_C.py")
-    if not so_files:
-        missing.append("_C_extension*.so")
+    if len(so_files) != 1:
+        missing.append("exactly one _C_extension*.so")
 
     print(
         f"deepgemm vendored binding: shim={shim.is_file()}, "
