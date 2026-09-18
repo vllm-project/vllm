@@ -4,10 +4,10 @@
 //! Python literal values inside pythonic tool calls.
 //!
 //! Tool call arguments are Python literals while the OpenAI API expects JSON
-//! text, so every value parsed here is converted into a `serde_json::Value`
+//! text, so every value parsed here is converted into compact JSON text
 //! (`True` -> `true`, `None` -> `null`, `'text'` -> `"text"`, ...).
 
-use serde_json::{Number, Value};
+use serde_json::Number;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, opt, separated, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -34,19 +34,24 @@ pub(super) fn string_quote(input: &mut PythonicInput<'_>) -> ModalResult<char> {
     one_of(['\'', '"']).parse_next(input)
 }
 
-/// Parse a Python literal value.
+/// Parse a Python literal value into compact JSON text.
 ///
 /// A value is only emitted once it is complete, so a nested container is
 /// buffered until its closing bracket arrives; only a top-level string argument
 /// is streamed incrementally (see [`decode_string_run`]).
 ///
-/// TODO: the Python `get_parameter_value` also accepts tuples, sets,
-/// placeholder-free f-strings and non-string dict keys. Those are rejected here
-/// so far; models emitting them fall back to plain text.
-pub(super) fn python_value(input: &mut PythonicInput<'_>) -> ModalResult<Value> {
+/// Values are built as JSON text rather than as a `serde_json::Value` because
+/// `serde_json::Number` cannot hold an integer wider than `u64`. Rounding one
+/// through `f64` would silently change a tool call argument, while the Python
+/// parser passes it through exactly.
+///
+/// TODO: the Python `get_parameter_value` also accepts sets, placeholder-free
+/// f-strings, triple-quoted strings and non-string dict keys. Those are
+/// rejected here so far; models emitting them fall back to plain text.
+pub(super) fn python_value(input: &mut PythonicInput<'_>) -> ModalResult<String> {
     alt((
-        python_string.map(Value::String),
-        python_list,
+        json_string,
+        python_sequence,
         python_dict,
         python_keyword,
         python_number,
@@ -54,47 +59,65 @@ pub(super) fn python_value(input: &mut PythonicInput<'_>) -> ModalResult<Value> 
     .parse_next(input)
 }
 
+/// Parse a Python string literal into a quoted JSON string.
+fn json_string(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    let text = python_string.parse_next(input)?;
+    let content = json_string_content(&text).map_err(|_| cut_error("Python string"))?;
+    Ok(format!("\"{content}\""))
+}
+
 /// Parse a Python string literal.
 fn python_string(input: &mut PythonicInput<'_>) -> ModalResult<String> {
     let quote = string_quote.parse_next(input)?;
-    let run = decode_string_run(input, quote)?;
+    let run = decode_string_run(input, quote, false)?;
     if !run.closed {
         return incomplete();
     }
     Ok(run.text)
 }
 
-/// Parse a Python list literal.
-fn python_list(input: &mut PythonicInput<'_>) -> ModalResult<Value> {
-    literal("[").parse_next(input)?;
+/// Parse a Python list or tuple literal into a JSON array.
+///
+/// Tuples have no JSON counterpart, so the Python parser turns them into arrays
+/// and so does this. Parentheses without a trailing comma are a grouping rather
+/// than a tuple, as in Python: `(1)` is `1` while `(1,)` is `[1]`.
+fn python_sequence(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    let closing = alt((literal("[").value("]"), literal("(").value(")"))).parse_next(input)?;
     let _guard = ParserRecursionGuard::enter()?;
-    terminated(python_items, literal("]")).map(Value::Array).parse_next(input)
+    let (items, trailing_comma) = terminated(python_items, literal(closing)).parse_next(input)?;
+    if closing == ")" && items.len() == 1 && !trailing_comma {
+        return Ok(items.into_iter().next().unwrap_or_default());
+    }
+    Ok(format!("[{}]", items.join(",")))
 }
 
-/// Parse the comma-separated items of a Python list literal.
-fn python_items(input: &mut PythonicInput<'_>) -> ModalResult<Vec<Value>> {
-    delimited(
+/// Parse the comma-separated items of a Python sequence literal.
+///
+/// Reports whether the items ended with a trailing comma, which is what
+/// distinguishes a one-element tuple from a parenthesised value.
+fn python_items(input: &mut PythonicInput<'_>) -> ModalResult<(Vec<String>, bool)> {
+    let (items, trailing_comma) = delimited(
         ws0,
-        terminated(
+        (
             separated(0.., python_value, comma_separator),
             opt(comma_separator),
         ),
         ws0,
     )
-    .parse_next(input)
+    .parse_next(input)?;
+    Ok((items, trailing_comma.is_some()))
 }
 
-/// Parse a Python dict literal.
-fn python_dict(input: &mut PythonicInput<'_>) -> ModalResult<Value> {
+/// Parse a Python dict literal into a JSON object.
+fn python_dict(input: &mut PythonicInput<'_>) -> ModalResult<String> {
     literal("{").parse_next(input)?;
     let _guard = ParserRecursionGuard::enter()?;
-    terminated(python_entries, literal("}"))
-        .map(|entries: Vec<(String, Value)>| Value::Object(entries.into_iter().collect()))
-        .parse_next(input)
+    let entries: Vec<String> = terminated(python_entries, literal("}")).parse_next(input)?;
+    Ok(format!("{{{}}}", entries.join(",")))
 }
 
 /// Parse the comma-separated entries of a Python dict literal.
-fn python_entries(input: &mut PythonicInput<'_>) -> ModalResult<Vec<(String, Value)>> {
+fn python_entries(input: &mut PythonicInput<'_>) -> ModalResult<Vec<String>> {
     delimited(
         ws0,
         terminated(
@@ -109,14 +132,15 @@ fn python_entries(input: &mut PythonicInput<'_>) -> ModalResult<Vec<(String, Val
 /// Parse one `'key': value` entry of a Python dict literal.
 ///
 /// JSON object keys are strings, so only string keys are accepted here.
-fn python_entry(input: &mut PythonicInput<'_>) -> ModalResult<(String, Value)> {
-    (
+fn python_entry(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    let (key, _, value) = (
         python_string,
         delimited(ws0, literal(":"), ws0),
         python_value,
     )
-        .map(|(key, _, value)| (key, value))
-        .parse_next(input)
+        .parse_next(input)?;
+    let key = json_object_key(&key).map_err(|_| cut_error("Python dict key"))?;
+    Ok(format!("{key}:{value}"))
 }
 
 /// Parse a comma separator between Python literals.
@@ -129,38 +153,72 @@ fn comma_separator(input: &mut PythonicInput<'_>) -> ModalResult<()> {
 /// JSON-style spellings are accepted as well because some models (e.g. OLMo 3)
 /// emit `true` / `false` / `null` inside otherwise pythonic calls, matching
 /// `_JSON_NAME_LITERALS` in the Python parser.
-fn python_keyword(input: &mut PythonicInput<'_>) -> ModalResult<Value> {
+fn python_keyword(input: &mut PythonicInput<'_>) -> ModalResult<String> {
     alt((
-        literal("True").value(Value::Bool(true)),
-        literal("False").value(Value::Bool(false)),
-        literal("None").value(Value::Null),
-        literal("true").value(Value::Bool(true)),
-        literal("false").value(Value::Bool(false)),
-        literal("null").value(Value::Null),
+        literal("True").value("true"),
+        literal("False").value("false"),
+        literal("None").value("null"),
+        literal("true").value("true"),
+        literal("false").value("false"),
+        literal("null").value("null"),
     ))
+    .map(|keyword: &str| keyword.to_string())
     .parse_next(input)
 }
 
-/// Parse a Python numeric literal.
+/// Parse a Python numeric literal into JSON number text.
 ///
 /// Signs are part of the literal here; Python parses `-1` as a unary operation
 /// over a constant, which the Python parser converts back into a number.
-fn python_number(input: &mut PythonicInput<'_>) -> ModalResult<Value> {
-    let raw = take_while(1.., ('0'..='9', '.', 'e', 'E', '+', '-')).parse_next(input)?;
-    number_value(raw).ok_or_else(|| cut_error("Python number"))
+fn python_number(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    alt((radix_integer, decimal_number)).parse_next(input)
 }
 
-/// Convert a Python numeric literal into a JSON number.
-fn number_value(raw: &str) -> Option<Value> {
-    if let Ok(value) = raw.parse::<i64>() {
-        return Some(value.into());
+/// Parse a binary, octal or hexadecimal Python integer literal.
+fn radix_integer(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    let (sign, _, marker, digits) = (
+        opt(one_of(['+', '-'])),
+        literal("0"),
+        one_of(['b', 'B', 'o', 'O', 'x', 'X']),
+        take_while(1.., ('0'..='9', 'a'..='f', 'A'..='F', '_')),
+    )
+        .parse_next(input)?;
+    let radix = match marker {
+        'b' | 'B' => 2,
+        'o' | 'O' => 8,
+        _ => 16,
+    };
+    let digits = digits.replace('_', "");
+    let value =
+        i128::from_str_radix(&digits, radix).map_err(|_| cut_error("Python integer literal"))?;
+    let value = if sign == Some('-') { -value } else { value };
+    Ok(value.to_string())
+}
+
+/// Parse a decimal Python integer or float literal.
+fn decimal_number(input: &mut PythonicInput<'_>) -> ModalResult<String> {
+    let raw = take_while(1.., ('0'..='9', '.', 'e', 'E', '+', '-', '_')).parse_next(input)?;
+    number_json(raw).ok_or_else(|| cut_error("Python number"))
+}
+
+/// Convert a decimal Python numeric literal into JSON number text.
+///
+/// Integers keep their digits so values wider than `u64` stay exact; only
+/// floats go through `f64`. Non-finite floats have no JSON representation and
+/// are rejected here, like `_is_json_finite` does on the Python side.
+fn number_json(raw: &str) -> Option<String> {
+    let raw = raw.replace('_', "");
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(&raw);
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        // JSON rejects leading zeros, and so does Python outside of `0`.
+        let digits = digits.trim_start_matches('0');
+        let sign = if raw.starts_with('-') { "-" } else { "" };
+        return Some(match digits {
+            "" => "0".to_string(),
+            digits => format!("{sign}{digits}"),
+        });
     }
-    if let Ok(value) = raw.parse::<u64>() {
-        return Some(value.into());
-    }
-    // Non-finite floats have no JSON representation and are rejected here, like
-    // `_is_json_finite` does on the Python side.
-    Number::from_f64(raw.parse::<f64>().ok()?).map(Value::Number)
+    Number::from_f64(raw.parse::<f64>().ok()?).map(|number| number.to_string())
 }
 
 /// Decode the body of a Python string literal up to its closing `quote`.
@@ -168,9 +226,17 @@ fn number_value(raw: &str) -> Option<Value> {
 /// Decoding stops at the closing quote or at the last complete escape sequence,
 /// so a trailing partial escape stays buffered until the next chunk arrives.
 /// The input is advanced past the decoded run.
+///
+/// `commit_decoded` selects what happens when an invalid escape follows text
+/// that has already been decoded. A streamed argument sets it so the decoded
+/// text is returned and the escape is reported on the next call, because a
+/// chunk boundary just before the escape would have committed that text too and
+/// committed output cannot be taken back. A string inside a container clears it
+/// and the invalid escape is reported right away.
 pub(super) fn decode_string_run(
     input: &mut PythonicInput<'_>,
     quote: char,
+    commit_decoded: bool,
 ) -> ModalResult<StringRun> {
     let text = **input;
     let mut decoded = String::new();
@@ -187,11 +253,15 @@ pub(super) fn decode_string_run(
             });
         }
         if char == '\\' {
-            let Some(len) = decode_escape(&text[index..], &mut decoded)? else {
-                break;
-            };
-            index += len;
-            continue;
+            match decode_escape(&text[index..], &mut decoded) {
+                Ok(Some(len)) => {
+                    index += len;
+                    continue;
+                }
+                Ok(None) => break,
+                Err(_) if commit_decoded && index > 0 => break,
+                Err(error) => return Err(error),
+            }
         }
         decoded.push(char);
         index += char.len_utf8();
@@ -230,10 +300,13 @@ fn decode_escape(text: &str, decoded: &mut String) -> ModalResult<Option<usize>>
         'x' => decode_fixed_escape(text, decoded, 2),
         'u' => decode_unicode_escape(text, decoded),
         'U' => decode_fixed_escape(text, decoded, 8),
+        // Decoding `\N{NAME}` needs a Unicode name table. Keeping it verbatim
+        // would hand the tool a different string than the model wrote, so the
+        // call is rejected and the text falls back to content instead.
+        // TODO: decode named escapes once a name table is available.
+        'N' => Err(cut_error("Python named string escape")),
         // Python keeps unknown escapes such as `\d` verbatim (with a syntax
         // warning that the Python parser suppresses), and so does this.
-        // TODO: `\N{NAME}` named escapes need a Unicode name table and are
-        // kept verbatim for now.
         _ => {
             decoded.push('\\');
             Ok(Some(push_escaped(decoded, escape, end)))
@@ -415,6 +488,43 @@ mod tests {
         expect![[r#"[1,2] | rest """#]].assert_eq(&parse("[1, 2,]"));
     }
 
+    /// Python has no JSON counterpart for tuples, so the Python parser turns
+    /// them into arrays. Parentheses without a trailing comma group a value.
+    #[test]
+    fn python_value_converts_tuples_to_arrays() {
+        expect![[r#"[1,2] | rest """#]].assert_eq(&parse("(1, 2)"));
+        expect![[r#"[1] | rest """#]].assert_eq(&parse("(1,)"));
+        expect![[r#"1 | rest """#]].assert_eq(&parse("(1)"));
+        expect![[r#"[] | rest """#]].assert_eq(&parse("()"));
+        expect![[r#"[[1,2],["a"]] | rest """#]].assert_eq(&parse("[(1, 2), ('a',)]"));
+    }
+
+    /// `serde_json::Number` tops out at `u64`, so wide integers are carried
+    /// through as text; rounding them into an `f64` would silently change the
+    /// argument the tool receives.
+    #[test]
+    fn python_value_keeps_wide_integers_exact() {
+        expect!["123456789012345678901234567890 | rest \")\""]
+            .assert_eq(&parse("123456789012345678901234567890)"));
+        expect!["-9223372036854775809 | rest \")\""].assert_eq(&parse("-9223372036854775809)"));
+        expect!["18446744073709551615 | rest \")\""].assert_eq(&parse("18446744073709551615)"));
+        expect!["9007199254740993 | rest \")\""].assert_eq(&parse("9007199254740993)"));
+        expect!["0 | rest \")\""].assert_eq(&parse("-0)"));
+        expect!["7 | rest \")\""].assert_eq(&parse("007)"));
+    }
+
+    #[test]
+    fn python_value_parses_radix_and_grouped_integers() {
+        expect!["31 | rest \")\""].assert_eq(&parse("0x1f)"));
+        expect!["255 | rest \")\""].assert_eq(&parse("0XFF)"));
+        expect!["15 | rest \")\""].assert_eq(&parse("0o17)"));
+        expect!["5 | rest \")\""].assert_eq(&parse("0b101)"));
+        expect!["-31 | rest \")\""].assert_eq(&parse("-0x1F)"));
+        expect!["1000 | rest \")\""].assert_eq(&parse("1_000)"));
+        expect!["1000.5 | rest \")\""].assert_eq(&parse("1_000.5)"));
+        expect!["65535 | rest \")\""].assert_eq(&parse("0xFF_FF)"));
+    }
+
     #[test]
     fn python_value_reports_incomplete_for_partial_literals() {
         for text in [
@@ -438,9 +548,12 @@ mod tests {
     fn python_value_rejects_unsupported_literals() {
         for text in [
             "f'formatted'",
-            "(1, 2)",
+            "{'a', 'b'}",
             "{1: 'int key'}",
             "'bad \\ud83d\\u0041'",
+            // A named escape would need a Unicode name table; passing it
+            // through verbatim would silently change the decoded string.
+            r"'\N{BULLET}'",
         ] {
             assert!(
                 !matches!(error(text), ErrMode::Incomplete(_)),

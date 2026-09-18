@@ -66,7 +66,8 @@ enum PythonicEvent {
     },
     Argument {
         key: String,
-        value: serde_json::Value,
+        /// The value as JSON text.
+        value: String,
     },
     StringArgumentStart {
         key: String,
@@ -201,8 +202,6 @@ impl PythonicToolParser {
             }
             PythonicEvent::Argument { key, value } => {
                 let key = json_object_key(&key)?;
-                let value = serde_json::to_string(&value)
-                    .map_err(|error| parsing_failed!("failed to serialize argument: {}", error))?;
                 let fragment = format!("{}{key}:{value}", self.argument_separator());
                 self.push_arguments(&fragment, output)?;
                 self.mode = PythonicMode::Arguments { first: false };
@@ -377,8 +376,10 @@ fn list_end_event(input: &mut PythonicInput<'_>) -> ModalResult<PythonicEvent> {
 }
 
 /// Parse the start of one pythonic call, up to its opening `(`.
+///
+/// Whitespace between the name and `(` is allowed because Python accepts it.
 fn call_start_event(input: &mut PythonicInput<'_>) -> ModalResult<PythonicEvent> {
-    seq!(function_name, _: literal("("))
+    seq!(function_name, _: ws0, _: literal("("))
         .map(|(name,)| PythonicEvent::CallStart {
             name: name.to_string(),
         })
@@ -434,7 +435,7 @@ fn string_value_event(input: &mut PythonicInput<'_>, quote: char) -> ModalResult
         text,
         consumed,
         closed,
-    } = decode_string_run(input, quote)?;
+    } = decode_string_run(input, quote, true)?;
 
     if consumed == 0 {
         return incomplete();
@@ -764,6 +765,134 @@ mod tests {
         "#]].assert_debug_eq(&parse(
             "[\n  get_weather(\n    city = 'San Francisco',\n    metric = 'celsius',\n  ),\n  add(x=1, y=2),\n]",
         ));
+    }
+
+    /// `serde_json::Number` stops at `u64`, so a wider integer would have to be
+    /// rounded into an `f64` and the tool would be called with a different
+    /// amount than the model asked for. The Python parser keeps it exact.
+    #[test]
+    fn pythonic_keeps_wide_integers_exact() {
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "pay",
+                            ),
+                            arguments: "{\"wei\":123456789012345678901234567890,\"low\":-9223372036854775809,\"high\":18446744073709551615,\"mantissa\":9007199254740993}",
+                        },
+                    ),
+                ],
+            }
+        "#]].assert_debug_eq(&parse(
+            "[pay(wei=123456789012345678901234567890, low=-9223372036854775809, \
+             high=18446744073709551615, mantissa=9007199254740993)]",
+        ));
+    }
+
+    /// Tuples have no JSON counterpart and the Python parser turns them into
+    /// arrays; parentheses without a trailing comma group a value instead.
+    #[test]
+    fn pythonic_converts_tuples_to_arrays() {
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "plot",
+                            ),
+                            arguments: "{\"point\":[1,2],\"single\":[3],\"grouped\":4,\"empty\":[],\"mixed\":[1,[2,3]]}",
+                        },
+                    ),
+                ],
+            }
+        "#]].assert_debug_eq(&parse(
+            "[plot(point=(1, 2), single=(3,), grouped=(4), empty=(), mixed=[1, (2, 3)])]",
+        ));
+    }
+
+    #[test]
+    fn pythonic_accepts_radix_and_underscored_integers() {
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "flags",
+                            ),
+                            arguments: "{\"mask\":31,\"mode\":493,\"bits\":11,\"count\":1000000,\"ratio\":1000.5}",
+                        },
+                    ),
+                ],
+            }
+        "#]].assert_debug_eq(&parse(
+            "[flags(mask=0x1f, mode=0o755, bits=0b1011, count=1_000_000, ratio=1_000.5)]",
+        ));
+    }
+
+    /// Python allows whitespace between the function name and its arguments.
+    #[test]
+    fn pythonic_accepts_whitespace_before_the_argument_list() {
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"city\":\"San Francisco\"}",
+                        },
+                    ),
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&parse("[get_weather (city='San Francisco')]"));
+    }
+
+    /// An invalid escape (here a Windows path, which Python rejects as a
+    /// truncated `\\U` escape) recovers as text. `parse_chunkings` asserts that
+    /// every chunking commits the same output, including the text decoded
+    /// before the escape.
+    #[test]
+    fn pythonic_recovers_invalid_string_escapes_as_text() {
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    Text(
+                        "\\Users\\me')]",
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "open_file",
+                            ),
+                            arguments: "{\"path\":\"C:",
+                        },
+                    ),
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&parse(r"[open_file(path='C:\Users\me')]"));
+    }
+
+    /// Decoding `\N{NAME}` would need a Unicode name table; passing it through
+    /// verbatim would hand the tool a different string than the model wrote.
+    #[test]
+    fn pythonic_rejects_named_string_escapes() {
+        let mut parser = PythonicToolParser::new(&test_tools());
+
+        let error = parser.parse_chunk(r"[say(text='\N{BULLET} point')]").unwrap_err();
+
+        expect![[r#"tool parser parsing failed: near "\\N{BULLET} point')]": invalid Python named string escape"#]].assert_eq(&error.to_report_string());
     }
 
     #[test]
