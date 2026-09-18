@@ -33,7 +33,7 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
     pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make Intel OpenMP is added to `LD_PRELOAD`:
+    Before use vLLM CPU installed via wheels, make sure Intel OpenMP is added to `LD_PRELOAD`:
     ```bash
     # manually find the path
     sudo find / -iname *libiomp5.so
