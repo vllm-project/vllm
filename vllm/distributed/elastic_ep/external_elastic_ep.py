@@ -308,21 +308,42 @@ class ExternalElasticEPScaleCoordinator:
             return None
         return store.get(error_key).decode()
 
-    def get_phase(self) -> ExternalElasticEPScalePhase:
+    def get_status(self) -> dict[str, str | int | None]:
         store = self._get_reconfig_store()
         current_epoch_key = self.key("current_epoch")
         if not store.check([current_epoch_key]):
-            return ExternalElasticEPScalePhase.IDLE
+            return {
+                "phase": ExternalElasticEPScalePhase.IDLE.value,
+                "epoch": None,
+                "error": None,
+                "requested_data_parallel_size": None,
+            }
 
         epoch = store.get(current_epoch_key).decode()
-        if self._get_error(store, epoch) is not None:
-            return ExternalElasticEPScalePhase.FAILED
-        if store.check([self.key(epoch, "completed")]):
-            return ExternalElasticEPScalePhase.COMPLETED
-        phase_key = self.key(epoch, "phase")
-        if store.check([phase_key]):
-            return ExternalElasticEPScalePhase(store.get(phase_key).decode())
-        return ExternalElasticEPScalePhase.IDLE
+        error = self._get_error(store, epoch)
+        if error is not None:
+            phase = ExternalElasticEPScalePhase.FAILED
+        elif store.check([self.key(epoch, "completed")]):
+            phase = ExternalElasticEPScalePhase.COMPLETED
+        elif store.check([self.key(epoch, "phase")]):
+            phase = ExternalElasticEPScalePhase(
+                store.get(self.key(epoch, "phase")).decode()
+            )
+        else:
+            phase = ExternalElasticEPScalePhase.IDLE
+        requested_dp_size = None
+        bootstrap_key = self.key(epoch, "bootstrap")
+        if store.check([bootstrap_key]):
+            bootstrap = msgspec.msgpack.decode(
+                store.get(bootstrap_key), type=ReconfigureDistributedRequest
+            )
+            requested_dp_size = bootstrap.new_data_parallel_size
+        return {
+            "phase": phase.value,
+            "epoch": epoch,
+            "error": error,
+            "requested_data_parallel_size": requested_dp_size,
+        }
 
     def _set_phase(
         self, store: Any, epoch: str, phase: ExternalElasticEPScalePhase
@@ -418,9 +439,10 @@ class ExternalElasticEPScaleCoordinator:
         if self.reconfig_store_ref is not None:
             stores.append(self.reconfig_store_ref)
         for target_store in stores:
-            target_store.set(current_epoch_key, epoch.encode())
             target_store.set(bootstrap_key, bootstrap_payload)
             self._set_phase(target_store, epoch, ExternalElasticEPScalePhase.PREPARING)
+            # Publish the epoch only after its metadata is ready for readers.
+            target_store.set(current_epoch_key, epoch.encode())
         return epoch, bootstrap
 
     def _start_scale_up_handshake_server(
