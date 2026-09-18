@@ -380,7 +380,9 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
-def _prompt_logprobs_runner(max_logprobs: int, calls: list) -> SimpleNamespace:
+def _prompt_logprobs_runner(
+    max_logprobs: int, calls: list, max_model_len: int = 4096
+) -> SimpleNamespace:
     hidden_size, vocab_size = 8, 32
 
     def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -396,6 +398,7 @@ def _prompt_logprobs_runner(max_logprobs: int, calls: list) -> SimpleNamespace:
             dtype=torch.float32,
         ),
         device=torch.device("cpu"),
+        max_model_len=max_model_len,
     )
 
 
@@ -419,6 +422,18 @@ def test_prompt_logprobs_warmup_materializes_one_chunk(
         ("logits", (chunk, 8)),
         ("topk", (chunk, 32), expected_topk, (chunk,)),
     ]
+
+
+def test_prompt_logprobs_warmup_chunk_is_capped_by_model_len(monkeypatch):
+    """A prompt cannot exceed max_model_len, so neither does the warmup chunk."""
+    calls: list = []
+    monkeypatch.setattr(
+        warmup,
+        "compute_topk_scores",
+        lambda logits, num_logprobs, token_ids: calls.append(tuple(logits.shape)),
+    )
+    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(5, calls, max_model_len=100))
+    assert calls == [("logits", (100, 8)), (100, 32)]
 
 
 def test_prompt_logprobs_warmup_skips_when_unavailable():

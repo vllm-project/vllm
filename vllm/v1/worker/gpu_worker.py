@@ -105,7 +105,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import run_mixed_prefill_decode_warmup, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -834,9 +834,10 @@ class Worker(WorkerBase):
         """Size an extensible KV cache from the memory free after warmup.
 
         Transient activations are kept free in full: the larger of the profiled
-        peak and what the allocator had to hold from the device for the warmup
-        steps beyond the tensors that outlive them (its reserved peak, which
-        includes fragmentation, less the live allocations). Torch's cache is
+        peak and the peak the warmup steps allocated beyond the tensors that
+        outlive them. Allocated rather than reserved bytes: with the device
+        still mostly free, the caching allocator reserves opportunistically and
+        its reserved peak says little about what a step needs. Torch's cache is
         emptied first so that peak is measured against truly free memory rather
         than blocks the allocator happens to hold, which need not be reusable
         for the large workspaces the first real steps allocate.
@@ -844,7 +845,7 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
         gc.collect()
         stats = torch.accelerator.memory_stats(self.device)
-        warmup_peak = stats.get("reserved_bytes.all.peak", 0) - stats.get(
+        warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
             "allocated_bytes.all.current", 0
         )
         torch.accelerator.empty_cache()
@@ -930,6 +931,24 @@ class Worker(WorkerBase):
         if self.use_v2_model_runner:
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+            if (
+                self.cache_config.enable_extensible_kv_cache
+                and not self.model_config.is_encoder_decoder
+            ):
+                # Profiling ran the full token budget without attention. Run it
+                # as a real step so the peak that measured sizing keeps free
+                # covers the largest prefill the scheduler can issue: one
+                # request of up to the model length, the rest of the budget in
+                # a second, capped to what a block table row can hold.
+                run_mixed_prefill_decode_warmup(
+                    self._v2_model_runner(),
+                    self.execute_model,
+                    self.sample_tokens,
+                    min(
+                        self.scheduler_config.max_num_batched_tokens,
+                        self.model_config.max_model_len,
+                    ),
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

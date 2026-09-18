@@ -261,15 +261,15 @@ def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
     if hidden_size <= 0:
         # Composite configs (e.g. encoder-decoder ASR) expose no head width.
         return
-    chunk_size = PROMPT_LOGPROBS_CHUNK_SIZE
+    # A chunk never holds more rows than a prompt can have.
+    num_rows = min(PROMPT_LOGPROBS_CHUNK_SIZE, model_runner.max_model_len)
     hidden_states = torch.zeros(
-        chunk_size, hidden_size, dtype=model_config.dtype, device=model_runner.device
+        num_rows, hidden_size, dtype=model_config.dtype, device=model_runner.device
     )
     logits = model_runner.model.compute_logits(hidden_states)
-    num_logprobs = model_config.max_logprobs
-    if num_logprobs == -1:
-        num_logprobs = logits.shape[-1]
-    token_ids = torch.zeros(chunk_size, dtype=torch.int64, device=model_runner.device)
+    max_logprobs = model_config.max_logprobs
+    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
+    token_ids = torch.zeros(num_rows, dtype=torch.int64, device=model_runner.device)
     compute_topk_scores(logits, num_logprobs, token_ids)
 
 
