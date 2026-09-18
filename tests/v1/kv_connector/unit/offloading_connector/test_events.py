@@ -682,3 +682,92 @@ def test_tiering_accepts_self_describing_kv_events():
     assert spec.kv_events_config.enable_kv_cache_events
     assert spec.kv_events_config.self_describing_kv_events
     assert tracker.self_describing_enabled
+
+
+def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
+    vllm_config = create_vllm_config(
+        block_size=4,
+        max_num_batched_tokens=16,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    extra_config = {
+        "spec_name": "TieringOffloadingSpec",
+        "cpu_bytes_to_use": 1 << 20,
+        "secondary_tiers": secondary_tiers,
+    }
+    if top_level_backpressure is not None:
+        extra_config["backpressure"] = top_level_backpressure
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    return TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+
+def test_partial_tier_backpressure_inherits_top_level_defaults():
+    """A partial tier override still inherits missing fields.
+
+    Field-by-field merge means an override that sets only ``high_water_s``
+    keeps ``backpressure_cls`` (and any other field) from the top-level
+    default, so the resolved dict reaching the factory is complete.
+    """
+    spec = _build_tiering_spec(
+        [{"type": "example", "backpressure": {"high_water_s": 0.1}}],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the field it sets.
+    assert resolved["high_water_s"] == 0.1
+    # Missing fields fall back to the top-level default.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+    assert resolved["low_water_s"] == 0.05
+
+
+def test_tier_override_wins_over_top_level():
+    """Precedence is tier override > top-level default, field-by-field."""
+    spec = _build_tiering_spec(
+        [
+            {
+                "type": "example",
+                "backpressure": {"high_water_s": 0.1, "low_water_s": 0.02},
+            }
+        ],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the fields it sets.
+    assert resolved["high_water_s"] == 0.1
+    assert resolved["low_water_s"] == 0.02
+    # Fields only in top-level still fill in.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+
+
+def test_tier_without_backpressure_stays_unconfigured():
+    spec = _build_tiering_spec([{"type": "example"}])
+    assert "backpressure" not in spec.secondary_tier_configs[0]
