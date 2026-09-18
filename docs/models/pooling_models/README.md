@@ -264,43 +264,8 @@ shown in the table below.
 
 ### Pooler Configuration
 
-#### Experimental Sentence Transformers LogitScore checkpoints
-
-This branch also recognizes `Transformer -> LogitScore` CrossEncoder exports.
-The Transformer must use `text-generation` or `any-to-any` and output
-`causal_logits`. vLLM selects last-token classification automatically and derives
-the score from the saved vocabulary IDs: the positive logit alone, or the positive
-minus negative logit. The saved CrossEncoder activation is then applied.
-
-```python
-from vllm import LLM, PoolingParams
-
-model = LLM("path/to/checkpoint")
-scores = model.score("query", ["document one", "document two"])
-
-# Select one of the checkpoint's saved prompts.
-scores = model.score(
-    "query",
-    "document",
-    pooling_params=PoolingParams(
-        extra_kwargs={"chat_template_kwargs": {"prompt_name": "text_to_image"}},
-    ),
-)
-```
-
-The prototype supports structured query/document messages, saved default or named
-system prompts, and boolean `add_generation_prompt` / `enable_thinking` settings
-under `processing_kwargs.chat_template`. Request chat-template kwargs override
-the saved settings; `prompt` overrides `prompt_name`, and an empty `prompt`
-disables the saved default. The same kwargs can be passed to the scoring API.
-
-The current scope is unquantized models with tensor and pipeline parallel sizes
-of one, and a bias-free linear LM head without logit scaling or soft-capping.
-Flat message templates and other saved processing settings are rejected. Tests
-cover small Qwen3 and Qwen3-VL exports with text and image pairs; this does not
-establish support for arbitrary any-to-any models, audio, or video.
-
-For this prototype, use merged checkpoints rather than runtime LoRA adapters.
+For supported Sentence Transformers CrossEncoder layouts and their saved scoring
+settings, see [Sentence Transformers module checkpoints](scoring.md#sentence-transformers-module-checkpoints).
 
 #### Predefined models
 

@@ -114,8 +114,9 @@ The three supported scoring functions are as illustrated in the figure below.
 #### Sentence Transformers module checkpoints
 
 vLLM also loads CrossEncoders saved by Sentence Transformers as
-`Transformer → Pooling → Dense`, without a model-specific classification class
-or `trust_remote_code`. The backbone must be supported by vLLM.
+`Transformer → Pooling → Dense` or `Transformer → LogitScore`, without a
+model-specific classification class or `trust_remote_code`. The backbone must be
+supported by vLLM, and the Transformer module must be at the checkpoint root.
 
 ```python
 from vllm import LLM
@@ -125,27 +126,41 @@ outputs = model.score("query", ["document one", "document two"])
 ```
 
 The checkpoint selects the pooling runner and classification conversion
-automatically. Supported exports have a feature-extraction Transformer at the
-checkpoint root, one `cls`, `mean`, or `lasttoken` pooling mode with
+automatically. Pooling/Dense exports have a feature-extraction Transformer,
+one `cls`, `mean`, or `lasttoken` pooling mode with
 `include_prompt=True`, and a Dense module mapping `sentence_embedding` to `scores`.
 vLLM loads the trained Dense weights, bias, and activation. CLS pooling requires
 right padding.
 
+LogitScore exports use a `text-generation` or `any-to-any` Transformer producing
+`causal_logits`. vLLM derives a last-token classifier from the saved vocabulary
+IDs: the positive logit alone, or the positive minus negative logit, followed by
+the saved CrossEncoder activation. This requires unquantized merged weights,
+TP=PP=1, and a bias-free linear LM head without logit scaling or soft-capping;
+runtime LoRA adapters are not supported.
+
+LogitScore structured inputs support saved default and named system prompts, plus
+boolean `add_generation_prompt` and `enable_thinking` settings under
+`processing_kwargs.chat_template`. Request chat-template kwargs override saved
+settings: `prompt` overrides `prompt_name`, and `prompt=""` disables the default.
+For example, select a saved prompt with
+`PoolingParams(extra_kwargs={"chat_template_kwargs": {"prompt_name": "match"}})`.
+
 Ordinary text pairs use tokenizer pair encoding. Exports declaring structured
 message inputs use their saved chat template with `query` and `document` roles;
-multimodal pairs additionally require a compatible multimodal backbone. The saved
-tokenizer length limit is used by default. Explicit tokenization options can
-override automatic truncation.
+multimodal pairs additionally require a compatible multimodal backbone. Text and
+image pairs are tested; arbitrary any-to-any models, audio, and video are not.
+The saved tokenizer length limit is used by default. Explicit tokenization options
+can override automatic truncation.
 
 Transformers-backend cross-encoders that use token type IDs support eager execution
 and ordinary piecewise CUDA graphs, but reject forced breakable CUDA graphs. Use
 `enforce_eager=True` or `VLLM_USE_BREAKABLE_CUDAGRAPH=0` for these models.
 
-Unsupported variants of this Pooling-based layout, saved prompts, custom processing
-settings, residual Dense layers, and prompt-excluding pooling are rejected instead
-of silently changing the checkpoint's behavior. This support does not interpret
-`Transformer → LogitScore` module stacks; existing model-specific reranker paths
-are unchanged.
+Unsupported topologies and processing settings are rejected instead of silently
+changing checkpoint behavior. Pooling/Dense additionally rejects saved prompts,
+residual Dense layers, and prompt-excluding pooling. Existing model-specific
+reranker paths are unchanged.
 
 Saved CrossEncoder output activations take precedence over the backbone's
 `problem_type`, including the legacy `sbert_ce_default_activation_function`
