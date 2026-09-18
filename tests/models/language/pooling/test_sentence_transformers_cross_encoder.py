@@ -122,14 +122,8 @@ def _create_modular_bert_cross_encoder(
     return str(export_path), pairs, reference_scores
 
 
-@pytest.mark.parametrize(
-    ("model_impl", "enforce_eager"),
-    [("vllm", True), ("transformers", True), ("transformers", False)],
-)
-def test_modular_bert_cross_encoder_score_parity(
-    vllm_runner, tmp_path: Path, model_impl: str, enforce_eager: bool
-) -> None:
-    """A current modular BERT export must preserve pair and truncation semantics."""
+def test_modular_bert_cross_encoder_score_parity(vllm_runner, tmp_path: Path) -> None:
+    """Native BERT preserves a modular export's pair and truncation semantics."""
     pytest.importorskip(
         "sentence_transformers",
         minversion="5.7.0",
@@ -140,19 +134,18 @@ def test_modular_bert_cross_encoder_score_parity(
     with vllm_runner(
         model_path,
         runner="pooling",
-        model_impl=model_impl,
         trust_remote_code=False,
         max_model_len=None,
         dtype="float32",
-        enforce_eager=enforce_eager,
+        enforce_eager=True,
         gpu_memory_utilization=0.1,
         max_num_batched_tokens=32,
         max_num_seqs=2,
-        compilation_config={"cudagraph_capture_sizes": [8, 16, 32]},
     ) as model:
-        assert model.llm.llm_engine.model_config.max_model_len == 16
-        # Replay equal-sized requests with different segment boundaries, then
-        # exercise a shorter request whose graph input includes padding.
+        model_config = model.llm.llm_engine.model_config
+        assert not model_config.using_transformers_backend()
+        assert model_config.max_model_len == 16
+        # Equal-sized pairs with different segment boundaries, then a short pair.
         for pair, expected_length, reference_score in zip(
             pairs, [16, 16, 5], reference_scores
         ):

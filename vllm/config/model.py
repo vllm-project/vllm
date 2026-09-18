@@ -750,6 +750,20 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        if (
+            sentence_transformers_config is not None
+            and self.runner_type == "pooling"
+            and self.convert_type == "classify"
+            and self.using_transformers_backend()
+            and getattr(self.hf_text_config, "type_vocab_size", 0) > 0
+        ):
+            raise ValueError(
+                "Modular Sentence Transformers CrossEncoders with token type "
+                "embeddings are not supported by the Transformers backend. "
+                "Use model_impl='vllm' (--model-impl vllm) if this backbone has "
+                "a native vLLM implementation."
+            )
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":

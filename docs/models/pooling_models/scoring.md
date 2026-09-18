@@ -153,9 +153,10 @@ image pairs are tested; arbitrary any-to-any models, audio, and video are not.
 The saved tokenizer length limit is used by default. Explicit tokenization options
 can override automatic truncation.
 
-Transformers-backend cross-encoders that use token type IDs support eager execution
-and ordinary piecewise CUDA graphs, but reject forced breakable CUDA graphs. Use
-`enforce_eager=True` or `VLLM_USE_BREAKABLE_CUDAGRAPH=0` for these models.
+Modular CrossEncoders with token type embeddings, such as BERT, require a native
+vLLM implementation. BERT uses this by default; selecting
+`model_impl="transformers"` is rejected for these checkpoints. Existing non-modular
+embedding and sequence-classification checkpoints are unaffected.
 
 Unsupported topologies and processing settings are rejected instead of silently
 changing checkpoint behavior. Pooling/Dense additionally rejects saved prompts,

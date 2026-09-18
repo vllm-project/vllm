@@ -407,6 +407,28 @@ def _write_sentence_transformers_cross_encoder(path):
     write_cross_encoder_metadata(path)
 
 
+@pytest.mark.parametrize("model_impl", ["auto", "vllm", "transformers"])
+def test_modular_segment_cross_encoder_requires_native_backend(tmp_path, model_impl):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    if model_impl == "transformers":
+        with pytest.raises(ValueError, match="Use model_impl='vllm'"):
+            ModelConfig(str(tmp_path), model_impl=model_impl, dtype="float32")
+    else:
+        config = ModelConfig(str(tmp_path), model_impl=model_impl, dtype="float32")
+        assert not config.using_transformers_backend()
+        assert config.runner_type == "pooling"
+        assert config.convert_type == "classify"
+
+
+@pytest.mark.parametrize("architecture", ["BertModel", "BertForSequenceClassification"])
+def test_non_modular_bert_can_use_transformers_backend(tmp_path, architecture):
+    BertConfig(architectures=[architecture]).save_pretrained(tmp_path)
+    config = ModelConfig(str(tmp_path), model_impl="transformers", dtype="float32")
+    assert config.sentence_transformers_config is None
+    assert config.using_transformers_backend()
+    assert config.runner_type == "pooling"
+
+
 def test_current_sentence_transformers_cross_encoder_config(tmp_path):
     """Resolve metadata once and preserve it when runtime config is copied."""
     _write_sentence_transformers_cross_encoder(tmp_path)
