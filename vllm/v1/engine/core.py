@@ -85,7 +85,11 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_kind,
+    is_full_attention_spec,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -456,6 +460,32 @@ class EngineCore:
             config_fields,
             supported_pooling_tasks,
         )
+
+    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+        """Return serializable KV cache metadata for external event consumers
+        (e.g., Dynamo). This function has no call sites within vLLM but needs to
+        be kept.
+        """
+        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
+        if kv_cache_config is None:
+            return []
+
+        kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
+        managers = kv_cache_manager.coordinator.single_type_managers
+        metadata: list[dict[str, int | str | None]] = []
+        for group_idx, (group, manager) in enumerate(
+            zip(kv_cache_config.kv_cache_groups, managers, strict=True)
+        ):
+            spec = group.kv_cache_spec
+            metadata.append(
+                {
+                    "group_idx": group_idx,
+                    "kind": get_kv_cache_spec_kind(spec).value,
+                    "block_size": manager.block_size,
+                    "sliding_window": getattr(spec, "sliding_window", None),
+                }
+            )
+        return metadata
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
@@ -927,11 +957,14 @@ class EngineCore:
         pause_future.add_done_callback(pause_complete)
         return future
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep.
 
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+
+        Returns:
+            Whether all executor memory is resident again (fully awake).
 
         """
         if tags is not None and "scheduling" in tags:
@@ -943,8 +976,30 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        if not self.model_executor.is_sleeping:
+        fully_awake = not self.model_executor.is_sleeping
+        if fully_awake:
             self.resume_scheduler()
+        return fully_awake
+
+    def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical memory. Requires a completed pause
+        and all executor memory to be resident. Kept requests are recomputed
+        after wake-up.
+        """
+        if not (
+            self.is_scheduler_paused()
+            and not self.scheduler.has_requests()
+            and not self.batch_queue
+        ):
+            raise RuntimeError(
+                "release_kv_cache_memory() requires a completed pause first"
+            )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "release_kv_cache_memory() requires all executor memory to be resident"
+            )
+        self._reset_caches()
+        self.model_executor.discard(("kv_cache",))
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1691,6 +1746,8 @@ class EngineCoreProc(EngineCore):
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
+                if self.vllm_config.weight_transfer_config is not None
+                else False
             ),
         )
 
