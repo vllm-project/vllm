@@ -77,6 +77,7 @@ def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
             expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
             input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
             pos=torch.full((num_reqs,), POS, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(num_reqs, POS + 1, dtype=np.int64),
         ),
     )
     return logits.cpu()

@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -220,6 +221,7 @@ def test_v2_greedy_sampling_applies_thinking_budget():
         torch.tensor([4], dtype=torch.int32, device=DEVICE),
         input_ids,
         torch.tensor([0], dtype=torch.int32, device=DEVICE),
+        np.full(1, 4, dtype=np.int64),
     )
 
     assert out[0, END].item() == pytest.approx(1.0e9)

@@ -99,6 +99,7 @@ def test_custom_processor_lifecycle_and_pipeline_position():
         pos=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
         input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
         expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+        seq_lens_upper_bound_np=np.ones(num_reqs, dtype=np.int64),
     )
 
     assert proc.events == [

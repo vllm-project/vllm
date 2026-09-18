@@ -137,6 +137,7 @@ class Sampler:
         expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
         input_ids = input_batch.input_ids[input_batch.logits_indices]
+        seq_lens_upper_bound_np = input_batch.seq_lens_cpu_upper_bound.numpy()
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -152,6 +153,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             return_logprobs=logprobs_dims is not None,
         )
 
@@ -221,6 +223,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
@@ -236,6 +239,7 @@ class Sampler:
             expanded_local_pos=expanded_local_pos,
             input_ids=input_ids,
             pos=pos,
+            seq_lens_upper_bound_np=seq_lens_upper_bound_np,
         )
         for processor in self.logits_processors:
             logits = processor.apply(logits, ctx)
@@ -275,6 +279,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
@@ -285,6 +290,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(

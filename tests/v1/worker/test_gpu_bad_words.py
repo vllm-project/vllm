@@ -76,6 +76,7 @@ def _apply(bad_words_token_ids: list[list[int]]) -> torch.Tensor:
             ),
             input_ids=torch.tensor(INPUT_IDS, dtype=torch.int32, device=DEVICE),
             pos=torch.zeros(num_logits, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, num_logits, dtype=np.int64),
         ),
     )
     return logits.cpu()
@@ -107,6 +108,7 @@ def test_v2_bad_words_slot_reuse_clears_state():
             ),
             input_ids=torch.tensor(INPUT_IDS, dtype=torch.int32, device=DEVICE),
             pos=torch.zeros(num_logits, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, num_logits, dtype=np.int64),
         ),
     )
     assert not torch.isinf(out).any()
