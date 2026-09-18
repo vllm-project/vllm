@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
@@ -332,6 +333,7 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         loaded_weight: torch.Tensor,
         tp_rank: int,
+        is_scale: bool = False,
     ):
         """Load grouped weight scales for group quantization or model weights
 
@@ -341,14 +343,41 @@ class RoutedExperts(PluggableLayer):
             shard_id: either w1, w2, or w3
             loaded_weight: checkpoint weight to load into the param
             tp_rank: tensor parallel rank
+            is_scale: whether padding should use unit scales instead of zero weights.
 
         """
+        padded_tp = self.moe_config.tp_shard_with_padding
+        if padded_tp:
+            destination = expert_data
+            if shard_id in ("w1", "w3") and self.moe_config.is_act_and_mul:
+                half = destination.shape[shard_dim] // 2
+                destination = destination.narrow(
+                    shard_dim, 0 if shard_id == "w1" else half, half
+                )
+            shard_size = destination.shape[shard_dim]
+            expected_size = (
+                self.moe_config.intermediate_size
+                * shard_size
+                // self.moe_config.intermediate_size_per_partition
+            )
+            if loaded_weight.shape[shard_dim] != expected_size:
+                raise ValueError(
+                    "Block-aligned TP loading expects an unsharded checkpoint "
+                    f"projection of size {expected_size}, got "
+                    f"{loaded_weight.shape[shard_dim]}."
+                )
+            start = min(tp_rank * shard_size, expected_size)
+            size = min(shard_size, expected_size - start)
+            loaded_weight = loaded_weight.narrow(shard_dim, start, size)
+            destination.fill_(1 if is_scale else 0)
+
         if shard_id == "w2":
             self._load_w2(
                 shard_dim=shard_dim,
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
+                load_full=padded_tp,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -357,6 +386,7 @@ class RoutedExperts(PluggableLayer):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=tp_rank,
+                load_full=padded_tp,
             )
 
     def _load_per_channel_weight_scale(
@@ -511,11 +541,12 @@ class RoutedExperts(PluggableLayer):
         shard_dim: int,
         loaded_weight: torch.Tensor,
         tp_rank: int,
+        load_full: bool = False,
     ):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
-        # Only narrow if the loaded_weight is not a scalar (0-dim tensor).
-        if loaded_weight.ndim > 0:
+        # Padded TP weights have already been sliced by the grouped loader.
+        if not load_full and loaded_weight.ndim > 0:
             # Same padding fix as _load_w13: use unpadded per-rank size.
             tp_size = self.moe_config.moe_parallel_config.tp_size
             loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
@@ -536,6 +567,23 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        if (
+            loaded_weight.device.type == "cpu"
+            and expert_data.device.type == "cuda"
+            and not expert_data.is_contiguous()
+            and expert_data.ndim == 2
+        ):
+            # A strided CPU-to-CUDA copy can allocate a full-shard CUDA
+            # temporary. Make the TP slice contiguous on CPU and copy rows
+            # in chunks to limit the temporary used for the padded view.
+            loaded_weight = loaded_weight.contiguous()
+            num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
+            for dst, src in zip(
+                expert_data.chunk(num_chunks, dim=0),
+                loaded_weight.chunk(num_chunks, dim=0),
+            ):
+                dst.copy_(src)
+            return
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
@@ -800,6 +848,7 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
+                    is_scale=True,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
