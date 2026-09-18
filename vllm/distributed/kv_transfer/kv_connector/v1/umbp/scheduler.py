@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_block_hash, get_group_id
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -94,6 +95,12 @@ class UMBPStoreConnectorScheduler:
         self._pinned_store_blocks: dict[tuple[str, int], list[int]] = {}
         self._store_plan_requests: dict[tuple[str, int], tuple[str, int]] = {}
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
+        self._lazy_scan_pending = False
+        self._lazy_cursor: KVCacheBlock | None = None
+        self._lazy_max_blocks = int(extra.get("lazy_offload_max_blocks", 64))
+        self._store_event_counter = 0
+        self._store_event_tokens: dict[int, set[tuple[str, int]]] = {}
+        self._store_event_pending_counts: dict[int, int] = {}
 
     def _build_local_tp_mapping(self) -> TPShardMapping | None:
         """Build the identity mapping for homogeneous local TP."""
@@ -345,6 +352,10 @@ class UMBPStoreConnectorScheduler:
         for partial_plans in self._pending_partial_tails.values():
             meta.partial_tail_plans.extend(partial_plans)
         self._pending_partial_tails.clear()
+        if self.lazy_offload and self._lazy_scan_pending:
+            lazy_plans = self._prepare_lazy_store_plans()
+            self._pending_stores.extend(lazy_plans)
+            self._lazy_scan_pending = False
         meta.deferred_store_requests.update(
             plan.request_id
             for plan in self._pending_stores
@@ -353,8 +364,47 @@ class UMBPStoreConnectorScheduler:
         meta.store_plans.extend(self._pending_stores)
         self._pending_stores.clear()
         self._reference_store_blocks(meta)
+        if self.lazy_offload and meta.store_plans:
+            event = self._store_event_counter
+            self._store_event_counter += 1
+            meta.store_event = event
+            self._store_event_tokens[event] = {
+                (plan.key, plan.generation) for plan in meta.store_plans
+            }
         self._group_layer_plans(meta)
         return meta
+
+    def _prepare_lazy_store_plans(self) -> list[BlockTransferPlan]:
+        pool = self._gpu_block_pool
+        if pool is None or self._lazy_max_blocks <= 0:
+            return []
+        if self._lazy_cursor is not None and self._lazy_cursor.ref_cnt > 0:
+            self._lazy_cursor = None
+        plans: list[BlockTransferPlan] = []
+        generation = self._next_generation
+        self._next_generation += 1
+        for block in pool.free_block_queue.iter_blocks_after(self._lazy_cursor):
+            self._lazy_cursor = block
+            if block.is_null or block.block_hash is None:
+                continue
+            group_id = get_group_id(block.block_hash)
+            block_hash = get_block_hash(block.block_hash)
+            key = self.codec.key(block_hash, group_id)
+            if any(token[0] == key for token in self._pinned_store_blocks):
+                continue
+            plans.append(
+                BlockTransferPlan(
+                    key=key,
+                    block_id=block.block_id,
+                    generation=generation,
+                    group_id=group_id,
+                    block_hash=block_hash,
+                    block_size=self.group_block_sizes[group_id],
+                )
+            )
+            if len(plans) >= self._lazy_max_blocks:
+                break
+        return plans
 
     def _add_boundary_state_plans(
         self,
@@ -581,28 +631,10 @@ class UMBPStoreConnectorScheduler:
         future = self._lookup_futures.pop(request.request_id, None)
         if future is not None:
             future.cancel()
-        plans: list[BlockTransferPlan] = []
         if self.lazy_offload:
-            tracker = self._tracker_for_request(request.request_id)
-            tracker.save_mode = "lazy"
-            group_ids = self.kv_cache_config.prefix_cacheable_group_ids
-            selected_block_ids = tuple(block_ids[group_id] for group_id in group_ids)
-            token_count = getattr(
-                request,
-                "num_computed_tokens",
-                getattr(request, "num_tokens", 0),
-            )
-            plans = self._store_plans(
-                request,
-                tracker,
-                token_count,
-                block_ids_override=selected_block_ids,
-            )
-            self._pending_stores.extend(plans)
-            if plans:
-                pending_meta = UMBPConnectorMetadata(store_plans=plans)
-                self._reference_store_blocks(pending_meta)
-        return bool(plans), None
+            self._request_trackers.pop(request.request_id, None)
+            self._lazy_scan_pending = True
+        return False, None
 
     def register_finished_partial_tail(
         self,
@@ -661,7 +693,27 @@ class UMBPStoreConnectorScheduler:
         for token, count in metadata.failed_store_tokens.items():
             terminal_counts[token] = terminal_counts.get(token, 0) + count
         failed_tokens = set(metadata.failed_store_tokens)
+        event_tokens: set[tuple[str, int]] = set()
+        terminal_events = dict(metadata.completed_store_events)
+        for event, count in metadata.failed_store_events.items():
+            terminal_events[event] = terminal_events.get(event, 0) + count
+        for event, count in terminal_events.items():
+            total = self._store_event_pending_counts.get(event, 0) + count
+            if total < self._num_workers:
+                self._store_event_pending_counts[event] = total
+                continue
+            self._store_event_pending_counts.pop(event, None)
+            tokens = self._store_event_tokens.pop(event, set())
+            event_tokens.update(tokens)
+            for token in tokens:
+                block_ids = self._pinned_store_blocks.pop(token, None)
+                if pool is not None and block_ids is not None:
+                    pool.free_blocks(
+                        pool.blocks[block_id] for block_id in reversed(block_ids)
+                    )
         for token, count in terminal_counts.items():
+            if token in event_tokens:
+                continue
             if count < self._num_workers:
                 continue
             block_ids = self._pinned_store_blocks.pop(token, None)
@@ -680,7 +732,7 @@ class UMBPStoreConnectorScheduler:
                         tracker.clear_store_retry()
 
     def has_pending_push_work(self) -> bool:
-        return bool(self._pinned_store_blocks)
+        return self._lazy_scan_pending or bool(self._pinned_store_blocks)
 
     def reset_store(self) -> bool:
         for future in self._lookup_futures.values():

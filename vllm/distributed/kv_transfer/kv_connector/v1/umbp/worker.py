@@ -59,6 +59,7 @@ class UMBPStoreConnectorWorker:
         self._failed_recving: set[str] = set()
         self._report_load_completions = False
         self._report_store_completions: set[str] = set()
+        self._active_store_event = -1
         self._stats = UMBPStoreConnectorStats()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -340,6 +341,9 @@ class UMBPStoreConnectorWorker:
         layer_results = [
             self.runtime.wait(job) for job in self._layer_store_jobs.values()
         ]
+        event_failed = any(
+            result.status != TransferJobStatus.COMPLETED for result in layer_results
+        )
         all_keys = set(self._layer_store_plans)
         failed_keys = {key for result in layer_results for key in result.failed_keys}
         completed_keys = all_keys - failed_keys
@@ -370,7 +374,9 @@ class UMBPStoreConnectorWorker:
         self._layer_store_plans.clear()
         self._submitted_store_layers.clear()
         for request_id, job in self._store_jobs.items():
-            self._finish_job(request_id, job, is_load=False)
+            result = self.runtime.wait(job)
+            event_failed |= result.status != TransferJobStatus.COMPLETED
+            self._finish_job(request_id, result, is_load=False, wait=False)
             if request_id != "__umbp_batch__":
                 finished_requests.add(request_id)
             else:
@@ -382,6 +388,14 @@ class UMBPStoreConnectorWorker:
             finished_requests & self._report_store_completions
         )
         self._report_store_completions.clear()
+        if self._active_store_event >= 0:
+            events = (
+                self._worker_meta.failed_store_events
+                if event_failed
+                else self._worker_meta.completed_store_events
+            )
+            events[self._active_store_event] = 1
+            self._active_store_event = -1
 
     def _materialize_layer_plans(
         self, plans: Sequence[BlockTransferPlan], layer_name: str
@@ -419,6 +433,7 @@ class UMBPStoreConnectorWorker:
         self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
+        self._active_store_event = metadata.store_event
         self._report_store_completions = set(metadata.deferred_store_requests)
         store_requests = {
             request_id: list(plans)

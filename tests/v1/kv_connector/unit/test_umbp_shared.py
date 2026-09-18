@@ -48,7 +48,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import (
+    make_block_hash_with_group_id,
+    maybe_convert_block_hash,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -518,7 +521,24 @@ def test_scheduler_lazy_offload_stores_only_when_request_finishes():
     )
 
     assert scheduler.build_connector_meta(active_output).store_plans == []
-    assert scheduler.request_finished(request, ([4, 5],)) == (True, None)
+    block = SimpleNamespace(
+        block_id=4,
+        block_hash=make_block_hash_with_group_id(b"a", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+    freed = []
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, None, block],
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((block,))
+            ),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: freed.extend(blocks),
+        )
+    )
+    assert scheduler.request_finished(request, ([4, 5],)) == (False, None)
     finished_output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -526,9 +546,20 @@ def test_scheduler_lazy_offload_stores_only_when_request_finishes():
         scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
         num_scheduled_tokens={},
     )
-    plans = scheduler.build_connector_meta(finished_output).store_plans
+    metadata = scheduler.build_connector_meta(finished_output)
+    plans = metadata.store_plans
 
-    assert [plan.block_id for plan in plans] == [4, 5]
+    assert [plan.block_id for plan in plans] == [4]
+    assert metadata.store_event == 0
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                completed_store_events={0: 1}
+            )
+        )
+    )
+    assert freed == [block]
+    assert not scheduler.has_pending_push_work()
 
 
 def test_scheduler_resumed_request_replaces_stale_block_table():
@@ -1172,7 +1203,7 @@ def test_worker_localizes_scheduler_plan_key_to_its_tp_rank():
         group_id=0,
         block_hash=b"hash",
     )
-    metadata = UMBPConnectorMetadata(store_plans=[plan])
+    metadata = UMBPConnectorMetadata(store_plans=[plan], store_event=7)
 
     worker.enqueue_stores(metadata)
     worker.wait_for_save()
@@ -1180,6 +1211,7 @@ def test_worker_localizes_scheduler_plan_key_to_its_tp_rank():
     assert handle.store_calls[0][0].key == codec.key(b"hash", 0)
     worker_meta = worker.build_connector_worker_meta()
     assert worker_meta.completed_store_tokens == {(plan.key, 0): 1}
+    assert worker_meta.completed_store_events == {7: 1}
 
 
 def test_scheduler_partial_prefix_load_plans_partial_block():
