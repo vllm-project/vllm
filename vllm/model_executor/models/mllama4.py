@@ -91,12 +91,11 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - batch_size: Batch size
-        - total_num_chunks: Batch size * number of chunks
-        - num_channels: Number of channels
-        - image_size: Size of each image
+    """Dimensions:
+    - batch_size: Batch size
+    - total_num_chunks: Batch size * number of chunks
+    - num_channels: Number of channels
+    - image_size: Size of each image
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -413,16 +412,15 @@ class Llama4VisionEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        r"""
-        Args:
-            hidden_states: Input tensor of shape
-                (batch_size, sequence_length, hidden_size).
-                Hidden states from the model embeddings, representing
-                the input tokens.
-                associated vectors than the model's internal embedding
-                lookup matrix.
-        """
+        r"""Args:
+        hidden_states: Input tensor of shape
+            (batch_size, sequence_length, hidden_size).
+            Hidden states from the model embeddings, representing
+            the input tokens.
+            associated vectors than the model's internal embedding
+            lookup matrix.
 
+        """
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(hidden_states)
             hidden_states = layer_outputs[0]
@@ -591,7 +589,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -1270,9 +1268,7 @@ class Llama4ForConditionalGeneration(
         return updated_params
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=[

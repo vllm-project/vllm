@@ -21,9 +21,13 @@ from .BlockScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
+
+# BLOCK_K in csrc/cpu/sgl-kernels/gemm.h — the AMX kernel's fixed K-block size.
+_BLOCK_SIZE_K = 128
 
 
 class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -329,4 +333,100 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         raise NotImplementedError(
             "CPUFp8BlockScaledMMKernel overrides apply_weights directly."
+        )
+
+
+class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    """FP8 W8A16 per-tensor-scaled GEMM via AMX BRGEMM on CPU.
+
+    Reuses the block-scaled AMX kernel (fp8_scaled_mm_cpu) with a single
+    synthetic block spanning the whole weight, so activations stay BF16/FP32
+    — no FP8 activation quantization, unlike PerTensorTorchFP8ScaledMMLinearKernel.
+    """
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "requires CPU platform."
+        if not torch.cpu._is_amx_tile_supported():
+            return False, "requires AMX tile support (Sapphire Rapids or newer)."
+        if not ops._supports_cpu_fp8_w8a16:
+            return False, "fp8_scaled_mm_cpu op not available."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if not c.weight_quant_key.scale.group_shape.is_per_tensor():
+            return False, "requires a per-tensor weight scale."
+        if not c.activation_quant_key.scale.group_shape.is_per_tensor():
+            return False, "requires a per-tensor activation scale."
+        if c.out_dtype not in (torch.bfloat16, torch.float32):
+            return False, "Only bfloat16/float32 output dtype supported."
+        n = c.weight_shape[0]
+        if n % 32 != 0:
+            # The AMX tinygemm kernel tiles N in chunks of 32 and cannot
+            # handle a remainder tile smaller than that.
+            return False, f"requires weight output dim (N={n}) to be a multiple of 32."
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_name, w_s_name, _, _ = self.layer_param_names
+        # Fp8LinearMethod transposes weight to (K, N) for torch._scaled_mm-style
+        # kernels; convert_weight_packed/fp8_scaled_mm_cpu expect (N, K), as
+        # produced by CUDA nn.Linear-style checkpoints.
+        weight = getattr(layer, w_name).t().contiguous()
+        n, k = weight.shape
+
+        packed_weight = torch.ops._C.convert_weight_packed(weight)
+        replace_parameter(
+            layer, w_name, torch.nn.Parameter(packed_weight, requires_grad=False)
+        )
+
+        # Synthesize a single-block "block scale" tensor from the scalar
+        # per-tensor weight scale so fp8_scaled_mm_cpu can be reused as-is.
+        weight_scale = getattr(layer, w_s_name)
+        self._block_size_n = -(-n // 32) * 32  # round up to a multiple of 32
+        num_k_blocks = -(-k // _BLOCK_SIZE_K)
+        block_scale = weight_scale.reshape(()).expand(1, num_k_blocks).contiguous()
+        replace_parameter(
+            layer, w_s_name, torch.nn.Parameter(block_scale, requires_grad=False)
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        w_name, w_s_name, _, _ = self.layer_param_names
+        weight = getattr(layer, w_name)
+        weight_scale = getattr(layer, w_s_name)
+
+        x_2d = x.reshape(-1, x.shape[-1]) if x.dim() > 2 else x
+        out = torch.ops._C.fp8_scaled_mm_cpu(
+            x_2d,
+            weight,
+            weight_scale,
+            [self._block_size_n, _BLOCK_SIZE_K],
+            bias,
+            x.dtype,
+            True,  # is_vnni (weight already prepacked)
+        )
+        return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "CPUFp8PerTensorScaledMMLinearKernel overrides apply_weights directly."
         )

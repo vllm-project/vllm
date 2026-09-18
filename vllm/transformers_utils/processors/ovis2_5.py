@@ -33,13 +33,13 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[cal
 
 
 class Ovis2_5Processor(ProcessorMixin):
-    r"""
-    Constructs an Ovis processor which wraps an Ovis image processor
+    r"""Constructs an Ovis processor which wraps an Ovis image processor
     and a Qwen2 tokenizer into a single processor.
     [`OvisProcessor`] offers all the functionalities of
     [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`].
     See the [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`]
     for more information.
+
     Args:
         image_processor ([`Qwen2VLImageProcessor`], *optional*):
             The image processor is a required input.
@@ -48,6 +48,7 @@ class Ovis2_5Processor(ProcessorMixin):
         chat_template (`str`, *optional*): A Jinja template which will
             be used to convert lists of messages in a chat into
             a tokenizable string.
+
     """
 
     attributes = ["image_processor", "tokenizer"]
@@ -110,43 +111,39 @@ class Ovis2_5Processor(ProcessorMixin):
         | list[PreTokenizedInput] = None,
         **kwargs: Unpack[Ovis2_5ProcessorKwargs],
     ) -> BatchFeature:
-        """
-        Main method to prepare for the model one or several sequences(s)
+        """Main method to prepare for the model one or several sequences(s)
         and image(s). This method forwards the `text`and `kwargs` arguments
         to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text`
         is not `None` to encode the text. To prepare the vision inputs,
         this method forwards the `vision_infos` and `kwrags` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`]
         if `vision_infos` is not `None`.
-            Args:
-                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`,
-                    `list[PIL.Image.Image]`, `list[np.ndarray]`,
-                    `list[torch.Tensor]`):
-                    The image or batch of images to be prepared.
-                    Each image can be a PIL image, NumPy array or PyTorch
-                    tensor. Both channels-first and channels-last formats
-                    are supported.
-                text (`str`, `list[str]`, `list[list[str]]`):
-                    The sequence or batch of sequences to be encoded.
-                    Each sequence can be a string or a list of strings
-                    (pretokenized string). If the sequences are provided as
-                    list of strings (pretokenized), you must set
-                    `is_split_into_words=True` (to lift the ambiguity with
-                    a batch of sequences).
-                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`,
-                    `list[torch.Tensor]`):
-                    The image or batch of videos to be prepared. Each video
-                    can be a 4D NumPy array or PyTorch tensor, or a nested
-                    list of 3D frames. Both channels-first and channels-last
-                    formats are supported.
-                return_tensors (`str` or [`~utils.TensorType`], *optional*):
-                    If set, will return tensors of a particular framework.
-                    Acceptable values are:
-                    - `'tf'`: Return TensorFlow `tf.constant` objects.
-                    - `'pt'`: Return PyTorch `torch.Tensor` objects.
-                    - `'np'`: Return NumPy `np.ndarray` objects.
-                    - `'jax'`: Return JAX `jnp.ndarray` objects.
-            Returns:
+
+        Args:
+            images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, or a list):
+                The image or batch of images to be prepared. Each image can
+                be a PIL image, NumPy array or PyTorch tensor. Both
+                channels-first and channels-last formats are supported.
+            videos (`np.ndarray`, `torch.Tensor`, or a list of either):
+                The video or batch of videos to be prepared. Each video can
+                be a 4D NumPy array or PyTorch tensor, or a nested list of
+                3D frames. Both channels-first and channels-last formats are
+                supported.
+            text (`str`, `list[str]`, `list[list[str]]`):
+                The sequence or batch of sequences to be encoded. Each
+                sequence can be a string or a list of strings (pretokenized
+                string). If the sequences are provided as list of strings
+                (pretokenized), you must set `is_split_into_words=True` (to
+                lift the ambiguity with a batch of sequences).
+            return_tensors (`str` or [`~utils.TensorType`], *optional*):
+                If set, will return tensors of a particular framework.
+                Acceptable values are:
+                - `'tf'`: Return TensorFlow `tf.constant` objects.
+                - `'pt'`: Return PyTorch `torch.Tensor` objects.
+                - `'np'`: Return NumPy `np.ndarray` objects.
+                - `'jax'`: Return JAX `jnp.ndarray` objects.
+
+        Returns:
                 [`BatchFeature`]: A [`BatchFeature`] with the following fields:
                 - **input_ids** -- list of token ids to be fed to a model.
                   Returned when `text` is not `None`.
@@ -164,6 +161,7 @@ class Ovis2_5Processor(ProcessorMixin):
                   when `videos` is not `None`.
                 - **second_per_grid_ts** -- list of video seconds per time grid.
                   Returned when `videos` is not `None`.
+
         """
         output_kwargs = self._merge_kwargs(
             Ovis2_5ProcessorKwargs,
