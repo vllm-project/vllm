@@ -160,8 +160,6 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler.block_size = block_size
     scheduler.blocks_per_sw = [0]
     scheduler._group_block_sizes = [block_size]
-    scheduler._full_attn_group_idx = 0
-    scheduler._full_attn_block_size = block_size
     scheduler.transfer_id_to_request_id = {}
     scheduler._reqs_need_recv = {}
     scheduler._reqs_need_save = {}
@@ -782,7 +780,6 @@ def test_write_mode_excludes_spec_lookahead_blocks():
     assert req_id in meta.reqs_to_save
     saved = meta.reqs_to_save[req_id]
     assert saved.local_block_ids == [prompt_blocks]
-    assert saved.local_block_ids[scheduler._full_attn_group_idx] == prompt_blocks
 
 
 def test_write_mode_chunked_prefill_clamps_spec_lookahead_blocks():
@@ -926,12 +923,29 @@ def test_write_mode_defers_save_until_prompt_complete_with_lookahead():
     meta3 = _build_meta(
         scheduler,
         req_ids=[req_id],
-        new_block_ids=[[[]]],
+        new_block_ids=[None],
         num_scheduled_tokens={req_id: 2},
     )
     assert req_id in meta3.reqs_to_save, "final chunk must emit the WRITE save"
     assert meta3.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
     assert req_id not in scheduler._reqs_need_pending_save
+
+
+def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
+    # Two full-attention groups with different block sizes are each clamped to
+    # their own prompt-block count; a sliding-window group is left untouched.
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._group_block_sizes = [16, 32, 16]
+
+    req = SimpleNamespace(num_prompt_tokens=40)
+    block_ids = [
+        [0, 1, 2, 3, 4],  # ceil(40/16)=3 -> clamp to 3
+        [10, 11, 12],  # ceil(40/32)=2 -> clamp to 2
+        [20, 21, 22, 23, 24],  # sliding-window -> untouched
+    ]
+    clamped = scheduler._clamp_to_prompt_blocks(req, block_ids)
+    assert clamped == [[0, 1, 2], [10, 11], [20, 21, 22, 23, 24]]
 
 
 def _make_hybrid_kv_cache_config() -> KVCacheConfig:
@@ -960,6 +974,35 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
+    """A uniform sliding-window model (e.g. Mistral-7B): the single group is a
+    SlidingWindowSpec, so HMA is not required once hybrid management is
+    disabled, yet the spec guard still applies."""
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = sw_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page,
+                layers=["sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
         ],
     )
@@ -1043,15 +1086,6 @@ def test_non_sliding_window_hybrid_is_rejected():
         _read_scheduler(config)
 
 
-def test_token_count_basis_uses_full_attention_group():
-    """Chunked-prefill token counting must use an unclipped full-attention
-    group (blocks_per_sw == 0), not a clipped sliding-window group."""
-    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
-    # Group 0 is the full-attention group
-    assert scheduler._full_attn_group_idx == 0
-    assert scheduler._full_attn_block_size == 16
-
-
 def test_get_exchange_clipped_blocks_clips_only_sw_group():
     """get_exchange_clipped_blocks keeps the full attn group intact and clips the
     sliding-window group to its window tail."""
@@ -1121,14 +1155,18 @@ def test_single_group_path_unchanged():
 
 
 def _spec_vllm_config() -> VllmConfig:
-    vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
     vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=1)
+    # HMA off => the WRITE+hybrid guard is skipped, so construction reaches the
+    # spec-decode guard (the only path that hits it).
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
     return vllm_config
 
 
 def test_spec_decode_rejected_with_sliding_window_groups():
-    """MoRIIO + speculative decoding fails closed on sliding-window/hybrid
-    models, since the prompt-block clamp only covers full-attention groups."""
+    """MoRIIO + speculative decoding fails closed on sliding-window models,
+    since the prompt-block clamp only covers full-attention groups. The only
+    reachable path is a uniform SWA model with HMA disabled."""
     vllm_config = _spec_vllm_config()
     with (
         set_current_vllm_config(vllm_config),
@@ -1137,7 +1175,7 @@ def test_spec_decode_rejected_with_sliding_window_groups():
         MoRIIOConnector(
             vllm_config,
             KVConnectorRole.SCHEDULER,
-            _make_hybrid_kv_cache_config(),
+            _make_sliding_window_only_kv_cache_config(),
         )
 
 
@@ -1149,6 +1187,19 @@ def test_spec_decode_allowed_with_full_attention_only():
             vllm_config,
             KVConnectorRole.SCHEDULER,
             _make_test_kv_cache_config(),
+        )
+    assert connector.connector_scheduler is not None
+
+
+def test_spec_decode_allowed_with_sliding_window_in_read_mode():
+    """The spec guard is WRITE-mode only; READ mode is unaffected."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=1)
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
         )
     assert connector.connector_scheduler is not None
 

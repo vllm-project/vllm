@@ -447,22 +447,13 @@ class MoRIIOConnectorScheduler:
             getattr(g.kv_cache_spec, "block_size", self.block_size)
             for g in kv_cache_config.kv_cache_groups
         ]
-        # First full-attention group drives WRITE chunked-prefill final-chunk
-        # detection: its block count reflects the full sequence length, unlike
-        # clipped sliding-window groups.
-        self._full_attn_group_idx = 0
-        self._full_attn_block_size = self.block_size
-        for gi, bps in enumerate(self.blocks_per_sw):
-            if bps == 0:
-                self._full_attn_group_idx = gi
-                self._full_attn_block_size = self._group_block_sizes[gi]
-                break
-
-        # The prompt-block clamp only covers full-attention groups, so MoRIIO +
-        # speculative decoding is not yet safe on sliding-window / hybrid models.
-        # TODO: lift once SWA + spec is validated end-to-end.
-        if vllm_config.speculative_config is not None and any(
-            bps != 0 for bps in self.blocks_per_sw
+        # The WRITE-mode prompt-block clamp only covers full-attention groups, so
+        # MoRIIO + speculative decoding is not yet safe on sliding-window /
+        # hybrid models. TODO: lift once SWA + spec is validated end-to-end.
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and vllm_config.speculative_config is not None
+            and any(bps != 0 for bps in self.blocks_per_sw)
         ):
             raise NotImplementedError(
                 "MoRIIO with speculative decoding is not yet supported for "
@@ -942,6 +933,18 @@ class MoRIIOConnectorScheduler:
                 changed = True
         return clamped if changed else block_ids
 
+    def _is_final_prefill_chunk(
+        self, req: "Request", scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Whether this step completes the prompt.
+
+        ``build_connector_meta`` runs before ``_update_after_schedule``, so
+        ``num_computed_tokens`` excludes the current chunk; add this step's
+        scheduled tokens. Token progress is lookahead-safe unlike block counts.
+        """
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
+        return req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -955,39 +958,36 @@ class MoRIIOConnectorScheduler:
             # It places the request metadata into the saving queue.
 
             for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                # Non-disagg requests aren't registered here; skip them
+                # instead of KeyError-ing.
+                if req_id not in self._reqs_need_pending_save:
+                    continue
+                req, existing_blocks = self._reqs_need_pending_save[req_id]
+                # The final chunk may allocate no new blocks (the previous chunk
+                # reserved speculative-lookahead slack), so new_block_ids is None;
+                # still fall through to the final-chunk check below.
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-
                 if new_block_ids is not None:
-                    # Non-disagg requests aren't registered here; skip them
-                    # instead of KeyError-ing.
-                    if req_id not in self._reqs_need_pending_save:
-                        continue
-                    req, existing_blocks = self._reqs_need_pending_save[req_id]
-                    updated_blocks = [
+                    existing_blocks = [
                         existing_blocks[g] + new_block_ids[g]
                         for g in range(len(new_block_ids))
                     ]
-                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    # Detect the final prefill chunk by token progress
-                    # (lookahead-safe); num_computed_tokens excludes the current
-                    # chunk, so add this step's scheduled tokens.
-                    num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-                    if req.num_computed_tokens + num_scheduled >= req.num_prompt_tokens:
-                        # Live kv_transfer_params may be cleared; prefer the
-                        # update_state_after_alloc snapshot.
-                        kv_params = self._req_kv_params.pop(
-                            req_id, req.kv_transfer_params or {}
-                        )
-                        save_block_ids = self._clamp_to_prompt_blocks(
-                            req, self._reqs_need_pending_save[req_id][1]
-                        )
-                        meta.add_new_req(
-                            request_id=req_id,
-                            local_block_ids=save_block_ids,
-                            kv_transfer_params=kv_params,
-                            write_mode=True,
-                        )
-                        del self._reqs_need_pending_save[req_id]
+                    self._reqs_need_pending_save[req_id] = (req, existing_blocks)
+                if not self._is_final_prefill_chunk(req, scheduler_output):
+                    continue
+                # Live kv_transfer_params may be cleared; prefer the
+                # update_state_after_alloc snapshot.
+                kv_params = self._req_kv_params.pop(
+                    req_id, req.kv_transfer_params or {}
+                )
+                save_block_ids = self._clamp_to_prompt_blocks(req, existing_blocks)
+                meta.add_new_req(
+                    request_id=req_id,
+                    local_block_ids=save_block_ids,
+                    kv_transfer_params=kv_params,
+                    write_mode=True,
+                )
+                del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -1000,11 +1000,7 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            # Detect the final prefill chunk by token progress (lookahead-safe);
-            # num_computed_tokens excludes the current chunk, so add this step's
-            # scheduled tokens.
-            num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-            if req.num_computed_tokens + num_scheduled < req.num_prompt_tokens:
+            if not self._is_final_prefill_chunk(req, scheduler_output):
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
             save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
@@ -2739,15 +2735,6 @@ class MoRIIOConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
-        # The WRITE producer save already clamps local_block_ids to the prompt
-        # blocks, so local must never exceed remote by transfer time.
-        if self.mode == MoRIIOMode.WRITE:
-            assert len(local_block_ids) <= len(remote_block_ids), (
-                "MoRIIO WRITE local_block_ids longer than remote_block_ids "
-                f"(local {len(local_block_ids)} vs remote "
-                f"{len(remote_block_ids)}); scheduler save should have clamped "
-                "to prompt blocks"
-            )
         local, remote, sizes = compute_block_transfer_offsets(
             layer_name=layer_name,
             kv_cache=self.kv_caches[layer_name],
