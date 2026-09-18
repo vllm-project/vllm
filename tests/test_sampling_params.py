@@ -108,6 +108,36 @@ def test_diffusion_read_only_ends_after_one_canvas(max_tokens, expected, flag):
     assert params.ignore_eos
 
 
+@pytest.mark.parametrize(
+    "width, match",
+    [(0, "positive integer"), ("4", "positive integer"), (True, "positive integer"), (9, "no larger")],
+)
+def test_diffusion_rejects_bad_canvas_length(width, match):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(
+            SamplingParams(extra_args={"diffusion_canvas_length": width}), canvas_length=8
+        )
+
+
+def test_diffusion_canvas_length_sizes_the_seed_and_the_read():
+    params = SamplingParams(
+        max_tokens=100,
+        extra_args={
+            "diffusion_canvas_length": 4,
+            "diffusion_seed_canvas": [1, 2, 3, 4],
+            "diffusion_read_only": True,
+        },
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == 4
+
+    params = SamplingParams(
+        extra_args={"diffusion_canvas_length": 4, "diffusion_seed_canvas": [0] * 8}
+    )
+    with pytest.raises(VLLMValidationError, match="exactly 4 ids, got 8"):
+        _verify_diffusion(params, canvas_length=8)
+
+
 def test_diffusion_accepts_extra_args():
     params = SamplingParams(
         extra_args={

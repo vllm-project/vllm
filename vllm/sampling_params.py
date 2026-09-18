@@ -1095,6 +1095,22 @@ class SamplingParams(
         if not extra:
             return
 
+        canvas_length = None if diffusion_config is None else diffusion_config.canvas_length
+        width = extra.get("diffusion_canvas_length")
+        if width is not None and (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or width < 1
+            or (canvas_length is not None and width > canvas_length)
+        ):
+            raise VLLMValidationError(
+                "diffusion_canvas_length must be a positive integer no larger "
+                "than the served canvas.",
+                parameter="extra_args",
+            )
+        # The request's canvas: its own width, else the served one.
+        expected_len = width or canvas_length
+
         seed = extra.get("diffusion_seed_canvas")
         if seed is not None:
             if not isinstance(seed, (list, tuple)) or not all(
@@ -1110,13 +1126,10 @@ class SamplingParams(
                     f"diffusion_seed_canvas ids must be in [0, {vocab_size}).",
                     parameter="extra_args",
                 )
-            if (
-                diffusion_config is not None
-                and len(seed) != diffusion_config.canvas_length
-            ):
+            if expected_len is not None and len(seed) != expected_len:
                 raise VLLMValidationError(
                     "diffusion_seed_canvas must hold exactly "
-                    f"{diffusion_config.canvas_length} ids, got {len(seed)}.",
+                    f"{expected_len} ids, got {len(seed)}.",
                     parameter="extra_args",
                 )
 
@@ -1142,11 +1155,8 @@ class SamplingParams(
             # One canvas is the whole output. Cap max_tokens so the scheduler
             # ends the request there, and ignore EOS so an end-of-turn token
             # drawn into a noise slot does not end it early.
-            if diffusion_config is not None:
-                canvas_length = diffusion_config.canvas_length
-                self.max_tokens = min(
-                    self.max_tokens or canvas_length, canvas_length
-                )
+            if expected_len is not None:
+                self.max_tokens = min(self.max_tokens or expected_len, expected_len)
             self.ignore_eos = True
 
     def _validate_structured_outputs(

@@ -86,6 +86,18 @@ def test_add_request_clears_seed_and_read_only():
     assert not bool(states.read_only[0])
 
 
+def test_canvas_width_resets_with_the_slot():
+    states = _states()
+    states.add_request(0)
+    states.canvas_width_np[0] = 4
+    states.set_seed_canvas(0, [7, 7, 7, 7])
+    assert states.seed_canvas[0, :4].tolist() == [7, 7, 7, 7]
+
+    states.add_request(0)
+
+    assert states.canvas_width_np[0] == CL
+
+
 def test_remove_request_forgets_the_slot():
     states = _states()
     states.add_request(0)

@@ -651,6 +651,9 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots: set[int] = set()
         # Slots capped at one denoise step never consume a soft embed.
         self.single_step_slots: set[int] = set()
+        # Per-slot canvas width, at most canvas_length. The scheduler schedules
+        # this many draft tokens for the slot and the sampler pads the rest.
+        self.canvas_width_np = np.full(max_num_reqs, canvas_length, dtype=np.int32)
 
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
@@ -687,6 +690,7 @@ class DiffusionGemmaRequestStates:
         self.read_only[slot_idx].fill_(False)
         self.read_only_slots.discard(slot_idx)
         self.single_step_slots.discard(slot_idx)
+        self.canvas_width_np[slot_idx] = self.canvas_length
 
     def remove_request(self, slot_idx: int) -> None:
         # add_request resets the GPU flags before a slot is reused. The host
@@ -699,7 +703,8 @@ class DiffusionGemmaRequestStates:
         self.single_step_slots.discard(slot_idx)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
-        self.seed_canvas[slot_idx] = async_tensor_h2d(
+        """``ids`` covers the slot's canvas width; positions past it are never scheduled."""
+        self.seed_canvas[slot_idx, : len(ids)] = async_tensor_h2d(
             ids, dtype=torch.int64, device=self.device
         )
         self.has_seed[slot_idx].fill_(True)
@@ -836,6 +841,10 @@ class DiffusionGemmaModelState(ModelState):
         idx = self._req_id_to_index.pop(req_id, None)
         if idx is not None:
             self.diffusion_states.remove_request(idx)
+
+    def num_draft_tokens_per_req(self, input_batch: Any) -> np.ndarray:
+        slots = input_batch.idx_mapping_np[: input_batch.num_reqs]
+        return self.diffusion_states.canvas_width_np[slots]
 
     def prepare_inputs_embeds(
         self,
@@ -1096,12 +1105,15 @@ class DiffusionSampler:
             states.max_steps[req_idx].fill_(cap)
             if cap == 1:
                 states.single_step_slots.add(req_idx)
+        width = extra.get("diffusion_canvas_length")
+        if width:
+            states.canvas_width_np[req_idx] = max(1, min(int(width), self.canvas_length))
+        width = int(states.canvas_width_np[req_idx])
         seed = extra.get("diffusion_seed_canvas")
         if seed is not None:
-            if len(seed) != self.canvas_length:
+            if len(seed) != width:
                 raise ValueError(
-                    "diffusion_seed_canvas must hold exactly "
-                    f"{self.canvas_length} ids, got {len(seed)}"
+                    f"diffusion_seed_canvas must hold exactly {width} ids, got {len(seed)}"
                 )
             states.set_seed_canvas(req_idx, seed)
         if extra.get("diffusion_read_only"):

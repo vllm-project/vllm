@@ -2170,6 +2170,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
+                num_draft_tokens_per_req=self.model_state.num_draft_tokens_per_req(
+                    input_batch
+                ),
             )
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(

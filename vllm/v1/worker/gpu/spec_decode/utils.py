@@ -36,12 +36,20 @@ class DraftTokensHandler:
         self.req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
+        # Per-request draft counts when a model state narrows some requests.
+        self.num_draft_tokens_per_req: list[int] | None = None
 
     def set_draft_tokens(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        draft_tokens: torch.Tensor,
+        num_draft_tokens_per_req: np.ndarray | None = None,
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
+        self.num_draft_tokens_per_req = (
+            None if num_draft_tokens_per_req is None else num_draft_tokens_per_req.tolist()
+        )
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
@@ -61,12 +69,18 @@ class DraftTokensHandler:
             self.copy_event.record()
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
+        per_req = self.num_draft_tokens_per_req
         if self.draft_tokens_np is not None:
             self.copy_event.synchronize()
             draft_token_ids = self.draft_tokens_np.tolist()
+            if per_req is not None:
+                draft_token_ids = [row[:n] for row, n in zip(draft_token_ids, per_req)]
         else:
             # This case only happens when async scheduling is disabled.
-            draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
+            draft_token_ids = [
+                [-1] * (self.num_draft_tokens if per_req is None else per_req[i])
+                for i in range(len(self.req_ids))
+            ]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
 

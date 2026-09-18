@@ -37,7 +37,10 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.diffusion_scheduler import DiffusionAsyncScheduler
+from vllm.v1.core.sched.diffusion_scheduler import (
+    DiffusionAsyncScheduler,
+    diffusion_canvas_width,
+)
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -6798,6 +6801,16 @@ def test_update_draft_token_ids_in_output_strips_padding():
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
 
 
+def test_diffusion_canvas_width_defaults_to_the_served_canvas():
+    def req(extra):
+        return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
+
+    assert diffusion_canvas_width(req(None), 64) == 64
+    assert diffusion_canvas_width(req({}), 64) == 64
+    assert diffusion_canvas_width(req({"diffusion_canvas_length": 16}), 64) == 16
+    assert diffusion_canvas_width(SimpleNamespace(sampling_params=None), 64) == 64
+
+
 def _diffusion_request(req_id: str, extra_args: dict) -> Request:
     (request,) = create_requests(
         num_requests=1, num_tokens=8, max_tokens=64, req_ids=[req_id]
@@ -6829,6 +6842,22 @@ def test_diffusion_scheduler_is_selected_with_async_scheduling():
     assert cls is Scheduler
     cls, is_async = selected(async_scheduling=True)
     assert cls is (AsyncScheduler if is_async else Scheduler)
+
+
+def test_diffusion_scheduler_narrows_the_canvas_per_request():
+    scheduler = _diffusion_scheduler()
+    wide = _diffusion_request("wide", {})
+    narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
+    scheduler.add_request(wide)
+    scheduler.add_request(narrow)
+
+    # The prefill step lays down the served canvas as placeholders.
+    scheduler.schedule()
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens["wide"] == [-1] * 8
+    assert output.scheduled_spec_decode_tokens["narrow"] == [-1] * 4
+    assert output.num_scheduled_tokens["narrow"] == 4
+    assert narrow.num_output_placeholders == 4
 
 
 def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
