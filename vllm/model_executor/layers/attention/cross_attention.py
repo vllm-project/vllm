@@ -34,7 +34,6 @@ def _get_cross_slot_mapping(
     device: torch.device,
 ) -> torch.Tensor:
     """Get cross-attention slot mappings."""
-
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
@@ -187,8 +186,7 @@ def create_cross_attention_backend(
 
 
 class CrossAttention(Attention):
-    """
-    Cross-attention for encoder-decoder models.
+    """Cross-attention for encoder-decoder models.
     Handles attention between decoder queries and encoder keys/values.
     """
 
