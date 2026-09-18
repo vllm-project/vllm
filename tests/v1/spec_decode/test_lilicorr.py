@@ -78,14 +78,7 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
             dtype=x.dtype,
             device=x.device,
         )
-        attention.load_state_dict(
-            {
-                name.replace("in_proj.weight", "in_proj_weight").replace(
-                    "in_proj.bias", "in_proj_bias"
-                ): value
-                for name, value in layer.attn.state_dict().items()
-            }
-        )
+        attention.load_state_dict(layer.attn.state_dict())
         normalized = layer.attn_norm(x)
         x = (
             x
@@ -134,6 +127,9 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
                     parameter.weight_loader(
                         parameter, torch.randn_like(parameter) * 0.1
                     )
+        for layer in head.layers:
+            layer.attn.in_proj_weight.normal_(std=0.1)
+            layer.attn.in_proj_bias.normal_(std=0.1)
         head.relative_slot_bias.normal_(std=0.1)
         head.same_slot_bias.normal_(std=0.1)
         head.slot_embedding.normal_(std=0.1)
@@ -336,12 +332,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         projection = wrapper.model.lilicorr.pass_hidden_proj
         projection.quant_method = object()
         projection.register_parameter("weight_scale", nn.Parameter(torch.ones(1)))
-    weights = {
-        name.replace(".attn.in_proj.weight", ".attn.in_proj_weight").replace(
-            ".attn.in_proj.bias", ".attn.in_proj_bias"
-        ): value
-        for name, value in wrapper.model.state_dict().items()
-    }
+    weights = dict(wrapper.model.state_dict())
     if quantized:
         del weights["lilicorr.pass_hidden_proj.weight_scale"]
     if mismatch == "missing_head":
@@ -424,6 +415,9 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
                 )
                 del module.weight
                 module.bias.zero_()
+        for layer in head.layers:
+            layer.attn.in_proj_weight.normal_(std=0.1)
+            layer.attn.in_proj_bias.zero_()
         head.materialize_inference_buffers(torch.device("cpu"), torch.float32)
         result = head(
             torch.randn(2, 3, 4, 16),
@@ -434,6 +428,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
         )
     assert result.shape == (2, 3, 4, 4)
     assert torch.isfinite(result).all()
+    assert not any(prefix.endswith(".in_proj") for prefix in configured)
     assert set(calls) == set(configured)
     assert len(configured) == len(set(configured))
     for name, module in head.named_modules():

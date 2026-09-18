@@ -97,12 +97,12 @@ class LiLiCorrLatticeAttention(nn.Module):
         self.hidden_size = int(hidden_size)
         self.num_heads = int(num_heads)
         self.head_dim = self.hidden_size // self.num_heads
-        self.in_proj = ReplicatedLinear(
-            hidden_size,
-            3 * hidden_size,
-            return_bias=False,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "in_proj"),
+        # Exported lattice QKV parameters stay in the model's floating dtype.
+        self.in_proj_weight = nn.Parameter(
+            torch.empty(3 * hidden_size, hidden_size), requires_grad=False
+        )
+        self.in_proj_bias = nn.Parameter(
+            torch.empty(3 * hidden_size), requires_grad=False
         )
         self.out_proj = ReplicatedLinear(
             hidden_size,
@@ -116,7 +116,7 @@ class LiLiCorrLatticeAttention(nn.Module):
         self, hidden_states: torch.Tensor, attention_bias: torch.Tensor
     ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
-        qkv = self.in_proj(hidden_states)
+        qkv = F.linear(hidden_states, self.in_proj_weight, self.in_proj_bias)
         q, k, v = qkv.chunk(3, dim=-1)
         shape = (bsz, seq_len, self.num_heads, self.head_dim)
         q = q.view(shape).transpose(1, 2)
@@ -532,9 +532,6 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         def normalized_weights():
             for name, value in weights:
                 name = name.removeprefix("model.")
-                if name.startswith("lilicorr."):
-                    name = name.replace(".attn.in_proj_weight", ".attn.in_proj.weight")
-                    name = name.replace(".attn.in_proj_bias", ".attn.in_proj.bias")
                 if (
                     name.startswith("lilicorr.")
                     or ".attention_conv." in name

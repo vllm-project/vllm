@@ -257,3 +257,6 @@ configured `conv_kernel_size` and `conv_group_size`. Target input embeddings and
 the target LM head must be available on the draft rank. Correlator linear layers
 and convolution kernel projections use the draft quantization configuration
 and its module exclusions.
+
+Lattice QKV `in_proj_weight` and `in_proj_bias` must remain in floating-point
+model dtype; they use the original exported parameter layout.
