@@ -24,7 +24,6 @@ from vllm.profiler.wrapper import (
     WorkerProfiler,
 )
 from vllm.v1.core.sched.output import CachedRequestData
-from vllm.v1.worker.cpu_worker import CPUWorker
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
@@ -141,7 +140,6 @@ def test_torch_profiler_activities_require_torch_profiler():
     ("worker_type", "expected"),
     [
         (Worker, ("CPU", "CUDA")),
-        (CPUWorker, ("CPU",)),
         (XPUWorker, ("CPU", "XPU")),
     ],
 )
@@ -156,7 +154,6 @@ def test_worker_resolves_platform_default_activities(worker_type, expected):
     ("worker_type", "activities"),
     [
         (Worker, ["XPU"]),
-        (CPUWorker, ["CUDA"]),
         (XPUWorker, ["CUDA"]),
     ],
 )
@@ -176,7 +173,6 @@ def test_worker_rejects_unsupported_activities_at_startup(worker_type, activitie
     ("worker_type", "expected"),
     [
         (Worker, ("CPU", "CUDA")),
-        (CPUWorker, ("CPU",)),
         (XPUWorker, ("CPU", "XPU")),
     ],
 )
@@ -217,7 +213,7 @@ def test_worker_forwards_configured_torch_profiler_activities():
     )
 
 
-@pytest.mark.parametrize("worker_type", [Worker, CPUWorker, XPUWorker])
+@pytest.mark.parametrize("worker_type", [Worker, XPUWorker])
 def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
     worker = object.__new__(worker_type)
     worker.rank = 0
