@@ -235,7 +235,11 @@ def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push, monkeypa
             ec_zmq_addrs=["tcp://decode:14579"] if push else [],
         )
     )
-    handle = {"metadata": {"image_grid_thw": [[1, 2, 3]]}, "peer_port": 5601}
+    handle = {
+        "metadata": {"image_grid_thw": [[1, 2, 3]]},
+        "item_indices": [0, 1],
+        "peer_port": 5601,
+    }
     response = Mock(
         status=200,
         read=AsyncMock(
@@ -258,15 +262,18 @@ def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push, monkeypa
     items = prepared["ec_transfer_params"]["ec_items"]
     assert [item["mm_hash"] for item in items] == ["engine-hash", "engine-hash"]
     assert items[0]["transfer_id"] != items[1]["transfer_id"]
-    for index, call in enumerate(session.post.call_args_list):
-        sent = msgspec.json.decode(call.kwargs["data"]).get("ec_transfer_params")
-        if push:
-            assert sent == {
-                "consumer_zmq": "tcp://decode:14579",
-                "ec_items": [{"transfer_id": items[index]["transfer_id"]}],
-            }
-        else:
-            assert sent is None
+    assert session.post.call_count == 1
+    sent = msgspec.json.decode(session.post.call_args.kwargs["data"]).get(
+        "ec_transfer_params"
+    )
+    if push:
+        assert sent == {
+            "consumer_zmq": "tcp://decode:14579",
+            "ec_items": [{"transfer_id": item["transfer_id"]} for item in items],
+        }
+    else:
+        assert sent is None
+    for index in range(2):
         assert prepared["messages"][0]["content"][index]["image_embeds"] == {
             "image_grid_thw": [1, 2, 3]
         }
