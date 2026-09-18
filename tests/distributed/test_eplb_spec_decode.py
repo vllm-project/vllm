@@ -9,12 +9,17 @@ import pytest
 import torch
 
 from tests.utils import large_gpu_mark
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+    _get_dspark_parallel_config,
+    dspark_draft_supports_eplb,
+)
 
 
 def get_model_args(
@@ -76,36 +81,34 @@ class FakeEplbState:
         self.add_model_calls.append((model, model_config))
 
 
+def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
+    return DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        hidden_size=128,
+        num_hidden_layers=2,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        num_hash_layers=0,
+        n_shared_experts=1,
+        moe_intermediate_size=128,
+        hc_mult=1,
+        hc_eps=1e-5,
+        rms_norm_eps=1e-5,
+        dspark_target_layer_ids=[0],
+        dspark_markov_rank=8,
+        index_topk=4,
+        head_dim=64,
+        num_attention_heads=4,
+        vocab_size=256,
+        n_mtp_layers=2,
+        enable_confidence_head=False,
+        compress_ratios=[1, 1],
+    )
+
+
 @pytest.fixture
 def dspark_vllm_config(dist_init):
-    hf_config = DeepseekV41Config(
-        text_config=dict(
-            hidden_size=128,
-            num_hidden_layers=2,
-            n_routed_experts=8,
-            num_experts_per_tok=2,
-            dspark_n_routed_experts=4,
-            dspark_num_experts_per_tok=3,
-            n_shared_experts=1,
-            moe_intermediate_size=128,
-            hidden_act="silu",
-            swiglu_limit=10.0,
-            norm_topk_prob=True,
-            topk_method="noaux_tc",
-            routed_scaling_factor=1.5,
-            hc_mult=1,
-            hc_eps=1e-5,
-            rms_norm_eps=1e-5,
-            dspark_target_layer_ids=[0],
-            dspark_markov_rank=8,
-            index_topk=4,
-            head_dim=64,
-            num_attention_heads=4,
-            vocab_size=256,
-            n_mtp_layers=2,
-            enable_confidence_head=False,
-        ),
-    )
+    hf_config = _make_dsv4_dspark_hf_config()
     model_config = SimpleNamespace(
         dtype=torch.bfloat16, hf_config=hf_config, model="dspark"
     )
@@ -117,11 +120,14 @@ def dspark_vllm_config(dist_init):
             enable_expert_parallel=True,
             enable_eplb=True,
             enable_elastic_ep=False,
-            eplb_config=SimpleNamespace(num_redundant_experts=0),
+            eplb_config=SimpleNamespace(num_redundant_experts=4),
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
-        speculative_config=SimpleNamespace(draft_model_config=model_config),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=model_config,
+        ),
     )
 
 
@@ -140,6 +146,57 @@ def _build_dspark_draft(vllm_config, monkeypatch: pytest.MonkeyPatch):
         torch.device("cuda"),
     ):
         return DSparkDeepseekV4ForCausalLM(vllm_config=vllm_config)
+
+
+def test_dspark_parallel_config_preserves_eplb_for_dsv4(dspark_vllm_config):
+    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
+    assert dspark_draft_supports_eplb(draft_model_config)
+
+    draft_parallel_config = _get_dspark_parallel_config(
+        dspark_vllm_config.parallel_config,
+        tensor_parallel_size=2,
+        draft_model_config=draft_model_config,
+    )
+    assert draft_parallel_config.enable_eplb
+    assert (
+        draft_parallel_config.eplb_config.num_redundant_experts
+        == dspark_vllm_config.parallel_config.eplb_config.num_redundant_experts
+    )
+
+
+def _make_moe_topology(
+    *,
+    num_routed_experts: int = 8,
+    num_redundant_experts: int = 4,
+    num_expert_groups: int = 1,
+) -> SimpleNamespace:
+    num_physical_experts = num_routed_experts + num_redundant_experts
+    return SimpleNamespace(
+        num_routed_experts=num_routed_experts,
+        num_redundant_experts=num_redundant_experts,
+        num_physical_experts=num_physical_experts,
+        num_logical_experts=num_routed_experts,
+        num_expert_groups=num_expert_groups,
+    )
+
+
+def test_eplb_state_accepts_matching_dsv4_draft_and_target():
+    state = SimpleNamespace(model_states={})
+    draft = _make_moe_topology()
+    target = _make_moe_topology()
+    state.model_states["draft"] = SimpleNamespace(model=draft)
+
+    EplbState.validate_ep_configuration(state, target)
+
+
+def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
+    state = SimpleNamespace(model_states={})
+    draft = _make_moe_topology(num_redundant_experts=0)
+    target = _make_moe_topology(num_redundant_experts=4)
+    state.model_states["draft"] = SimpleNamespace(model=draft)
+
+    with pytest.raises(RuntimeError, match="mismatch"):
+        EplbState.validate_ep_configuration(state, target)
 
 
 def test_eplb_registers_dspark_draft_model(
@@ -176,6 +233,36 @@ def test_eplb_registers_dspark_draft_model(
         (draft, dspark_vllm_config.speculative_config.draft_model_config)
     ]
     assert speculator.eplb_state is controller.state
+
+
+def test_eplb_skips_dsv41_dspark_registration(
+    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
+):
+    """V4.1 DSpark drafts use a different expert topology and are not registered."""
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.EplbState",
+        FakeEplbState,
+    )
+
+    draft = _build_dspark_draft(dspark_vllm_config, monkeypatch)
+    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
+        "deepseek_v41"
+    )
+    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
+    controller.prepare_load()
+    speculator = SimpleNamespace(model=draft, eplb_state=None)
+    speculator.set_eplb_state = lambda state: setattr(speculator, "eplb_state", state)
+
+    registered = controller.maybe_register_speculator(
+        speculator,
+        dspark_vllm_config.speculative_config,
+        load_dummy_weights=False,
+    )
+
+    assert registered is False
+    assert controller.state is not None
+    assert controller.state.add_model_calls == []
 
 
 def test_eplb_skips_dspark_registration_with_dummy_weights(

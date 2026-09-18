@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import dspark_draft_supports_eplb
 
 logger = init_logger(__name__)
 
@@ -76,6 +77,13 @@ class EPLBController:
         )
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
+        if (
+            getattr(speculative_config, "method", None) == "dspark"
+            and not dspark_draft_supports_eplb(
+                speculative_config.draft_model_config
+            )
+        ):
+            return False
         assert self.state is not None
         self.state.add_model(
             draft_moe_model,

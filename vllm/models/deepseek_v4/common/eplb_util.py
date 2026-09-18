@@ -3,15 +3,24 @@
 """Shared EPLB MoE registration helpers for DeepSeek V4 family models."""
 
 from collections.abc import Iterable
+from typing import Protocol
 
 import torch.nn as nn
 
-from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import PPMissingLayer
 
 
+class _Dsv4CollectableMoE(Protocol):
+    num_expert_groups: int
+    num_moe_layers: int
+    moe_layers: list[nn.Module]
+    moe_mlp_layers: list[nn.Module]
+
+    def extract_moe_parameters(self, example_moe: object | None) -> None: ...
+
+
 def collect_moe_layers(
-    moe_model: MixtureOfExperts,
+    moe_model: _Dsv4CollectableMoE,
     layers: Iterable[nn.Module],
     config: object,
     *,

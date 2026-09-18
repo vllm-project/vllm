@@ -172,9 +172,12 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
 
 def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
     FakeEplbState.instances.clear()
-    target_model = SimpleNamespace(is_moe=False)
+    target_model = SimpleNamespace(is_moe=True)
     draft_model = SimpleNamespace(is_moe=True)
-    draft_model_config = SimpleNamespace(model="dspark-draft")
+    draft_model_config = SimpleNamespace(
+        model="dspark-draft",
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+    )
 
     class FakeDSparkSpeculator:
         def __init__(self):
@@ -209,13 +212,19 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
     speculator = FakeDSparkSpeculator()
     runner = _make_runner(
         is_last_pp_rank=False,
-        speculative_config=SimpleNamespace(draft_model_config=draft_model_config),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=draft_model_config,
+        ),
         speculator=speculator,
     )
     mrv2.GPUModelRunner.load_model(runner)
 
     assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == [(draft_model, draft_model_config)]
+    assert runner.eplb_state.add_model_calls == [
+        (draft_model, draft_model_config),
+        (target_model, runner.model_config),
+    ]
     assert speculator.eplb_state is runner.eplb_state
 
 

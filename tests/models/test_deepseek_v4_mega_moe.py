@@ -27,6 +27,7 @@ from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
@@ -883,44 +884,70 @@ def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     assert calls == ["mtp", "dspark"]
 
 
+@pytest.fixture
+def v4_dspark_config(dist_init):
+    hf_config = DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        hidden_size=128,
+        num_hidden_layers=2,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        num_hash_layers=0,
+        n_shared_experts=1,
+        moe_intermediate_size=128,
+        hc_mult=1,
+        hc_eps=1e-5,
+        rms_norm_eps=1e-5,
+        dspark_target_layer_ids=[0],
+        dspark_markov_rank=8,
+        index_topk=4,
+        head_dim=64,
+        num_attention_heads=4,
+        vocab_size=256,
+        n_mtp_layers=2,
+        enable_confidence_head=False,
+        compress_ratios=[1, 1],
+    )
+    model_config = SimpleNamespace(dtype=torch.bfloat16, hf_config=hf_config)
+    return SimpleNamespace(
+        model_config=model_config,
+        quant_config=None,
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=SimpleNamespace(num_redundant_experts=4),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        speculative_config=SimpleNamespace(draft_model_config=model_config),
+    )
+
+
 def test_dspark_draft_registers_mixture_of_experts(
-    v41_moe_config, monkeypatch, dist_init
+    v4_dspark_config, monkeypatch, dist_init
 ):
-    """DSpark MoE drafts expose MixtureOfExperts for EPLB registration."""
+    """DSV4 DSpark MoE drafts expose MixtureOfExperts for EPLB registration."""
     if not current_platform.is_device_capability_family(100):
         pytest.skip("DeepGEMM MegaMoE requires SM100")
 
-    hf_config = v41_moe_config.model_config.hf_config
-    hf_config.hc_mult = 1
-    hf_config.hc_eps = 1e-5
-    hf_config.rms_norm_eps = 1e-5
-    hf_config.dspark_target_layer_ids = [0]
-    hf_config.dspark_markov_rank = 8
-    hf_config.index_topk = 4
-    hf_config.head_dim = 64
-    hf_config.num_attention_heads = 4
-    hf_config.vocab_size = 256
-    hf_config.n_mtp_layers = 2
-    hf_config.enable_confidence_head = False
-
-    v41_moe_config.speculative_config = SimpleNamespace(
-        draft_model_config=v41_moe_config.model_config,
-    )
+    hf_config = v4_dspark_config.model_config.hf_config
     monkeypatch.setattr(
         "vllm.models.deepseek_v4.nvidia.dspark.get_current_vllm_config",
-        lambda: v41_moe_config,
+        lambda: v4_dspark_config,
     )
 
     with (
-        set_default_torch_dtype(v41_moe_config.model_config.dtype),
+        set_default_torch_dtype(v4_dspark_config.model_config.dtype),
         torch.device("cuda"),
     ):
-        draft = DSparkDeepseekV4ForCausalLM(vllm_config=v41_moe_config)
+        draft = DSparkDeepseekV4ForCausalLM(vllm_config=v4_dspark_config)
 
     assert is_mixture_of_experts(draft)
     assert get_mixture_of_experts_model(draft) is draft
     assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
-    assert draft.num_routed_experts == hf_config.dspark_n_routed_experts
+    assert draft.num_routed_experts == hf_config.n_routed_experts
+    assert draft.num_redundant_experts == 4
 
 
 @pytest.mark.skipif(
