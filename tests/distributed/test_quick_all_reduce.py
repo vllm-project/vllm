@@ -238,6 +238,122 @@ def test_quick_allreduce_passes_dynamic_quant_level(
     assert called_quant_level == QuickReduceRegime.FP.value
 
 
+def _install_fake_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    aiter_module: types.SimpleNamespace,
+    quick_all_reduce: types.ModuleType | None = None,
+) -> None:
+    """Stand in for the installed aiter, with or without its own handshake.
+
+    Without ``quick_all_reduce`` the submodule import fails the way it does on
+    a pre-ROCm/aiter#4421 install, since a namespace object has no ``__path__``
+    for the import machinery to descend into.
+    """
+    monkeypatch.setitem(sys.modules, "aiter", aiter_module)
+    if quick_all_reduce is None:
+        return
+    for name in ("aiter.dist", "aiter.dist.device_communicators"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.dist.device_communicators.quick_all_reduce",
+        quick_all_reduce,
+    )
+
+
+def test_qr_handle_exchange_delegates_to_aiter_where_aiter_has_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """ROCm/aiter#4421 took the handshake over; the buffer it wants is its own."""
+    calls = []
+    quick_all_reduce = types.ModuleType(
+        "aiter.dist.device_communicators.quick_all_reduce"
+    )
+    quick_all_reduce.qr_exchange_handles = (  # type: ignore[attr-defined]
+        lambda ptr, world_size, group: calls.append((ptr, world_size, group))
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("pre-#4421 handshake used against a post-#4421 aiter")
+
+    _install_fake_aiter(
+        monkeypatch,
+        types.SimpleNamespace(qr_get_handle=unexpected, qr_open_handles=unexpected),
+        quick_all_reduce,
+    )
+
+    group = object()
+    aiter_ops._exchange_aiter_qr_handles(123, 2, group)
+
+    assert calls == [(123, 2, group)]
+
+
+def test_qr_handle_exchange_keeps_working_on_pre_4421_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Older aiter returns the handle and takes the gathered handles back."""
+    opened = []
+    _install_fake_aiter(
+        monkeypatch,
+        types.SimpleNamespace(
+            qr_get_handle=lambda ptr: f"handle-{ptr}",
+            qr_open_handles=lambda ptr, handles: opened.append((ptr, handles)),
+        ),
+    )
+    monkeypatch.setattr(
+        aiter_ops.dist,
+        "all_gather_object",
+        lambda handles, handle, group: handles.__setitem__(0, handle),
+    )
+
+    aiter_ops._exchange_aiter_qr_handles(123, 2, object())
+
+    assert opened == [(123, ["handle-123", None])]
+
+
+def test_qr_rmsnorm_comm_comes_up_against_a_post_4421_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The whole fused path rides on this handshake, and it is easy to lose.
+
+    An aiter that only offers the post-#4421 entry point rejects the call this
+    used to make, and the failure is swallowed: no communicator, no fused
+    kernel, and nothing in the log but a slower model.
+    """
+    quick_all_reduce = types.ModuleType(
+        "aiter.dist.device_communicators.quick_all_reduce"
+    )
+    quick_all_reduce.qr_exchange_handles = (  # type: ignore[attr-defined]
+        lambda ptr, world_size, group: None
+    )
+
+    def post_4421_qr_get_handle(ptr, out_ptr):
+        return None
+
+    _install_fake_aiter(
+        monkeypatch,
+        types.SimpleNamespace(
+            qr_all_reduce_rmsnorm=lambda *args: None,
+            init_custom_qr=lambda rank, world_size, qr_max_size: 123,
+            qr_get_handle=post_4421_qr_get_handle,
+            qr_open_handles=lambda ptr, handles: None,
+        ),
+        quick_all_reduce,
+    )
+    monkeypatch.setattr(aiter_ops.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(aiter_ops.dist, "get_rank", lambda group: 0)
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", True)
+
+    device_comm = SimpleNamespace(cpu_group=object())
+
+    assert aiter_ops._get_or_create_aiter_qr_rmsnorm_comm(device_comm) == (
+        123,
+        2,
+        True,
+    )
+
+
 def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -403,6 +519,223 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
     assert calls[0]["gemma_norm"] is False
     torch.testing.assert_close(out, inp + 1)
     torch.testing.assert_close(residual_out, residual + 1)
+
+
+def _fused_ar_rms_on_fake_aiter_ca(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gemma_norm: bool,
+    custom_fused_result,
+):
+    """Drive the fused AR+RMS op with every fused collective declining."""
+    calls: list[dict] = []
+
+    class FakeQrComm:
+        disabled = False
+
+        def should_quick_allreduce(self, inp):
+            calls.append({"should_quick_allreduce": inp})
+            return True
+
+        def _get_qr_quant_level(self, inp):
+            return QuickReduceRegime.INT4.value
+
+    class FakeAiterCA:
+        world_size = 2
+        fully_connected = True
+
+        def custom_fused_ar_rms(
+            self, inp, residual, weight, epsilon, *, use_1stage, gemma_norm
+        ):
+            return custom_fused_result
+
+    class FakeAiterAllReduce:
+        aiter_ca = FakeAiterCA()
+
+        def use_1stage_fused_ar_rms(self, inp):
+            return False
+
+    monkeypatch.setattr(
+        aiter_ops.rocm_aiter_ops,
+        "get_aiter_allreduce",
+        lambda: FakeAiterAllReduce(),
+    )
+    monkeypatch.setattr(
+        vllm_distributed,
+        "get_tp_group",
+        lambda: SimpleNamespace(
+            device_communicator=SimpleNamespace(qr_comm=FakeQrComm(), cpu_group=None)
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    inp = torch.randn(81, 4096, dtype=torch.bfloat16)
+    residual = torch.randn_like(inp)
+    weight = torch.randn(4096, dtype=torch.bfloat16)
+    return calls, inp, residual, weight, gemma_norm
+
+
+def test_rocm_aiter_fused_rmsnorm_falls_back_when_no_fused_path_accepts_input(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A lifted compile ceiling must not turn a declined input into a crash."""
+    calls, inp, residual, weight, gemma_norm = _fused_ar_rms_on_fake_aiter_ca(
+        monkeypatch, gemma_norm=False, custom_fused_result=None
+    )
+    # No aiter module means the QR+RMSNorm communicator cannot be created, so
+    # both fused routes decline and only the unfused fallback is left.
+    monkeypatch.setitem(sys.modules, "aiter", types.SimpleNamespace())
+
+    expected_out = torch.randn_like(inp)
+    expected_residual = torch.randn_like(residual)
+    unfused_calls: list[tuple] = []
+
+    def fake_unfused(input_, residual_, weight_, epsilon, gemma):
+        unfused_calls.append((input_, residual_, weight_, epsilon, gemma))
+        return expected_out, expected_residual
+
+    monkeypatch.setattr(aiter_ops, "_unfused_allreduce_rmsnorm", fake_unfused)
+
+    out, residual_out = aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
+        inp, residual, weight, 1e-6, gemma_norm
+    )
+
+    assert len(unfused_calls) == 1
+    assert out is expected_out
+    assert residual_out is expected_residual
+
+
+def test_rocm_aiter_fused_rmsnorm_skips_qr_for_gemma_norm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """aiter.qr_all_reduce_rmsnorm has no (1 + weight) variant."""
+    calls, inp, residual, weight, gemma_norm = _fused_ar_rms_on_fake_aiter_ca(
+        monkeypatch, gemma_norm=True, custom_fused_result=None
+    )
+    qr_rmsnorm_calls: list[tuple] = []
+    fake_aiter = types.SimpleNamespace(
+        qr_all_reduce_rmsnorm=lambda *args: qr_rmsnorm_calls.append(args),
+        init_custom_qr=lambda *args: 123,
+        qr_get_handle=lambda ptr: b"handle",
+        qr_open_handles=lambda ptr, handles: None,
+    )
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setattr(
+        aiter_ops,
+        "_unfused_allreduce_rmsnorm",
+        lambda *args: (torch.empty_like(inp), torch.empty_like(residual)),
+    )
+
+    aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
+        inp, residual, weight, 1e-6, gemma_norm
+    )
+
+    assert qr_rmsnorm_calls == []
+    # The gate must short-circuit before consulting QuickReduce at all.
+    assert calls == []
+
+
+def _fake_qr_comm(*, disabled: bool = False, qr_max_size: int = 2048 * MB):
+    """A stand-in for the QuickReduce communicator the fusion pass reads."""
+    return SimpleNamespace(disabled=disabled, qr_max_size=qr_max_size)
+
+
+def _patch_qr_rmsnorm_kernel(monkeypatch: pytest.MonkeyPatch, available: bool) -> None:
+    from vllm.distributed.device_communicators import aiter_custom_all_reduce as car
+
+    monkeypatch.setattr(car, "aiter_qr_all_reduce_rmsnorm_available", lambda: available)
+
+
+def test_fused_rms_max_size_follows_the_quickreduce_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The ceiling is the workspace the fused kernel stages through."""
+    from vllm.distributed.device_communicators import aiter_custom_all_reduce as car
+
+    _patch_qr_rmsnorm_kernel(monkeypatch, True)
+
+    fused = car.AiterCustomAllreduce.fused_rms_max_size(
+        4096, torch.bfloat16, _fake_qr_comm()
+    )
+    assert fused == 2048 * MB
+    # hidden 4096 bf16 is 8 KiB/token, so the custom-AR pool is 8192 tokens and
+    # a default workspace is 262144 -- the 16384-token batches vLLM schedules
+    # by default fall between the two.
+    assert car.AiterCustomAllreduce.effective_max_size() // (4096 * 2) == 8192
+    assert fused // (4096 * 2) == 262144
+
+
+def test_fused_rms_max_size_follows_a_workspace_that_was_sized_down(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.distributed.device_communicators import aiter_custom_all_reduce as car
+
+    _patch_qr_rmsnorm_kernel(monkeypatch, True)
+
+    assert (
+        car.AiterCustomAllreduce.fused_rms_max_size(
+            4096, torch.bfloat16, _fake_qr_comm(qr_max_size=128 * MB)
+        )
+        == 128 * MB
+    )
+
+
+def test_fused_rms_max_size_never_goes_below_the_custom_ar_pool(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A workspace smaller than the pool must not shrink the existing gate."""
+    from vllm.distributed.device_communicators import aiter_custom_all_reduce as car
+
+    _patch_qr_rmsnorm_kernel(monkeypatch, True)
+
+    assert (
+        car.AiterCustomAllreduce.fused_rms_max_size(
+            4096, torch.bfloat16, _fake_qr_comm(qr_max_size=8 * MB)
+        )
+        == car.AiterCustomAllreduce.effective_max_size()
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "hidden_dim", "dtype", "kernel", "qr_comm"),
+    [
+        ("no QuickReduce communicator", 4096, torch.bfloat16, True, None),
+        (
+            "QuickReduce disabled",
+            4096,
+            torch.bfloat16,
+            True,
+            _fake_qr_comm(disabled=True),
+        ),
+        ("aiter without the kernel", 4096, torch.bfloat16, False, _fake_qr_comm()),
+        ("10 KiB row, 32 KiB tile", 5120, torch.bfloat16, True, _fake_qr_comm()),
+        ("row wider than the tile", 20480, torch.bfloat16, True, _fake_qr_comm()),
+        (
+            "dtype the kernel is not built for",
+            4096,
+            torch.float32,
+            True,
+            _fake_qr_comm(),
+        ),
+    ],
+)
+def test_fused_rms_max_size_stays_on_custom_ar_when_the_fused_kernel_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    kernel: bool,
+    qr_comm,
+):
+    """Everything that rules the fused QR kernel out keeps the old gate."""
+    from vllm.distributed.device_communicators import aiter_custom_all_reduce as car
+
+    _patch_qr_rmsnorm_kernel(monkeypatch, kernel)
+
+    assert (
+        car.AiterCustomAllreduce.fused_rms_max_size(hidden_dim, dtype, qr_comm)
+        == car.AiterCustomAllreduce.effective_max_size()
+    ), case
 
 
 @ray.remote(num_gpus=1, max_calls=1)

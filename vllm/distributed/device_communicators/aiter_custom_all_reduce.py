@@ -8,12 +8,28 @@ the fused allreduce+RMSNorm path share a single AITER instance with its IPC buff
 
 """
 
+from typing import Any
+
 import torch
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# aiter's fused QR+RMSNorm launcher needs a row to divide its 32 KiB tile.
+# Mirrors the runtime gate in vllm/_aiter_ops.py, as does the dtype pair.
+_QR_RMSNORM_TILE_BYTES = 32 * 1024
+_QR_RMSNORM_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def aiter_qr_all_reduce_rmsnorm_available() -> bool:
+    """True when AITER exposes the fused QuickReduce + RMSNorm kernel."""
+    try:
+        import aiter
+    except Exception:
+        return False
+    return hasattr(aiter, "qr_all_reduce_rmsnorm")
 
 
 class AiterCustomAllreduce:
@@ -24,6 +40,40 @@ class AiterCustomAllreduce:
     def effective_max_size(cls) -> int:
         """Max input byte size eligible for AITER custom allreduce."""
         return cls.MAX_SIZE // 2
+
+    @classmethod
+    def fused_rms_max_size(
+        cls,
+        hidden_dim: int,
+        dtype: torch.dtype,
+        qr_comm: Any | None,
+    ) -> int:
+        """Byte ceiling for fusing all-reduce with RMSNorm.
+
+        The fused QuickReduce + RMSNorm kernel stages through ``qr_comm``'s
+        workspace rather than this class's IPC pool, so where that kernel will
+        run the workspace is the limit; otherwise the pool still is.
+
+        A 16384-token batch at hidden 4096 in bf16 is 128 MiB: above the
+        64 MiB pool, far below a 2 GiB workspace.
+        """
+        custom = cls.effective_max_size()
+        if qr_comm is None or getattr(qr_comm, "disabled", True):
+            return custom
+        if dtype not in _QR_RMSNORM_DTYPES:
+            return custom
+        if not aiter_qr_all_reduce_rmsnorm_available():
+            return custom
+
+        row_size = hidden_dim * dtype.itemsize
+        if (
+            row_size <= 0
+            or row_size > _QR_RMSNORM_TILE_BYTES
+            or _QR_RMSNORM_TILE_BYTES % row_size != 0
+        ):
+            return custom
+
+        return max(custom, qr_comm.qr_max_size)
 
     def __init__(
         self,
