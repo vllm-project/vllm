@@ -274,21 +274,21 @@ class LiLiCorrHead(nn.Module):
             hidden_size * 3,
             hidden_size,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "factor_input_proj"),
         )
         self.out_head = ReplicatedLinear(
             hidden_size,
             self.factor_dim,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "out_head"),
         )
         self.in_head = ReplicatedLinear(
             hidden_size,
             self.factor_dim,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "in_head"),
         )
         self.anchor_out_head = ReplicatedLinear(
@@ -298,6 +298,9 @@ class LiLiCorrHead(nn.Module):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "anchor_out_head"),
         )
+        self._fused_edge_weight: torch.Tensor | None = None
+        self._fused_edge_bias: torch.Tensor | None = None
+        self._factor_input_splits: tuple[torch.Tensor, ...] | None = None
         self._attn_bias: torch.Tensor | None = None
         self._rank_frac_col: torch.Tensor | None = None
         self._is_top1_col: torch.Tensor | None = None
@@ -308,6 +311,23 @@ class LiLiCorrHead(nn.Module):
     ) -> None:
         topk = self.candidate_topk
         self._attn_bias = self._build_attention_bias(device=device, dtype=dtype)
+        self._fused_edge_weight = (
+            torch.cat([self.out_head.weight, self.in_head.weight], dim=0)
+            .to(device=device, dtype=dtype)
+            .contiguous()
+        )
+        self._fused_edge_bias = (
+            torch.cat([self.out_head.bias, self.in_head.bias], dim=0)
+            .to(device=device, dtype=dtype)
+            .contiguous()
+        )
+        weight = self.factor_input_proj.weight
+        hdim = self.hidden_size
+        self._factor_input_splits = (
+            weight[:, :hdim].contiguous(),
+            weight[:, hdim : 2 * hdim].contiguous(),
+            weight[:, 2 * hdim :].contiguous(),
+        )
         if topk > 1:
             rank_frac = torch.arange(topk, device=device, dtype=torch.float32).view(
                 1, 1, 1, topk
@@ -405,16 +425,16 @@ class LiLiCorrHead(nn.Module):
             bsz, n_blocks, n_slots, topk, self.hidden_size
         )
         anchor_state = self.anchor_norm(anchor_state)
-        anchor_row = anchor_state[:, :, None, None, :].expand_as(hidden_states)
-        factor_hidden = F.silu(
-            self.factor_input_proj(
-                torch.cat(
-                    (hidden_states, anchor_row, hidden_states * anchor_row), dim=-1
-                )
-            )
-        )
-        out_vec = F.normalize(self.out_head(factor_hidden), dim=-1, eps=self.vector_eps)
-        in_vec = F.normalize(self.in_head(factor_hidden), dim=-1, eps=self.vector_eps)
+        w_self, w_anchor, w_cross = self._factor_input_splits
+        anchor_row = anchor_state[:, :, None, None, :]
+        pre = F.linear(hidden_states, w_self, self.factor_input_proj.bias)
+        pre = pre + F.linear(anchor_row, w_anchor)
+        pre = pre + F.linear(hidden_states * anchor_row, w_cross)
+        factor_hidden = F.silu(pre)
+        edges = F.linear(factor_hidden, self._fused_edge_weight, self._fused_edge_bias)
+        out_vec, in_vec = F.normalize(
+            edges.unflatten(-1, (2, self.factor_dim)), dim=-1, eps=self.vector_eps
+        ).unbind(-2)
         anchor_out = F.normalize(
             self.anchor_out_head(anchor_state), dim=-1, eps=self.vector_eps
         )

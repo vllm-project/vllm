@@ -260,3 +260,7 @@ and its module exclusions.
 
 Lattice QKV `in_proj_weight` and `in_proj_bias` must remain in floating-point
 model dtype; they use the original exported parameter layout.
+
+The split factor and fused edge projections also require floating-point
+`lilicorr.factor_input_proj`, `lilicorr.out_head`, and `lilicorr.in_head` weights.
+Exclude these modules when exporting a quantized checkpoint.

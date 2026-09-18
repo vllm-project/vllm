@@ -399,6 +399,10 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
     with torch.no_grad():
         for module in head.modules():
             if isinstance(module, ReplicatedLinear):
+                if module.quant_config is None:
+                    module.weight.normal_(std=0.1)
+                    module.bias.zero_()
+                    continue
                 module.register_parameter(
                     "packed_weight",
                     nn.Parameter(
@@ -429,6 +433,9 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(
     assert result.shape == (2, 3, 4, 4)
     assert torch.isfinite(result).all()
     assert not any(prefix.endswith(".in_proj") for prefix in configured)
+    for name in ("factor_input_proj", "out_head", "in_head"):
+        assert getattr(head, name).quant_config is None
+        assert f"model.lilicorr.{name}" not in configured
     assert set(calls) == set(configured)
     assert len(configured) == len(set(configured))
     for name, module in head.named_modules():
