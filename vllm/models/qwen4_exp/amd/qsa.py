@@ -111,19 +111,9 @@ class Qwen4ExpQSAImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
-        if alibi_slopes is not None:
-            raise NotImplementedError("QSA does not support ALiBi")
-        if sliding_window is not None:
-            raise NotImplementedError("QSA does not support sliding-window attention")
-        if logits_soft_cap is not None:
-            raise NotImplementedError("QSA does not support logits soft capping")
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("QSA only supports decoder attention")
         if self.dcp_world_size != 1:
@@ -136,12 +126,8 @@ class Qwen4ExpQSAImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        self.alibi_slopes = None
-        self.sliding_window = (-1, -1)
         self.kv_cache_dtype = kv_cache_dtype
-        self.logits_soft_cap = 0.0
         self.attn_type = attn_type
-        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.supports_quant_query_input = False
 
     def do_kv_cache_update(
@@ -196,10 +182,6 @@ class Qwen4ExpQSAImpl(AttentionImpl):
         del key, value
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("QSA does not support fused output quantization")
-        if self.alibi_slopes is not None:
-            raise NotImplementedError("QSA does not support ALiBi")
-        if self.sliding_window != (-1, -1):
-            raise NotImplementedError("QSA does not support sliding-window attention")
 
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
@@ -347,12 +329,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
-            None,
-            None,
             self.kv_cache_dtype,
-            None,
             AttentionType.DECODER,
-            None,
         )
         self.indexer = QSAIndexer(
             vllm_config=vllm_config,
