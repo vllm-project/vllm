@@ -345,7 +345,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         """Issue the D2H copies on the current stream and record the ready
         event. The producing forward+sample work must already be ordered
         before the copies (stream-wait in __init__, or event-sync in
-        get_output for the deferred Confidential Computing path)."""
+        get_output for the deferred Confidential Computing path).
+        """
         self.sampled_token_ids_cpu = self._sampled_token_ids.to(
             "cpu", non_blocking=True
         )
@@ -382,6 +383,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             self._src_ready_event.synchronize()
             with torch.cuda.stream(self._copy_stream):
                 self._issue_copies()
+        assert self.sampled_token_ids_cpu is not None
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         self.async_copy_ready_event.synchronize()
 
@@ -2251,20 +2253,12 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            # Copy one row at a time. mrope_positions is allocated as
-            # [num_dims, max_num_tokens + 1] with a dummy trailing column to keep it
-            # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
-            # copy_() cannot express a strided source as a single
-            # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
-            # temporary, and a pageable H2D ignores non_blocking=True and
-            # synchronizes the stream before the transfer starts. Each row is
-            # contiguous within the pinned allocation, so per-row copies stay on
-            # the pinned path and are genuinely asynchronous.
-            for row in range(self.mrope_positions.gpu.shape[0]):
-                self.mrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
-                    self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
+            # mrope_positions is allocated as [num_dims, max_num_tokens + 1]
+            # with a dummy trailing column to keep it non-contiguous for
+            # torch.compile, so cpu[:, :N] is a strided view; copy it row by
+            # row to stay on the pinned (and, under Confidential Computing,
+            # staged) path.
+            self.mrope_positions.copy_rows_to_gpu(total_num_scheduled_tokens)
         if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens.gpu[req_indices_gpu].to(
                 torch.int64

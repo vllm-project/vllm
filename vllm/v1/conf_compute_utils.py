@@ -77,7 +77,11 @@ def _prep_stream(device: torch.device) -> torch.cuda.Stream:
     Confidential Computing, so the stream is drained by the time each copy
     call returns.
     """
-    idx = device.index if device.index is not None else torch.cuda.current_device()
+    idx = (
+        device.index
+        if device.index is not None
+        else torch.accelerator.current_device_index()
+    )
     return _prep_stream_for_index(idx)
 
 

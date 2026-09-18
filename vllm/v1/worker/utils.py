@@ -245,6 +245,10 @@ class KVBlockZeroer:
         # vllm.v1.conf_compute_utils.
         with prep_stream_ctx(self.device):
             idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
+        # idx was allocated on the prep stream but is consumed on the compute
+        # stream; keep the allocator from reusing it before the kernel runs.
+        if idx.is_cuda:
+            idx.record_stream(torch.cuda.current_stream(self.device))
         grid = (n_blocks, n_segs, max_chunks)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
