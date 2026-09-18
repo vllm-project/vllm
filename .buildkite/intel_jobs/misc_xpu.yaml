@@ -126,7 +126,7 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
     pytest -v -s -m not cpu_test v1/core || true'
-- label: ':nvidia: (H200 MIG 35GB) V1 Executor + Worker'
+- label: ':nvidia: (H200 MIG 18GB) V1 Executor + Worker'
   key: v1-executor-worker
   device: intel_gpu
   timeout_in_minutes: 45
@@ -170,6 +170,7 @@ steps:
     mem: 16+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh
   - pytest -v -s v1/kv_offload
   - pytest -v -s v1/simple_kv_offload
   source_file_dependencies: *v1-core-kv-metrics-deps
@@ -178,12 +179,14 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-offload.sh || true &&
     pytest -v -s v1/kv_offload || true &&
     pytest -v -s v1/simple_kv_offload || true'
-- label: ':nvidia: (H200 MIG 35GB) V1 KV Connectors'
+- label: ':nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N'
   key: v1-kv-connectors
   device: intel_gpu
   timeout_in_minutes: 45
+  parallelism: 4
   working_dir: .
   no_plugin: true
   env:
@@ -197,8 +200,8 @@ steps:
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-  - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+  - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
   - >-
@@ -206,8 +209,8 @@ steps:
     'cd tests &&
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    pytest -v -s -m not cpu_test v1/kv_connector/unit --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[float32]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[float16]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_batch_write_and_read_dtype[bfloat16]" --deselect="tests/v1/kv_connector/unit/test_hf3fs_connector.py::TestHf3fsMockClient::test_multiple_tensors_rw" || true &&
-    pytest -v -s -m not cpu_test v1/ec_connector/unit || true'
+    pytest -v -s -m not cpu_test v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
+    pytest -v -s -m not cpu_test v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval'
   key: v1-metrics-lmeval
   device: intel_gpu
