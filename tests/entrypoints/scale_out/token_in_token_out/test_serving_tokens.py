@@ -423,6 +423,31 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="--tokens-only is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
+async def test_stop_strings_rejected_when_tokens_only(client):
+    """--tokens-only forces detokenize=False after request validation, so
+    stop strings must be rejected explicitly rather than silently ignored."""
+    sampling_params = {"max_tokens": 5, "stop": ["never"]}
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": sampling_params,
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "stop strings" in resp.json()["error"]["message"]
+
+    sampling_params["stop"] = None
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "server",
     [
