@@ -18,8 +18,7 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
 
 @dataclass
 class ProcessorInputs:
-    """
-    Represents the keyword arguments to
+    """Represents the keyword arguments to
     [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
 
