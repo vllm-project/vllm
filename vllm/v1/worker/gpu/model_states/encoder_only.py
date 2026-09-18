@@ -170,15 +170,18 @@ class EncoderOnlyModelState(DefaultModelState):
         ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
-        attn_metadata = super().prepare_attn(
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture,
-        )
+        if not kv_cache_config.kv_cache_groups and not self.supports_mm_inputs:
+            attn_metadata: dict[str, Any] = {}
+        else:
+            attn_metadata = super().prepare_attn(
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+            )
         attn_metadata.update(
             self._build_encoder_attn_metadata(input_batch, cudagraph_mode, for_capture)
         )
