@@ -50,6 +50,7 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
         timeout: Maximum time in seconds to wait for processes (default: 60)
         mp_context: Optional multiprocess context (e.g. ``mp.get_context("spawn")``)
             for workers that must not inherit the parent's thread/CUDA state.
+
     """
     ctx = mp_context or mp
     number_of_processes = world_size
@@ -851,7 +852,7 @@ def _drain(reader: ShmTensorArena) -> None:
     retires it once the event has fired."""
     reader.flush_releases()
     if reader._deferred_releases:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         reader.flush_releases()
     assert not reader._pending_release
     assert not reader._deferred_releases
@@ -968,9 +969,11 @@ def test_arena_release_survives_intervening_flush_from_another_tensor():
     b = _get_view(reader, idx_b, t)
     del b
     assert reader._pending_release == [idx_b]
-    # This flush must not orphan `a`'s still-pending finalizer.
-    reader.flush_releases()
-    assert reader._pending_release == []
+    # This flush must not orphan `a`'s still-pending finalizer. `_drain`,
+    # not a bare `flush_releases()` call: on the pinned fast path (real
+    # CUDA present) the release is gated behind an event and may need a
+    # second flush once it fires -- see `flush_releases`.
+    _drain(reader)
     assert writer.write_tensor(t) == idx_b  # b's slot correctly reused.
     # `a` is dropped well after that intervening flush.
     del a
@@ -1183,7 +1186,7 @@ def test_arena_event_gated_release():
     assert len(reader._deferred_releases) == 1
     with reader._meta(idx) as meta:
         assert meta[1] == 0
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     reader.flush_releases()
     assert reader._deferred_releases == []
     with reader._meta(idx) as meta:
@@ -1236,7 +1239,12 @@ def test_create_from_handle_tolerates_arena_attach_failure():
     n_reader, slot_bytes, n_slots, _real_name = handle.tensor_arena_handle
     bogus_handle = dataclasses.replace(
         handle,
-        tensor_arena_handle=(n_reader, slot_bytes, n_slots, "vllm-arena-does-not-exist"),
+        tensor_arena_handle=(
+            n_reader,
+            slot_bytes,
+            n_slots,
+            "vllm-arena-does-not-exist",
+        ),
     )
 
     reader_mq = MessageQueue.create_from_handle(bogus_handle, rank=0)

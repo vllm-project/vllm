@@ -221,12 +221,12 @@ class ShmTensorArena:
     # ---- reader side ----
 
     def _ensure_pinned(self):
-        """cudaHostRegister the whole arena mapping in THIS process (lazy,
-        once). Without it the HtoD of a zero-copy tensor pays first-touch
-        page faults on the tmpfs mapping plus pageable staging (~hundreds of
-        ms for 200MB); registration allocates+pins the pages once, making
-        every later HtoD a true DMA. Failure (no CUDA in this process, etc.)
-        is fine — the copy still works, just slower."""
+        """Pin the whole arena mapping via cudaHostRegister in THIS process
+        (lazy, once). Without it the HtoD of a zero-copy tensor pays
+        first-touch page faults on the tmpfs mapping plus pageable staging
+        (~hundreds of ms for 200MB); registration allocates+pins the pages
+        once, making every later HtoD a true DMA. Failure (no CUDA in this
+        process, etc.) is fine — the copy still works, just slower."""
         if self._pin_attempted:
             return
         self._pin_attempted = True
@@ -251,7 +251,7 @@ class ShmTensorArena:
             logger.info("ShmTensorArena: host-register skipped: %s", e)
 
     def _unpin(self):
-        """cudaHostUnregister the mapping pinned by _ensure_pinned; must run
+        """Undo the pin from _ensure_pinned via cudaHostUnregister; must run
         before the mapping is closed. Failures are ignored — at interpreter
         shutdown the CUDA context may already be gone, and the registration
         dies with the process anyway."""
