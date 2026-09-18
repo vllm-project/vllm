@@ -31,9 +31,7 @@ def _trim_dispatch_output(
     ep_size: int,
     topk: int,
     input_num_tokens: int,
-) -> tuple[
-    torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor
-]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     orig_rows = dispatch_a1.shape[0]
 
     if _is_stream_capturing():
