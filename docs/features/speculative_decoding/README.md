@@ -255,5 +255,5 @@ The checkpoint must declare `LiLiCorrDraftModel` and include all `lilicorr_*`
 geometry fields and trained head weights. Convolution tensors must match the
 configured `conv_kernel_size` and `conv_group_size`. Target input embeddings and
 the target LM head must be available on the draft rank. Correlator linear layers
-use the draft quantization configuration and its module exclusions. The reused
-DFlash2 convolution projections remain unquantized.
+and convolution kernel projections use the draft quantization configuration
+and its module exclusions.
