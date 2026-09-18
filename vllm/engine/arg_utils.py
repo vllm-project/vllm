@@ -106,6 +106,7 @@ from vllm.config.parallel import (
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
+    NcclEPActivationFormat,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -513,6 +514,9 @@ class EngineArgs:
         KernelConfig.sparse_indexer_topk_backend
     )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    nccl_ep_activation_format: NcclEPActivationFormat = (
+        ParallelConfig.nccl_ep_activation_format
+    )
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -1200,6 +1204,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
+        )
+        parallel_group.add_argument(
+            "--nccl-ep-activation-format",
+            **parallel_kwargs["nccl_ep_activation_format"],
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
@@ -2357,6 +2365,7 @@ class EngineArgs:
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
+            nccl_ep_activation_format=self.nccl_ep_activation_format,
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
