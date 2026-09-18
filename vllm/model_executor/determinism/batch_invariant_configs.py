@@ -524,6 +524,13 @@ def resolve_tuned_matmul_configs() -> None:
     _TUNED_MATMUL_CONFIGS_RESOLVED = True
 
 
+def has_tuned_matmul_configs() -> bool:
+    """Whether the current device has a tuned batch-invariant matmul table."""
+    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
+        resolve_tuned_matmul_configs()
+    return _TUNED_MATMUL_CONFIGS_FOR_DEVICE is not None
+
+
 def _get_matmul_config(
     M: int,
     N: int,
