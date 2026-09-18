@@ -91,7 +91,12 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         num_groups = weight_scale.shape[1]
         return num_groups > 0 and in_features % num_groups == 0
 
-    def _zentorch_da8w4_eligible(self, layer: torch.nn.Module) -> bool:
+    def _maybe_process_da8w4_weights(self, layer: torch.nn.Module) -> bool:
+        """Repack ``layer`` into the DA8W4 layout, or leave it untouched.
+
+        Returns False without mutating the layer when it is not eligible, so
+        the caller falls through to the W4A16 paths.
+        """
         if not envs.VLLM_CPU_INT4_W4A8:
             return False
 
@@ -107,19 +112,6 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if not self._zentorch_woq_eligible(layer):
             return False
 
-        weight_packed = getattr(layer, self.w_q_name)
-        weight_scale = getattr(layer, self.w_s_name)
-        in_features = weight_packed.shape[1] * 8
-        num_groups = weight_scale.shape[1]
-        group_size = in_features // num_groups
-        # AOCL sym_quant requires K/G to be a multiple of 4; K must be even to
-        # pack two s4 values per byte.
-        return group_size % 4 == 0 and in_features % 2 == 0
-
-    def _process_da8w4_weights(self, layer: torch.nn.Module) -> None:
-        if self.w_zp_name is not None:
-            setattr(layer, self.w_zp_name, None)
-
         weight_q = getattr(layer, self.w_q_name)
         weight_s = getattr(layer, self.w_s_name)
         weight_packed = weight_q.data if hasattr(weight_q, "data") else weight_q
@@ -129,6 +121,15 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         pack_factor = torch.iinfo(weight_packed.dtype).bits // bits
         out_features, num_groups = weight_scale.shape[0], weight_scale.shape[1]
         in_features = weight_packed.shape[1] * pack_factor
+
+        # AOCL sym_quant requires K/G to be a multiple of 4; K must be even to
+        # pack two s4 values per byte.
+        if (in_features // num_groups) % 4 != 0 or in_features % 2 != 0:
+            return False
+
+        if self.w_zp_name is not None:
+            setattr(layer, self.w_zp_name, None)
+
         unpack_from_int32 = _import_unpack_from_int32()
 
         weight_unpacked = unpack_from_int32(
@@ -161,6 +162,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
             self.config.weight_type,
             in_features // num_groups,
         )
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack CT GPTQ weights into the zentorch DA8W4 or WOQ layout.
@@ -174,8 +176,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if getattr(layer, "_zentorch_processed_weights", False):
             return
 
-        if self._zentorch_da8w4_eligible(layer):
-            self._process_da8w4_weights(layer)
+        if self._maybe_process_da8w4_weights(layer):
             return
 
         if not self._zentorch_woq_eligible(layer):

@@ -204,7 +204,7 @@ def test_da8w4_eligible_for_symmetric_bf16_layer(mock_zentorch_ops, monkeypatch)
     )
     layer, _ = _make_layer()
     kernel = _make_kernel(_make_config())
-    assert kernel._zentorch_da8w4_eligible(layer)
+    assert kernel._maybe_process_da8w4_weights(layer)
 
 
 @pytest.mark.parametrize(
@@ -225,7 +225,7 @@ def test_da8w4_not_eligible(mock_zentorch_ops, monkeypatch, config_kwargs, reaso
     )
     layer, _ = _make_layer()
     kernel = _make_kernel(_make_config(**config_kwargs))
-    assert not kernel._zentorch_da8w4_eligible(layer), reason
+    assert not kernel._maybe_process_da8w4_weights(layer), reason
 
 
 def test_da8w4_not_eligible_when_env_disabled(mock_zentorch_ops, monkeypatch):
@@ -241,7 +241,7 @@ def test_da8w4_not_eligible_when_env_disabled(mock_zentorch_ops, monkeypatch):
     )
     layer, _ = _make_layer()
     kernel = _make_kernel(_make_config())
-    assert not kernel._zentorch_da8w4_eligible(layer)
+    assert not kernel._maybe_process_da8w4_weights(layer)
 
 
 def test_da8w4_process_weights_layout(mock_zentorch_ops, monkeypatch):
@@ -300,7 +300,7 @@ def test_da8w4_falls_back_to_w4a16_when_op_missing(monkeypatch):
     )
     layer, _ = _make_layer()
     kernel = _make_kernel(_make_config())
-    assert not kernel._zentorch_da8w4_eligible(layer)
+    assert not kernel._maybe_process_da8w4_weights(layer)
 
 
 def test_can_implement_requires_zen_cpu(monkeypatch):
