@@ -18,7 +18,8 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
-    write_flashinfer_autotune_cache,
+    share_flashinfer_autotune_cache,
+    write_flashinfer_autotune_cache_aliases,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     autotune_hisparse_flashinfer_attention,
@@ -440,16 +441,15 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    # Read cached autotune results and broadcast to all ranks.
-    cached_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
-    if cached_results is not None:
-        write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
-        tuner.load_configs(str(cache_path))
+    # Share one cache payload (or none). Rank-0-only hits skip FlashInfer's
+    # per-tactic reduce and deadlock the other ranks; see issue #57423.
+    share_flashinfer_autotune_cache(
+        tuner,
+        cache_path,
+        is_leader=is_leader,
+        broadcast_object=lambda obj: world.broadcast_object(obj, src=0),
+        barrier=world.barrier if world.world_size > 1 else None,
+    )
 
     group = world.cpu_group if world.world_size > 1 else None
     set_autotune_process_group(group)
@@ -479,3 +479,5 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         world.barrier()
     if is_leader:
         tuner.save_configs(str(cache_path))
+        if cache_path.is_file():
+            write_flashinfer_autotune_cache_aliases(cache_path, cache_path.read_bytes())
