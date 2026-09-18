@@ -18,8 +18,6 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
-# gfx1250 needs num_stages=1 on top of that: any deeper pipeline corrupts the
-# recurrent state and accuracy drops to zero. Root cause not established.
 if torch.version.hip:
     from vllm.platforms.rocm import on_gfx1250
 

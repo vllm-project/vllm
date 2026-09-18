@@ -126,7 +126,7 @@ class Mxfp4MoeBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
     # ROCm AITER backends
-    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950/gfx1250)
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950)
     # Legacy alias, resolves to the CK kernel. New code should name either
     # AITER_MXFP4_BF16 (CK) or AITER_TRITON_MXFP4_BF16 (Triton) explicitly.
     AITER = "AITER_MXFP4_BF16"
@@ -1599,8 +1599,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # Must stay in lockstep with the GateMode `AiterExperts` passes:
-        # INTERLEAVE reads w13 as GUGU, SEPARATED as GGUU.
         guinterleave = True
         if activation == MoEActivation.SITU:
             guinterleave = rocm_aiter_ops.is_fused_moe_situv2_enabled()
@@ -1617,12 +1615,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
         w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
 
-        # `moe_shuffle_*` are the arch-aware entry points: on gfx1250 they
-        # interleave gate/up at the row level and then apply the WMMA 16x16
-        # tile / n32k4 scale layouts. The CDNA branch below applies the
-        # lane-level interleave instead -- via the `*_a16w4` helpers for SiTU
-        # and `shuffle_{weight,scale}` for DeepSeek-V4 -- which gfx1250
-        # kernels do not read.
         w13 = moe_shuffle_weight(
             w13_weight.data.view(fp4_dtype),
             experts_cnt=num_experts,

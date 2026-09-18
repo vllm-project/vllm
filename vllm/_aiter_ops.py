@@ -1861,12 +1861,6 @@ def _sync_aiter_situv2_moe_env() -> None:
     dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
     afp4 FlyDSL but falls back to heuristic configs, which is not the
     tuned a4w4 path this recipe is meant to use.
-
-    gfx1250 is dispatched separately. AITER overrides the activation dtype
-    for that arch after the SiTUv2 chain has run, keying only off
-    AITER_FORCE_A8W4 and otherwise defaulting to fp4 (aiter/fused_moe.py,
-    ``if get_gfx() == "gfx1250"``). gfx1250 has no tuned a4w4 FlyDSL
-    configs, so request the gate/up-interleaved a8w4 kernels instead.
     """
     import os
 

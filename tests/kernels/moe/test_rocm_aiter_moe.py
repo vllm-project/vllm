@@ -565,20 +565,6 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
-def _assert_situv2_dispatch_env():
-    """SiTUv2 requests a4w4, except on gfx1250 which requests a8w4 instead."""
-    import os
-
-    from vllm.platforms.rocm import on_gfx1250
-
-    if on_gfx1250():
-        assert os.environ.get("AITER_FORCE_A8W4") == "1"
-        assert "AITER_SITUV2_A4W4" not in os.environ
-    else:
-        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
-        assert "AITER_SITUV2_A8W4" not in os.environ
-
-
 def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -590,20 +576,22 @@ def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
     with monkeypatch.context() as mp:
         mp.delenv("AITER_SITUV2_A8W4", raising=False)
         mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.delenv("AITER_FORCE_A8W4", raising=False)
         mp.setenv("VLLM_ROCM_USE_AITER", "1")
         mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
         mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "1")
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
 
-        _assert_situv2_dispatch_env()
+        import os
+
+        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
+        assert "AITER_SITUV2_A8W4" not in os.environ
 
 
 def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Deprecated VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 still enables SiTUv2."""
+    """Deprecated VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 still enables SiTUv2 a4w4."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -611,7 +599,6 @@ def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
     with monkeypatch.context() as mp:
         mp.delenv("AITER_SITUV2_A8W4", raising=False)
         mp.delenv("AITER_SITUV2_A4W4", raising=False)
-        mp.delenv("AITER_FORCE_A8W4", raising=False)
         mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
         mp.setenv("VLLM_ROCM_USE_AITER", "1")
         mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
@@ -619,7 +606,10 @@ def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
 
-        _assert_situv2_dispatch_env()
+        import os
+
+        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
+        assert "AITER_SITUV2_A8W4" not in os.environ
 
 
 def test_aiter_moe_situv2_clears_aiter_env_when_disabled(
