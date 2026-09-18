@@ -1212,6 +1212,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MuseGlimmerForCausalLM": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
     ),
+    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/audio-flamingo-next-hf",
+        extras={
+            "think": "nvidia/audio-flamingo-next-think-hf",
+            "captioner": "nvidia/audio-flamingo-next-captioner-hf",
+            "music-flamingo": "nvidia/music-flamingo-2601-hf",
+        },
+        min_transformers_version="5.9.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/44830"
+        },
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
