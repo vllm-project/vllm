@@ -22,12 +22,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
 
-import regex as re
 import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.utils import getattr_iter
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -40,7 +40,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
-    fused_moe_make_expert_params_mapping,
+    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -57,10 +57,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
@@ -73,27 +69,63 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
+    ShardIds,
     WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
 
 logger = init_logger(__name__)
 
-_GEMMA4_EXPERT_PARENT_MAPPER = WeightsMapper(
-    orig_to_new_regex={
-        re.compile(r"(?<!\.moe)\.experts$"): ".moe.experts",
+
+def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
+    """Stack each decoder layer's projections the way its modules are built.
+
+    gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
+    into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
+    is loaded into both the K and V shards and no v_proj is expected. KV-shared
+    layers only have q_proj; the K/V tensors original checkpoints still ship
+    for them are dropped.
+    """
+    num_layers = config.num_hidden_layers
+    first_kv_shared = num_layers - getattr(config, "num_kv_shared_layers", 0)
+    k_eq_v_layers = (
+        {
+            i
+            for i, layer_type in enumerate(config.layer_types[:first_kv_shared])
+            if layer_type == "full_attention"
+        }
+        if getattr(config, "attention_k_eq_v", False)
+        else set()
+    )
+    qkv_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", "k"), ("v", "v"))
+    k_eq_v_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", ["k", "v"]))
+    stacked: dict[str, tuple[str, ShardIds]] = {
+        ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+        ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
     }
-)
-
-
-def _remap_gemma4_expert_weight_name(name: str) -> str:
-    return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+    stacked |= {
+        f"layers.{i}.self_attn.{shard}_proj.": (
+            f"layers.{i}.self_attn.qkv_proj.",
+            shard_id,
+        )
+        for i in range(first_kv_shared)
+        for shard, shard_id in (k_eq_v_shards if i in k_eq_v_layers else qkv_shards)
+    }
+    return WeightsMapper(
+        orig_to_new_substr={
+            f"layers.{i}.self_attn.{name}.": None
+            for i in range(first_kv_shared, num_layers)
+            for name in ("k_proj", "v_proj", "k_norm")
+        },
+        orig_to_new_stacked=stacked,
+    )
 
 
 @triton.jit
@@ -279,6 +311,9 @@ class Gemma4Router(nn.Module):
         self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps, has_weight=False)
         # Per-dimension learned scale, applied after norm + root_size
         self.scale = nn.Parameter(torch.ones(self.hidden_size))
+        # Per-expert output scale folded into routing weights so that
+        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
+        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
         # Constant 1/sqrt(hidden_size) scaling factor
         self.register_buffer(
             "root_size",
@@ -296,6 +331,29 @@ class Gemma4Router(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
+    def routing_function(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Softmax over ALL experts → top-k → renormalize.
+
+        MoERunner's built-in fused_topk scopes softmax differently, so Gemma4
+        needs its own routing for numerical correctness.
+
+        NOTE: self.per_expert_scale is read at call time (not captured into a
+        local) so that torch.func.functional_call parameter substitution
+        reaches the routing function correctly.
+        """
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            return gemma4_fused_routing_kernel_triton(
+                gating_output, topk, self.per_expert_scale
+            )
+
+        return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns raw router logits [T, E]."""
         x = self.norm(x)
@@ -303,77 +361,6 @@ class Gemma4Router(nn.Module):
         x = x * self.scale.to(x.dtype)
         router_logits, _ = self.proj(x)
         return router_logits
-
-
-class Gemma4MoE(nn.Module):
-    """Mixture of Experts for Gemma4 using vLLM's MoERunner.
-
-    Wraps MoERunner with custom routing. The router projection is
-    external (Gemma4Router) — this class only handles expert dispatch.
-
-    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-    per_expert_scale is folded into routing weights for mathematical
-    correctness with MoERunner's fused kernel.
-    """
-
-    def __init__(
-        self,
-        config,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.num_experts = config.num_experts
-
-        # Per-expert output scale folded into routing weights so that
-        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
-        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
-
-        # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-        # MoERunner's built-in fused_topk scopes softmax differently, so
-        # a custom routing function is needed for numerical correctness.
-        # NOTE: self.per_expert_scale is read at call time (not captured into
-        # a local) so that torch.func.functional_call parameter substitution
-        # reaches the routing function correctly.
-        def routing_function(
-            hidden_states: torch.Tensor,
-            gating_output: torch.Tensor,
-            topk: int,
-            renormalize: bool,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                return gemma4_fused_routing_kernel_triton(
-                    gating_output, topk, self.per_expert_scale
-                )
-
-            return gemma4_routing_function_torch(
-                gating_output, topk, self.per_expert_scale
-            )
-
-        # MoERunner experts with custom Gemma4 routing
-        intermediate_size = getattr(
-            config,
-            "moe_intermediate_size",
-            getattr(config, "expert_intermediate_size", None),
-        )
-        if intermediate_size is None:
-            raise ValueError("Gemma4 MoE requires an expert intermediate size")
-
-        self.experts = FusedMoEFactory(
-            num_experts=config.num_experts,
-            top_k=config.top_k_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size,
-            renormalize=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            custom_routing_function=routing_function,
-            activation="gelu_tanh",
-        )
-
-    def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
-        return self.experts(x, router_logits)
 
 
 class Gemma4Attention(nn.Module):
@@ -433,7 +420,7 @@ class Gemma4Attention(nn.Module):
         else:
             # QKVParallelLinear handles GQA correctly for all layer types.
             # k_eq_v layers load K weights into both K and V slots via
-            # _weight_iterator remapping — no structural difference needed.
+            # hf_to_vllm_mapper — no structural difference needed.
             self.qkv_proj = QKVParallelLinear(
                 hidden_size,
                 self.head_dim,
@@ -645,7 +632,7 @@ class Gemma4DecoderLayer(nn.Module):
             config, "use_second_mlp_block", False
         )
         self.router: Gemma4Router | None
-        self.moe: Gemma4MoE | None
+        self.experts: MoERunner | None
         self.post_feedforward_layernorm_1: RMSNorm | None
         self.post_feedforward_layernorm_2: RMSNorm | None
         self.pre_feedforward_layernorm_2: RMSNorm | None
@@ -655,10 +642,20 @@ class Gemma4DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.router",
             )
-            self.moe = Gemma4MoE(
-                config,
+            names = ("moe_intermediate_size", "expert_intermediate_size")
+            intermediate_size = getattr_iter(config, names)
+            if intermediate_size is None:
+                raise ValueError("Gemma4 MoE requires an expert intermediate size")
+            self.experts = FusedMoEFactory(
+                num_experts=config.num_experts,
+                top_k=config.top_k_experts,
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                renormalize=True,
                 quant_config=quant_config,
-                prefix=f"{prefix}.moe",
+                prefix=f"{prefix}.experts",
+                custom_routing_function=self.router.routing_function,
+                activation="gelu_tanh",
             )
             self.post_feedforward_layernorm_1 = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
@@ -671,7 +668,7 @@ class Gemma4DecoderLayer(nn.Module):
             )
         else:
             self.router = None
-            self.moe = None
+            self.experts = None
             self.post_feedforward_layernorm_1 = None
             self.post_feedforward_layernorm_2 = None
             self.pre_feedforward_layernorm_2 = None
@@ -747,13 +744,13 @@ class Gemma4DecoderLayer(nn.Module):
             assert self.post_feedforward_layernorm_1 is not None
             assert self.pre_feedforward_layernorm_2 is not None
             assert self.router is not None
-            assert self.moe is not None
+            assert self.experts is not None
             assert self.post_feedforward_layernorm_2 is not None
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
             router_logits = self.router(residual)
-            hidden_states_2 = self.moe(hidden_states_2, router_logits)
+            hidden_states_2 = self.experts(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
             # Combine MLP and MoE outputs
@@ -983,7 +980,7 @@ class Gemma4CrossDecoderLayers(nn.Module):
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
-class Gemma4Model(nn.Module, EagleModelMixin):
+class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -991,6 +988,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.hf_to_vllm_mapper = _gemma4_layer_weights_mapper(config)
 
         # PLE config values (default to 0 if not present — disables PLE)
         self.hidden_size_per_layer_input = getattr(
@@ -1391,165 +1389,27 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        # MoE expert weight mapping: checkpoint can have either:
-        #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
-        #   2. Already per-expert 2D weights (if quantized)
-        # Map to MoERunner parameters:
-        #   moe.experts.{id}.gate_proj → MoERunner w1 (shard of w13)
-        #   moe.experts.{id}.up_proj   → MoERunner w3 (shard of w13)
-        #   moe.experts.{id}.down_proj → MoERunner w2
-        num_experts = getattr(self.config, "num_experts", None) or 0
-        # Strategy A: dot-separated suffix
-        # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
-        dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
-        )
-        # Strategy B: underscore-separated suffix
-        # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
-        underscore_suffix_expert_params_mapping = [
-            (
-                f"{param_name}weight_",
-                f"{weight_name.rstrip('.')}_",
-                expert_id,
-                shard_id,
-            )
-            for (
-                param_name,
-                weight_name,
-                expert_id,
-                shard_id,
-            ) in dot_suffix_expert_params_mapping
-        ]
-        expert_params_mapping = (
-            dot_suffix_expert_params_mapping + underscore_suffix_expert_params_mapping
-        )
-        params_dict = dict(self.named_parameters())
-        # Include buffers (e.g. layer_scalar) so they can be loaded too
-        params_dict.update(dict(self.named_buffers()))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is not None and remapped_name in params_dict:
-                    param = params_dict[remapped_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(remapped_name)
-                    continue
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                stacked_name = name.replace(shard_name, param_name)
-                # KV-shared layers have a plain q_proj instead of a packed
-                # qkv_proj: fall through to the direct load, which also
-                # skips the redundant K/V tensors original checkpoints ship.
-                if stacked_name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(stacked_name, self):
-                    continue
-                param = params_dict[stacked_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(stacked_name)
-                break
-            else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    shard_id,
-                ) in expert_params_mapping:
-                    # Match both:
-                    #  - Bare weights: "experts.0.down_proj" (from 3D explosion)
-                    #  - With suffix: "experts.0.down_proj.weight_scale" (2D quantized)
-                    # weight_name has trailing dot, so check with and without it
-                    weight_name_base = weight_name.rstrip(".")
-                    if weight_name in name:
-                        # Has suffix (e.g., .weight_scale)
-                        moe_name = name.replace(weight_name, param_name)
-                    elif name.endswith(weight_name_base):
-                        # Bare weight (no suffix)
-                        moe_name = name.replace(
-                            weight_name_base, param_name.rstrip("_") + "_weight"
-                        )
-                    else:
-                        continue
-                    if moe_name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(moe_name, self):
-                        continue
-                    param = params_dict[moe_name]
-                    # Expert weights are already in the correct
-                    # orientation for MoERunner after _weight_iterator:
-                    #   gate/up: [I, H] → w1/w3 expects [I, H]
-                    #   down:    [H, I] → w2 expects [H, I]
-                    # Scales and other quantization params may be 1D or scalar.
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        moe_name,  # Pass mapped name (handles both weights and scales)
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    loaded_params.add(moe_name)
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Skip if name doesn't exist in params_dict (e.g., individual
-                    # expert weights that should have been handled above)
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
-    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # Multimodal weights are handled by the multimodal wrapper.
+            "audio_tower.": None,
+            "vision_tower.": None,
+            "embed_audio.": None,
+            "embed_vision.": None,
+        },
         orig_to_new_prefix={
             # Gemma4ForConditionalGeneration already loads the text stack
             # from `model.language_model.*`. We reuse that same checkpoint
             # and adapter naming for the text-only Gemma4ForCausalLM path,
             # so LoRA keys from the conditional wrapper map onto `model.*`.
             "model.language_model.": "model.",
-        },
-        orig_to_new_substr={
-            # Gemma4ForConditionalGeneration names MoE adapter targets under
-            # `...moe.experts.*`, while the text-only model exposes them
-            # under `...moe.*`.
-            ".moe.experts.gate_up_proj": ".moe.gate_up_proj",
-            ".moe.experts.down_proj": ".moe.down_proj",
         },
     )
     # KV-shared layers only have q_proj, so qkv_proj packing applies to
@@ -1596,26 +1456,18 @@ class Gemma4ForCausalLM(
         )
 
         # --- MixtureOfExperts protocol ---
-        self.moe_layers: list[nn.Module] = []
-        example_moe: Gemma4MoE | None = None
-
-        for layer in self.model.layers:
-            if hasattr(layer, "moe") and isinstance(layer.moe, Gemma4MoE):
-                example_moe = layer.moe
-                self.moe_layers.append(layer.moe.experts)
-
+        self.moe_layers: list[nn.Module] = [
+            layer.experts
+            for layer in self.model.layers
+            if not isinstance(layer, PPMissingLayer) and layer.experts is not None
+        ]
         self.num_moe_layers = len(self.moe_layers)
 
-        if example_moe is not None:
-            self.num_logical_experts = example_moe.num_experts
-            self.num_physical_experts = example_moe.num_experts
-            self.num_local_physical_experts = example_moe.num_experts
-            self.num_routed_experts = example_moe.num_experts
-        else:
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
+        num_experts = config.num_experts if self.num_moe_layers else 0
+        self.num_logical_experts = num_experts
+        self.num_physical_experts = num_experts
+        self.num_local_physical_experts = num_experts
+        self.num_routed_experts = num_experts
 
         self.num_expert_groups = 1
         self.num_shared_experts = 0
@@ -1644,106 +1496,5 @@ class Gemma4ForCausalLM(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Checkpoint weight names use "language_model." prefix (from the
-        # Gemma4ForConditionalGeneration wrapper). Strip it to map to our
-        # model tree which is just "model.*".
-        def _weight_iterator():
-            use_k_eq_v = getattr(self.config, "attention_k_eq_v", False)
-            # Build set of k_eq_v layer indices (full_attention layers
-            # when attention_k_eq_v is enabled). These layers have k_proj
-            # but no v_proj in checkpoint — we duplicate k_proj as v_proj.
-            k_eq_v_layer_indices: set[int] = set()
-            if use_k_eq_v:
-                for idx, lt in enumerate(self.config.layer_types):
-                    if lt == "full_attention":
-                        k_eq_v_layer_indices.add(idx)
-
-            for name, weight in weights:
-                # Remap "language_model." → "" to match our model tree.
-                # Checkpoint: model.language_model.layers.X.*
-                # Our model:  model.layers.X.*
-                name = name.replace("language_model.", "")
-
-                # Remap new HF checkpoint naming to internal vLLM
-                # naming: HF moved per_expert_scale to router and
-                # renamed moe → experts in the MoE block.
-                name = name.replace(
-                    ".router.per_expert_scale",
-                    ".moe.per_expert_scale",
-                )
-                if ".experts.gate_up_proj" in name:
-                    name = name.replace(
-                        ".experts.gate_up_proj",
-                        ".moe.gate_up_proj",
-                    )
-                elif ".experts.down_proj" in name:
-                    name = name.replace(
-                        ".experts.down_proj",
-                        ".moe.down_proj",
-                    )
-
-                # Remap individual 2D expert weights:
-                # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
-                # (This handles per-expert 2D quantized weights)
-                name = _remap_gemma4_expert_weight_name(name)
-
-                # MoE expert weights: checkpoint stores as 3D packed
-                # tensors.  Explode into per-expert 2D weights for
-                # MoERunner weight_loader.
-                #
-                # Checkpoint format:
-                #   moe.gate_up_proj: [E, 2*I, H]  (fused gate + up)
-                #   moe.down_proj:    [E, H, I]
-                #
-                # MoERunner expects per-expert:
-                #   w1 (gate): [I, H]   — first half of gate_up
-                #   w3 (up):   [I, H]   — second half of gate_up
-                #   w2 (down): [H, I]   — as-is from checkpoint
-                #
-                # No transpose needed: checkpoint orientation already
-                # matches MoERunner's expected layout.
-                if "moe.gate_up_proj" in name and weight.dim() == 3:
-                    num_experts = weight.size(0)
-                    intermediate_size = weight.size(1) // 2
-                    for expert_id in range(num_experts):
-                        gate_weight = weight[expert_id, :intermediate_size, :]
-                        up_weight = weight[expert_id, intermediate_size:, :]
-                        base = name.replace("moe.", f"moe.experts.{expert_id}.")
-                        yield base.replace("gate_up_proj", "gate_proj"), gate_weight
-                        yield base.replace("gate_up_proj", "up_proj"), up_weight
-                    continue
-
-                if "moe.down_proj" in name and weight.dim() == 3:
-                    num_experts = weight.size(0)
-                    for expert_id in range(num_experts):
-                        expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
-                        yield expert_name, weight[expert_id]
-                    continue
-
-                # k_eq_v layers: checkpoint has k_proj but no v_proj.
-                # QKVParallelLinear expects both, so duplicate k_proj
-                # as v_proj so V gets identical weights to K.
-                # ONLY for full_attention layers — sliding layers have
-                # their own real v_proj weights.
-                if "self_attn.k_proj" in name and k_eq_v_layer_indices:
-                    m = re.search(r"layers\.(\d+)\.", name)
-                    if m and int(m.group(1)) in k_eq_v_layer_indices:
-                        yield name, weight
-                        yield name.replace("k_proj", "v_proj"), weight.clone()
-                        continue
-
-                yield name, weight
-
-        # Drop multimodal weights, which are handled by the multimodal wrapper.
-        # `_weight_iterator` already applies this model's renames by hand, so
-        # `hf_to_vllm_mapper` is deliberately not passed here.
-        mapper = WeightsMapper(
-            orig_to_new_substr={
-                "audio_tower.": None,
-                "vision_tower.": None,
-                "embed_audio.": None,
-                "embed_vision.": None,
-            }
-        )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(_weight_iterator(), mapper=mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

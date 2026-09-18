@@ -341,7 +341,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+            "model.language_model.layers.1.experts.gate_up_proj": {
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
@@ -353,10 +353,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
     config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
-    expected_prefix = "language_model.model.layers.0.moe.experts"
+    expected_prefix = "language_model.model.layers.0.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
