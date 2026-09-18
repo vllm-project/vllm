@@ -61,9 +61,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "MORI EPv2 does not support apply_router_weight_on_input=True"
         )
         if a1.dtype != torch.bfloat16:
-            raise ValueError(
-                f"MORI EPv2 requires BF16 dispatch input, got {a1.dtype}"
-            )
+            raise ValueError(f"MORI EPv2 requires BF16 dispatch input, got {a1.dtype}")
 
         (
             dispatch_a1,
@@ -80,6 +78,14 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             return_routing=True,
             clone_routing=False,
         )
+        # MORI reuses capacity-sized buffers without clearing unused rows.
+        unused = (
+            torch.arange(dispatch_a1.shape[0], device=dispatch_a1.device)
+            >= dispatch_recv_token_num
+        ).unsqueeze(1)
+        dispatch_a1.masked_fill_(unused, 0)
+        dispatch_weights.masked_fill_(unused, 0)
+        dispatch_ids.masked_fill_(unused, -1)
         self._recv_topk_ids = dispatch_ids
         logger.warning_once(
             "MORI EPv2 dispatch entered: "
