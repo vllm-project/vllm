@@ -3,7 +3,7 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
@@ -211,7 +211,12 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
+    # written by different API-server processes. Offloading stats reach one
+    # frontend per step as complete per-engine snapshots, so the freshest write
+    # is the correct value and summing would multiply it by the number of
+    # participating frontends.
+    multiprocess_mode: str = "mostrecent"
 
 
 @dataclass(frozen=True)
@@ -400,6 +405,19 @@ class OffloadingManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
+
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return static config facts to publish as info metric labels.
+
+        The scheduler reads this once, after the manager is built, so the
+        values must stay fixed for the process lifetime.
+
+        Returns:
+            Mapping of label name to value. The frontend renders each value
+            with str(), so a value must be a scalar that msgpack carries, not
+            an enum or an object. Empty by default.
+        """
+        return {}
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
