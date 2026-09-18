@@ -31,7 +31,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
   // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
-  // optional zero points for asymmetric quantization
+  // optional zero points [M/8, K/group_size] int32 for asymmetric
+  // quantization
   rocm_ops.def(
       "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
       "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
