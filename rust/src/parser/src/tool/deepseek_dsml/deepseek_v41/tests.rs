@@ -111,3 +111,167 @@ fn structural_tag_ignores_parameter_schemas_and_strict() {
         }
     }
 }
+
+#[test]
+fn spaced_dsml_streaming_emits_arguments_before_invoke_closes() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let mut output = crate::tool::ToolParserOutput::default();
+    parser
+        .parse_into(
+            concat!(
+                "<｜DSML｜ calls>\n",
+                "<｜DSML｜ invoke name=\"lookup\">\n",
+                "<｜DSML｜ parameter name=\"query\" string=\"true\">hello",
+                "</｜DSML｜ parameter>\n",
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    let calls = output.calls();
+    assert!(calls.iter().any(|call| call.name.as_deref() == Some("lookup")));
+    let arguments = calls.iter().map(|call| call.arguments.as_str()).collect::<String>();
+    assert_eq!(arguments, r#"{"query":"hello""#);
+    assert!(parser.finish().is_err());
+}
+
+#[test]
+fn spaced_dsml_streaming_matches_pr42879_mixed_argument_semantics() {
+    let tool = Tool {
+        name: "plan_trip".into(),
+        description: None,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer"},
+                "flexible": {"type": "boolean"},
+                "cities": {"type": "array", "items": {"type": "string"}},
+                "notes": {"type": "string"}
+            }
+        }),
+        strict: None,
+    };
+    let wire = concat!(
+        "<｜DSML｜ calls>\n",
+        "<｜DSML｜ invoke name=\"plan_trip\">\n",
+        "<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"flexible\" string=\"false\">false</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"cities\" string=\"false\">[\"Beijing\",\"Shanghai\",\"Tokyo\",\"New York\"]</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"notes\" string=\"true\">靠窗座位</｜DSML｜ parameter>\n",
+        "</｜DSML｜ invoke>\n",
+        "</｜DSML｜ calls>",
+    );
+    let chunks = crate::tool::test_utils::split_by_chars(wire, 4);
+    let mut parser = DeepSeekV41ToolParser::create(&[tool]).unwrap();
+    let mut output = crate::tool::ToolParserOutput::default();
+    let mut non_empty_argument_deltas = 0;
+    for chunk in chunks {
+        let before = output.events.len();
+        parser.parse_into(chunk, &mut output).unwrap();
+        non_empty_argument_deltas += output.events[before..]
+            .iter()
+            .filter(|event| match event {
+                crate::tool::ToolParserEvent::ToolCall(call) => !call.arguments.is_empty(),
+                crate::tool::ToolParserEvent::Text(_) => false,
+            })
+            .count();
+    }
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(non_empty_argument_deltas > 2);
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({
+            "days": 3,
+            "flexible": false,
+            "cities": ["Beijing", "Shanghai", "Tokyo", "New York"],
+            "notes": "靠窗座位"
+        })
+    );
+}
+
+#[test]
+fn dsml_composite_parameters_preserve_fallback_across_chunk_boundaries() {
+    use super::super::{DeepSeekDsmlToolParser, DsmlTokens};
+    use crate::tool::ToolParserOutput;
+
+    for tokens in [DsmlTokens::V32, DsmlTokens::V4, DsmlTokens::V41] {
+        for (schema, empty) in [
+            (json!({"type": "object"}), json!({})),
+            (json!({"type": "array"}), json!([])),
+            (json!({"type": ["object", "array"]}), json!({})),
+            (
+                json!({"anyOf": [{"type": "array"}, {"type": "object"}]}),
+                json!([]),
+            ),
+        ] {
+            let mut tool = tools().remove(0);
+            tool.parameters["properties"]["data"] = schema;
+            for (raw, expected) in [
+                ("", empty),
+                (" \n", json!(" \n")),
+                ("not-json", json!("not-json")),
+                (r#"{"x":1"#, json!(r#"{"x":1"#)),
+                ("[1,]", json!("[1,]")),
+                ("{} trailing", json!("{} trailing")),
+                ("NULL", json!(null)),
+                (r#"{"x":1}"#, json!({"x": 1})),
+                ("[1,2]", json!([1, 2])),
+            ] {
+                let wire = format!(
+                    "{}{} name=\"lookup\">{} name=\"data\" string=\"false\">{raw}{}{}{}",
+                    tokens.tool_calls_start,
+                    tokens.invoke_start,
+                    tokens.parameter_start,
+                    tokens.parameter_end,
+                    tokens.invoke_end,
+                    tokens.tool_calls_end,
+                );
+                for split in wire.char_indices().map(|(i, _)| i) {
+                    let mut parser =
+                        DeepSeekDsmlToolParser::new(std::slice::from_ref(&tool), tokens);
+                    let mut output = ToolParserOutput::default();
+                    parser.parse_into(&wire[..split], &mut output).unwrap();
+                    parser.parse_into(&wire[split..], &mut output).unwrap();
+                    output.append(parser.finish().unwrap());
+                    let output = output.coalesce();
+                    assert_eq!(output.calls().len(), 1);
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments)
+                            .unwrap(),
+                        json!({"data": expected}),
+                        "tokens {tokens:?}, raw {raw:?}, split {split}",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dsml_done_discards_trailing_chunks_without_retaining_them() {
+    use super::super::{DeepSeekDsmlToolParser, DsmlTokens};
+    use crate::tool::ToolParserOutput;
+
+    for tokens in [DsmlTokens::V32, DsmlTokens::V4, DsmlTokens::V41] {
+        let mut parser = DeepSeekDsmlToolParser::new(&tools(), tokens);
+        let mut output = ToolParserOutput::default();
+        let end = tokens.tool_calls_end;
+        parser.parse_into(tokens.tool_calls_start, &mut output).unwrap();
+        parser.parse_into(&end[..end.len() - 1], &mut output).unwrap();
+        parser.parse_into(">same-chunk trailing text", &mut output).unwrap();
+        assert!(parser.buffer.is_empty());
+        let trailing = "ignored".repeat(1024);
+        for _ in 0..16 {
+            parser.parse_into(&trailing, &mut output).unwrap();
+            assert!(parser.buffer.is_empty());
+        }
+        assert!(output.events.is_empty());
+        assert!(parser.reset().is_empty());
+        parser.parse_into("next response", &mut output).unwrap();
+        output.append(parser.finish().unwrap());
+        assert_eq!(output.normal_text(), "next response");
+    }
+}
