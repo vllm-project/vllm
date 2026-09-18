@@ -349,6 +349,11 @@ class MistralTokenizer(TokenizerLike):
         truncation: bool = False,
         max_length: int | None = None,
     ) -> "BatchEncoding":
+        if text_pair is not None:
+            raise ValueError(
+                "`text_pair` is not supported by `MistralTokenizer.__call__`."
+            )
+
         return self.transformers_tokenizer(
             text=text,
             text_pair=text_pair,
@@ -375,12 +380,16 @@ class MistralTokenizer(TokenizerLike):
         max_length: int | None = None,
         add_special_tokens: bool = True,
     ) -> list[int]:
-        return self.transformers_tokenizer.encode(
-            text,
-            truncation=truncation,
-            max_length=max_length,
-            add_special_tokens=add_special_tokens,
-        )
+        # NOTE: transformers guards truncation with `if max_length and ...`, so
+        # `max_length=0` returns the full sequence instead of an empty one. vLLM
+        # treats `truncate_prompt_tokens=0` as an empty prompt, so keep slicing
+        # here until that is fixed upstream.
+        encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
+
+        if truncation is not False and max_length is not None:
+            return encoded[:max_length]
+        else:
+            return encoded
 
     def apply_chat_template(
         self,
