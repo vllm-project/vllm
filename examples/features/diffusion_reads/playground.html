@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djev playground</title>
+<style>
+  :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --ok: #1a7f37; --accent: #0b5cad; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151515; --fg: #e8e8e8; --muted: #9a9a9a; --line: #333; --ok: #4cc26a; --accent: #6fb3ff; } }
+  body { margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .col { flex: 1 1 420px; min-width: 0; }
+  textarea { width: 100%; box-sizing: border-box; height: 320px; font: 13px/1.4 ui-monospace, monospace; background: var(--bg); color: var(--fg); border: 1px solid var(--line); padding: 8px; }
+  button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  .muted { color: var(--muted); }
+  video, canvas, img.preview { max-width: 100%; border: 1px solid var(--line); display: block; }
+  [hidden] { display: none !important; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .conf { color: var(--ok); }
+  pre { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); padding: 8px; max-height: 360px; overflow: auto; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .err { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>djev playground</h1>
+<div class="row">
+  <div class="col">
+    <div class="muted">Request body for <code>POST /v1/systemone</code></div>
+    <textarea id="req"></textarea>
+    <div class="bar">
+      <button class="primary" id="send">Send</button>
+      <label>seed <input id="seed" type="number" value="42" style="width:6em"></label>
+      <label>api key <input id="key" type="password" placeholder="if the server has API_KEY" style="width:12em"></label>
+      <span id="status" class="muted"></span>
+    </div>
+    <div class="bar">
+      <select id="mode">
+        <option value="none">no image</option>
+        <option value="file">image file</option>
+        <option value="oneshot">webcam: one-shot</option>
+        <option value="live">webcam: live</option>
+        <option value="realtime">webcam: realtime</option>
+      </select>
+      <span id="opt-file" class="opt" hidden><input id="file" type="file" accept="image/*"></span>
+      <span id="opt-oneshot" class="opt" hidden><button id="snap">Capture and send</button></span>
+      <span id="opt-live" class="opt" hidden><label>every <input id="every" type="number" value="2" min="0.5" step="0.5" style="width:4em"> s</label> <button id="livetoggle">Start</button></span>
+      <span id="opt-realtime" class="opt" hidden><button id="rttoggle">Start</button> <span id="rtcount" class="muted"></span></span>
+    </div>
+    <video id="video" autoplay playsinline muted hidden></video>
+    <canvas id="canvas" hidden></canvas>
+    <img id="preview" class="preview" hidden alt="attached image">
+  </div>
+  <div class="col">
+    <div class="muted">Answers</div>
+    <table id="answers"><tbody></tbody></table>
+    <div id="meta" class="muted"></div>
+    <details open><summary>raw response</summary><pre id="raw"></pre></details>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const example = {
+  model: "jev-latest",
+  state: {ticket: "Everything is down and we have a demo at noon. Fix it now."},
+  samples: 1,
+  questions: {
+    urgent: {type: "noul", instructions: "Does the customer need a reply within the hour?"},
+    team: {type: "choice", instructions: "Which team owns this?",
+           criteria: {billing: null, outage: "service down", feature: null}},
+    tone: {type: "score", instructions: "How angry is the customer?", criteria: ["calm", "annoyed", "furious"]}
+  }
+};
+const imageExample = {
+  model: "jev-latest",
+  state: {note: "one photo attached"},
+  samples: 1,
+  questions: {
+    scene: {type: "choice", instructions: "What does the photo show?",
+            criteria: {"a person": null, "a room with nobody in it": null, "an object held up to the camera": null, "something else": null}},
+    hand: {type: "noul", instructions: "Is a hand visible?"}
+  }
+};
+$("req").value = JSON.stringify(example, null, 2);
+try { $("key").value = localStorage.getItem("djev_api_key") || ""; } catch (e) {}
+$("key").onchange = () => { try { localStorage.setItem("djev_api_key", $("key").value); } catch (e) {} };
+function authHeaders(h) { const k = $("key").value.trim(); if (k) h["authorization"] = "Bearer " + k; return h; }
+
+let blob = null;          // the attached image
+let stream = null;        // webcam
+let timer = null;         // live mode
+let realtime = false;     // realtime mode
+let inflight = false;
+let sent = 0;
+
+function setImage(b) {
+  blob = b;
+  if (b) { $("preview").src = URL.createObjectURL(b); $("preview").hidden = false; }
+  else { $("preview").hidden = true; }
+}
+$("file").onchange = e => setImage(e.target.files[0] || null);
+
+async function startCam() {
+  if (stream) return true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}, audio: false});
+  } catch (e) { $("status").innerHTML = '<span class="err">webcam: ' + e.message + "</span>"; return false; }
+  $("video").srcObject = stream; $("video").hidden = false;
+  if ($("req").value === JSON.stringify(example, null, 2)) $("req").value = JSON.stringify(imageExample, null, 2);
+  return true;
+}
+function stopCam() {
+  stopLoops();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; $("video").hidden = true;
+}
+function stopLoops() {
+  if (timer) { clearInterval(timer); timer = null; }
+  realtime = false;
+  $("livetoggle").textContent = "Start"; $("rttoggle").textContent = "Start";
+}
+function frame() {
+  const v = $("video"), c = $("canvas");
+  c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.85));
+}
+
+$("mode").onchange = async () => {
+  const mode = $("mode").value;
+  stopLoops();
+  document.querySelectorAll(".opt").forEach(el => el.hidden = el.id !== "opt-" + mode);
+  if (mode === "none") { stopCam(); setImage(null); $("file").value = ""; }
+  else if (mode === "file") { stopCam(); setImage($("file").files[0] || null); }
+  else { setImage(null); await startCam(); }
+};
+$("snap").onclick = async () => { if (await startCam()) { setImage(await frame()); send(); } };
+$("livetoggle").onclick = () => {
+  if (timer) { stopLoops(); return; }
+  const every = Math.max(0.5, parseFloat($("every").value) || 2) * 1000;
+  timer = setInterval(async () => { if (!inflight && stream) { setImage(await frame()); send(); } }, every);
+  $("livetoggle").textContent = "Stop";
+};
+$("rttoggle").onclick = async () => {
+  if (realtime) { stopLoops(); return; }
+  realtime = true; sent = 0; $("rttoggle").textContent = "Stop";
+  realtimeStep();
+};
+async function realtimeStep() {
+  if (!realtime || !stream) return;
+  setImage(await frame());
+  const ok = await send();
+  $("rtcount").textContent = ++sent + " sent";
+  if (ok === false) { stopLoops(); return; }
+  if (realtime) realtimeStep();
+}
+
+async function send() {
+  if (inflight) return;
+  if ($("mode").value === "file" && !blob) setImage($("file").files[0] || null);
+  let body;
+  try { body = JSON.parse($("req").value); } catch (e) { $("status").innerHTML = '<span class="err">request is not JSON: ' + e.message + "</span>"; return false; }
+  body.seed = parseInt($("seed").value) || 42;
+  if (!blob && Array.isArray(body.images) && typeof body.images[0] === "string") { $("preview").src = body.images[0]; $("preview").hidden = false; }
+  inflight = true; $("send").disabled = true; $("status").textContent = "sending...";
+  const t0 = performance.now();
+  let resp, text;
+  try {
+    if (blob) {
+      const fd = new FormData();
+      fd.append("request", JSON.stringify(body));
+      fd.append("image", blob, "image.jpg");
+      resp = await fetch("/v1/systemone", {method: "POST", headers: authHeaders({}), body: fd});
+    } else {
+      resp = await fetch("/v1/systemone", {method: "POST", headers: authHeaders({"content-type": "application/json"}), body: JSON.stringify(body)});
+    }
+    text = await resp.text();
+  } catch (e) {
+    $("status").innerHTML = '<span class="err">' + e.message + "</span>"; inflight = false; $("send").disabled = false; return false;
+  }
+  const ms = Math.round(performance.now() - t0);
+  let d; try { d = JSON.parse(text); } catch (e) { d = {raw: text}; }
+  $("raw").textContent = JSON.stringify(d, null, 2);
+  const tb = $("answers").querySelector("tbody"); tb.innerHTML = "";
+  if (resp.ok && d.answers) {
+    for (const [id, a] of Object.entries(d.answers)) {
+      let result, conf;
+      if (a.type === "noul") { result = (a.noul >= 0.5 ? "yes" : "no") + " (p=" + a.noul.toFixed(2) + ")"; conf = Math.max(a.noul, 1 - a.noul); }
+      else if (a.type === "choice") { result = a.choice; conf = a.confidence; }
+      else { const top = Object.entries(a.probabilities).sort((x, y) => y[1] - x[1])[0][0]; result = a.legend[top] + " (score " + a.score.toFixed(2) + ")"; conf = a.confidence; }
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th>" + id + "</th><td>" + a.type + "</td><td>" + result + '</td><td class="conf">' + conf.toFixed(2) + "</td>";
+      tb.appendChild(tr);
+    }
+    const dg = d.diagnostics || {};
+    $("meta").textContent = ms + " ms round trip, " + (dg.timing ? Math.round(dg.timing.total_ms) + " ms in the server, " : "")
+      + (dg.samples ? (Array.isArray(dg.samples.n) ? dg.samples.n.join("+") : dg.samples.n) + " read(s), " : "")
+      + "usage " + JSON.stringify(d.usage || {}) + (dg.thought && dg.thought.text ? "; thought: " + dg.thought.text : "");
+    $("status").textContent = "ok";
+  } else {
+    $("status").innerHTML = '<span class="err">HTTP ' + resp.status + ": " + ((d.error && d.error.message) || text).slice(0, 200) + "</span>";
+    $("meta").textContent = "";
+  }
+  inflight = false; $("send").disabled = false;
+  return resp.ok;
+}
+$("send").onclick = send;
+if (location.hash.startsWith("#req=")) {
+  try {
+    $("req").value = JSON.stringify(JSON.parse(atob(decodeURIComponent(location.hash.slice(5)))), null, 2);
+    send();
+  } catch (e) { $("status").innerHTML = '<span class="err">bad #req: ' + e.message + "</span>"; }
+}
+$("req").addEventListener("keydown", e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") send(); });
+</script>
+</body>
+</html>
