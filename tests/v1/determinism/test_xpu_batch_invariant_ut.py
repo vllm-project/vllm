@@ -96,10 +96,13 @@ def test_quantized_kv_cache_allowed_without_batch_invariance(monkeypatch):
         "position",
         "weight_seed",
         "input_seed",
+        "input_pattern",
     ),
     [
-        ("rms", 1024, 16384, 512, 7, 42),
-        ("gemma", 257, 8192, 255, 1, 2),
+        ("rms", 1024, 16384, 512, 7, 42, "normal"),
+        ("gemma", 257, 8192, 255, 1, 2, "normal"),
+        ("rms", 5, 8192, 3, 7, 46, "scaled"),
+        ("gemma", 5, 8192, 3, 1, 46, "scaled"),
     ],
 )
 def test_residual_norm_preserves_batch_invariance(
@@ -109,22 +112,36 @@ def test_residual_norm_preserves_batch_invariance(
     position,
     weight_seed,
     input_seed,
+    input_pattern,
     monkeypatch,
     default_vllm_config,
 ):
     """Residual norm output must not change when its row changes batch position."""
+    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    init_batch_invariance()
     norm_cls = RMSNorm if norm_name == "rms" else GemmaRMSNorm
     norm = norm_cls(hidden_size, eps=1e-6).to(device="xpu", dtype=torch.bfloat16)
     with torch.no_grad():
         torch.manual_seed(weight_seed)
         norm.weight.uniform_(-0.5, 0.5)
 
-    torch.manual_seed(input_seed)
-    x = torch.randn(batch_size, hidden_size, device="xpu", dtype=torch.bfloat16)
-    residual = torch.randn_like(x)
+    if input_pattern == "scaled":
+        # Heterogeneous columns expose native mean's batch-dependent rounding.
+        generator = torch.Generator(device="cpu").manual_seed(input_seed)
+        scale = torch.randn(hidden_size, generator=generator).exp()
+        x = (torch.randn(batch_size, hidden_size, generator=generator) * scale).to(
+            device="xpu", dtype=torch.bfloat16
+        )
+        residual = (
+            torch.randn(batch_size, hidden_size, generator=generator) * scale
+        ).to(device="xpu", dtype=torch.bfloat16)
+    else:
+        torch.manual_seed(input_seed)
+        x = torch.randn(batch_size, hidden_size, device="xpu", dtype=torch.bfloat16)
+        residual = torch.randn_like(x)
 
     single_output, single_residual = norm(
         x[position : position + 1].clone(),
