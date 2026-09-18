@@ -3,11 +3,15 @@
 """Unit tests for ScoringIOProcessor post-tokenization helpers."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
+from transformers import PreTrainedTokenizerFast
 
 from vllm import TokensPrompt
 from vllm.entrypoints.pooling.scoring.io_processor import (
+    CrossEncoderIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
@@ -22,6 +26,70 @@ class _DummyTokenizer:
     # Outside the range of the prompt ids below, so a test can tell a pad
     # token apart from a real one.
     pad_token_id: int = 99999
+
+
+@pytest.fixture
+def llm_reranker_processor() -> CrossEncoderIOProcessor:
+    vocab = {
+        "[UNK]": 0,
+        "[CLS]": 1,
+        "foo": 2,
+        "bar": 3,
+        "foobar": 4,
+        "baz": 5,
+    }
+    backend = Tokenizer(models.WordPiece(vocab, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A",
+        special_tokens=[("[CLS]", 1)],
+    )
+
+    processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
+    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)
+    processor.tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        cls_token="[CLS]",
+    )
+    processor.supports_score_template = False
+    processor.use_sep_token = False
+    processor.model = None
+    return processor
+
+
+@pytest.mark.parametrize("add_special_tokens", [False, True])
+def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
+    llm_reranker_processor: CrossEncoderIOProcessor,
+    add_special_tokens: bool,
+):
+    """A document limit must only truncate content, not change tokenization."""
+    encode_kwargs = {"add_special_tokens": add_special_tokens}
+
+    full_prompt, uncapped = llm_reranker_processor.get_score_prompt(
+        "foo", "bar baz", encode_kwargs
+    )
+    capped_prompt, nonbinding = llm_reranker_processor.get_score_prompt(
+        "foo", "bar baz", encode_kwargs, max_tokens_per_doc=10
+    )
+
+    assert full_prompt == capped_prompt == "foobar baz"
+    expected = [1, 4, 5] if add_special_tokens else [4, 5]
+    assert uncapped["prompt_token_ids"] == nonbinding["prompt_token_ids"] == expected
+
+
+def test_llm_reranker_truncates_doc_before_composed_tokenization(
+    llm_reranker_processor: CrossEncoderIOProcessor,
+):
+    full_prompt, engine_prompt = llm_reranker_processor.get_score_prompt(
+        "foo",
+        "bar baz",
+        {"add_special_tokens": True},
+        max_tokens_per_doc=1,
+    )
+
+    assert full_prompt == "foobar"
+    assert engine_prompt["prompt_token_ids"] == [1, 4]
 
 
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
