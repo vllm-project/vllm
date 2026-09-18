@@ -499,7 +499,6 @@ class DeepseekV32Attention(MLAAttention):
             self.layer_name
         )
         if attn_metadata is None:
-            self.impl.profile_run(output.device)
             output.zero_()
             return
         attn_metadata = cast("MLACommonMetadata", attn_metadata)

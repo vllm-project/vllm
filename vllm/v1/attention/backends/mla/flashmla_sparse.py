@@ -754,7 +754,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             * self.prefill_padding
         )
         self.prefill_buffer_index = len(self.workspace_specs)
-        self.prefill_stats_shape = (2, max_tokens, prefill_heads)
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             self.workspace_specs.extend(
                 [
@@ -769,11 +768,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Reserve capacity without retaining views that prevent old storage
         # from being released when another layer grows the shared workspace.
         current_workspace_manager().get_simultaneous(*self.workspace_specs)
-
-    def profile_run(self, device: torch.device) -> None:
-        # FlashMLA accepts out=, but still allocates max_logits and lse internally.
-        if self.kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
-            torch.empty(self.prefill_stats_shape, dtype=torch.float32, device=device)
 
     def _forward_bf16_kv(
         self,
