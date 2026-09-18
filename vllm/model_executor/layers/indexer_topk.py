@@ -87,6 +87,7 @@ def deep_select_topk(
 
     Returns:
         The (num_rows, topk) indices tensor.
+
     """
     assert input.dim() == 2 and input.stride(1) == 1
     assert (

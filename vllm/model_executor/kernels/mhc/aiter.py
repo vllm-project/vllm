@@ -19,8 +19,7 @@ def mhc_pre_aiter(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Forward pass for mHC pre block.
+    """Forward pass for mHC pre block.
 
     Args:
         residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
@@ -40,8 +39,8 @@ def mhc_pre_aiter(
         post_mix: shape (..., hc_mult), dtype torch.float32
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
-    """
 
+    """
     hidden_size = residual.shape[-1]
     assert hidden_size % 256 == 0
     from vllm._aiter_ops import rocm_aiter_ops
@@ -120,7 +119,7 @@ def mhc_pre_delayed_aiter(
     comb_res_mix: torch.Tensor | None = None,
     residual_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """mHC pre with the pre-mix carried in from the previous sublayer.
+    """MHC pre with the pre-mix carried in from the previous sublayer.
 
     Matches ``mhc_pre_delayed_torch``: the stream collapse uses *pre_mix*
     rather than the gate computed here, and that gate is returned as the
@@ -151,6 +150,7 @@ def mhc_pre_delayed_aiter(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
         next_pre_mix: shape (..., hc_mult), dtype torch.float32
+
     """
     hidden_size = residual.shape[-1]
     assert hidden_size % 256 == 0

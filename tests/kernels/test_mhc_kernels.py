@@ -132,6 +132,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
+        use_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
@@ -452,7 +453,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -536,7 +537,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -703,7 +704,7 @@ def mhc_pre_ref(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """mHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303"""
+    """MHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303."""
     hc_mult = residual.shape[-2]
 
     residual_flat = residual.flatten(-2, -1).float()
@@ -742,7 +743,7 @@ def mhc_post_ref(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    """mHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68"""
+    """MHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68."""
     term2 = torch.bmm(comb_res_mix.mT, residual.float())
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
