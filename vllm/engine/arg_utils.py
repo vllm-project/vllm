@@ -22,6 +22,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    is_typeddict,
 )
 
 import huggingface_hub
@@ -183,6 +184,18 @@ def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     return type_hint is type or get_origin(type_hint) is type
 
 
+def is_dict_subclass(type_hint: TypeHint) -> bool:
+    """Check if the type hint is a subclass of `dict`.
+
+    `TypedDict`s are excluded because they do not support class checks.
+    """
+    return (
+        isinstance(type_hint, type)
+        and not is_typeddict(type_hint)
+        and issubclass(type_hint, dict)
+    )
+
+
 def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
     """Check if the type hints contain a specific type."""
     return any(is_type(type_hint, type) for type_hint in type_hints)
@@ -305,6 +318,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     for field in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = get_type_hints(field.type)
+        # Subclasses of dict (e.g. MultiModalDummyOptions) are CLI dicts
+        type_hints = {dict if is_dict_subclass(th) else th for th in type_hints}
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
