@@ -25,6 +25,36 @@ BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
 
 
+@pytest.mark.parametrize(
+    ("window_left", "expected_starts", "expected_ends"),
+    [
+        (-1, [0, 0, 0, 0, 0], [3, 4, 5, 5, 5]),
+        (1, [2, 3, 2, 3, 4], [3, 4, 4, 5, 5]),
+    ],
+)
+def test_flashinfer_mixed_causal_variable_window_bounds(
+    window_left: int,
+    expected_starts: list[int],
+    expected_ends: list[int],
+):
+    from vllm.v1.attention.backends.flashinfer import _make_variable_window_bounds
+
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    seq_lens = torch.tensor([5, 6], dtype=torch.int32)
+    causal = torch.tensor([True, False])
+
+    starts, ends = _make_variable_window_bounds(
+        query_start_loc,
+        seq_lens,
+        causal,
+        window_left,
+        num_tokens=5,
+    )
+
+    assert starts.tolist() == expected_starts
+    assert ends.tolist() == expected_ends
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
