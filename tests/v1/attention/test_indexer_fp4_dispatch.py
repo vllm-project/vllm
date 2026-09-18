@@ -12,7 +12,8 @@ from vllm.config import AttentionConfig
 from vllm.v1.attention.backends.mla import indexer
 
 
-def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
+@pytest.mark.parametrize("heads", [32, 64])
+def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch, heads):
     import torch
 
     from vllm.model_executor.layers import sparse_attn_indexer as sparse
@@ -51,9 +52,9 @@ def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
 
     sparse._rocm_fp4_sparse_attn_indexer(
         cache,
-        torch.zeros((2, 64, 64), dtype=torch.uint8),
+        torch.zeros((2, heads, 64), dtype=torch.uint8),
         torch.zeros((2, 1, 4, 16, 4), dtype=torch.uint8),
-        torch.zeros((2, 64), dtype=torch.float32),
+        torch.zeros((2, heads), dtype=torch.float32),
         128,
         64,
         8,

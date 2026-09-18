@@ -323,7 +323,6 @@ def _rocm_fp4_cache_views(
     assert head_dim == 128 and kv_cache.ndim == 3
     assert kv_cache.dtype == torch.uint8 and kv_cache.shape[2] == 68
     num_blocks, block_size, _ = kv_cache.shape
-    assert block_size == 64
     assert kv_cache.stride(2) == 1 and kv_cache.stride(1) == 68
     page_stride = kv_cache.stride(0)
     assert page_stride >= block_size * 68
@@ -410,6 +409,9 @@ def _rocm_fp4_sparse_attn_indexer(
     topk_tokens,
     topk_indices_buffer,
     metadata,
+    candidate_blocks=None,
+    candidate_block_size=0,
+    candidate_write=False,
 ):
     from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
         flydsl_pa_mqa_logits_fp4,
@@ -418,9 +420,19 @@ def _rocm_fp4_sparse_attn_indexer(
         flydsl_pa_mqa_logits_fp4_prefill,
     )
 
-    assert q_quant.dtype == torch.uint8 and q_quant.shape[1:] == (64, 64)
+    assert q_quant.dtype == torch.uint8
+    assert q_quant.ndim == 3 and q_quant.shape[1] % 16 == 0
+    assert q_quant.shape[2] * 2 == head_dim
     assert q_scale is not None and q_scale.dtype == torch.uint8
-    assert q_scale.shape == (q_quant.shape[0], 1, 4, 16, 4)
+    m_tiles = q_quant.shape[1] // 16
+    q_scale_words = ((m_tiles + 3) // 4) * 4
+    assert q_scale.shape == (
+        q_quant.shape[0],
+        head_dim // 128,
+        4,
+        16,
+        q_scale_words,
+    )
     values, scales = _rocm_fp4_cache_views(kv_cache, head_dim)
     block_size = kv_cache.shape[1]
     block_k = 256
@@ -449,6 +461,25 @@ def _rocm_fp4_sparse_attn_indexer(
                 kv_block_size=block_size,
                 parallel_unit_num=max(512, chunk.token_end - chunk.token_start),
             )
+            if candidate_blocks is not None:
+                chunk_candidates = candidate_blocks[rows]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        starts,
+                        ends,
+                        chunk_candidates.shape[1],
+                        candidate_block_size,
+                        chunk_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        starts,
+                        ends,
+                        chunk_candidates,
+                        candidate_block_size,
+                    )
             ops.top_k_per_row_prefill(
                 logits,
                 starts,
@@ -484,6 +515,26 @@ def _rocm_fp4_sparse_attn_indexer(
                 cta_info=decode.fp4_cta_info,
                 total_ctas=decode.fp4_total_ctas,
             )
+            if candidate_blocks is not None:
+                decode_candidates = candidate_blocks[:rows]
+                visible = decode.seq_lens[:rows, 0]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        visible,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        visible,
+                        decode_candidates,
+                        candidate_block_size,
+                    )
             ops.top_k_per_row_decode(
                 logits,
                 1,
@@ -664,6 +715,9 @@ def sparse_attn_indexer(
             topk_tokens,
             topk_indices_buffer,
             attn_metadata_narrowed,
+            candidate_blocks=candidate_blocks,
+            candidate_block_size=candidate_block_size,
+            candidate_write=candidate_write,
         )
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
@@ -1085,10 +1139,15 @@ class SparseAttnIndexer(CustomOp):
             from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
 
             dsa_indexer_uses_fp4(vllm_config)
-            if head_dim != 128 or compress_ratio != 4 or not skip_k_cache_insert:
-                raise ValueError("ROCm MXFP4 indexer requires fused C4 K, D=128")
-            if candidate_blocks is not None:
-                raise ValueError("ROCm MXFP4 indexer does not support candidate blocks")
+            if (
+                head_dim != 128
+                or compress_ratio not in (1, 2, 4)
+                or not skip_k_cache_insert
+            ):
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires fused K, D=128, and "
+                    "compression ratio 1, 2, or 4"
+                )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "

@@ -84,20 +84,23 @@ def test_default_q_remains_platform_fp8(monkeypatch, rocm, fnuz, explicit_fp8):
     gfx_probe.assert_not_called()
 
 
-def test_rocm_fp4_uses_triton_and_swizzled_scale_contract(monkeypatch):
+@pytest.mark.parametrize("heads", [32, 64])
+def test_rocm_fp4_uses_triton_and_swizzled_scale_contract(monkeypatch, heads):
     _platform(monkeypatch, rocm=True)
     cutedsl_probe = Mock(side_effect=AssertionError("ROCm FP4 must not probe CuTeDSL"))
     monkeypatch.setattr(producer, "has_cutedsl", cutedsl_probe)
     kernel = Mock()
     monkeypatch.setattr(producer, "_FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL", kernel)
 
-    (q, scales), weights = producer.fused_indexer_q_rope_quant(*_inputs(), use_fp4=True)
+    (q, scales), weights = producer.fused_indexer_q_rope_quant(
+        *_inputs(heads=heads), use_fp4=True
+    )
 
-    assert q.shape == (3, 64, 64)
+    assert q.shape == (3, heads, 64)
     assert q.dtype == torch.uint8
     assert scales.shape == (3, 1, 4, 16, 4)
     assert scales.dtype == torch.uint8
-    assert weights.shape == (3, 64)
+    assert weights.shape == (3, heads)
     assert weights.dtype == torch.float32
     kernel.assert_called_once()
     assert kernel.call_args.args[6] is q
@@ -108,7 +111,7 @@ def test_rocm_fp4_uses_triton_and_swizzled_scale_contract(monkeypatch):
 
 @pytest.mark.parametrize(
     "gfx950,heads,head_dim",
-    [(False, 64, 128), (True, 32, 128), (True, 64, 256)],
+    [(False, 64, 128), (True, 8, 128), (True, 144, 128), (True, 64, 256)],
 )
 def test_rocm_fp4_rejects_unsupported_architecture_or_shape(
     monkeypatch, gfx950, heads, head_dim
@@ -117,7 +120,7 @@ def test_rocm_fp4_rejects_unsupported_architecture_or_shape(
     kernel = Mock(side_effect=AssertionError("unsupported inputs must not launch"))
     monkeypatch.setattr(producer, "_FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL", kernel)
 
-    with pytest.raises(ValueError, match="requires gfx950, H=64, D=128"):
+    with pytest.raises(ValueError, match="requires gfx950, D=128, and H in"):
         producer.fused_indexer_q_rope_quant(
             *_inputs(heads=heads, head_dim=head_dim), use_fp4=True
         )

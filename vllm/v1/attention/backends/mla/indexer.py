@@ -312,7 +312,12 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        return [
+            64
+            if current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+            else 128
+        ]
 
 
 @dataclass(frozen=True)
@@ -953,12 +958,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
-        if (
-            current_platform.is_rocm()
-            and self.indexer_uses_fp4
-            and (self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64)
-        ):
-            raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
+        if current_platform.is_rocm() and self.indexer_uses_fp4:
+            if self.compress_ratio not in (1, 2, 4):
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires compression ratio 1, 2, or 4"
+                )
+            if self.kv_cache_spec.num_states <= 0 or self.kv_cache_spec.num_states % 16:
+                raise ValueError(
+                    "ROCm MXFP4 indexer requires a positive 16-token-aligned "
+                    f"page; got num_states={self.kv_cache_spec.num_states}, "
+                    f"block_size={self.kv_cache_spec.block_size}, "
+                    f"compress_ratio={self.compress_ratio}"
+                )
 
         self.fp4_cta_info_buffer: torch.Tensor | None = None
         if current_platform.is_rocm() and self.indexer_uses_fp4:

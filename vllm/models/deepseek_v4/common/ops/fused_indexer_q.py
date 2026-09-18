@@ -638,17 +638,35 @@ def fused_indexer_q_rope_quant(
         if rocm_fp4:
             from vllm.platforms.rocm import on_gfx950
 
-            if not on_gfx950() or (num_index_q_heads, index_q_head_dim) != (64, 128):
-                raise ValueError("ROCm MXFP4 indexer Q requires gfx950, H=64, D=128")
+            if (
+                not on_gfx950()
+                or num_index_q_heads % 16 != 0
+                or num_index_q_heads > 128
+                or index_q_head_dim != 128
+            ):
+                raise ValueError(
+                    "ROCm MXFP4 indexer Q requires gfx950, D=128, and H in "
+                    "{16, 32, 48, 64, 80, 96, 112, 128}"
+                )
         index_q_packed = torch.empty(
             (num_tokens, num_index_q_heads, index_q_head_dim // 2),
             dtype=torch.uint8,
             device=index_q.device,
         )
+        q_scale_shape: tuple[int, ...]
+        if rocm_fp4:
+            m_tiles = num_index_q_heads // 16
+            q_scale_shape = (
+                num_tokens,
+                1,
+                num_scale_blocks,
+                16,
+                ((m_tiles + 3) // 4) * 4,
+            )
+        else:
+            q_scale_shape = (num_tokens, num_index_q_heads, num_scale_blocks)
         index_q_scale = torch.empty(
-            (num_tokens, 1, 4, 16, 4)
-            if rocm_fp4
-            else (num_tokens, num_index_q_heads, num_scale_blocks),
+            q_scale_shape,
             dtype=torch.uint8,
             device=index_q.device,
         )
