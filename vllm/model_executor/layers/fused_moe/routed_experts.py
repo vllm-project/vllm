@@ -1081,9 +1081,9 @@ class RoutedExperts(PluggableLayer):
             if gate_up is not None:
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
-                    (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
-                    (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
-                    (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
+                    (w13, f"experts.{gate_up}.", 0, "w1"),
+                    (w13, f"experts.{gate_up}.", 1, "w3"),
+                    (w2, f"experts.{ckpt_down_proj_name}.", 0, "w2"),
                 ]
                 fused_mapping.extend(
                     (
