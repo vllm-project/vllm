@@ -242,6 +242,8 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     )
 
 
+# FIXME(arpera): The approach used here needs to be redesigned because of
+# existing bugs: https://github.com/vllm-project/vllm/issues/57550
 def _schema_types(schema: dict[str, Any]) -> set[str]:
     """Normalize a scalar or list-valued JSON Schema type."""
     schema_type = schema.get("type")
@@ -262,7 +264,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         schema_types = _schema_types(obj)
 
         # Check for numeric ranges
-        if schema_types & {"integer", "number"} and "multipleOf" in obj:
+        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
