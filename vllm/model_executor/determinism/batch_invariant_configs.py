@@ -493,7 +493,6 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     if capability is None:
         return None
     if capability.major == 12:
-        # Blackwell workstation/consumer parts (RTX PRO 6000, RTX 50 series).
         return "sm120"
     if capability.major == 10:
         return "blackwell"
