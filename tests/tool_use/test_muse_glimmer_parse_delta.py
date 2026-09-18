@@ -654,6 +654,77 @@ def test_tool_only_nonstreaming_strips_channel_framing(tokenizer):
     assert not tools
 
 
+def test_bare_self_user_header_with_atem_stays_text(tokenizer):
+    # Even with ATEM right after it, a bare self/user header never switches
+    # channels: it is quoted text.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer,
+        " to=self<|message|>quoting: to=user<|message|>" + EMPTY_TOOL_XML + "<|eot|>",
+    )
+    assert tools == []
+    assert "to=user" in reasoning
+
+
+def test_open_body_preserves_quoted_start_marker(tokenizer):
+    # A quoted `<|start|>` inside an OPEN body is literal text too, and
+    # truncation must not eat it.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer, " to=self<|message|>quote <|start|>garbage here"
+    )
+    assert reasoning == "quote <|start|>garbage here"
+    assert tools == []
+
+
+def test_newline_anchored_bare_tool_header_switches_cleanly(tokenizer):
+    # The defect switch also fires after a newline anchor, with no `to`
+    # fragment ever leaking into the stream first.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer,
+        " to=self<|message|>think\nto=calc<|message|>" + EMPTY_TOOL_XML + "<|eot|>",
+    )
+    # The invoke's name attribute is the call name (the header's is not
+    # consulted), so a mismatched header recipient passes through verbatim.
+    assert tool_names(tools) == ["weather.get"]
+    assert reasoning == "think\n"
+
+
+def test_frozen_untagged_body_prefix_streams(tokenizer):
+    # An untagged body cut by a later framed header is frozen: its prefix was
+    # validatable then and must not be withheld forever.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer, "<|message|>pre <|start|>assistant to=user<|message|>done<|eot|>"
+    )
+    assert reasoning == ""
+    assert content == "pre done"
+    assert tools == []
+
+
+def test_finish_keeps_trailing_self_user_bare_header(tokenizer):
+    # A trailing bare self/user header was already streamed as text
+    # mid-stream, so finish must not retract it (unlike a tool header, which
+    # is held back the whole way).
+    reasoning, content, tools = drive(
+        tokenizer,
+        [" to=self<|message|>thinking to=user<|message|>"],
+        with_tool_parser=False,
+    )
+    assert reasoning == "thinking to=user<|message|>"
+    assert tools == []
+
+
+def test_overlong_recipient_name_degrades_to_text(tokenizer):
+    # A >1KB recipient can never be a real channel header; the cap degrades it
+    # instead of losing the body.
+    name = "a" * 2048
+    parser = ParserManager.get_parser(reasoning_parser_name="muse_glimmer")(tokenizer)
+    request = SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True)
+    _reasoning, content, tools = parser.parse(
+        f" to={name}<|message|>the answer<|eot|>", request
+    )
+    assert tools is None or tools == []
+    assert content == "the answer"
+
+
 def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,

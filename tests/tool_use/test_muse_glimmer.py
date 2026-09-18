@@ -218,6 +218,33 @@ def test_reasoning_end_requires_a_post_reasoning_channel():
     assert not is_end(reasoning + echoed)
 
 
+def test_reasoning_end_fires_for_answer_quoting_turn_marker():
+    """An answer quoting ``<|start|>assistant`` as text must still engage the
+    grammar: a quoted marker is not a turn boundary, so the gate must see the
+    real open ``to=user`` channel."""
+    tokenizer = SimpleNamespace(decode=lambda token_ids: "".join(map(chr, token_ids)))
+    parser = MuseGlimmerReasoningParser(tokenizer)
+
+    quoted = " to=user<|message|>the marker <|start|>assistant starts turns"
+    assert parser.is_reasoning_end(list(map(ord, quoted)))
+    # ...but a turn still purely in the reasoning channel does not fire.
+    thinking = " to=self<|message|>the marker <|start|>assistant starts turns"
+    assert not parser.is_reasoning_end(list(map(ord, thinking)))
+
+
+def test_nonstreaming_truncation_strips_partial_marker():
+    """Non-streaming extraction applies the same trailing-partial-marker trim
+    as the streaming path."""
+    reasoning, _ = MuseGlimmerReasoningParser.extract_reasoning(
+        R, " to=self<|message|>thinking hard<|eo", _FakeReq()
+    )
+    assert reasoning == "thinking hard"
+    assert (
+        MuseGlimmerToolParser._extract_content(" to=user<|message|>answer<|eo")
+        == "answer"
+    )
+
+
 # NO closing <|eom|> -> truncated CoT
 RAW_TRUNCATED = (
     " to=self<|message|>Maybe I should call "

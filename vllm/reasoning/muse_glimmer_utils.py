@@ -17,9 +17,16 @@ USER_RECIPIENT = "user"
 
 # All parts except <|message|> are optional. The bare form is used for public
 # chain-of-thought or untagged content.
+# A recipient name longer than this can never be a real channel header (the
+# Rust port caps candidates identically); it degrades to body text.
+_MAX_RECIPIENT_LEN = 1024
+_RECIPIENT_CHAR = r"A-Za-z0-9_.\-"
+_RECIPIENT = rf"[{_RECIPIENT_CHAR}]{{1,{_MAX_RECIPIENT_LEN}}}"
+# A still-growing partial name, allowed one extra byte past the cap.
+_RECIPIENT_PARTIAL = rf"[{_RECIPIENT_CHAR}]{{0,{_MAX_RECIPIENT_LEN}}}"
 MSG_HEADER_RE = re.compile(
     r"(?:<\|start\|>\s*assistant)?[^\S\n]*"
-    r"(?:to=(?P<recipient>[A-Za-z0-9_.\-]+))?<\|message\|>"
+    rf"(?:to=(?P<recipient>{_RECIPIENT}))?<\|message\|>"
 )
 MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 # A channel terminator at the very end of the text (framing, not content).
@@ -31,15 +38,16 @@ TRAILING_MSG_END_RE = re.compile(r"(?:<\|eom\|>|<\|eot\|>)\s*$")
 # preceding body at the stray <|start|> and skip past the header, silently
 # dropping that message's body.
 FRAMED_HEADER_PATTERN = (
-    r"<\|start\|>\s*assistant[^\S\n]*"
-    r"(?:to=[A-Za-z0-9_.\-]+)?<\|message\|>"
+    rf"<\|start\|>\s*assistant[^\S\n]*(?:to={_RECIPIENT})?<\|message\|>"
 )
-# The bare-header defect switch is anchored like the Rust parser: the header
-# must start at a word boundary (whitespace or body start -- a match at
-# body_start is preceded by the previous header's ``>`` and is rejected), and
-# the ATEM markup must follow immediately, with no gap.
+# The bare-header defect switch: the header must start at a word boundary
+# (whitespace or body start -- a match at body_start is preceded by the
+# previous header's ``>`` and is rejected), and the ATEM markup must follow
+# immediately, with no gap. Note the Rust port additionally fires a bare
+# switch right after a channel header (empty-body defect); this pattern
+# deliberately does not, preferring fewer phantom switches.
 BARE_HEADER_WITH_ATEM_PATTERN = (
-    r"(?<!\S)to=(?!(?:self|user)<\|message\|>)[A-Za-z0-9_.\-]+<\|message\|>"
+    rf"(?<!\S)to=(?!(?:self|user)<\|message\|>){_RECIPIENT}<\|message\|>"
     r"(?=<atem:(?:function_calls>|invoke(?:\s|>)))"
 )
 BODY_BOUNDARY_PATTERN = rf"(?:{FRAMED_HEADER_PATTERN}|{BARE_HEADER_WITH_ATEM_PATTERN})"
@@ -47,13 +55,20 @@ BODY_BOUNDARY_RE = re.compile(BODY_BOUNDARY_PATTERN)
 
 _STRUCTURAL_MARKERS = (EOM, EOT, "<|start|>", "<|message|>")
 _MAX_MARKER_LEN = max(len(marker) for marker in _STRUCTURAL_MARKERS)
-_OPEN_TAIL_HEADER_RE = re.compile(r"[^\S\n]+(?:t|to|to=[A-Za-z0-9_.\-]*)$")
-# A complete bare header at the very end of a finished body: its body never
-# arrived, so it is framing, not text. Anchored like the boundary pattern
-# (body start or right after whitespace); the preceding whitespace is
-# stripped with it, mirroring the mid-stream holdback.
+# A ` to`-ish fragment that may grow into a bare header: preceded by any
+# whitespace (including newlines, matching the boundary pattern's anchor).
+_OPEN_TAIL_HEADER_RE = re.compile(rf"\s+(?:t|to|to={_RECIPIENT_PARTIAL})$")
+# A complete bare TOOL header at the very end of a finished body: its body
+# never arrived, so it is framing, not text. Anchored like the boundary
+# pattern's Rust semantics: the header must follow whitespace -- glued to a
+# word or at body start it is text (a body-start match would be preceded by
+# the previous header's ``>`` in the full text, which the boundary pattern
+# rejects). Self/user are excluded for the same reason: bare self/user
+# headers never switch channels, so they were streamed as text. Only the
+# header itself is stripped -- the preceding whitespace was legitimately
+# emitted while streaming.
 _TRAILING_BARE_HEADER_RE = re.compile(
-    r"[^\S\n]*(?<!\S)to=[A-Za-z0-9_.\-]+<\|message\|>$"
+    rf"(?<=\s)to=(?!(?:self|user)<\|message\|>){_RECIPIENT}<\|message\|>$"
 )
 
 
@@ -63,15 +78,20 @@ def current_assistant_turn(text: str) -> str:
     Only an occurrence that opens a real header counts -- or one that ends the
     text, as in the generation prompt's trailing turn opener. A quoted or
     partial ``<|start|>assistant`` inside a body is text, not a turn boundary.
+
+    Forward scan, tracking the latest qualifying occurrence: re-anchoring with
+    ``rfind`` in a loop is quadratic on a flood of quoted markers.
     """
-    index = text.rfind(ASSISTANT_TURN_OPEN)
-    while index != -1:
+    last: int | None = None
+    for match in re.finditer(re.escape(ASSISTANT_TURN_OPEN), text):
+        index = match.start()
         if MSG_HEADER_RE.match(text, index) is not None or index + len(
             ASSISTANT_TURN_OPEN
         ) == len(text):
-            return text[index + len(ASSISTANT_TURN_OPEN) :]
-        index = text.rfind(ASSISTANT_TURN_OPEN, 0, index)
-    return text
+            last = index
+    if last is None:
+        return text
+    return text[last + len(ASSISTANT_TURN_OPEN) :]
 
 
 def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
@@ -169,10 +189,10 @@ def flush_open_body(body: str) -> str:
 
     At end-of-stream nothing more arrives: a held-back ` to=…` fragment is
     real text and must flush, while a trailing partial marker (cut by the
-    token limit) is framing and stays dropped. A trailing COMPLETE bare header
-    (``to=…<|message|>`` with nothing after it) is framing too -- its body
-    never arrived -- so it is stripped as well. The partial marker goes first:
-    a complete header ends with ``<|message|>``, so none can follow one.
+    token limit) is framing and stays dropped. A trailing COMPLETE bare tool
+    header (``to=…<|message|>`` with nothing after it) is framing too -- its
+    body never arrived -- so it is stripped as well. The partial marker goes
+    first: a complete header ends with ``<|message|>``, so none can follow one.
     """
     partial = _trailing_partial_marker_len(body)
     if partial:
@@ -186,22 +206,34 @@ def flush_open_body(body: str) -> str:
 def visible_channels(
     text: str, *, withhold_open_untagged: bool = False
 ) -> tuple[str, str, bool, bool]:
-    """Return content, reasoning, and whether each last body is still open.
+    """Return content, reasoning, and whether each last body is still growing.
+
+    A body can still grow only when it is unterminated AND the last message
+    in the text: a body cut by a later channel header is frozen, and its tail
+    is emittable text -- holding it back (or stripping it at finish) would
+    retract text the stream already validated.
 
     Open untagged bodies may later become ATEM tool channels, so streaming
-    callers withhold them until their classification can no longer shrink.
+    callers withhold them until their classification can no longer shrink --
+    i.e. only while they can still grow.
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     content_open = False
     reasoning_open = False
 
-    for recipient, body, closed in iter_messages(text):
+    messages = list(iter_messages(text))
+    last = len(messages) - 1
+    for index, (recipient, body, closed) in enumerate(messages):
+        # An empty growing tail contributes nothing to the joined text, so the
+        # tail callers would trim belongs to a frozen body. Only a non-empty
+        # growing body makes its channel's tail unsafe to emit.
+        growing = not closed and index == last and bool(body)
         if recipient == REASONING_RECIPIENT:
             reasoning_parts.append(body)
-            reasoning_open = not closed
+            reasoning_open = growing
         elif recipient is None or recipient == USER_RECIPIENT:
-            if recipient is None and not closed and withhold_open_untagged:
+            if recipient is None and growing and withhold_open_untagged:
                 # An open untagged body may still grow ATEM markup; hold it
                 # back until its classification can no longer change.
                 continue
@@ -222,7 +254,7 @@ def visible_channels(
                     if not body:
                         continue
             content_parts.append(body)
-            content_open = not closed
+            content_open = growing
 
     return (
         "".join(content_parts),

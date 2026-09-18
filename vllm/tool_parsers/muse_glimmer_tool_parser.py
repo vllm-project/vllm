@@ -270,7 +270,7 @@ class MuseGlimmerToolParser(ToolParser):
         # trailing end marker: it is framing, and the streaming path never
         # surfaces it.
         if not reasoning and _MSG_HEADER_RE.search(text) is None:
-            trimmed = _TRAILING_MSG_END_RE.sub("", text)
+            trimmed = flush_open_body(_TRAILING_MSG_END_RE.sub("", text))
             return trimmed or None
         return None
 
