@@ -194,6 +194,13 @@ class Request:
         self.trace_headers = trace_headers
         self.session_id = session_id
 
+        # The number of KV cache entries discarded by KV compression
+        # (KeyDiff). Physical cache occupancy is
+        # num_computed_tokens - num_kv_discarded. Always 0 when KV
+        # compression is disabled. Reported by the model runner via
+        # ModelRunnerOutput and used for block allocation accounting.
+        self.num_kv_discarded = 0
+
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
 
