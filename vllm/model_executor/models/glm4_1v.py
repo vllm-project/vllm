@@ -1555,17 +1555,12 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         raw_metadata = prepared_data.get("video_metadata")
         hf_video_metadata = []
         for metadata in raw_metadata if isinstance(raw_metadata, Sequence) else ():
-            if isinstance(metadata, VideoMetadata):
-                hf_video_metadata.append(metadata)
-            elif isinstance(metadata, Mapping):
-                hf_video_metadata.append(_to_video_metadata(metadata))
-                if "do_sample_frames" in metadata:
-                    prepared_kwargs["do_sample_frames"] = metadata["do_sample_frames"]
-            elif metadata is not None:
-                raise TypeError(
-                    "Video metadata must be a mapping or VideoMetadata, "
-                    f"got {type(metadata)}"
-                )
+            if metadata is None:
+                continue
+            hf_video_metadata.append(_to_video_metadata(metadata))
+            if "do_sample_frames" in metadata:
+                # This call is batched, so the last video's value wins
+                prepared_kwargs["do_sample_frames"] = metadata["do_sample_frames"]
 
         if hf_video_metadata:
             prepared_data["video_metadata"] = hf_video_metadata
