@@ -81,10 +81,10 @@ def test_patch_legacy_rope_type_normalizes_telechat3_yarn():
 def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
     """`yarn.apply_scale: false` must reach the DeepSeek-style attentions.
 
-    Transformers spells it `attention_factor = 1.0`; DeepseekV2Attention and
-    its siblings select `deepseek_llama_scaling` over `deepseek_yarn` from
-    `apply_yarn_scaling`, so both have to be present or Mistral-Large-3 runs
-    with a spurious yarn_get_mscale(factor)^2 attention scaling.
+    Transformers spells it `attention_factor = 1.0`, which DeepseekV2Attention
+    and its siblings read to select `deepseek_llama_scaling` over
+    `deepseek_yarn`; without it Mistral-Large-3 runs with a spurious
+    yarn_get_mscale(factor)^2 attention scaling.
     """
     params = {
         "dim": 7168,
@@ -127,7 +127,6 @@ def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
 
     assert config.architectures == ["MistralLarge3ForCausalLM"]
     assert config.rope_parameters["attention_factor"] == 1.0
-    assert config.rope_parameters["apply_yarn_scaling"] is False
 
 
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
