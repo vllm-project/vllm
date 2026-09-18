@@ -599,6 +599,67 @@ def test_scheduler_lazy_offload_stores_only_when_request_finishes():
     assert not scheduler.has_pending_push_work()
 
 
+def test_lazy_store_event_releases_refs_after_partial_rank_failure():
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"mode": "embedded", "lazy_offload": True},
+            tensor_parallel_size=2,
+            world_size=2,
+        ),
+        _kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("lazy-failure")),
+        RankTopology(tp_size=2),
+    )
+    block = SimpleNamespace(
+        block_id=4,
+        block_hash=make_block_hash_with_group_id(b"a", 0),
+        is_null=False,
+        ref_cnt=0,
+    )
+    freed = []
+    scheduler.bind_gpu_block_pool(
+        SimpleNamespace(
+            blocks=[None, None, None, None, block],
+            free_block_queue=SimpleNamespace(
+                iter_blocks_after=lambda cursor: iter((block,))
+            ),
+            touch=lambda blocks: None,
+            free_blocks=lambda blocks: freed.extend(blocks),
+        )
+    )
+    request = SimpleNamespace(request_id="lazy-failure")
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        num_scheduled_tokens={},
+    )
+    metadata = scheduler.build_connector_meta(output)
+
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                completed_store_events={metadata.store_event: 1}
+            )
+        )
+    )
+    assert freed == []
+    assert scheduler.has_pending_push_work()
+
+    scheduler.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                failed_store_events={metadata.store_event: 1}
+            )
+        )
+    )
+    assert freed == [block]
+    assert not scheduler.has_pending_push_work()
+
+
 def test_scheduler_resumed_request_replaces_stale_block_table():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config(
