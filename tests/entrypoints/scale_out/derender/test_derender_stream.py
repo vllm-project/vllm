@@ -18,7 +18,9 @@ Tests are split into two layers:
 """
 
 import json
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import pytest_asyncio
@@ -210,7 +212,7 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
-def derenderer(tokenizer):
+def derenderer(tokenizer, request):
     """Construct a minimal OnlineDerenderer backed by a stub renderer."""
     from unittest.mock import MagicMock
 
@@ -218,6 +220,10 @@ def derenderer(tokenizer):
 
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    request.addfinalizer(executor.shutdown)
+    renderer._executor = executor
 
     model_config = MagicMock()
     model_config.hf_config.model_type = "llama"
@@ -384,6 +390,46 @@ class TestDetokenizeDelta:
 
         assert len(set(results)) == 1, "All independent streams must produce same text"
         assert results[0] == self._one_shot(tokenizer, token_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stream_method",
+    ["derender_chat_stream", "derender_completion_stream"],
+)
+async def test_streaming_detokenization_runs_off_event_loop(
+    derenderer, monkeypatch, stream_method
+):
+    """Streaming detokenization runs on the renderer executor."""
+    import vllm.renderers.online_derenderer as online_derenderer_module
+
+    event_loop_thread_id = threading.get_ident()
+    executor_thread_id = derenderer.renderer._executor.submit(
+        threading.get_ident
+    ).result()
+
+    detokenize_thread_id = None
+    original_detokenize = online_derenderer_module.detokenize_incrementally
+
+    def record_detokenize_thread(*args, **kwargs):
+        nonlocal detokenize_thread_id
+        detokenize_thread_id = threading.get_ident()
+        return original_detokenize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        online_derenderer_module,
+        "detokenize_incrementally",
+        record_detokenize_thread,
+    )
+
+    await getattr(derenderer, stream_method)(
+        model=MODEL_NAME,
+        generate_chunk=_make_stream_chunk([10]),
+    )
+
+    assert detokenize_thread_id is not None
+    assert detokenize_thread_id == executor_thread_id
+    assert detokenize_thread_id != event_loop_thread_id
 
 
 class TestDerenderCompletionStream:
