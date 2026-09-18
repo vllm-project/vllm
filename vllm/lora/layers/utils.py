@@ -58,17 +58,21 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     elif (qweight := getattr(base_layer, "qweight", None)) is not None:
         return qweight.device
     # INC WNA16 (AutoRound)
-    elif hasattr(base_layer, "ark_linear"):
-        return base_layer.ark_linear.qweight.device
+    elif (ark_linear := getattr(base_layer, "ark_linear", None)) is not None and (
+        ark_qweight := getattr(ark_linear, "qweight", None)
+    ) is not None:
+        return ark_qweight.device
     # MoE layer
-    elif hasattr(base_layer, "w2_weight"):
-        return base_layer.w2_weight.device
+    elif (w2_weight := getattr(base_layer, "w2_weight", None)) is not None:
+        return w2_weight.device
     # MoE Compressed Tensor
-    elif hasattr(base_layer, "w2_weight_packed"):
-        return base_layer.w2_weight_packed.device
+    elif (
+        w2_weight_packed := getattr(base_layer, "w2_weight_packed", None)
+    ) is not None:
+        return w2_weight_packed.device
     # MoE GPTQ/AWQ/GGUF
-    elif hasattr(base_layer, "w2_qweight"):
-        return base_layer.w2_qweight.device
+    elif (w2_qweight := getattr(base_layer, "w2_qweight", None)) is not None:
+        return w2_qweight.device
     else:
         raise ValueError(f"Unsupported base layer: {base_layer}")
 
