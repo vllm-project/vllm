@@ -1101,14 +1101,11 @@ class MoriAll2AllManager(All2AllManagerBase):
 class MoriEPv2All2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
-        if self.internode:
-            raise ValueError("MORI EPv2 only supports single-node expert parallelism")
-        if self.world_size > 8:
-            raise ValueError(
-                f"MORI EPv2 supports at most 8 ranks, got {self.world_size}"
-            )
-
-        from mori.cco import Communicator
+        from mori.cco import (
+            GDA_CONNECTION_NONE,
+            CCODevCommRequirements,
+            Communicator,
+        )
 
         uid = Communicator.get_unique_id() if self.rank == 0 else None
         values = [uid]
@@ -1122,6 +1119,20 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
             values[0],
             per_rank_vmm=per_rank_vmm_gb * (1 << 30),
         )
+        requirements = CCODevCommRequirements()
+        requirements.gda_connection_type = GDA_CONNECTION_NONE
+        try:
+            device_comm = self._comm.create_dev_comm(requirements)
+            lsa_size = device_comm.lsa_size
+            device_comm.close()
+            if lsa_size != self.world_size:
+                raise ValueError(
+                    "MORI EPv2 requires all expert-parallel ranks in one LSA team, "
+                    f"got LSA size {lsa_size} for {self.world_size} ranks"
+                )
+        except Exception:
+            self._comm.destroy()
+            raise
         self.handle_cache = Cache()
         logger.warning(
             "MORI EPv2 selected: module=mori.ops.dispatch_combine_v2 "
@@ -1148,8 +1159,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         handle = EpDispatchCombineOp(config, self._comm)
         self._comm.barrier()
         logger.warning(
-            "MORI EPv2 op initialized: dispatch=%s combine=%s "
-            "recv_cap=%d schedule=%s",
+            "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d schedule=%s",
             config.dispatch_dtype,
             config.combine_dtype,
             config.effective_max_recv,

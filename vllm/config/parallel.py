@@ -221,7 +221,7 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
-    - "mori_epv2": MoRI EPv2 with CCO-LSA for single-node EP
+    - "mori_epv2": MoRI EPv2 within one CCO-LSA team, including UALink fabrics
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl

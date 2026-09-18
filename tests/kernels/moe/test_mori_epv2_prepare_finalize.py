@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -14,6 +16,47 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
 )
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize("world_size,lsa_size", [(4, 4), (8, 8), (16, 16), (8, 4)])
+def test_mori_epv2_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
+    from vllm.distributed.device_communicators.all2all import MoriEPv2All2AllManager
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        All2AllManagerBase,
+    )
+
+    monkeypatch.setattr(
+        All2AllManagerBase,
+        "__init__",
+        lambda self, group: self.__dict__.update(
+            rank=0, world_size=world_size, internode=world_size > 4, cpu_group=group
+        ),
+    )
+    monkeypatch.setattr(
+        torch.distributed, "broadcast_object_list", lambda *a, **kw: None
+    )
+    device_comm = Mock(lsa_size=lsa_size)
+    comm = Mock()
+    comm.create_dev_comm.return_value = device_comm
+    communicator = Mock()
+    communicator.init.return_value = comm
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cco",
+        SimpleNamespace(
+            Communicator=communicator,
+            CCODevCommRequirements=SimpleNamespace,
+            GDA_CONNECTION_NONE=0,
+        ),
+    )
+    if lsa_size != world_size:
+        with pytest.raises(ValueError, match="one LSA team"):
+            MoriEPv2All2AllManager(object())
+    else:
+        manager = MoriEPv2All2AllManager(object())
+        manager.destroy()
+    device_comm.close.assert_called_once()
+    comm.destroy.assert_called_once()
 
 
 def test_mori_epv2_accepts_non_gated_experts(monkeypatch):
