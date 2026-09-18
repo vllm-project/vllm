@@ -2432,6 +2432,18 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
         if (
+            (self.dcp_size > 1 or remote_dcp_size > 1)
+            and self.region_group_ids
+            and self.region_group_ids != self.dst_region_group_ids[remote_engine_id]
+            and (
+                self._physical_blocks_per_logical_kv_block != 1
+                or remote_physical_per_logical != 1
+            )
+        ):
+            raise NotImplementedError(
+                "DCP region pulls require matching logical and physical block sizes"
+            )
+        if (
             self._has_mamba
             and remote_physical_per_logical
             != self._physical_blocks_per_logical_kv_block

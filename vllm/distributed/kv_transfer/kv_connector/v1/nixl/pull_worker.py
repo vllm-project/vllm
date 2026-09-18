@@ -191,13 +191,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
-            if dcp_active and (
-                self._physical_blocks_per_logical_kv_block != 1
-                or remote_info.remote_physical_blocks_per_logical != 1
-            ):
-                raise NotImplementedError(
-                    "DCP region pulls require matching logical and physical block sizes"
-                )
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
@@ -209,10 +202,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_by_region = self._block_ids_by_region(
                 remote_physical_block_ids, remote_region_groups
             )
-            local_by_region = (
-                self._block_ids_by_region(local_block_ids, local_region_groups)
-                if local_block_ids
-                else []
+            local_by_region = self._block_ids_by_region(
+                local_block_ids, local_region_groups
             )
             num_computed_blocks = None
             num_remote_blocks = None
