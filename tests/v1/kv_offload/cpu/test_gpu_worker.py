@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import MIN_N, THRESHOLD_BYTES
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_CHUNKS = [256]
@@ -90,7 +91,7 @@ def test_canonical_load_path_follows_fragment_size(cuda_like_platform) -> None:
     """Canonical loads copy per fragment, so a page above the Triton threshold
     whose fragments fall below it takes the Triton path."""
     page = 32 * 1024
-    assert page >= gpu_worker.THRESHOLD_BYTES > page // 2
+    assert page >= THRESHOLD_BYTES > page // 2
     refs = _two_fragment_refs(page, page // 2)
 
     direct = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
@@ -119,6 +120,79 @@ def test_canonical_load_path_requires_aligned_fragments(cuda_like_platform) -> N
     )
 
     assert canonical is ops.swap_blocks_batch
+
+
+def test_calibrated_load_path_uses_measured_min_n(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With calibration on, the measured crossover replaces the defaults, also
+    for copy sizes above the default Triton threshold."""
+    page = 32 * 1024
+    assert page >= THRESHOLD_BYTES
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]]
+    calibration = (torch.zeros(1, dtype=torch.int8), torch.device("cpu"))
+    timings = {"dma": [1, 2, 4, 8, 16], "triton": [3, 3, 3, 4, 5]}
+    monkeypatch.setattr(
+        gpu_worker,
+        "measure_load_paths",
+        lambda *args: (timings["dma"], timings["triton"]),
+    )
+
+    default = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    calibrated = gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, calibration=calibration
+    )
+
+    assert default is ops.swap_blocks_batch
+    assert calibrated.keywords["min_n"] == 64
+
+    # Triton never wins: stay on DMA.
+    timings["triton"] = [3, 3, 5, 9, 17]
+    assert (
+        gpu_worker._select_swap_blocks_fn(
+            refs, gpu_to_cpu=False, calibration=calibration
+        )
+        is ops.swap_blocks_batch
+    )
+
+
+def test_mixed_copy_sizes_reduce_to_one_min_n(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One call carries every copy size of the handler: the largest min_n
+    wins, and a size that never takes Triton keeps the whole handler on DMA."""
+    refs = [
+        [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)],
+        [CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=16384)],
+    ]
+    policy: dict[int, int | None] = {4096: 64, 16384: 32}
+    monkeypatch.setattr(gpu_worker, "default_min_n", lambda size: policy[size])
+
+    fn = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    assert fn.keywords["min_n"] == 64
+
+    policy[16384] = None
+    assert (
+        gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+        is ops.swap_blocks_batch
+    )
+
+
+def test_calibration_failure_keeps_defaults(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)]]
+    calibration = (torch.zeros(1, dtype=torch.int8), torch.device("cpu"))
+
+    def boom(*args):
+        raise RuntimeError("no batch memcpy")
+
+    for measure in (boom, lambda *args: None):
+        monkeypatch.setattr(gpu_worker, "measure_load_paths", measure)
+        fn = gpu_worker._select_swap_blocks_fn(
+            refs, gpu_to_cpu=False, calibration=calibration
+        )
+        assert fn.keywords["min_n"] == MIN_N
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
