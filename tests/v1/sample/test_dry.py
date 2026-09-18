@@ -211,16 +211,14 @@ def test_dry_base_below_one_warns_that_it_disabled_dry():
 
     with patch("vllm.v1.worker.gpu.sample.dry.logger") as log:
         DryState.validate_params(_params(dry_multiplier=0.8, dry_base=0.8))
-    assert not use_dry({"dry_multiplier": 0.8, "dry_base": 0.8}), (
-        "base < 1.0 must disable DRY"
-    )
+    assert not use_dry(0.8, 0.8, -1), "base < 1.0 must disable DRY"
     assert log.warning.called, "the disabling must be reported, not silent"
     assert "disables DRY" in log.warning.call_args[0][0]
 
     # A normal configuration says nothing.
     with patch("vllm.v1.worker.gpu.sample.dry.logger") as log:
         DryState.validate_params(_params(dry_multiplier=0.8, dry_base=1.75))
-    assert use_dry({"dry_multiplier": 0.8, "dry_base": 1.75})
+    assert use_dry(0.8, 1.75, -1)
     assert not log.warning.called
 
 

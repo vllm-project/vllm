@@ -26,7 +26,7 @@ penalty is skipped with a one-time warning. The match computation lives in
 ``vllm.v1.sample.dry_core``.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -173,17 +173,21 @@ class DryState(LogitsProcessor):
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         ea = sampling_params.extra_args or {}
+        multiplier = ea.get("dry_multiplier", 0.0)
+        base = ea.get("dry_base", 1.75)
+        allowed_length = ea.get("dry_allowed_length", 2)
+        penalty_last_n = ea.get("dry_penalty_last_n", -1)
         # Same gate as llama_sampler_dry_apply.
-        enabled = use_dry(ea)
+        enabled = use_dry(multiplier, base, penalty_last_n)
         self.use_dry[req_idx] = enabled
         self.breaker_ids.pop(req_idx, None)
         self._breaker_masks.pop(req_idx, None)
         if not enabled:
             return False
-        self.multiplier[req_idx] = ea.get("dry_multiplier", 0.0)
-        self.base[req_idx] = ea.get("dry_base", 1.75)
-        self.allowed_length[req_idx] = ea.get("dry_allowed_length", 2)
-        self.penalty_last_n[req_idx] = ea.get("dry_penalty_last_n", -1)
+        self.multiplier[req_idx] = multiplier
+        self.base[req_idx] = base
+        self.allowed_length[req_idx] = allowed_length
+        self.penalty_last_n[req_idx] = penalty_last_n
         self.max_exponent[req_idx] = max_exponent(float(self.base[req_idx]))
 
         breakers = ea.get("dry_sequence_breakers", DEFAULT_DRY_SEQUENCE_BREAKERS)
@@ -367,8 +371,6 @@ def _load_tokenizer(vllm_config: "VllmConfig") -> "TokenizerLike | None":
     )
 
 
-def use_dry(extra_args: dict[str, Any]) -> bool:
-    multiplier = extra_args.get("dry_multiplier", 0.0)
-    base = extra_args.get("dry_base", 1.75)
-    penalty_last_n = extra_args.get("dry_penalty_last_n", -1)
+def use_dry(multiplier: float, base: float, penalty_last_n: int) -> bool:
+    """Whether DRY modifies logits for a request with these parameters."""
     return bool(multiplier) and base >= 1.0 and penalty_last_n != 0
