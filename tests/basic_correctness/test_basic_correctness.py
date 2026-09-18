@@ -11,8 +11,6 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm.envs as envs
 from vllm import LLM
@@ -149,15 +147,6 @@ def test_models(
         if enable_prompt_embeds:
             with torch.no_grad():
                 prompt_embeds = hf_model.get_prompt_embeddings(example_prompts)
-            if model == "hmellor/tiny-random-Gemma2ForCausalLM" and (
-                Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-            ):
-                # For Gemma 1/2 models with Transformers 5.4.0+, the prompt embeddings
-                # are normalised in `get_prompt_embeddings`, like Gemma 3.
-                # For older versions, we need to manually normalise.
-                embed_scale = hf_model.config.hidden_size**0.5
-                normalizer = torch.tensor(embed_scale, dtype=prompt_embeds[0].dtype)
-                prompt_embeds = [p_e * normalizer for p_e in prompt_embeds]
 
     with VllmRunner(
         model,
