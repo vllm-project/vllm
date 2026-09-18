@@ -26,7 +26,7 @@ from typing_extensions import TypedDict
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -1834,7 +1834,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1845,13 +1845,11 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         if num_images > 0:
             target_width, target_height = self.info.get_image_size_with_most_features()
 
-            image_overrides = mm_options.get("image")
-
             dummy_images = self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=mm_options.get("image"),
             )
 
         if num_videos > 0:
@@ -1864,7 +1862,6 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
             video_overrides = mm_options.get("video")
 
             if video_overrides:
-                assert isinstance(video_overrides, VideoDummyOptions)
                 num_frames_override = video_overrides.num_frames
                 if num_frames_override:
                     if num_frames_override > target_num_frames:
