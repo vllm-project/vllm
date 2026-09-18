@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -1405,6 +1406,18 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         )
         assert preemptions_after - preemptions_before > 0, (
             "Test did not trigger any preemptions"
+        )
+
+    # Row alignment is numerical: chunked and preempted scores must match an
+    # unchunked, unpreempted run of the same requests. Batch composition moves
+    # bf16 tail logprobs by a few percent; a misaligned row differs by nats.
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B", max_model_len=512, gpu_memory_utilization=0.25
+    ) as reference:
+        reference_outputs = reference.llm.generate(prompts, sampling_params)
+    for output, ref in zip(outputs, reference_outputs):
+        np.testing.assert_allclose(
+            output.prompt_token_id_logprobs, ref.prompt_token_id_logprobs, rtol=0.1
         )
 
 
