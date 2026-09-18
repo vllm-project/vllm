@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
 
 import pytest
 
@@ -286,10 +285,8 @@ def test_reasoning(
     output_tokens: list[str] = [
         step3p5_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser = cast(
-        Step3p5ReasoningParser,
-        ReasoningParserManager.get_reasoning_parser(parser_name)(step3p5_tokenizer),
-    )
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(step3p5_tokenizer)
+    assert isinstance(parser, Step3p5ReasoningParser)
 
     reasoning, content = run_reasoning_extraction(
         parser, output_tokens, streaming=streaming

@@ -7,7 +7,6 @@ fp32, which is required for RL training-inference consistency.
 """
 
 import math
-from typing import cast
 
 import pytest
 import torch
@@ -38,7 +37,7 @@ def _fake_lm_head(
     weight: torch.Tensor, quantized: bool = False, shard_indices: object | None = None
 ) -> VocabParallelEmbedding:
     # The dtype tests only need the projection fields, not distributed setup.
-    return cast(VocabParallelEmbedding, _FakeLmHead(weight, quantized, shard_indices))
+    return _FakeLmHead(weight, quantized, shard_indices)  # type: ignore[return-value]
 
 
 def _build_processor(vocab_size: int) -> LogitsProcessor:
