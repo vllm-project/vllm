@@ -17,9 +17,10 @@ from vllm.distributed import (
     get_engram_dp_group,
     get_engram_dp_size,
     get_tensor_model_parallel_rank,
+    get_tp_group,
     tensor_model_parallel_all_gather,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_weight_attrs
@@ -328,6 +329,66 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         return out[:, : self.n_hash_cols]
 
 
+class SPSharedEngramEmbedding(ParallelEngramEmbedding):
+    """Load disjoint TP shards but expose the full registered table for SP lookup."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._shard_start = self.vocab_start_idx
+        self._shard_rows = self.part_num_embeddings
+        # Checkpoint parameters retain their original head-shard shape/offset.
+        # Lookup addresses instead span all heads in the common backing.
+        self.head_start = 0
+        self.part_n_hash_cols = self.n_hash_cols
+        self.vocab_start_idx = 0
+        self.vocab_end_idx = self.num_embeddings
+
+    def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        group = get_tp_group()
+        if not all(in_the_same_node_as(group.cpu_group)):
+            raise ValueError("sp_shared_memory requires all TP ranks on the same host.")
+        storage = DPSharedEngramStorage(
+            self.num_embeddings, self.dim, self.block_size, group
+        )
+        self._shared_memory = storage
+        self._weight_loader = self._load_shard
+        start, end = self.vocab_start_idx, self.vocab_end_idx
+        return storage.weight[start:end], storage.weight_scale_inv[start:end]
+
+    @staticmethod
+    def _load_shard(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        group = get_tp_group()
+        error = None
+        try:
+            _engram_head_shard_weight_loader(param, loaded_weight)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        errors: list[str | None] = [None] * group.world_size
+        torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
+        if any(error is not None for error in errors):
+            raise RuntimeError(f"Shared Engram TP shard load failed: {errors}")
+
+    def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
+        storage = self._shared_memory
+        assert storage is not None
+        start, end = self._shard_start, self._shard_start + self._shard_rows
+        if (self.weight.data_ptr(), self.weight_scale_inv.data_ptr()) != (
+            storage.weight[start:end].data_ptr(),
+            storage.weight_scale_inv[start:end].data_ptr(),
+        ):
+            raise RuntimeError("Shared Engram parameter storage must not be replaced")
+        return storage.get_views(storage.weight, storage.weight_scale_inv)
+
+    def forward(self, indices: torch.Tensor) -> torch.Tensor:
+        out = torch.empty(
+            (indices.shape[0], self.n_hash_cols, self.dim),
+            dtype=torch.bfloat16,
+            device=indices.device,
+        )
+        self.lookup(indices, out)
+        return out
+
+
 def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
     """Exchange DP tokens for heads, retaining only this replica's tokens."""
     dp_group = get_engram_dp_group()
@@ -357,7 +418,23 @@ class Engram(BaseEngram):
     ) -> ParallelEngramEmbedding:
         engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
-        return ParallelEngramEmbedding(
+        embedding_cls = ParallelEngramEmbedding
+        if engram_config.sp_shared_memory:
+            config = get_current_vllm_config()
+            engram_config.verify_parallel_config(config.parallel_config)
+            engram_config.verify_load_config(config.load_config)
+            if (
+                not self.use_sequence_parallel
+                or not config.use_v2_model_runner
+                or config.speculative_config is not None
+                or config.model_config.enable_sleep_mode
+            ):
+                raise ValueError(
+                    "sp_shared_memory requires active SP and MRV2, without "
+                    "speculation or sleep mode."
+                )
+            embedding_cls = SPSharedEngramEmbedding
+        return embedding_cls(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
@@ -366,6 +443,10 @@ class Engram(BaseEngram):
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+        if isinstance(self.embed_tokens, SPSharedEngramEmbedding):
+            max_tokens = (
+                max_tokens + self.embed_tokens.tp_size - 1
+            ) // self.embed_tokens.tp_size
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
@@ -374,8 +455,15 @@ class Engram(BaseEngram):
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
         if self._prefetch_stream is None:
             return super().prepare_embeddings(hash_ids)
-        rows = self.staged_rows[: hash_ids.shape[0]]
-        assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        num_tokens = hash_ids.shape[0]
+        if isinstance(self.embed_tokens, SPSharedEngramEmbedding):
+            size = self.embed_tokens.tp_size
+            chunk = (num_tokens + size - 1) // size
+            start = get_tensor_model_parallel_rank() * chunk
+            hash_ids = hash_ids[min(start, num_tokens) : min(start + chunk, num_tokens)]
+            num_tokens = chunk
+        rows = self.staged_rows[:num_tokens]
+        assert rows.shape[0] == num_tokens, "engram staging buffer too small"
         self._start_prefetch(hash_ids, rows, self._prefetch_stream)
 
     @eager_break_during_capture
@@ -392,6 +480,14 @@ class Engram(BaseEngram):
     @eager_break_during_capture
     def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
         torch.cuda.current_stream().wait_stream(stream)
+
+    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.embed_tokens, SPSharedEngramEmbedding):
+            assert self._prefetch_stream is not None
+            self._finish_prefetch(self._prefetch_stream)
+            size = self.embed_tokens.tp_size
+            return self.staged_rows[: (hash_ids.shape[0] + size - 1) // size]
+        return super().embed(hash_ids)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
         if self._prefetch_stream is not None:
