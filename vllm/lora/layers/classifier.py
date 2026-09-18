@@ -20,23 +20,26 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
     ) -> None:
         # Preserve ordinary LoRA A/B support for classification heads.
         super().create_lora_weights(max_loras, lora_config, model_config)
+
+        max_num_labels = lora_config.max_lora_num_labels or self.output_size
         self.full_weight_stacked = torch.zeros(
             max_loras,
             1,
-            self.output_size,
+            max_num_labels,
             self.input_size,
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
         self.full_bias_stacked = torch.zeros(
             max_loras,
-            self.output_size,
+            max_num_labels,
             dtype=self.base_layer.params_dtype,
             device=self.device,
         )
         self.full_module_enabled = torch.zeros(
             max_loras, dtype=torch.bool, device=self.device
         )
+        self.max_num_labels = max_num_labels
 
     def reset_module_to_save(self, index: int) -> None:
         self.full_weight_stacked[index].zero_()
@@ -58,7 +61,10 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         # TODO base_result maybe don't need compute truly.
         base_result = super().forward(input_)
-        output = base_result[0] if isinstance(base_result, tuple) else base_result
+        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
+
+        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+        output[:, : self.output_size].copy_(base_result)
 
         full_output = self.punica_wrapper.apply_lora_full_linear(
             output,
