@@ -31,7 +31,10 @@ fn itl_flush_interval_tokens(value: Option<&str>) -> u32 {
         Some(value) => match value.parse::<u32>() {
             Ok(interval) if interval > 0 => interval,
             _ => {
-                tracing::warn!(value, "ignoring invalid {ITL_FLUSH_INTERVAL_ENV}; using 32");
+                tracing::warn!(
+                    value,
+                    "ignoring invalid {ITL_FLUSH_INTERVAL_ENV}; using {DEFAULT_ITL_FLUSH_INTERVAL_TOKENS}"
+                );
                 DEFAULT_ITL_FLUSH_INTERVAL_TOKENS
             }
         },
@@ -39,6 +42,8 @@ fn itl_flush_interval_tokens(value: Option<&str>) -> u32 {
 }
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
+///
+/// Pending observations have one owner, so neither the tracker nor its accumulator is cloneable.
 ///
 /// This is the Rust-side counterpart of the Python frontend's request-lifecycle
 /// bookkeeping, centered on `RequestStateStats` and the per-output/per-finished
@@ -382,6 +387,7 @@ pub fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
 
@@ -430,8 +436,8 @@ mod tests {
 
     #[test]
     fn token_intervals_publish_itl_while_active_and_finish_flushes_the_tail() {
-        let mut tracker =
-            RequestMetricsTracker::new("itl-token-interval".into(), 0, 100.0, 1, Some(65), 1);
+        let model_name = format!("itl-token-interval-{}", Uuid::new_v4().simple());
+        let mut tracker = RequestMetricsTracker::new(model_name, 0, 100.0, 1, Some(65), 1);
         tracker.itl_flush_interval_tokens = DEFAULT_ITL_FLUSH_INTERVAL_TOKENS;
         for tokens in 1_u32..=65 {
             observe_tokens(&mut tracker, 10.0 + f64::from(tokens) * 0.5, 1);
@@ -454,8 +460,9 @@ mod tests {
 
     #[test]
     fn token_flushes_are_per_request_and_preserve_multi_token_observations() {
-        let mut a = RequestMetricsTracker::new("itl-chunks".into(), 0, 100.0, 1, None, 1);
-        let mut b = RequestMetricsTracker::new("itl-chunks".into(), 0, 100.0, 1, None, 1);
+        let model_name = format!("itl-chunks-{}", Uuid::new_v4().simple());
+        let mut a = RequestMetricsTracker::new(model_name.clone(), 0, 100.0, 1, None, 1);
+        let mut b = RequestMetricsTracker::new(model_name, 0, 100.0, 1, None, 1);
         a.itl_flush_interval_tokens = 32;
         b.itl_flush_interval_tokens = 32;
         observe_tokens(&mut a, 10.0, 16);

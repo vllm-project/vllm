@@ -7,10 +7,8 @@ use parking_lot::RwLock;
 use prometheus_client::encoding::{EncodeMetric, MetricEncoder, NoLabelSet};
 use prometheus_client::metrics::{MetricType, TypedMetric};
 
-pub(crate) const ITL_BUCKETS: [f64; 19] = [
-    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0,
-    40.0, 80.0,
-];
+use crate::request::ITL_BUCKETS;
+
 const BUCKET_COUNT: usize = ITL_BUCKETS.len() + 1;
 
 /// Request-local ITL observations, published at token intervals and stream end.

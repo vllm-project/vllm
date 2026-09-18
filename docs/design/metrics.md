@@ -79,6 +79,25 @@ statistics can differ. Use `vllm:request_time_per_output_token_seconds` for
 request-level TPOT and `vllm:inter_token_latency_seconds` when you specifically
 want the inter-output latency distribution.
 
+### Rust frontend ITL publication
+
+The Rust frontend measures ITL using the engine output timestamps when it
+processes each eligible output update. It stores observations locally per
+request, then publishes them to `vllm:inter_token_latency_seconds` after 32
+generated tokens by default. Delayed publication does not change the measured
+intervals: the first output and empty outputs add no ITL observation, and a
+multi-token output adds one observation.
+
+Pending observations are also published before returning terminal output,
+an error, or an unexpected close, and when the stream is dropped. Metric
+collection sees only published observations. Short-window rates can therefore
+be delayed or uneven. There is no wall-clock bound on visibility delay if a
+stream stalls, and process failure loses any observations still pending.
+Generated-token counters and TTFT retain their existing update timing.
+
+Set [`VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS`](../configuration/env_vars.md#rust-frontend)
+to change the token interval. Use `1` to publish on each eligible output update.
+
 ### Prometheus Client Library
 
 Prometheus support was initially added [using the aioprometheus library](https://github.com/vllm-project/vllm/pull/1890), but a switch was made quickly to [prometheus_client](https://github.com/vllm-project/vllm/pull/2730). The rationale is discussed in both linked PRs.
