@@ -749,12 +749,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
                 prefill_query_heads *= parallel_config.tensor_parallel_size
-            prefill_heads = round_up(prefill_query_heads, self.prefill_padding)
+            padded_prefill_query_heads = round_up(
+                prefill_query_heads, self.prefill_padding
+            )
             self.workspace_specs.extend(
                 (shape, torch.bfloat16)
                 for shape in (
-                    (max_tokens, prefill_heads, head_size),
-                    (max_tokens, prefill_heads, self.kv_lora_rank),
+                    (max_tokens, padded_prefill_query_heads, head_size),
+                    (max_tokens, padded_prefill_query_heads, self.kv_lora_rank),
                     (max_tokens, prefill_query_heads, self.kv_lora_rank),
                 )
             )
