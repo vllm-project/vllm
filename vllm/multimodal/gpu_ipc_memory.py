@@ -183,6 +183,7 @@ def reserve_mm_ipc_gpu_memory(
 
     Raises:
         ValueError: If the reservation leaves no memory for the KV cache.
+
     """
     if mm_config is None:
         return available_kv_cache_memory_bytes

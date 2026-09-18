@@ -13,6 +13,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.kernels  # noqa: F401 to register kernels
+from vllm import ir
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
@@ -28,6 +30,9 @@ from vllm.config import (
 )
 from vllm.envs import disable_envs_cache
 from vllm.forward_context import set_forward_context
+from vllm.ir import ops
+from vllm.model_executor.layers.activation import GeluAndMulSparse
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
@@ -75,6 +80,18 @@ class CompiledModTuple(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return reference_fn_tuple(x)
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0})
+class SparseActivationAotModel(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.up_proj = torch.nn.Linear(32, 256, bias=False)
+        self.activation = GeluAndMulSparse(0.95, "tanh")
+        self.down_proj = torch.nn.Linear(128, 16, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        return self.down_proj(self.activation(self.up_proj(x)))
 
 
 def make_vllm_config() -> VllmConfig:
@@ -175,6 +192,54 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             assert torch.allclose(ret, expected)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not is_torch_equal_or_newer("2.10.0"),
+    reason="requires CUDA and torch 2.10",
+)
+def test_sparse_activation_standalone_aot_preserves_dependencies(
+    monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
+):
+    def native_reference(model: SparseActivationAotModel, x: torch.Tensor):
+        projected = torch.nn.functional.linear(x, model.up_proj.weight)
+        activated = ops.gelu_and_mul_sparse.impls["native"].impl_fn(
+            projected, model.activation.std_multiplier, "tanh"
+        )
+        return torch.nn.functional.linear(activated, model.down_proj.weight)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+        m.setenv("VLLM_CACHE_ROOT", str(vllm_tmp_cache / "vllm_cache"))
+
+        vllm_config = make_vllm_config()
+        torch.manual_seed(0)
+        inputs = [
+            torch.randn(4, 32, device="cuda", dtype=torch.bfloat16),
+            torch.randn(7, 32, device="cuda", dtype=torch.bfloat16),
+        ]
+
+        with (
+            use_vllm_config(vllm_config),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            ir.enable_torch_wrap(True),
+        ):
+            compiled = SparseActivationAotModel(vllm_config=vllm_config).to(
+                device="cuda", dtype=torch.bfloat16
+            )
+            compiled.requires_grad_(False)
+            expected = [native_reference(compiled, x) for x in inputs]
+            actual = [compiled(x) for x in inputs]
+
+        for result, reference in zip(actual, expected):
+            assert torch.isfinite(result).all()
+            torch.testing.assert_close(
+                result,
+                reference,
+                **ops.gelu_and_mul_sparse.get_tolerance(result.dtype),
+            )
+
+
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
     from torch._subclasses import FakeTensorMode
@@ -203,8 +268,7 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
 def test_cache_load_returns_tuple_consistency_tuple_output(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that cache loading correctly handles models that return tuples.
+    """Test that cache loading correctly handles models that return tuples.
 
     This verifies that when a model returns a tuple of tensors, the output
     type is preserved as a tuple between fresh compilation and cache load.
@@ -270,8 +334,7 @@ def test_cache_load_returns_tuple_consistency_tuple_output(
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_shape_env(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that the shape environment is correctly serialized and preserved
+    """Test that the shape environment is correctly serialized and preserved
     when loading from cache.
     """
     with monkeypatch.context() as m:
@@ -309,8 +372,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
 ):
-    """
-    Test that partition wrappers are applied when loading AOT cached functions.
+    """Test that partition wrappers are applied when loading AOT cached functions.
 
     This test verifies the fix for GitHub issue #31439 where AOT compile
     caused 2x latency regression when use_inductor_graph_partition=True.
@@ -433,14 +495,12 @@ def test_standalone_compile_correctness():
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that compiling gpt2 twice results in a cache hit.
+    """Test that compiling gpt2 twice results in a cache hit.
 
     Counter values are read from the EngineCore subprocess via
     ``LLM.collective_rpc`` so the test works under default V1
     multiprocessing (no shared memory between test and engine).
     """
-
     from vllm import LLM
 
     def _snap(self):
@@ -576,7 +636,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_success(self, mock_deserialize):
-        """Test successful loading of all artifacts"""
+        """Test successful loading of all artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact1 = Mock()
@@ -593,7 +653,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_already_loaded(self, mock_deserialize):
-        """Test that load_all skips if already loaded"""
+        """Test that load_all skips if already loaded."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -606,7 +666,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_get_loaded_artifact(self, mock_deserialize):
-        """Test retrieving loaded artifacts"""
+        """Test retrieving loaded artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
