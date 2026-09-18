@@ -804,6 +804,49 @@ def test_unframed_to_framed_transition_loses_nothing(tokenizer):
     assert tools == []
 
 
+def test_unframed_prefix_text_survives_late_framing(tokenizer):
+    # Real text streamed before the first header: once framing arrives the
+    # segmenter drops the pre-header text, so the streaming cursor must
+    # re-anchor (emit the framed body as a fresh delta) instead of wedging
+    # on the unframed prefix and losing the answer.
+    text = "Hello there<|start|>assistant to=user<|message|>Answer<|eot|>"
+    for with_tool_parser in (True, False):
+        reasoning, content, tools = drive_tokenwise(
+            tokenizer, text, with_tool_parser=with_tool_parser
+        )
+        assert reasoning == ""
+        assert content == "Hello thereAnswer"
+        assert tools == []
+
+
+def test_unframed_stream_strips_trailing_end_marker_runs(tokenizer):
+    # A partial marker can hide a complete one at the tail ("ok<|eom|><"):
+    # the holdback must strip the whole run, not just one layer.
+    for text, expected in (
+        ("The answer is 42.<|eom|> ", "The answer is 42."),
+        ("ok<|eom|><|eom|>", "ok"),
+    ):
+        for with_tool_parser in (True, False):
+            reasoning, content, tools = drive_tokenwise(
+                tokenizer, text, with_tool_parser=with_tool_parser
+            )
+            assert reasoning == ""
+            assert content == expected
+            assert tools == []
+
+
+def test_headerless_complete_atem_salvaged_at_finish(tokenizer):
+    # A derailed ATEM block with no channel framing streams out as text (the
+    # markup is indistinguishable from quoted text until it completes), but a
+    # complete call inside it is still salvaged at finish -- matching the
+    # non-streaming fallback, which extracts the same call.
+    text = '<atem:invoke name="weather.get"></atem:invoke>'
+    reasoning, content, tools = drive_tokenwise(tokenizer, text)
+    assert reasoning == ""
+    assert content == text
+    assert tool_names(tools) == ["weather.get"]
+
+
 def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):
     # Quoted framing in unframed (e.g. grammar-shaped JSON) text stalls the
     # stream while it might be a header, then flushes whole at finish.

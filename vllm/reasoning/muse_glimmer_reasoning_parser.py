@@ -28,6 +28,10 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         self._emitted_reasoning = ""
         self._emitted_content = ""
+        # Set while the unframed fallback has emitted content: the segmenter
+        # drops pre-header text, so the framed path must re-anchor the cursor
+        # instead of wedging on it.
+        self._content_unframed = False
         self._initial_recipient: str | None = None
 
     def adjust_request(
@@ -99,6 +103,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         content, _reasoning, _content_open, _reasoning_open = visible_channels(
             seeded, flush_growing=True
         )
+        if self._content_unframed:
+            self._emitted_content = ""
+            self._content_unframed = False
         remainder, self._emitted_content = advance_emitted(
             self._emitted_content, content
         )
@@ -146,6 +153,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
+            self._content_unframed = bool(self._emitted_content)
             return DeltaMessage(content=content_delta) if content_delta else None
         content, reasoning, content_open, reasoning_open = visible_channels(
             seeded, withhold_open_untagged=True
@@ -154,6 +162,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             content = safe_open_body(content)
         if reasoning_open:
             reasoning = safe_open_body(reasoning)
+        if self._content_unframed and content:
+            if not content.startswith(self._emitted_content):
+                # The segmenter dropped the pre-header text the fallback
+                # already emitted; re-anchor the cursor rather than wedge.
+                self._emitted_content = ""
+            self._content_unframed = False
 
         reasoning_delta, self._emitted_reasoning = advance_emitted(
             self._emitted_reasoning, reasoning

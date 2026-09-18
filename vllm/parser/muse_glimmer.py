@@ -6,7 +6,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage, FunctionCall
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    FunctionCall,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser, StreamState
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
@@ -184,6 +189,30 @@ class MuseGlimmerParser(DelegatingParser):
             # This also recovers text the streaming side held while a stray
             # marker (e.g. a quoted `<|start|>`) never completed a header.
             content, reasoning = flush_open_body(state.previous_text), ""
+            if "<atem:invoke" in state.previous_text:
+                # A derailed/headerless ATEM block never formed a channel:
+                # salvage its complete calls at finish, like the non-streaming
+                # fallback does.
+                for i, call in enumerate(
+                    tool_parser._parse_tool_calls(
+                        state.previous_text,
+                        tool_parser._registered_names(request),
+                    )
+                ):
+                    if delta_message is None:
+                        delta_message = DeltaMessage()
+                    delta_message.tool_calls = delta_message.tool_calls or []
+                    delta_message.tool_calls.append(
+                        DeltaToolCall(
+                            index=i,
+                            type="function",
+                            id=call.id,
+                            function=DeltaFunctionCall(
+                                name=call.function.name,
+                                arguments=call.function.arguments,
+                            ).model_dump(exclude_none=True),
+                        )
+                    )
         else:
             content, reasoning, _content_open, _reasoning_open = visible_channels(
                 state.previous_text, flush_growing=True

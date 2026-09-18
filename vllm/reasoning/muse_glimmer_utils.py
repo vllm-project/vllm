@@ -144,44 +144,54 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
         pos = next_pos
 
 
-def _trailing_partial_marker_len(text: str) -> int:
-    """Return the longest suffix that prefixes a structural marker."""
-    max_overlap = min(len(text), _MAX_MARKER_LEN - 1)
-    for overlap in range(max_overlap, 0, -1):
-        suffix = text[-overlap:]
-        if any(marker.startswith(suffix) for marker in _STRUCTURAL_MARKERS):
-            return overlap
+def _trailing_live_marker_len(text: str) -> int:
+    """Return the trailing suffix that could still grow into a marker.
+
+    Anchored at the LAST ``<``: in a run of marker prefixes only that start
+    is still live (a marker's third character is a letter), so this replaces
+    re-scanning a run of prefixes to a fixpoint.
+    """
+    index = text.rfind("<")
+    if index == -1:
+        return 0
+    suffix = text[index:]
+    for marker in _STRUCTURAL_MARKERS:
+        if len(suffix) < len(marker) and marker.startswith(suffix):
+            return len(suffix)
     return 0
 
 
 def safe_open_body(body: str) -> str:
-    """Trim a growing body's suffix until it is safe to emit."""
-    while True:
-        trimmed = body
+    """Trim a growing body's suffix until it is safe to emit.
 
-        partial_marker = _trailing_partial_marker_len(trimmed)
+    A marker strip can expose a header fragment (``… to=skill<``) and a
+    header strip can expose a marker, so the two alternate once. Each side
+    strips only its last possible start: in a run of marker prefixes, only
+    the last ``<`` is still live; and a header fragment with more text after
+    it can never complete a header. Longer chains are derailment debris and
+    self-heal at the next delta.
+    """
+    partial_marker = _trailing_live_marker_len(body)
+    if partial_marker:
+        body = body[:-partial_marker]
+    trimmed = body
+
+    header_tail = _OPEN_TAIL_HEADER_RE.search(trimmed)
+    if header_tail is not None:
+        trimmed = trimmed[: header_tail.start()]
+
+    boundary = BODY_BOUNDARY_RE.search(trimmed, partial=True)
+    if boundary is not None and boundary.partial and boundary.end() == len(trimmed):
+        candidate = trimmed[boundary.start() :]
+        if candidate.startswith(("to=", "<|start|>")):
+            trimmed = trimmed[: boundary.start()]
+
+    if trimmed != body:
+        # The header/boundary strip may have exposed a live marker tail.
+        partial_marker = _trailing_live_marker_len(trimmed)
         if partial_marker:
             trimmed = trimmed[:-partial_marker]
-
-        header_tail = _OPEN_TAIL_HEADER_RE.search(trimmed)
-        if header_tail is not None:
-            trimmed = trimmed[: header_tail.start()]
-
-        boundary = BODY_BOUNDARY_RE.search(trimmed, partial=True)
-        if boundary is not None and boundary.partial and boundary.end() == len(trimmed):
-            candidate = trimmed[boundary.start() :]
-            if candidate.startswith(("to=", "<|start|>")):
-                trimmed = trimmed[: boundary.start()]
-
-        if trimmed == body:
-            return body
-        # A trailing partial-marker strip cannot expose more trailing
-        # framing: in a run of marker prefixes, only the last can still start
-        # a marker. Settle immediately unless a header fragment was also
-        # trimmed, which can expose a new partial marker to re-check.
-        if partial_marker and trimmed == body[: len(body) - partial_marker]:
-            return trimmed
-        body = trimmed
+    return trimmed
 
 
 def safe_unframed_tail(text: str) -> str:
@@ -191,7 +201,20 @@ def safe_unframed_tail(text: str) -> str:
     whitespace run may precede `to=…`, and the first header of a turn needs
     no preceding whitespace, so a whole-buffer `to=…` fragment is held too.
     """
-    body = safe_open_body(text)
+    # Strip a trailing run of end markers first: exposing one after the
+    # whitespace trim would leak it (the marker is framing, not content).
+    # Fixpoint with safe_open_body: its partial-marker/header strip can expose
+    # a complete end marker at the tail ("ok<|eom|><" -> "ok<|eom|>").
+    body = text
+    while True:
+        stripped = TRAILING_MSG_END_RE.sub("", body)
+        if stripped != body:
+            body = stripped
+            continue
+        trimmed = safe_open_body(body)
+        if trimmed == body:
+            break
+        body = trimmed
     tail = re.search(r"\s+$", body)
     if tail is not None:
         body = body[: tail.start()]
@@ -210,15 +233,27 @@ def flush_open_body(body: str) -> str:
     body never arrived -- so it is stripped as well. The partial marker goes
     first: a complete header ends with ``<|message|>``, so none can follow one.
     """
-    # A lone "<" is ordinary text; only a marker actually in progress ("<|…")
-    # is framing cut by the token limit.
-    partial = _trailing_partial_marker_len(body)
-    if partial >= 2:
-        body = body[: len(body) - partial]
-    header = _TRAILING_BARE_HEADER_RE.search(body)
-    if header is not None:
-        body = body[: header.start()]
-    return body
+    while True:
+        # A trailing run of end markers is framing, not content (the
+        # streaming path never surfaces them either).
+        stripped = TRAILING_MSG_END_RE.sub("", body)
+        if stripped != body:
+            body = stripped
+            continue
+
+        # A lone "<" is ordinary text; only a marker actually in progress
+        # ("<|…") is framing cut by the token limit.
+        partial = _trailing_live_marker_len(body)
+        if partial >= 2:
+            body = body[: len(body) - partial]
+            continue
+
+        header = _TRAILING_BARE_HEADER_RE.search(body)
+        if header is not None:
+            body = body[: header.start()]
+            continue
+
+        return body
 
 
 def has_channel_framing(text: str) -> bool:

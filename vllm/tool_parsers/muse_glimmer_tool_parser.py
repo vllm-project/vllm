@@ -64,9 +64,6 @@ from vllm.reasoning.muse_glimmer_utils import (
     REASONING_RECIPIENT as _REASONING_RECIPIENT,
 )
 from vllm.reasoning.muse_glimmer_utils import (
-    TRAILING_MSG_END_RE as _TRAILING_MSG_END_RE,
-)
-from vllm.reasoning.muse_glimmer_utils import (
     USER_RECIPIENT as _USER_RECIPIENT,
 )
 from vllm.reasoning.muse_glimmer_utils import (
@@ -126,6 +123,10 @@ class MuseGlimmerToolParser(ToolParser):
         self._emitted_content = ""
         self._emitted_reasoning = ""
         self._emitted_tool_calls: int = 0
+        # Set while the unframed fallback has emitted content: the segmenter
+        # drops pre-header text, so the framed path must re-anchor the cursor
+        # instead of wedging on it.
+        self._content_unframed = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -272,7 +273,7 @@ class MuseGlimmerToolParser(ToolParser):
         # trailing end marker: it is framing, and the streaming path never
         # surfaces it.
         if not reasoning and _MSG_HEADER_RE.search(text) is None:
-            trimmed = flush_open_body(_TRAILING_MSG_END_RE.sub("", text))
+            trimmed = flush_open_body(text)
             return trimmed or None
         return None
 
@@ -353,6 +354,7 @@ class MuseGlimmerToolParser(ToolParser):
             self._emitted_content = ""
             self._emitted_reasoning = ""
             self._emitted_tool_calls = 0
+            self._content_unframed = False
 
         if not has_channel_framing(current_text):
             # No channel framing anywhere (e.g. a grammar-constrained answer
@@ -362,6 +364,7 @@ class MuseGlimmerToolParser(ToolParser):
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
+            self._content_unframed = bool(self._emitted_content)
             return DeltaMessage(content=content_delta) if content_delta else None
 
         try:
@@ -373,6 +376,12 @@ class MuseGlimmerToolParser(ToolParser):
 
             # Trim the tail of a channel that is still growing, so the emitted
             # prefix never shrinks between deltas.
+            if self._content_unframed and content:
+                if not content.startswith(self._emitted_content):
+                    # The segmenter dropped the pre-header text the fallback
+                    # already emitted; re-anchor the cursor rather than wedge.
+                    self._emitted_content = ""
+                self._content_unframed = False
             if content_open:
                 content = safe_open_body(content)
             if reasoning_open:
