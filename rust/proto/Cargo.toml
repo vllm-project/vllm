@@ -1,6 +1,6 @@
 [package]
 name = "vllm-proto"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 description = "Protobuf messages and gRPC bindings for the vLLM Rust frontend"
