@@ -90,7 +90,9 @@ def cleanup_gpu_memory_between_tests() -> Generator[None, None, None]:
             devices=list(range(torch.accelerator.device_count())),
             threshold_ratio=0.1,
         )
-    except ValueError as e:
+    except Exception as e:
+        # NVML is not usable on MIG slices (raises NVMLError_NoPermission);
+        # cleanup is best-effort, so never fail a test over it.
         logger.info("Failed to clean GPU memory: %s", e)
 
 
