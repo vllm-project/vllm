@@ -620,3 +620,59 @@ def test_dsv4_fast_topk_bias_vl():
     assert topk_ids.dtype == torch.int64
     torch.testing.assert_close(topk_ids_ref.to(torch.int64), topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize("num_tokens", [1, 8, 64])
+@pytest.mark.parametrize("renormalize", [False, True])
+def test_rocm_fused_router_gate_matches_gate_gemm_plus_selection(
+    num_tokens: int, renormalize: bool
+) -> None:
+    """The fused gate must route exactly like a gate GEMM followed by top-k.
+
+    The fused kernel keeps the logits in registers, so a scoring or tie-break
+    drift would silently reroute tokens rather than fail loudly.
+    """
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        rocm_fused_router_gate,
+    )
+
+    torch.manual_seed(0)
+    hidden_size, num_experts, topk = 7168, 384, 8
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    router_weight = (
+        torch.randn(num_experts, hidden_size, dtype=torch.float32, device="cuda")
+        * hidden_size**-0.5
+    ).to(torch.bfloat16)
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+
+    gating_output = hidden_states.float() @ router_weight.float().t()
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+
+    topk_weights, topk_ids = rocm_fused_router_gate(
+        hidden_states,
+        router_weight,
+        correction_bias,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+    )
+
+    torch.testing.assert_close(topk_ids_ref, topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-3, rtol=2e-3)
