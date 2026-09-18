@@ -215,7 +215,10 @@ class PagedShmCache:
         4. Return the reconstructed item; finally close the read handle.
         """
         try:
-            alloc = self._client.open_read(PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash, timeout=self.open_write_timeout)
+            alloc = self._client.open_read(
+                PROCESSOR_CACHE_MM_HASH_PREFIX + mm_hash,
+                timeout=self.open_write_timeout,
+            )
             try:
                 with self.stream:
                     mm_item = read_decoded_from_blocks(

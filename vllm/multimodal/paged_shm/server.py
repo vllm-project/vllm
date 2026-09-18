@@ -1045,7 +1045,7 @@ class PagedShmServerProc:
         self.parent_conn = parent_conn
         self._finalizer = weakref.finalize(self, self.shutdown)
 
-    def start(self, timeout: float = 5.0):
+    def start(self, timeout: float = 60.0):
         self.proc.start()
         if not self.parent_conn.poll(timeout):
             self.proc.terminate()
@@ -1054,7 +1054,7 @@ class PagedShmServerProc:
         self.address = self.parent_conn.recv()
         self.parent_conn.close()
 
-    def shutdown(self, timeout: float = 5.0):
+    def shutdown(self, timeout: float = 60.0):
         if self.proc.is_alive() and self.address:
             try:
                 ctx = zmq.Context()
