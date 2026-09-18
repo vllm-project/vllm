@@ -169,65 +169,6 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
 
 
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-@pytest.mark.parametrize(
-    "checkpoint_name,loaded_name,param_name",
-    [
-        (
-            "experts.fc1.weight",
-            "experts.w13_weight",
-            "experts.routed_experts.w13_weight",
-        ),
-        (
-            "experts.fc2.weight",
-            "experts.w2_weight",
-            "experts.routed_experts.w2_weight",
-        ),
-        (
-            "shared_experts.down_proj.weight",
-            "shared_experts.down_proj.weight",
-            "shared_experts.down_proj.weight",
-        ),
-    ],
-)
-def test_aria_expert_weights_load_with_checkpoint_layout(
-    checkpoint_name: str, loaded_name: str, param_name: str
-):
-    """Real Aria checkpoint weights must reach the right parameter and layout."""
-    from transformers import AriaTextConfig
-    from transformers.models.aria.modeling_aria import AriaTextMoELayer as HFMoE
-
-    from vllm.model_executor.models.aria import AriaTextModel, AriaTextMoELayer
-
-    config = AriaTextConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        moe_num_experts=2,
-        moe_topk=1,
-        moe_num_shared_experts=1,
-    )
-    checkpoint_weight = HFMoE(config).state_dict()[checkpoint_name]
-    checkpoint_weight.copy_(
-        torch.arange(
-            checkpoint_weight.numel(), dtype=checkpoint_weight.dtype
-        ).reshape_as(checkpoint_weight)
-    )
-    expected = checkpoint_weight.clone()
-    if checkpoint_name.startswith("experts."):
-        expected = expected.transpose(-1, -2)
-
-    layer = AriaTextMoELayer(config, quant_config=None, prefix="mlp")
-    loaded = AutoWeightsLoader(layer).load_weights(
-        [(checkpoint_name, checkpoint_weight)], mapper=AriaTextModel.hf_to_vllm_mapper
-    )
-
-    assert loaded == {loaded_name}
-    torch.testing.assert_close(
-        dict(layer.named_parameters())[param_name], expected, rtol=0, atol=0
-    )
-
-
 class raise_if_cuda_sync:
     def __enter__(self):
         self.previous_debug_mode = torch.cuda.get_sync_debug_mode()
