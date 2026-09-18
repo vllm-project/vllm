@@ -11,7 +11,10 @@ from vllm.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -73,9 +76,10 @@ def _o_proj_is_ptpc_fp8(o_proj: torch.nn.Module) -> bool:
 
     Mutually exclusive with MXFP4 fusion (kMxfp4Dynamic) on the same layer.
     Fusion is a no-op unless Step 1 attached Fp8PtpcOnlineLinearMethod and
-    the chosen FP8 kernel returned an input_quant_key.
+    the chosen FP8 kernel returned an input_quant_key (stored as
+    layer._input_quant_key; read via get_input_quant_key).
     """
-    return getattr(o_proj, "input_quant_key", None) == kFp8DynamicTokenSym
+    return get_input_quant_key(o_proj) == kFp8DynamicTokenSym
 
 
 def _wrap_ptpc_activation(
