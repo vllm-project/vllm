@@ -130,39 +130,52 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             # All of this is per builder, i.e. per KV cache group: block ids are
             # only unique within a group, so state shared across groups would
             # let unrelated blocks collide on the same cursor entry.
-            num_slots = self._replayssm_num_slots(vllm_config)
-            self.replayssm_write_pos = torch.zeros(
-                num_slots, dtype=torch.int32, device=device
-            )
-            self.replayssm_pending_reset = torch.zeros(
-                num_slots, dtype=torch.int32, device=device
-            )
-            self.replayssm_slot_buf = torch.zeros(
-                max(
-                    self.decode_cudagraph_max_bs,
-                    vllm_config.scheduler_config.max_num_seqs,
-                ),
-                dtype=torch.int32,
-                device=device,
-            )
-            logger.info_once(
-                "KDA ReplaySSM enabled on ROCm: cache_len=%d, verify window=%d, "
-                "write_pos_slots=%d.",
-                self.replayssm_cache_len,
-                self.replayssm_max_query_len,
-                self.replayssm_write_pos.numel(),
-            )
+            # Nightly constructs builders during CUDA-graph profiling *before*
+            # cache_config.num_gpu_blocks is published; defer until it is.
+            self.replayssm_write_pos = None
+            self.replayssm_slot_buf = None
+            self._ensure_replayssm_slots()
         else:
             self.replayssm_write_pos = None
 
-    @staticmethod
-    def _replayssm_num_slots(vllm_config) -> int:
-        num_slots = vllm_config.cache_config.num_gpu_blocks
+    def _replayssm_num_slots(self) -> int | None:
+        cfg = self.vllm_config.cache_config
+        num_slots = cfg.num_gpu_blocks
         if num_slots is None:
-            raise RuntimeError(
-                "KDA ReplaySSM metadata builder requires num_gpu_blocks to be set"
-            )
+            num_slots = cfg.num_gpu_blocks_override
         return num_slots
+
+    def _ensure_replayssm_slots(self) -> bool:
+        if not self.use_kda_replayssm:
+            return False
+        if self.replayssm_write_pos is not None:
+            return True
+        num_slots = self._replayssm_num_slots()
+        if num_slots is None:
+            return False
+        device = self.device
+        self.replayssm_write_pos = torch.zeros(
+            num_slots, dtype=torch.int32, device=device
+        )
+        self.replayssm_pending_reset = torch.zeros(
+            num_slots, dtype=torch.int32, device=device
+        )
+        self.replayssm_slot_buf = torch.zeros(
+            max(
+                self.decode_cudagraph_max_bs,
+                self.vllm_config.scheduler_config.max_num_seqs,
+            ),
+            dtype=torch.int32,
+            device=device,
+        )
+        logger.info_once(
+            "KDA ReplaySSM enabled on ROCm: cache_len=%d, verify window=%d, "
+            "write_pos_slots=%d.",
+            self.replayssm_cache_len,
+            self.replayssm_max_query_len,
+            self.replayssm_write_pos.numel(),
+        )
+        return True
 
     def _build_chunk_metadata(
         self,
@@ -185,6 +198,12 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             self._replayssm_committed_this_step = False
         metadata = super().build(*args, **kwargs)
         if not self.use_kda_replayssm:
+            return metadata
+        if not self._ensure_replayssm_slots():
+            logger.warning(
+                "KDA ReplaySSM: num_gpu_blocks still unset; skipping ReplaySSM "
+                "metadata for this step (typical during CUDA-graph profiling)."
+            )
             return metadata
         self._attach_kda_replayssm(metadata)
         return metadata
