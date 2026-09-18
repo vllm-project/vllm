@@ -125,6 +125,9 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
 )
+SPARSE_BACKEND_BATCH_SPECS["multi_chunk_prefill"] = BatchSpec(
+    seq_lens=[256] * 2, query_lens=[256] * 2
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -421,7 +424,19 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    monkeypatch,
 ):
+    if batch_name == "multi_chunk_prefill":
+        if (
+            backend_cls != FlashMLASparseBackend
+            or kv_cache_dtype != "fp8_ds_mla"
+            or tensor_parallel_size != 4
+        ):
+            pytest.skip("Exercises FlashMLA's separate FP8 prefill chunks")
+        monkeypatch.setattr(
+            "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
+            lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
+        )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -774,6 +789,10 @@ def test_sparse_backend_decode_correctness(
     )
 
     with torch.inference_mode():
+        if backend_cls == FlashMLASparseBackend and kv_cache_dtype == "fp8_ds_mla":
+            from vllm.v1.worker.workspace import current_workspace_manager
+
+            current_workspace_manager().lock()
         backend_output = mock_layer.forward_impl(
             query_vllm,
             kv_c_vllm,

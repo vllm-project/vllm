@@ -718,6 +718,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         if self.index_group is not None:
             self.index_group.set_logical_topk_ready(self.index_group_index)
 
+    def profile_run(self, device: torch.device) -> None:
+        """Account for backend temporaries when attention execution is skipped."""
+
     def prepare_for_batch(self, attn_metadata: T | None) -> None:
         if self.index_group is not None:
             self.index_group.prepare_for_batch(self.index_group_index, attn_metadata)
