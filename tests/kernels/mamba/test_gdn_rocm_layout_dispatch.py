@@ -23,7 +23,12 @@ from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
 
 PREFIX = "model.layers.0.linear_attn"
 H = 2  # num key heads
