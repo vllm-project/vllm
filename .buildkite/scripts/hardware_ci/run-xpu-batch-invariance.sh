@@ -3,11 +3,13 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-model="${VLLM_TEST_POWERMOE_MODEL:-ibm/PowerMoE-3b}"
+model="${VLLM_TEST_QWEN3_30B_A3B_MODEL:-Qwen/Qwen3-30B-A3B}"
 port="${VLLM_TEST_PORT:-8000}"
+mode="${VLLM_TEST_BATCH_INVARIANCE_MODE:-all}"
+prompt_style="${VLLM_TEST_PROMPT_STYLE:-token-ids}"
+print_responses="${VLLM_TEST_PRINT_RESPONSES:-0}"
 server_pid=
 server_log=
-decode_token=11
 num_decode_tokens=128
 
 cd "$repo_root"
@@ -49,44 +51,79 @@ wait_for_server() {
     return 1
 }
 
-request_logits() {
+request_outputs() {
     local prompts_json=$1
     local expected_choices=$2
     local response
 
     response=$(printf \
-        '{"model":"%s","prompt":%s,"temperature":0,"seed":0,"max_tokens":%s,"logprobs":64,"ignore_eos":true,"allowed_token_ids":[%s]}' \
-        "$model" "$prompts_json" "$num_decode_tokens" "$decode_token" |
+        '{"model":"%s","prompt":%s,"temperature":0.7,"top_p":0.95,"seed":0,"max_tokens":%s,"logprobs":64,"ignore_eos":true,"return_token_ids":true}' \
+        "$model" "$prompts_json" "$num_decode_tokens" |
         curl --fail --silent --show-error \
             --max-time 1200 \
             "http://127.0.0.1:$port/v1/completions" \
             -H "Content-Type: application/json" \
             --data-binary @-)
 
+    case "$print_responses" in
+        0) ;;
+        1) printf '%s\n' "$response" >&2 ;;
+        summary)
+            if ! command -v jq >/dev/null; then
+                echo "jq is required to print response summaries" >&2
+                return 1
+            fi
+            jq --raw-output '.choices[] | .text' <<<"$response" >&2
+            ;;
+        *)
+            echo "Unsupported response print mode: $print_responses" >&2
+            return 1
+            ;;
+    esac
+
+    mapfile -t token_id_arrays < <(
+        grep -o '"token_ids":\[[^]]*\]' <<<"$response" |
+            sed 's/^"token_ids":\[//; s/\]$//'
+    )
     mapfile -t logprob_arrays < <(
         grep -o '"token_logprobs":\[[^]]*\]' <<<"$response" |
             sed 's/^"token_logprobs":\[//; s/\]$//'
     )
-    if [[ "${#logprob_arrays[@]}" -ne "$expected_choices" ]]; then
-        echo "Expected $expected_choices choices, received ${#logprob_arrays[@]}" >&2
+    if [[ "${#token_id_arrays[@]}" -ne "$expected_choices" ]] ||
+        [[ "${#logprob_arrays[@]}" -ne "$expected_choices" ]]; then
+        echo "Expected $expected_choices choices with token IDs and logits" >&2
         return 1
     fi
+    local index
     local array
     local value
     local -a values
-    for array in "${logprob_arrays[@]}"; do
+    for index in "${!logprob_arrays[@]}"; do
+        array="${logprob_arrays[index]}"
         IFS=, read -r -a values <<<"$array"
         if [[ "${#values[@]}" -ne "$num_decode_tokens" ]]; then
             echo "Completion returned an unexpected number of decode steps" >&2
             return 1
         fi
+        IFS=, read -r -a values <<<"${token_id_arrays[index]}"
+        if [[ "${#values[@]}" -ne "$num_decode_tokens" ]]; then
+            echo "Completion returned an unexpected number of generated tokens" >&2
+            return 1
+        fi
+        for value in "${values[@]}"; do
+            if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+                echo "Completion returned an invalid token ID" >&2
+                return 1
+            fi
+        done
+        IFS=, read -r -a values <<<"$array"
         for value in "${values[@]}"; do
             if [[ ! "$value" =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
                 echo "Completion returned non-finite raw logits" >&2
                 return 1
             fi
         done
-        printf '%s\n' "$array"
+        printf '%s|%s\n' "${token_id_arrays[index]}" "${logprob_arrays[index]}"
     done
 }
 
@@ -95,6 +132,16 @@ make_prompt() {
     local offset=${2:-0}
     local i
     local -a tokens
+
+    if [[ "$prompt_style" == "natural" ]]; then
+        local prompt="Use the following system-design context to answer the question. Scenario $offset:"
+        for ((i = 0; i < length; i++)); do
+            prompt+=" context"
+        done
+        prompt+="\\n\\nQuestion: How should batch-invariant inference behave when this same request is decoded alongside unrelated requests?\\nAnswer:"
+        printf '"%s"' "$prompt"
+        return
+    fi
 
     for ((i = 0; i < length; i++)); do
         tokens+=( $((3 + (i + offset) % 253)) )
@@ -107,18 +154,36 @@ first_difference() {
     local actual=$1
     local expected=$2
     local position=$3
+    local actual_tokens=${actual%%|*}
+    local expected_tokens=${expected%%|*}
+    local actual_logits=${actual#*|}
+    local expected_logits=${expected#*|}
+    local -a actual_token_values
+    local -a expected_token_values
     local -a actual_values
     local -a expected_values
     local step
 
-    IFS=, read -r -a actual_values <<<"$actual"
-    IFS=, read -r -a expected_values <<<"$expected"
+    IFS=, read -r -a actual_token_values <<<"$actual_tokens"
+    IFS=, read -r -a expected_token_values <<<"$expected_tokens"
     for ((step = 0; step < num_decode_tokens; step++)); do
-        if [[ "${actual_values[step]}" != "${expected_values[step]}" ]]; then
-            printf 'batch position %s: step=%s, token=%s, baseline=%s, actual=%s' \
+        if [[ "${actual_token_values[step]}" != "${expected_token_values[step]}" ]]; then
+            printf 'batch position %s: step=%s, baseline token=%s, actual token=%s' \
                 "$position" \
                 "$step" \
-                "$decode_token" \
+                "${expected_token_values[step]}" \
+                "${actual_token_values[step]}"
+            return
+        fi
+    done
+    IFS=, read -r -a actual_values <<<"$actual_logits"
+    IFS=, read -r -a expected_values <<<"$expected_logits"
+    for ((step = 0; step < num_decode_tokens; step++)); do
+        if [[ "${actual_values[step]}" != "${expected_values[step]}" ]]; then
+            printf 'batch position %s: step=%s, token=%s, baseline logit=%s, actual logit=%s' \
+                "$position" \
+                "$step" \
+                "${expected_token_values[step]}" \
                 "${expected_values[step]}" \
                 "${actual_values[step]}"
             return
@@ -132,13 +197,13 @@ run_e2e() {
     local batch_invariant=0
     local needle
     local batch
-    local baseline_logits
-    local batch_logits_output
+    local baseline_output
+    local batch_outputs
     local difference
     local position
     local -a fillers
-    local -a batch_logits
-    local -a differences
+    local -a batch_outputs
+    local -a differences=()
 
     if [[ "$mode" == "batch-invariant" ]]; then
         batch_invariant=1
@@ -146,7 +211,7 @@ run_e2e() {
 
     server_log=$(mktemp "${TMPDIR:-/tmp}/xpu-batch-invariance-${mode}.XXXXXX.log")
     VLLM_BATCH_INVARIANT="$batch_invariant" vllm serve "$model" \
-        --tensor-parallel-size 2 \
+        --tensor-parallel-size 4 \
         --max-model-len 1024 \
         --max-num-seqs 16 \
         --max-num-batched-tokens 512 \
@@ -167,38 +232,52 @@ run_e2e() {
     done
     batch="[$needle,${fillers[0]},${fillers[1]},${fillers[2]},${fillers[3]},${fillers[4]},${fillers[5]},$needle,${fillers[6]},${fillers[7]},${fillers[8]},${fillers[9]},${fillers[10]},${fillers[11]},${fillers[12]},$needle]"
 
-    echo "Requesting BS=1 baseline (257 prefill tokens, $num_decode_tokens decode tokens)..."
-    baseline_logits=$(request_logits "$needle" 1)
+    echo "Requesting BS=1 baseline ($num_decode_tokens decode tokens)..."
+    baseline_output=$(request_outputs "$needle" 1)
     echo "Received BS=1 baseline."
-    echo "Requesting BS=16 batch (3358 prefill tokens, $((16 * num_decode_tokens)) decode tokens)..."
-    batch_logits_output=$(request_logits "$batch" 16)
-    mapfile -t batch_logits <<<"$batch_logits_output"
-    echo "Received BS=16 batch; comparing logits..."
+    echo "Requesting BS=16 batch ($((16 * num_decode_tokens)) decode tokens)..."
+    batch_outputs=$(request_outputs "$batch" 16)
+    mapfile -t batch_outputs <<<"$batch_outputs"
+    echo "Received BS=16 batch; comparing generated tokens and logits..."
 
     for position in 0 7 15; do
-        difference=$(first_difference "${batch_logits[position]}" "$baseline_logits" "$position")
+        difference=$(first_difference "${batch_outputs[position]}" "$baseline_output" "$position")
         if [[ -n "$difference" ]]; then
             differences+=("$difference")
         fi
     done
 
     if [[ "$expectation" == "identical" ]] && [[ "${#differences[@]}" -ne 0 ]]; then
-        echo "Batch-invariant PowerMoE logits changed: ${differences[*]}" >&2
+        echo "Batch-invariant Qwen3-30B-A3B logits changed: ${differences[*]}" >&2
         return 1
     fi
     if [[ "$expectation" == "different" ]] &&
         [[ "${#differences[@]}" -eq 0 ]]; then
-        echo "PowerMoE produced identical BS=1 and BS=16 logits without batch-invariant mode" >&2
+        echo "Qwen3-30B-A3B produced identical BS=1 and BS=16 logits without batch-invariant mode" >&2
         return 1
     fi
     if [[ "${#differences[@]}" -ne 0 ]]; then
         echo "BS=1 vs BS=16 differences: ${differences[*]}"
     fi
-    echo "PowerMoE logits were $expectation as expected"
+    echo "Qwen3-30B-A3B logits were $expectation as expected"
     cleanup_server
     rm -f "$server_log"
     server_log=
 }
 
-run_e2e batch-variant different
-run_e2e batch-invariant identical
+case "$mode" in
+    all)
+        run_e2e batch-variant different
+        run_e2e batch-invariant identical
+        ;;
+    batch-variant)
+        run_e2e batch-variant different
+        ;;
+    batch-invariant)
+        run_e2e batch-invariant identical
+        ;;
+    *)
+        echo "Unsupported batch invariance mode: $mode" >&2
+        exit 1
+        ;;
+esac
