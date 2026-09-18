@@ -1067,7 +1067,9 @@ class OpenAIServingChat(GenerateBaseServing):
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
+            is_finish_reason_tool_calls = (
+                auto_tools_called and output.finish_reason == "stop"
+            ) or (
                 request.tool_choice
                 and request.tool_choice == "required"
                 and output.finish_reason == "stop"

@@ -22,6 +22,7 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
+    FunctionCall,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -669,6 +670,44 @@ async def _single_request_output(
     request_output: RequestOutput,
 ) -> AsyncIterator[RequestOutput]:
     yield request_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_reason"),
+    [("length", "length"), ("stop", "tool_calls")],
+)
+@pytest.mark.parametrize("arguments", ['{"city":"Paris"}', '{"city":"Par'])
+async def test_nonstream_auto_tool_call_preserves_length(
+    finish_reason, expected_reason, arguments
+):
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_auto_tools = True
+    serving.parser_cls = MagicMock()
+    tool_call = FunctionCall(name="get_weather", arguments=arguments)
+    parser = MagicMock()
+    parser.parse.return_value = (None, None, [tool_call])
+    parser.count_reasoning_tokens.return_value = 0
+    request_output = _make_metrics_request_output()
+    request_output.outputs[0].finish_reason = finish_reason
+
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is the weather?"}],
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice="auto",
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=parser,
+    )
+    assert response.choices[0].finish_reason == expected_reason
+    assert response.choices[0].message.tool_calls[0].function == tool_call
 
 
 async def _stream_request_outputs(
