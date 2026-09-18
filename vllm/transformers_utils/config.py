@@ -162,11 +162,12 @@ _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
-# Model types whose checkpoints store shared RoPE parameters alongside the
-# per-layer-type dicts (e.g. Laguna's `original_max_position_embeddings`).
-# Since transformers 5.17, `validate_rope` treats every top-level value of such
-# a dict as a layer's parameters and raises on the shared ones.
-_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna"}
+# Model types whose checkpoints carry shared RoPE parameters alongside the
+# per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
+# top-level value of such a dict as a layer's parameters and raises on the
+# shared ones. `laguna` gets them injected by `convert_rope_params_to_dict`;
+# `gemma4_text` ships them in the checkpoint itself.
+_PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna", "gemma4_text"}
 
 # Model types whose checkpoints declare `layer_types` entries that upstream
 # transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
@@ -224,6 +225,35 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+def _install_hf_config_validator(
+    name: str, validator: Callable, supersedes: Callable
+) -> None:
+    """Replace a ``PretrainedConfig`` validator on every ``@strict`` snapshot.
+
+    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
+    at class creation and automatic post-``__init__`` validation dispatches off
+    that frozen list, so assigning the class attribute alone only affects
+    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
+    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    identity to leave a genuine per-model override in place.
+    """
+    setattr(PretrainedConfig, name, validator)
+
+    seen: set[int] = set()
+    stack = [PretrainedConfig]
+    while stack:
+        cls = stack.pop()
+        if id(cls) in seen:
+            continue
+        seen.add(id(cls))
+        validators = cls.__dict__.get("__class_validators__")
+        if isinstance(validators, list) and any(v is supersedes for v in validators):
+            cls.__class_validators__ = [
+                validator if v is supersedes else v for v in validators
+            ]
+        stack.extend(cls.__subclasses__())
+
+
 def _patch_hf_transformers_validate_rope():
     """Transformers v5 moved the ignore_keys option from the method signature of
     validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
@@ -231,7 +261,6 @@ def _patch_hf_transformers_validate_rope():
     validate_rope() with the ignore_keys parameter work with newer versions of
     hf transformers (from v5 onwards)
     """
-
     if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
         return
 
@@ -251,7 +280,9 @@ def _patch_hf_transformers_validate_rope():
         return result
 
     patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
@@ -274,7 +305,7 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
             layer_types = set(rope_parameters) & set(
                 hf_configuration_utils.ALLOWED_LAYER_TYPES
             )
-            if shared_keys := set(rope_parameters) - layer_types:
+            if layer_types and (shared_keys := set(rope_parameters) - layer_types):
                 for key in shared_keys:
                     del rope_parameters[key]
                 logger.warning(
@@ -285,7 +316,9 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
         return _original_validate_rope(self, *args, **kwargs)
 
     patched_validate_rope.__vllm_nested_rope_patched__ = True  # type: ignore[attr-defined]
-    PretrainedConfig.validate_rope = patched_validate_rope
+    _install_hf_config_validator(
+        "validate_rope", patched_validate_rope, _original_validate_rope
+    )
 
 
 def _patch_hf_transformers_allowed_layer_types(
@@ -489,10 +522,11 @@ def register_config_parser(config_format: str):
     """Register a customized vllm config parser.
      When a config format is not supported by vllm, you can register a customized
     config parser to support it.
-     Args:
-         config_format (str): The config parser format name.
-     Examples:
 
+    Args:
+         config_format (str): The config parser format name.
+
+    Examples:
          >>> from vllm.transformers_utils.config import (get_config_parser,
                                                          register_config_parser)
          >>> from vllm.transformers_utils.config_parser_base import ConfigParserBase
@@ -511,6 +545,7 @@ def register_config_parser(config_format: str):
          >>>
          >>> type(get_config_parser("custom_config_parser"))
          <class 'CustomConfigParser'>
+
     """  # noqa: E501
 
     def _wrapper(config_parser_cls):
@@ -548,7 +583,6 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
     """Patch legacy RoPE type fields for backwards compatibility with
     older custom models which would otherwise fail to load."""
-
     # No RoPE parameters to patch
     if rope_parameters is None:
         return
@@ -721,9 +755,7 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
-    """
-    Update kwargs for AutoConfig initialization based on model_type
-    """
+    """Update kwargs for AutoConfig initialization based on model_type."""
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs
@@ -748,8 +780,7 @@ def maybe_override_with_speculators(
     hf_token: bool | str | None = None,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
-    """
-    Resolve model configuration when speculators are detected.
+    """Resolve model configuration when speculators are detected.
 
     Checks if the provided model is a speculators model and if so, extracts
     the target model configuration and builds the speculative config.
@@ -764,6 +795,7 @@ def maybe_override_with_speculators(
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
+
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PretrainedConfig.get_config_dict(
@@ -938,8 +970,7 @@ def get_pooling_config(
     model: str,
     revision: str | None = "main",
 ) -> dict[str, Any] | None:
-    """
-    This function gets the pooling and normalize
+    """This function gets the pooling and normalize
     config from the model - only applies to
     sentence-transformers models.
 
@@ -951,6 +982,7 @@ def get_pooling_config(
     Returns:
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
+
     """
     modules_file_name = "modules.json"
 
@@ -1035,19 +1067,17 @@ def parse_pooling_type(pooling_name: str):
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
 ) -> dict[str, Any] | None:
-    """
-    Returns the tokenization configuration dictionary for a
+    """Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
 
-    Parameters:
-    - model (str|Path): The name of the Sentence Transformer
-    BERT model.
-    - revision (str, optional): The revision of the m
-    odel to use. Defaults to 'main'.
+    Args:
+        model (str|Path): The name of the Sentence Transformer BERT model.
+        revision (str, optional): The revision of the model to use. Defaults to 'main'.
 
     Returns:
     - dict: A dictionary containing the configuration parameters
     for the Sentence Transformer BERT model.
+
     """
     sentence_transformer_config_files = [
         "sentence_bert_config.json",
@@ -1308,9 +1338,7 @@ def get_safetensors_params_metadata(
     *,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Get the safetensors parameters metadata for remote/local model repository.
-    """
+    """Get the safetensors parameters metadata for remote/local model repository."""
     if (model_path := Path(model)).exists():
         return _read_safetensors_metadata_in_dir(model_path)
 
@@ -1354,6 +1382,7 @@ def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool |
     Returns:
         `None` if the checkpoint contents could not be determined, for example
         because it is not stored as safetensors.
+
     """
     metadata = get_safetensors_params_metadata(model, revision=revision)
     if not metadata:

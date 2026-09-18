@@ -537,6 +537,7 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         Returns:
             Intermediate tensors on non-final stages. On the final stage,
             normalized hidden states, paired with auxiliary states if captured.
+
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:

@@ -294,7 +294,6 @@ def create_vllm_config(
 
 def test_write_mode_saves_local_block_ids():
     """Write mode records local block ids in MoRIIOConnectorMetadata.reqs_to_save."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_producer")
     scheduler = create_scheduler(vllm_config)
@@ -405,7 +404,6 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
 
 def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
@@ -631,7 +629,6 @@ def test_register_kv_caches(mock_parallel_groups):
 )
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
-
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
     # Create test kv cache tensors using KVCacheSpec layout

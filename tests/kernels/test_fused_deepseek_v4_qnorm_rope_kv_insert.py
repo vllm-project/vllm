@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Standalone unit test for the horizontally-fused DeepseekV4-MLA kernel:
+"""Standalone unit test for the horizontally-fused DeepseekV4-MLA kernel:
 
   fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert
     - Q side:  optional per-head RMSNorm + GPT-J RoPE on last 64 dims
