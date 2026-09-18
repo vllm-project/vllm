@@ -25,7 +25,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -38,12 +42,14 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
@@ -118,7 +124,7 @@ class NemotronHMLP(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -198,6 +204,17 @@ class NemotronHMoE(nn.Module):
                 quant_config=quant_config,
                 disable_tp=self.is_sequence_parallel,
                 prefix=f"{prefix}.fc2_latent_proj",
+            )
+            # A bias-free, unquantized linear commutes with the TP sum
+            # (sum_r W x_r == W sum_r x_r), so one reduce after the transform
+            # suffices. Test the layer, not the model-wide `quant_config`: ModelOpt
+            # excludes the latent projections, so quantized checkpoints still get
+            # an UnquantizedLinearMethod here.
+            self.fc2_latent_proj.reduce_commutative = (
+                not config.mlp_bias
+                and isinstance(
+                    self.fc2_latent_proj.quant_method, UnquantizedLinearMethod
+                )
             )
         else:
             self.fc1_latent_proj = None
@@ -747,7 +764,8 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, vllm_config.model_config.dtype
+                base_dtype,
+                vllm_config.model_config.dtype,
             )
         return base_dtype
 
@@ -766,6 +784,7 @@ class NemotronHForCausalLM(
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
             - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+
         """
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
@@ -784,10 +803,11 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shape,
-                hf_config.n_groups,
-                parallel_config.tensor_parallel_size,
-                cache_config.replayssm_buffer_len,
+                base_shapes=base_shape,
+                n_groups=hf_config.n_groups,
+                tp_world_size=parallel_config.tensor_parallel_size,
+                logical_window=cache_config.replayssm_buffer_len,
+                backend=vllm_config.mamba_config.backend,
             )
         return base_shape
 

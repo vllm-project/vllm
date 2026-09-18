@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
@@ -33,6 +34,55 @@ def test_grouped_conv_matches_reference(block_size: int):
             ) * hidden_blocks[:, position - tap]
 
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "batch,num_groups,group_size,block_size,taps",
+    [
+        (7, 13, 11, 5, 1),
+        (7, 13, 11, 5, 3),
+        (7, 13, 11, 8, 2),
+        (16, 64, 16, 8, 2),
+        (16, 160, 16, 8, 2),
+    ],
+)
+def test_grouped_conv_triton_matches_reference(
+    dtype: torch.dtype,
+    batch: int,
+    num_groups: int,
+    group_size: int,
+    block_size: int,
+    taps: int,
+):
+    torch.manual_seed(0)
+    rows = batch * block_size
+    hidden = torch.randn(rows, num_groups * group_size, device="cuda", dtype=dtype)
+    base = torch.randn(taps, num_groups * group_size, device="cuda", dtype=dtype)
+    projected = torch.randn(rows, 2, taps, num_groups, device="cuda", dtype=dtype)
+    delta = projected[:, 1]
+
+    actual = _grouped_conv(
+        hidden, delta, base, block_size, num_groups, group_size, taps
+    )
+
+    hidden_blocks = hidden.float().view(batch, block_size, num_groups, group_size)
+    expected = torch.zeros_like(hidden_blocks)
+    base_blocks = base.float().view(taps, num_groups, group_size)
+    delta_blocks = delta.float().view(batch, block_size, taps, num_groups)
+    for position in range(block_size):
+        for tap in range(min(taps, position + 1)):
+            expected[:, position] += (
+                base_blocks[tap] + delta_blocks[:, position, tap, :, None]
+            ) * hidden_blocks[:, position - tap]
+
+    torch.testing.assert_close(
+        actual,
+        expected.flatten(0, 1).flatten(-2).to(dtype),
+        rtol=1e-2 if dtype is torch.bfloat16 else 1e-5,
+        atol=1e-2 if dtype is torch.bfloat16 else 1e-5,
+    )
 
 
 def test_selector_edges_match_sequential_reference():
@@ -116,3 +166,119 @@ def test_selector_asks_for_fp32_proposal_logits():
 
     assert dtype is torch.float32
     assert fill == float("-inf")
+
+
+@pytest.mark.skip_global_cleanup
+def test_dflash2_model_decoder_layer_cls(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash2 import (
+        DFlash2Qwen3DecoderLayer,
+        DFlash2Qwen3Model,
+    )
+
+    # 1. Mock get_current_vllm_config and TP groups
+    mock_current_vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            user_specified_block_size=False,
+            kv_cache_dtype_skip_layers=[],
+            cache_dtype="auto",
+            sliding_window=None,
+            enable_prefix_caching=False,
+        ),
+        kv_transfer_config=None,
+        speculative_config=None,
+        attention_config=SimpleNamespace(
+            use_non_causal=False,
+            backend=None,
+            backend_per_kind={},
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        compilation_config=SimpleNamespace(
+            compile_custom_ops=False,
+            custom_ops="all",
+            enabled_custom_ops=set(),
+            static_forward_context={},
+            mode=0,  # CompilationMode.NONE is 0
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            is_mm_prefix_lm=False,
+            rswa_window=None,
+        ),
+        kernel_config=SimpleNamespace(
+            linear_backend="auto",
+        ),
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_attn_backend_cls",
+        lambda *args, **kwargs: (
+            "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+        ),
+    )
+
+    class MockGroup:
+        rank_in_group = 0
+        world_size = 1
+
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state._TP",
+        MockGroup(),
+    )
+
+    # 2. Mock vllm_config
+    hf_config = SimpleNamespace(
+        vocab_size=1000,
+        hidden_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_parameters={},
+        intermediate_size=512,
+        hidden_act="silu",
+        dflash_config={
+            "selector_rank": 4,
+            "selector_top_k": 3,
+            "conv_kernel_size": 3,
+            "conv_group_size": 2,
+            "use_aux_hidden_state": False,
+        },
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_config=hf_config,
+                quantization=None,
+            ),
+            num_speculative_tokens=4,
+            enable_adaptive_verification=False,
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            is_mm_prefix_lm=False,
+        ),
+        load_config=SimpleNamespace(
+            quantization=None,
+            quantization_param_path=None,
+        ),
+    )
+    mock_current_vllm_config.speculative_config = vllm_config.speculative_config
+    vllm_config.compilation_config = mock_current_vllm_config.compilation_config
+
+    # 3. Instantiate the model under meta device to avoid parameter allocation issues
+    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
+        model = DFlash2Qwen3Model(vllm_config=vllm_config)
+
+    # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
+    assert len(model.layers) == 2
+    assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)

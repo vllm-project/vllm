@@ -510,6 +510,15 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
+    /// Return the effective attention block size if all engines report the same value.
+    pub fn effective_attention_block_size(&self) -> Option<u64> {
+        let size = self.ready_response().effective_attention_block_size?;
+        self.engines
+            .iter()
+            .all(|engine| engine.ready_response.effective_attention_block_size == Some(size))
+            .then_some(size)
+    }
+
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
@@ -902,11 +911,20 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Wake the engine from sleep, optionally limiting the wake-up to specific
-    /// tags.
-    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
-        self.call_utility::<(), _>("wake_up", (tags,)).await?;
+    /// Release KV cache memory while keeping model weights resident.
+    pub async fn release_kv_cache_memory(&self) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
         Ok(())
+    }
+
+    /// Wake the engine from sleep, optionally limiting the wake-up to specific
+    /// tags, and return whether every engine is fully awake.
+    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("wake_up", (tags,))
+            .await?
+            .into_iter()
+            .all(|fully_awake| fully_awake))
     }
 
     /// Pause the scheduler so generation can be halted

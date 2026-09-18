@@ -4,6 +4,7 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
 from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
@@ -21,12 +22,12 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, ToolCall, UsageInfo
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
     GenerateResponse,
     GenerateStreamResponse,
 )
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
@@ -232,6 +233,7 @@ class OnlineDerenderer:
         Returns:
             (new_text, updated_state) — the delta text for this chunk and the
             state to pass to the next call.
+
         """
         prev_tokens = list(state.prev_tokens)
         prefix_offset = state.prefix_offset
@@ -295,6 +297,7 @@ class OnlineDerenderer:
         Returns:
             (chunk, updated_state) — the derendered SSE chunk and the state
             the client must pass to the next call.
+
         """
         if state is None:
             state = DerenderStreamState()
@@ -460,6 +463,7 @@ class OnlineDerenderer:
 
         Returns:
             (chunk, updated_state) — the derendered chunk and updated state.
+
         """
         if state is None:
             state = DerenderStreamState()

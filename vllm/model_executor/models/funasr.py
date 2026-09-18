@@ -14,7 +14,7 @@ from transformers import (
 )
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
@@ -49,7 +49,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
+)
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -261,8 +264,8 @@ class SinusoidalPositionEncoder(torch.nn.Module):
 
     def encode(
         self,
-        positions: torch.Tensor = None,
-        depth: int = None,
+        positions: torch.Tensor,
+        depth: int,
         dtype: torch.dtype = torch.float32,
     ):
         batch_size = positions.size(0)
@@ -573,8 +576,8 @@ class Transformer(nn.Module):
                 ]
             )
 
-    def forward(self, hidden_states: torch.Tensor, ilens: int = 0):
-        max_len = max(ilens)
+    def forward(self, hidden_states: torch.Tensor, ilens: torch.Tensor):
+        max_len = ilens.max()
         hidden_states = hidden_states[:, :max_len, :]
         batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
@@ -598,11 +601,10 @@ class Transformer(nn.Module):
 
 
 class FunASRAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -682,6 +684,8 @@ class FunASRModel(nn.Module):
         self.feat_permute = False
 
         if self.feat_permute:
+            if not isinstance(speech, torch.Tensor):
+                raise NotImplementedError("List audio inputs cannot be permuted")
             encoder_out, encoder_out_lens = self.encoder.audio_encoder(
                 speech.permute(0, 2, 1), speech_lengths
             )
@@ -739,6 +743,7 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -750,42 +755,29 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
 
 
 class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        mm_data = dict(mm_data)
-        mm_data["audio"] = mm_data.pop("audios")
-
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         )
-
-        return mm_data, hf_processor_mm_kwargs
-
-    def _postprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if "labels" in processed_data:
-            processed_data["input_ids"] = processed_data.pop("labels")
-
-        return processed_data
 
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalProcessingInfo:
+    ) -> MultiModalProcessingResult:
         # Dithering injects noise into the extracted features, so the
         # feature extractor is not a pure function of its input. Since the
         # processing cache assumes that processor outputs are invariant

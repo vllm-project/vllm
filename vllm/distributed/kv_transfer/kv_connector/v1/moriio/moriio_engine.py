@@ -87,6 +87,7 @@ class MoRIIOWriter:
 
         Args:
             worker: Reference to the parent worker
+
         """
         self._worker_ref: weakref_ref[MoRIIOConnectorWorker] = weakref_ref(worker)
         self._write_task_q: Queue[WriteTask] = Queue()
@@ -108,6 +109,7 @@ class MoRIIOWriter:
 
         Raises:
             RuntimeError: If worker has been garbage collected
+
         """
         worker = self._worker_ref()
         if worker is None:
@@ -131,6 +133,7 @@ class MoRIIOWriter:
 
         Args:
             task: The write task to schedule
+
         """
         self.ensure_worker_started()
         if self._is_transfer_terminal(task.transfer_id):
@@ -178,7 +181,6 @@ class MoRIIOWriter:
 
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
-
         while True:
             # Process deferred tasks first
             self._process_deferred_tasks()
@@ -275,6 +277,7 @@ class MoRIIOWriter:
 
         Returns:
             True if remote blocks are ready
+
         """
         return (
             task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
@@ -291,6 +294,7 @@ class MoRIIOWriter:
 
         Raises:
             KeyError: If allocation info is missing
+
         """
         try:
             return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
@@ -372,21 +376,24 @@ class MoRIIOWriter:
         Args:
             task: The write task
             request_info: Remote allocation information
+            remote_moriio_meta: Metadata of the remote MoRIIO agent
 
         Returns:
             The transfer plan
+
         """
         layer_cache = self.worker.kv_caches[task.layer_name]
-        geometry_key = _get_write_geometry_key(layer_cache)
-        offsets = request_info.transfer_offsets.get(geometry_key)
+        key = (task.layer_name, *_get_write_geometry_key(layer_cache))
+        offsets = request_info.transfer_offsets.get(key)
         if offsets is None:
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
                 task.local_block_ids,
                 request_info.block_ids,
                 remote_moriio_meta,
+                remote_engine_id=task.dst_engine_id,
             )
-            request_info.transfer_offsets[geometry_key] = offsets
+            request_info.transfer_offsets[key] = offsets
 
         # Get session index
         layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
@@ -411,6 +418,7 @@ class MoRIIOWriter:
         Args:
             plan: The transfer plan
             sessions: List of transfer sessions
+
         """
         if plan.use_batch:
             return [
@@ -509,6 +517,7 @@ class MoRIIOWrapper:
         moriio_engine:  MoRIIO engine instance
         tp_rank: Tensor parallel rank
         dp_rank: Data parallel rank
+
     """
 
     def __init__(

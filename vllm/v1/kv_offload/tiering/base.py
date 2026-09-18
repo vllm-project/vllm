@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Abstract interfaces and data types for the secondary tiering layer.
-"""
+"""Abstract interfaces and data types for the secondary tiering layer."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -45,8 +43,8 @@ class TieringOffloadingMetrics:
     WRITE_TIME = "vllm:kv_offload_tiering_write_time"
     PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
     CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
-    BLOCK_QUERIES = "vllm:kv_offload_tiering_chunk_queries"
-    BLOCK_HITS = "vllm:kv_offload_tiering_chunk_hits"
+    CHUNK_QUERIES = "vllm:kv_offload_tiering_chunk_queries"
+    CHUNK_HITS = "vllm:kv_offload_tiering_chunk_hits"
     PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
     PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
     PROMOTION_ALLOCATION_FAILURES = (
@@ -62,7 +60,7 @@ class TransferJob:
 
     job_id: JobId
     keys: Collection[OffloadKey]
-    block_ids: np.ndarray
+    chunk_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
 
@@ -90,14 +88,14 @@ class ParentManager(ABC):
 
     Required call sequence for each remote request:
         1. on_new_request(req_context)  — set up per-request state
-        2. lookup(key, req_context)     — check block availability
-           (repeat per block)
-        3. create_store_job(keys, req_context) — pin blocks and get a
+        2. lookup(key, req_context)     — check chunk availability
+           (repeat per chunk)
+        3. create_store_job(keys, req_context) — pin chunks and get a
            job handle
         4. on_request_finished(req_context) — clean up per-request state
 
     Steps 2-3 may be interleaved. Step 4 must be called even if no
-    blocks were found, to avoid leaking async lookup state (e.g. in
+    chunks were found, to avoid leaking async lookup state (e.g. in
     the fs tier's AsyncLookupManager).
     """
 
@@ -119,8 +117,7 @@ class ParentManager(ABC):
 
 
 class SecondaryTierManager(ABC):
-    """
-    Abstract interface for managing a single non-primary offloading tier.
+    """Abstract interface for managing a single non-primary offloading tier.
 
     Secondary tiers cannot directly access GPU memory. All data transfers
     must go through the CPU (primary) tier:
@@ -140,12 +137,12 @@ class SecondaryTierManager(ABC):
         primary_kv_view: memoryview,
         tier_type: str,
     ) -> None:
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory
-                from the registered tier type.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory
+            from the registered tier type.
+
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
@@ -154,24 +151,23 @@ class SecondaryTierManager(ABC):
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        """
-        Check whether a block exists in this secondary tier.
+        """Check whether a chunk exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            HIT if the block is present and ready,
+            HIT if the chunk is present and ready,
             MISS if not found,
-            or RETRY if the block is being transferred (retry later).
+            or RETRY if the chunk is being transferred (retry later).
+
         """
         pass
 
     @abstractmethod
     def submit_store(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to store blocks from the primary tier to this
+        """Submit an async job to store chunks from the primary tier to this
         secondary tier.
 
         This method must be lightweight and non-blocking: allocate metadata
@@ -179,52 +175,52 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.block_ids`` are valid primary-tier slots, pinned
+          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
             (ref-counted) for the duration of the transfer.
 
         The implementation is responsible for:
-          1. Filtering out blocks already present in this tier
-          2. Evicting blocks if capacity is needed
+          1. Filtering out chunks already present in this tier
+          2. Evicting chunks if capacity is needed
           3. Allocating space in this tier
-          4. Submitting the async transfer (read from primary via block_ids)
+          4. Submitting the async transfer (read from primary via chunk_ids)
 
         Report completion via ``get_finished_jobs()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and block_ids
+            job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to read from.
+
         """
         pass
 
     @abstractmethod
     def submit_load(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to load blocks from this secondary tier to the
+        """Submit an async job to load chunks from this secondary tier to the
         primary tier.
 
-        This method must be lightweight and non-blocking: mark blocks as
+        This method must be lightweight and non-blocking: mark chunks as
         in-flight and submit the transfer, but do NOT perform the data copy
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.block_ids`` are allocated primary-tier slots
+          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
             ready to receive data.
 
         The implementation must copy data from this tier into the
-        primary-tier slots identified by ``block_ids``.
+        primary-tier slots identified by ``chunk_ids``.
 
         Report completion via ``get_finished_jobs()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and block_ids
+            job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to write into.
+
         """
         pass
 
     @abstractmethod
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Return all jobs (loads and stores) that completed since the last call.
+        """Return all jobs (loads and stores) that completed since the last call.
 
         The framework uses these results to release resources and finalize
         transfers.
@@ -232,6 +228,7 @@ class SecondaryTierManager(ABC):
         Returns:
             Iterable of JobResult objects for jobs finished since the
             last call.
+
         """
         pass
 
@@ -248,31 +245,30 @@ class SecondaryTierManager(ABC):
         return ()
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark blocks as recently used for eviction policy.
+        """Mark chunks as recently used for eviction policy.
 
         Args:
             keys: Offload keys to mark as recently used.
             req_context: Per-request context.
+
         """
         return
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """
-        Called when a new request is first seen by the scheduler.
+        """Called when a new request is first seen by the scheduler.
 
         Returns a RequestOffloadingContext expressing this tier's preference
-        for how blocks should be offloaded for this request.
+        for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
+
         """
         pass
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """
-        Called when a request has finished.
+        """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
         (submit_store, submit_load, touch) have already been issued, and none
@@ -283,6 +279,7 @@ class SecondaryTierManager(ABC):
 
         Args:
             req_context: per-request context.
+
         """
         return
 
@@ -300,6 +297,7 @@ class SecondaryTierManager(ABC):
 
         Args:
             context: Per-step context from the scheduler.
+
         """
         return
 
