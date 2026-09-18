@@ -665,7 +665,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
 
-    def forward_native(
+    def forward_hip(
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -726,4 +726,27 @@ class SparseAttnIndexerKpool(CustomOp):
             positions,
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
+        )
+
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        gate_score: torch.Tensor | None = None,
+        compress_ape: torch.Tensor | None = None,
+        index_kpool: int = 1,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.forward_hip(
+            hidden_states,
+            q_quant,
+            k,
+            weights,
+            gate_score=gate_score,
+            compress_ape=compress_ape,
+            index_kpool=index_kpool,
+            positions=positions,
         )
