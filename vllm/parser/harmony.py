@@ -39,6 +39,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
+    get_encoding,
     get_streamable_parser_for_assistant,
     is_function_recipient,
 )
@@ -346,6 +347,7 @@ class HarmonyParser(DelegatingParser):
 
         segments: list[Segment] = []
         reasoning_token_count = 0
+        encoding = get_encoding()
         for token_id in token_ids:
             self._harmony_parser.process(token_id)
             channel = self._harmony_parser.current_channel
@@ -366,9 +368,10 @@ class HarmonyParser(DelegatingParser):
                 reasoning_token_count += 1
 
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.REASONING and delta:
+            is_payload_token = not encoding.is_special_token(token_id)
+            if segment_type == _SegmentType.REASONING and is_payload_token:
                 self._phase_reasoning_token_count += 1
-            elif segment_type == _SegmentType.CONTENT and delta:
+            elif segment_type == _SegmentType.CONTENT and is_payload_token:
                 self._content_token_count += 1
 
             segments.append(
@@ -427,6 +430,7 @@ class HarmonyParser(DelegatingParser):
         usage_reasoning_token_count = 0
         reasoning_token_count = 0
         content_token_count = 0
+        encoding = get_encoding()
         for token_id in token_ids:
             parser.process(token_id)
             channel = parser.current_channel
@@ -436,9 +440,10 @@ class HarmonyParser(DelegatingParser):
             ):
                 usage_reasoning_token_count += 1
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.REASONING and parser.last_content_delta:
+            is_payload_token = not encoding.is_special_token(token_id)
+            if segment_type == _SegmentType.REASONING and is_payload_token:
                 reasoning_token_count += 1
-            elif segment_type == _SegmentType.CONTENT and parser.last_content_delta:
+            elif segment_type == _SegmentType.CONTENT and is_payload_token:
                 content_token_count += 1
         return (
             TokenPhaseCounts(
