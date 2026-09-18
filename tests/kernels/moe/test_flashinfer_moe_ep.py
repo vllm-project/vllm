@@ -203,6 +203,34 @@ def _moe_config(
     )
 
 
+def _check_expert_views_alias_kernel_memory(
+    adapter: FlashInferMoeEp,
+    geometry: Geometry,
+    rank: int,
+    num_local_experts: int,
+    device: torch.device,
+) -> None:
+    """EPLB moves experts through ``expert_weight_views``; the kernel must see it.
+
+    Swap local experts 0 and 1 in place on every rank, then route through the
+    swapped physical slots: the output must be the one the unswapped logical
+    experts would have produced.
+    """
+    for view in adapter.expert_weight_views():
+        first = view[0].clone()
+        view[0].copy_(view[1])
+        view[1].copy_(first)
+    torch.distributed.barrier()
+
+    topk_ids, topk_weights = _routing(geometry, rank, device)
+    slot = topk_ids % num_local_experts
+    physical_ids = torch.where(slot == 0, topk_ids + 1, topk_ids)
+    physical_ids = torch.where(slot == 1, topk_ids - 1, physical_ids)
+    output = adapter(_hidden_states(geometry, device), physical_ids, topk_weights)
+    torch.accelerator.synchronize()
+    assert torch.equal(output, _expected_output(geometry, topk_ids, topk_weights))
+
+
 def _init_warmup_forward(
     env: dict[str, str], world_size: int, geometry: Geometry, backend: str
 ) -> None:
@@ -241,6 +269,11 @@ def _init_warmup_forward(
                 f"nonzero output channels per token "
                 f"{[torch.nonzero(row).flatten().tolist() for row in output]}"
             )
+
+            if backend == FLASHINFER_MOE_EP_CUTEDSL:
+                _check_expert_views_alias_kernel_memory(
+                    adapter, geometry, rank, moe.num_local_experts, device
+                )
         finally:
             adapter.destroy()
 

@@ -110,7 +110,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     @property
     def supports_eplb(self) -> bool:
         if self.use_flashinfer_moe_ep:
-            return False
+            return True
         return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
     def create_weights(

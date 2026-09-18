@@ -1144,7 +1144,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self) -> bool:
-        return not self.use_flashinfer_moe_ep
+        return True
 
     def apply_monolithic(
         self,

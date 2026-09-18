@@ -178,7 +178,7 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
 def validate_flashinfer_moe_ep_model(
     moe_backend: str, architectures: Iterable[str]
 ) -> None:
-    """Reject architecture-specific FlashInfer MoE-EP backends."""
+    """Reject model-specific FlashInfer MoE-EP backends."""
     if moe_backend != FLASHINFER_MOE_EP_DEEP_GEMM:
         return
     if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):

@@ -512,7 +512,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self) -> bool:
-        return not self.use_flashinfer_moe_ep
+        return True
 
     @property
     def skip_forward_padding(self) -> bool:

@@ -83,6 +83,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
 
+    @property
+    def supports_eplb(self) -> bool:
+        return self.use_flashinfer_moe_ep
+
     def create_weights(
         self,
         layer: torch.nn.Module,

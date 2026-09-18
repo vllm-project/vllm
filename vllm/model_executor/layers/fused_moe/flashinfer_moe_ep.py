@@ -142,7 +142,7 @@ def validate_flashinfer_moe_ep_config(
         unsupported.append("runtime weight transfer")
     if vllm_config.parallel_config.enable_dbo:
         unsupported.append("dual batch overlap")
-    if vllm_config.parallel_config.enable_eplb:
+    if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
         unsupported.append("EPLB")
 
     capability = current_platform.get_device_capability()
@@ -475,6 +475,21 @@ class FlashInferMoeEp:
         )
         self._mega_layer.warmup(self._tensors(hidden_states, topk_ids, topk_weights))
 
+    def expert_weight_views(self) -> tuple[torch.Tensor, ...]:
+        """Kernel-resident per-expert tensors, leading dim = local experts.
+
+        EPLB permutes these in place; the megakernel reads the same memory.
+        """
+        if self._mega_layer is None:
+            raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
+        (fc1_weight, fc1_sf), (fc2_weight, fc2_sf) = self._mega_layer._transformed
+        epilogue = cast(FlashInferMoeEpEpilogue, self._epilogue)
+        vectors = (epilogue.fc1_alpha, epilogue.fc2_alpha, epilogue.fc1_norm_const)
+        return (
+            *(_expert_major_bytes(t) for t in (fc1_weight, fc1_sf, fc2_weight, fc2_sf)),
+            *(v for v in vectors if v is not None),
+        )
+
     def destroy(self) -> None:
         mega_layer = self._mega_layer
         if mega_layer is None:
@@ -486,6 +501,26 @@ class FlashInferMoeEp:
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
             self.destroy()
+
+
+def _expert_major_bytes(tensor: torch.Tensor) -> torch.Tensor:
+    """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8.
+
+    The CuTeDSL kernel keeps (E, K, N) transpose views over (E, N, K) storage.
+    """
+    if not tensor.is_contiguous():
+        tensor = tensor.transpose(1, 2)
+    if not tensor.is_contiguous():
+        raise ValueError(f"expert tensor is not expert-major: {tensor.stride()}")
+    return tensor.view(torch.uint8) if tensor.element_size() == 1 else tensor
+
+
+def register_eplb_expert_views(layer: RoutedExperts, adapter: FlashInferMoeEp) -> None:
+    for index, view in enumerate(adapter.expert_weight_views()):
+        layer.register_parameter(
+            f"flashinfer_moe_ep_eplb_view_{index}",
+            torch.nn.Parameter(view, requires_grad=False),
+        )
 
 
 def make_flashinfer_moe_ep(
@@ -505,6 +540,8 @@ def make_flashinfer_moe_ep(
         ),
     )
     adapter.warmup()
+    if moe.moe_parallel_config.enable_eplb:
+        register_eplb_expert_views(layer, adapter)
     return adapter
 
 
