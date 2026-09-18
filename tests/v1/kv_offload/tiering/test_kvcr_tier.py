@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import mmap
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import msgspec
 import numpy as np
@@ -18,6 +20,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemoryRef,
     OpEntryResult,
     OpEntryStatus,
@@ -172,6 +175,8 @@ def _make_tier(
     monkeypatch,
     kvcr: RecordingKVCR,
     *,
+    startup_error: BaseException | None = None,
+    primary_kv_view: memoryview | None = None,
     enable_telemetry: bool = False,
     secondary_g2_slots: int = 0,
     kvcr_service_socket_path: str | None = None,
@@ -195,6 +200,8 @@ def _make_tier(
         kvcr.constructor_bindings = bindings
         kvcr.framework_control = bindings.framework_control
         kvcr.inventory_sink = bindings.inventory_sink
+        if startup_error is not None:
+            raise startup_error
         return kvcr
 
     monkeypatch.setattr(kvcr_manager, "KVCR", make_kvcr)
@@ -229,10 +236,48 @@ def _make_tier(
                 self_describing_kv_events=self_describing_kv_events,
             ),
         ),
-        primary_kv_view=memoryview(np.zeros((4, 16), dtype=np.int8)),
+        primary_kv_view=(
+            primary_kv_view
+            if primary_kv_view is not None
+            else memoryview(np.zeros((4, 16), dtype=np.int8))
+        ),
     )
     assert isinstance(tier, KVCRSecondaryTierManager)
     return tier
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, KVCRStartupError, KeyboardInterrupt]
+)
+def test_startup_failure_cleanup(monkeypatch, error_type):
+    """Unsafe failures must hold a buffer export so nothing can unmap memory
+    native work may still write into. Ordinary failures release everything."""
+    retained: list[object] = []
+    monkeypatch.setattr(kvcr_manager, "_RETAINED_NATIVE_BUFFERS", retained)
+    close = Mock()
+    monkeypatch.setattr(_StubControlChannel, "close", close)
+    unsafe = error_type is not RuntimeError
+
+    mapping = mmap.mmap(-1, mmap.PAGESIZE)
+    primary_kv_view = memoryview(mapping)
+
+    with pytest.raises(error_type, match="startup failed"):
+        _make_tier(
+            monkeypatch,
+            RecordingKVCR(),
+            startup_error=error_type("startup failed"),
+            primary_kv_view=primary_kv_view,
+        )
+
+    assert close.call_count == (0 if unsafe else 1)
+    # Drop the test's own export, leaving only whatever the manager retained:
+    # the mapping is unmappable afterwards only if that retention covers it.
+    primary_kv_view.release()
+    if unsafe:
+        with pytest.raises(BufferError):
+            mapping.close()
+        retained.clear()
+    mapping.close()
 
 
 def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
