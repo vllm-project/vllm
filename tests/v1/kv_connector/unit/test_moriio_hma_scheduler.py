@@ -53,6 +53,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
     def __init__(self, **attrs):
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
+        self._mamba_spec_blocks: list[int | None] = [None, None]
         self._ssm_state_slots_are_positional = False
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
@@ -195,6 +196,17 @@ def test_exchange_blocks_ignore_transfer_disabled_group():
     ]
 
 
+def test_eagle_annotation_does_not_drop_mixed_attention_group():
+    config = SimpleNamespace(
+        transfer_groups=(
+            SimpleNamespace(kv_cache_spec=object(), is_eagle_group=True),
+            SimpleNamespace(kv_cache_spec=_mamba_spec(), is_eagle_group=False),
+        )
+    )
+
+    assert moriio_connector._split_kv_cache_group_kinds(config) == ([0], [1])
+
+
 def test_scheduler_rejects_multiple_attention_groups_with_mamba():
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -214,6 +226,7 @@ def test_split_block_groups_preserves_multiple_mamba_groups():
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1, 2],
+        _mamba_spec_blocks=[None, 0, 0],
     )
 
     assert sched.split_block_groups(([1, 2], [40], [70])) == (
@@ -251,7 +264,7 @@ def test_scheduler_rejects_mamba_group_without_two_states():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def test_scheduler_rejects_speculative_hybrid_read():
+def test_scheduler_rejects_non_dspark_speculative_hybrid_read():
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
@@ -262,8 +275,16 @@ def test_scheduler_rejects_speculative_hybrid_read():
 
     with pytest.raises(moriio_common.MoRIIOError, match="speculative decoding"):
         moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(speculative_config=object()), "engine", config
+            _gate_vllm_config(speculative_config=SimpleNamespace(method="ngram")),
+            "engine",
+            config,
         )
+
+
+def test_hybrid_speculation_accepts_dspark():
+    moriio_connector._validate_hybrid_speculation(
+        _gate_vllm_config(speculative_config=SimpleNamespace(method="dspark"))
+    )
 
 
 def test_scheduler_rejects_hybrid_write():
@@ -314,6 +335,18 @@ def test_split_block_groups_keeps_only_running_state_outside_all_mode():
         _mamba_group_ids=[1],
     )
     assert sched.split_block_groups(([1], [40, 41])) == ([1], [[41]])
+
+
+def test_split_block_groups_drops_dspark_scratch_slots():
+    sched = _FakeScheduler(
+        _has_mamba=True,
+        _attn_group_ids=[0],
+        _mamba_group_ids=[1],
+        _mamba_spec_blocks=[None, 2],
+        _ssm_state_slots_are_positional=True,
+    )
+
+    assert sched.split_block_groups(([1], [40, 41, 42])) == ([1], [[40]])
 
 
 # --------------------------------------------------------------------------
@@ -450,6 +483,7 @@ def test_update_state_full_attention_hit_still_carries_mamba_state():
 def test_update_state_preserves_each_mamba_group():
     sched = _make_read_scheduler()
     sched._mamba_group_ids = [1, 2]
+    sched._mamba_spec_blocks = [None, 0, 0]
     request = _make_read_request([[10], [90], [80]])
 
     sched.update_state_after_alloc(
