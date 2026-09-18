@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.models.deepseek_v41.common.pipeline import (
     get_sharing_dependencies,
@@ -62,3 +63,52 @@ def test_candidate_source_must_publish_indices():
     config.candidate_source_layer_id = 21
     with pytest.raises(ValueError, match="candidate source must be an index source"):
         get_sharing_dependencies(config, [(0, 40)])
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,mxfp8,record_bytes,alignment",
+    [
+        ("fp8_ds_mla", False, 584, 576),
+        ("fp8_ds_mla", True, 528, 512),
+        ("nvfp4_ds_mla", True, 288, 512),
+    ],
+)
+def test_pipeline_replica_preserves_packed_cache_record(
+    monkeypatch, cache_dtype, mxfp8, record_bytes, alignment
+):
+    from vllm.models.deepseek_v41 import attention
+
+    monkeypatch.setattr(attention, "_use_v41_mxfp8_kv_record", lambda: mxfp8)
+    replica = attention.DeepseekV4PipelineCache.__new__(
+        attention.DeepseekV4PipelineCache
+    )
+    torch.nn.Module.__init__(replica)
+    replica.head_dim = 512
+    replica.compress_ratio = 2
+    replica.kv_cache_dtype = cache_dtype
+    replica.kv_cache_torch_dtype = torch.uint8
+    config = SimpleNamespace(cache_config=SimpleNamespace(block_size=64))
+    spec = replica.get_kv_cache_spec(config)
+    assert spec.state_content_bytes == record_bytes
+    assert spec.alignment == alignment
+    assert spec.cache_dtype_str == cache_dtype
+    assert spec.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("requested_dtype", ["auto", "fp8"])
+def test_pipeline_replica_uses_mega_attention_default(requested_dtype):
+    from vllm.models.deepseek_v41.attention import DeepseekV4PipelineCache
+    from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+        DeepseekV4MegaAttnAttention,
+    )
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(head_dim=512, compress_ratios=[2])
+        ),
+        cache_config=SimpleNamespace(cache_dtype=requested_dtype),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    replica = DeepseekV4PipelineCache(config, "replica", 0, DeepseekV4MegaAttnAttention)
+    assert replica.kv_cache_dtype == "nvfp4_ds_mla"
+    assert config.cache_config.cache_dtype == "nvfp4_ds_mla"
