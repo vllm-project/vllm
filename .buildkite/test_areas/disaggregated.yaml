@@ -311,6 +311,9 @@ steps:
     PREFILLER_TP_SIZE: "2"
     DECODER_TP_SIZE: "2"
     MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
+    PREFILL_BLOCK_SIZE: "2048"
+    DECODE_BLOCK_SIZE: "2048"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
