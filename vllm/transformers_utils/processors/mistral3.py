@@ -109,11 +109,48 @@ class Mistral3ImageProcessor(PixtralImageProcessor):
         return output
 
 
-def enable_numba_image_processing(
-    processor: PixtralProcessor,
-) -> PixtralProcessor:
-    if not isinstance(processor.image_processor, Mistral3ImageProcessor):
-        processor.image_processor = Mistral3ImageProcessor.from_dict(
-            processor.image_processor.to_dict()
+class Mistral3Processor(PixtralProcessor):
+    @classmethod
+    def _get_arguments_from_pretrained(
+        cls,
+        pretrained_model_name_or_path,
+        processor_dict=None,
+        **kwargs,
+    ):
+        # Transformers selects Pixtral's tokenizer loader by class name.
+        return PixtralProcessor._get_arguments_from_pretrained(
+            pretrained_model_name_or_path,
+            processor_dict,
+            **kwargs,
         )
-    return processor
+
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        patch_size: int = 16,
+        spatial_merge_size: int = 1,
+        chat_template=None,
+        image_token: str = "[IMG]",
+        image_break_token: str = "[IMG_BREAK]",
+        image_end_token: str = "[IMG_END]",
+        **kwargs,
+    ) -> None:
+        if image_processor is not None and not isinstance(
+            image_processor, Mistral3ImageProcessor
+        ):
+            image_processor = Mistral3ImageProcessor.from_dict(
+                image_processor.to_dict()
+            )
+
+        super().__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            patch_size=patch_size,
+            spatial_merge_size=spatial_merge_size,
+            chat_template=chat_template,
+            image_token=image_token,
+            image_break_token=image_break_token,
+            image_end_token=image_end_token,
+            **kwargs,
+        )

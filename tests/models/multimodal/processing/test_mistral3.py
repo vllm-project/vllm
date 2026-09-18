@@ -16,7 +16,10 @@ from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.transformers_utils.processors import mistral3 as mistral3_processor
-from vllm.transformers_utils.processors.mistral3 import Mistral3ImageProcessor
+from vllm.transformers_utils.processors.mistral3 import (
+    Mistral3ImageProcessor,
+    Mistral3Processor,
+)
 
 from ...utils import build_model_context
 
@@ -214,6 +217,7 @@ def test_processor_size_override(
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    assert isinstance(hf_processor, Mistral3Processor)
     assert isinstance(hf_processor.image_processor, Mistral3ImageProcessor)
 
     dummy_image = Image.new("RGB", image_size, color=(127, 127, 127))

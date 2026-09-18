@@ -10,7 +10,6 @@ import torch.nn as nn
 import transformers
 from packaging.version import Version
 from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
-from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -40,7 +39,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.mistral3 import (
-    enable_numba_image_processing,
+    Mistral3Processor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -233,9 +232,8 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         image_size = size["longest_edge"]
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
-    def get_hf_processor(self, **kwargs: object):
-        processor = self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
-        return enable_numba_image_processing(processor)
+    def get_hf_processor(self, **kwargs: object) -> Mistral3Processor:
+        return self.ctx.get_hf_processor(Mistral3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
