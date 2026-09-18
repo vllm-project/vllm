@@ -874,6 +874,36 @@ class TestProcessChunk:
         )
         assert harmony_parser.classify_token_phases(token_ids) == expected
 
+    @pytest.mark.parametrize(
+        ("channel", "reasoning_tokens", "content_tokens"),
+        [("analysis", 5, 0), ("final", 0, 5)],
+    )
+    def test_multibyte_payload_tokens_are_classified_before_utf8_decode(
+        self,
+        harmony_parser,
+        chat_request,
+        channel,
+        reasoning_tokens,
+        content_tokens,
+    ):
+        token_ids = get_model_output_tokens([assistant("😀😃😄", channel)])
+        expected = TokenPhaseCounts(
+            reasoning=reasoning_tokens,
+            content=content_tokens,
+            unclassified=len(token_ids) - reasoning_tokens - content_tokens,
+        )
+
+        harmony_parser.process_chunk(token_ids)
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
+        harmony_parser.flush()
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
         result = harmony_parser.process_chunk(
             encode_output(
