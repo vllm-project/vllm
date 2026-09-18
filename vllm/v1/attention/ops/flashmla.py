@@ -141,7 +141,7 @@ if _use_triton_sparse_mla():
     flash_attn_varlen_kvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
     flash_attn_varlen_qkvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
 elif _is_flashmla_available()[0]:
-    from vllm.third_party.flashmla.flash_mla_interface import (  # noqa: F401
+    from vllm.third_party.flashmla.flash_mla_interface import (  # type: ignore[no-redef] # noqa: F401
         FlashMLASchedMeta,
         flash_attn_varlen_func,
         flash_attn_varlen_kvpacked_func,
