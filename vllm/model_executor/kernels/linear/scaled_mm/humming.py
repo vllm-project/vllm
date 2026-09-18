@@ -48,9 +48,17 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.layer_config = self.prepare_weights(layer)
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+
+    def prepare_weights(self, layer: torch.nn.Module):
+        """Convert a layer without changing this kernel's runtime state."""
         from vllm.utils.humming import dtypes
 
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
+        if hasattr(layer, "weight_scale_inv"):
+            name_map["weight_scale"] = "weight_scale_inv"
         scale_torch_dtype = self.config.weight_quant_key.scale.dtype
         scale_dtype = dtypes.DataType.from_torch_dtype(scale_torch_dtype)
 
@@ -62,6 +70,15 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         assert self.config.weight_quant_key.scale2 is None
         scale_group_shape = self.config.weight_quant_key.scale.group_shape
+        if getattr(layer, "weight_block_size", None) is None and (
+            scale_group_shape.is_per_tensor()
+            or scale_group_shape.is_per_channel()
+            or scale_group_shape.is_per_group()
+        ):
+            # Fp8LinearMethod canonicalizes non-block weights to KN and drops
+            # loader attributes. Humming's standard format is packed NK.
+            layer.weight.input_dim = 0
+            layer.weight.output_dim = 1
         if scale_group_shape.is_per_tensor():
             quant_config["weight_scale_type"] = "tensor"
         elif scale_group_shape.is_per_channel():
@@ -75,13 +92,8 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             quant_config["weight_scale_group_size_n"] = scale_group_shape.row
             quant_config["weight_scale_group_size"] = scale_group_shape.col
 
-            if hasattr(layer, "weight_scale_inv"):
-                name_map["weight_scale"] = "weight_scale_inv"
-
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
-        self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        return prepare_humming_linear_layer_config(layer, quant_config)
 
     def apply_weights(
         self,

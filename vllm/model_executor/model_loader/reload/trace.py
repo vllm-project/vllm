@@ -199,7 +199,7 @@ class ReloadPolicy(Protocol):
     def bind(self, state: "ReloadState") -> None:
         """Capture backend invariants after cold processing, once per state.
 
-        Loadable roles are already bound. A policy may add derived runtime
+        Roles with runtime counterparts are already bound. A policy may add derived
         targets and record kernel/config identities for later validation.
         """
         ...
@@ -270,6 +270,11 @@ class ReloadState:
             archive; the next round or abort clears them.
         runtime_modified: Conservative marker that runtime writes may have begun.
             It is set before writes and is neither a byte counter nor rollback.
+        runtime_names: Optional checkpoint-role to runtime-attribute mapping.
+            Renamed parameters are exposed under their checkpoint names only
+            during a reload round; the canonical runtime objects never change.
+            A None value denotes an input consumed by conversion with no
+            corresponding runtime tensor, such as a discarded activation scale.
 
     Example:
         An FP8 linear unit can use ``roles=("weight", "weight_scale_inv")``.
@@ -291,6 +296,7 @@ class ReloadState:
     complete: bool = False
     preserve_checkpoint: bool = False
     runtime_modified: bool = False
+    runtime_names: dict[str, str | None] = field(default_factory=dict)
 
     def bind_target(self, role: str, resolve: Callable[[], torch.Tensor]) -> None:
         """Record a runtime target and a getter used to detect replacement.
@@ -303,7 +309,46 @@ class ReloadState:
         """
         self.targets[role] = ReloadTarget(resolve(), resolve)
 
-    def source(self, role: str, *, alias_runtime: bool = False) -> torch.Tensor:
+    def prepare_sources(self, *, reuse_roles: tuple[str, ...]) -> None:
+        """Prepare this round's canonical inputs without changing live tensors.
+
+        Policies explicitly opt roles into storage reuse after auditing their
+        conversion. Old values are disposable; every expected shard must arrive
+        before finish. Only dense storage can provide a compact loading view.
+        Dtype changes, insufficient capacity and incompatible layouts fall back
+        to staging. This never reinterprets encoded scale bytes as another dtype.
+        """
+        for role in self.roles:
+            alias = role in reuse_roles
+            view = None
+            target = self.targets.get(role)
+            if alias and target is not None and not self.preserve_checkpoint:
+                runtime = target.tensor
+                meta = self.metadata[role]
+                if (
+                    runtime.dtype == meta.dtype
+                    and runtime.numel() >= meta.numel()
+                    and meta.is_contiguous()
+                ):
+                    # Sorting dimensions exposes physical order for dense
+                    # transposes without allocating or changing runtime strides.
+                    dims = sorted(
+                        range(runtime.ndim),
+                        key=lambda d: runtime.stride(d),
+                        reverse=True,
+                    )
+                    physical = runtime.detach().permute(dims)
+                    if physical.is_contiguous():
+                        view = physical.view(-1)[: meta.numel()].view(meta.shape)
+            self.source(role, alias_runtime=view is not None, loading_view=view)
+
+    def source(
+        self,
+        role: str,
+        *,
+        alias_runtime: bool = False,
+        loading_view: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Get the loading destination that will be a source for conversion.
 
         The name is relative to policy conversion: the returned tensor is the
@@ -311,11 +356,16 @@ class ReloadState:
         NCCL/IPC tensor. Multiple shards of a role accumulate in this object.
 
         Args:
-            role: Loadable role with captured metadata and a bound target.
+            role: Loadable role with captured metadata. Input-only roles use
+                the device of the state's first runtime target.
             alias_runtime: Policy permission to reuse runtime storage. Reuse
                 also requires preservation to be disabled and shape, dtype,
                 and strides to match. The policy must ensure the layout is
                 semantically suitable; matching dimensions alone is not enough.
+            loading_view: Optional canonical-layout view of the bound runtime
+                storage, prepared by the policy without changing the live tensor.
+                It must share the target's storage and dtype. The same layout
+                and checkpoint-preservation checks still apply.
 
         Returns:
             A cached loader-compatible proxy with the cold parameter's subclass
@@ -329,9 +379,24 @@ class ReloadState:
         """
         if role not in self.checkpoint:
             meta = self.metadata[role]
-            runtime = self.targets[role].tensor
+            target = self.targets.get(role)
+            runtime = target.tensor if target is not None else None
+            if loading_view is not None:
+                if (
+                    not alias_runtime
+                    or runtime is None
+                    or loading_view.device != runtime.device
+                    or loading_view.dtype != runtime.dtype
+                    or loading_view.untyped_storage().data_ptr()
+                    != runtime.untyped_storage().data_ptr()
+                ):
+                    raise ReloadError(
+                        f"{self.key}/{role}: invalid runtime loading view"
+                    )
+                runtime = loading_view
             can_alias = (
                 alias_runtime
+                and runtime is not None
                 and not self.preserve_checkpoint
                 and meta.shape == runtime.shape
                 and meta.dtype == runtime.dtype
@@ -339,9 +404,16 @@ class ReloadState:
             )
             data = (
                 runtime.detach()
-                if can_alias
+                if can_alias and runtime is not None
                 else torch.empty_strided(
-                    meta.shape, meta.stride(), dtype=meta.dtype, device=runtime.device
+                    meta.shape,
+                    meta.stride(),
+                    dtype=meta.dtype,
+                    device=(
+                        runtime.device
+                        if runtime is not None
+                        else next(iter(self.targets.values())).tensor.device
+                    ),
                 ).zero_()
             )
             # Preserve vLLM Parameter subclasses and TP/loader metadata without
@@ -420,6 +492,7 @@ class ModelReloadTracer:
         self._finished = False
         # Restore exact pre-wrap attributes in reverse installation order.
         self._wrappers: list[tuple[torch.Tensor, Any]] = []
+        self._aliases: list[tuple[torch.nn.Module, str]] = []
         # Reverse dependency edges wake units when their prerequisites finish.
         self._dependents: dict[str, list[str]] = {}
 
@@ -551,11 +624,21 @@ class ModelReloadTracer:
             pending.difference_update(ready)
         storage_owners: dict[tuple, str] = {}
         for state in self.states.values():
+            if set(state.runtime_names) - set(state.roles):
+                raise ReloadError(f"{state.key}: runtime mapping has unknown roles")
             for role in state.roles:
-                state.bind_target(role, partial(getattr, state.module, role))
+                name = state.runtime_names.get(role, role)
+                if name != role and hasattr(state.module, role):
+                    raise ReloadError(f"{state.key}: checkpoint alias already exists")
+                if name is not None:
+                    state.bind_target(role, partial(getattr, state.module, name))
             state.policy.bind(state)
+            if state.roles and not state.targets:
+                raise ReloadError(f"{state.key}: reload inputs have no runtime targets")
             # Shared targets need explicit ownership; do not silently write twice.
             for role in state.roles:
+                if role not in state.targets:
+                    continue
                 tensor = state.targets[role].tensor
                 if not tensor.numel():
                     continue
@@ -594,19 +677,44 @@ class ModelReloadTracer:
             for target in state.targets.values():
                 target.validate()
             state.policy.validate(state)
+            for role, name in state.runtime_names.items():
+                if name != role and hasattr(state.module, role):
+                    raise ReloadError(f"{state.key}: checkpoint alias already exists")
             if state.expert_plan is not None:
                 state.slots = state.expert_plan.build(state)
         self.active = True
         self._touched = False
         self._finished = False
-        for state in self.states.values():
-            state.slots.arrived.clear()
-            state.checkpoint.clear()
-            state.complete = False
-            state.runtime_modified = False
-            state.preserve_checkpoint = preserve_checkpoint
-            for role in state.roles:
-                self._wrap(state, role, state.targets[role].tensor)
+        try:
+            for state in self.states.values():
+                state.slots.arrived.clear()
+                state.checkpoint.clear()
+                state.complete = False
+                state.runtime_modified = False
+                state.preserve_checkpoint = preserve_checkpoint
+                for role in state.roles:
+                    role_target = state.targets.get(role)
+                    if role_target is None:
+                        meta = state.metadata[role]
+                        # Only the public proxy is needed here; payload storage
+                        # is allocated by source() and released per layer.
+                        param = torch.empty(
+                            (),
+                            dtype=meta.dtype,
+                            device=next(iter(state.targets.values())).tensor.device,
+                        ).expand(meta.shape)
+                    else:
+                        param = role_target.tensor
+                    if state.runtime_names.get(role, role) != role:
+                        # A distinct object prevents named_parameters() from
+                        # deduplicating the checkpoint name against the live one.
+                        param = torch.nn.Parameter(param.detach(), requires_grad=False)
+                        setattr(state.module, role, param)
+                        self._aliases.append((state.module, role))
+                    self._wrap(state, role, param)
+        except BaseException:
+            self.abort()
+            raise
 
     def _observe_loader(
         self, state: ReloadState, role: str, param: torch.Tensor
@@ -650,7 +758,7 @@ class ModelReloadTracer:
         self._install_wrapper(param, observed_loader)
 
     def _wrap(self, state: ReloadState, role: str, param: torch.Tensor) -> None:
-        """Install a reload interceptor on one bound runtime parameter.
+        """Install a reload interceptor on a runtime parameter or input proxy.
 
         The model still invokes its usual weight loader. The interceptor checks
         the arrival, obtains a policy destination, substitutes only this call's
@@ -664,7 +772,8 @@ class ModelReloadTracer:
         Args:
             state: Reload unit owning the parameter and expected slots.
             role: Parameter role within that unit.
-            param: Bound runtime object whose loader is temporarily replaced.
+            param: Runtime object or temporary checkpoint-name proxy whose
+                loader is temporarily replaced.
         """
         loader = state.loaders[role]
         signature = inspect.signature(loader)
@@ -698,10 +807,11 @@ class ModelReloadTracer:
                 # through its argument to a checkpoint-compatible proxy.
                 destination = state.policy.destination(state, role, bound)
                 bound.arguments["param"] = destination
-                runtime = state.targets[role].tensor
+                role_target = state.targets.get(role)
                 if (
-                    destination.untyped_storage().data_ptr()
-                    == runtime.untyped_storage().data_ptr()
+                    role_target is not None
+                    and destination.untyped_storage().data_ptr()
+                    == role_target.tensor.untyped_storage().data_ptr()
                 ):
                     state.runtime_modified = True
                 first_arrival = not self._touched
@@ -785,6 +895,9 @@ class ModelReloadTracer:
             else:
                 param.weight_loader = loader
         self._wrappers.clear()
+        for module, role in reversed(self._aliases):
+            delattr(module, role)
+        self._aliases.clear()
 
     def missing(self) -> list[str]:
         """Format missing slots with their owning state keys for diagnostics.

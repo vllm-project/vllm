@@ -38,7 +38,12 @@ class CopyReloadPolicy:
     def destination(
         self, state: ReloadState, role: str, bound: inspect.BoundArguments
     ) -> torch.Tensor:
-        return state.source(role, alias_runtime=True)
+        if not state.checkpoint:
+            self.prepare_for_load(state)
+        return state.checkpoint[role]
+
+    def prepare_for_load(self, state: ReloadState) -> None:
+        state.prepare_sources(reuse_roles=state.roles)
 
     def finish(self, state: ReloadState) -> None:
         for role in state.roles:
@@ -61,6 +66,9 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
     if hasattr(model, "process_weights_after_loading"):
         raise NotImplementedError("Trace reload needs a model-level post-load policy")
     trace = ModelReloadTracer()
+    # Parameter identity -> owning CopyReloadPolicy state. This covers only
+    # the ordinary copy path, not custom builders or distinct Parameter objects
+    # sharing storage.
     copy_owners: dict[int, str] = {}
     for key, module in model.named_modules():
         method = getattr(module, "quant_method", None)
@@ -91,10 +99,15 @@ def create_model_reload_tracer(model: torch.nn.Module) -> ModelReloadTracer:
         roles = []
         aliases = {}
         dependencies = set()
+        # Register tied weights once: e.g. lm_head.weight may be the very same
+        # Parameter as embed_tokens.weight. The first state owns its loader and
+        # slots; later states bind the alias for runtime identity checks only.
         for role, param in module.named_parameters(recurse=False):
             owner = copy_owners.get(id(param))
             if owner is not None:
                 aliases[role] = param
+                # Do not finish this state until the shared weight is ready.
+                # This is local completion ordering, not cross-rank synchronization.
                 dependencies.add(owner)
             else:
                 roles.append(role)

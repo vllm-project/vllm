@@ -39,10 +39,11 @@ from vllm.triton_utils.allocation import set_triton_allocator
 
 
 def _is_capturing_or_compiling() -> bool:
-    # The accelerator API dispatches to the active backend.
     return (
         torch.compiler.is_compiling()
-        or torch.accelerator.current_stream().is_capturing()
+        or torch.get_device_module(
+            current_platform.device_type
+        ).is_current_stream_capturing()
     )
 
 

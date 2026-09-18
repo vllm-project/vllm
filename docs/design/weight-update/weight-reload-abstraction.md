@@ -1,6 +1,11 @@
 # Weight Reload 抽象设计
 
-状态：设计提案（仅文档，不含代码改动）。
+状态：设计演进记录，包含早期提案和后续实现记录。
+
+> 当前实现导读：[Reload 调用流程与完整模型示例](reload-flow-walkthrough.md)。
+> 其中包含调用流程图、对象关系、逐 chunk 示例和源码阅读顺序。
+> 本文早期章节中的“全模型一次提交”等描述属于历史提案；
+> 当前 trace 实现逐层完成、允许原地写入，失败不回滚，不应混为同一套保证。
 
 适用范围：`vllm/model_executor/model_loader/reload/` 下的运行时权重热更新路径，
 以及量化方法（FP8 dense / CUTLASS FP8 MoE 等）与 reload 流程的交互面。
@@ -1457,3 +1462,359 @@ nvcc/ninja 进程，并明确释放共享机器窗口。
 ```text
 /inspire/hdd/global_user/wangtongyu-25057/vllm-reload-trace-20260915/reload-transfer-regression.log
 ```
+
+### 11.6 全后端扩展进度
+
+现有实现已提交为 `0fb0c853ac`，扩展任务仍未完成。
+第一批新增 `BlockFP8LinearReloadPolicy`，复用冷加载使用的
+`process_fp8_weight_block_strategy`，接入 CUTLASS block、Triton block、
+Torch block linear。该 policy 不调用 live kernel 的冷加载后处理，
+只将转换结果写回原有 target。
+
+固定 H200 环境执行：
+
+```text
+tests/quantization/test_fp8.py -k reload_trace -v --tb=short
+2 failed, 27 passed, 47 deselected in 50.63s
+ai4qz status=failed rc=1
+```
+
+新增 CUTLASS/Triton block linear 的保留及不保留 checkpoint 两种模式
+均通过，包括两轮 warm/cold tensor 对比、CUDA graph replay 输出对比和
+runtime 对象/地址检查。Torch block 的两项在第一次冷加载前向失败，
+尚未进入 reload：底层 `torch._scaled_mm` 要求 CUDA 12.9 及以上；
+核实固定环境为 `torch 2.11.0+cu128`、`torch.version.cuda == "12.8"`。
+没有修改固定环境，也没有将这两项当作 reload 验证通过。
+
+日志：
+
+```text
+/inspire/hdd/global_user/wangtongyu-25057/vllm-reload-trace-20260915/fp8-policy-expansion-01.log
+```
+
+后续仍需实现/验证普通 per-tensor linear、Marlin/Humming、B12x、
+ROCm/AITER、CPU/XPU，以及此前未接入的 MoE 后端。架构专用后端在 H200
+不能完成的原生前向验证必须单独标记，不能用纯转换测试代替。
+
+第二批新增 `TensorFP8LinearReloadPolicy`，对 checkpoint 分片执行统一
+重量化、转置、static input scale 归并及 CUTLASS padding。已接入
+CUTLASS、FlashInfer、Torch per-tensor/channel-wise/row-wise kernel 类，
+其中 H200 实测覆盖 CUTLASS、FlashInfer、Torch per-tensor 的 static
+activation 配置，分别测试保留和不保留 checkpoint。CUTLASS 测试使用
+`logical_widths=[128,132]`，额外覆盖两个逻辑分片及 260 列 padding。
+channel-wise/row-wise 和 dynamic activation 不能由这些结果视为已验证。
+
+第二批全量 trace 回归 `fp8-policy-expansion-02.log` 为 31 passed、
+4 failed、47 deselected：两项为上述 Torch block CUDA 版本限制，另两项
+FlashInfer 在冷加载首次前向 JIT 链接时找不到未带版本号的 cuBLAS 库。
+随后在测试 worktree 的 `reload-jit-library-links` 中建立指向固定环境
+现有 `libcublas.so.12` / `libcublasLt.so.12` 的链接，仅为测试进程设置
+`LIBRARY_PATH` / `LD_LIBRARY_PATH`，没有安装依赖或修改固定环境文件。
+FlashInfer 两项重跑 `fp8-policy-expansion-03.log` 实际 `status=ok rc=0`：
+`2 passed, 80 deselected in 5.71s`。六项新增 per-tensor 用例至此均通过，
+完整的全后端实现/验证目标仍未完成。
+
+第三批新增 `PlainMoEReloadPolicy`，接入 TRITON/BATCHED_TRITON 和
+VLLM_CUTLASS/BATCHED_VLLM_CUTLASS。它保留 expert tensor 布局，
+非 block 路径复用 w1/w3 scale 合并和重量化；静态 activation scale
+复用冷加载归并逻辑，但 EPLB + EP > 1 仍拒绝，等待 collective 协调。
+kernel/config 不重建，逐层完成后仍由 ReloadState 释放暂存。
+
+H200 第一次运行 `fp8-policy-expansion-04.log` 为 20 passed、6 failed：
+六个失败全部发生在 vLLM CUTLASS 的冷加载后端选择阶段，原因是
+`Fp8MoEMethod` 当前传入 `allow_vllm_cutlass=False`。没有修改该生产限制；
+移除不可达后端的集成用例后，`fp8-policy-expansion-05.log` 实际
+`status=ok rc=0`，20 passed、68 deselected，耗时 20.18 秒。
+其中六个新增 Triton MoE 用例覆盖 block/非 block、block EPLB 映射变化、
+两种 checkpoint 暂存模式，以及 warm/cold 权重和 CUDA graph 输出一致性。
+Batched Triton 未由本轮测试覆盖；vLLM CUTLASS 仅接入 policy，
+不能据此声称其生产入口或 GPU kernel 已验证。全后端目标仍未完成。
+
+第四批新增 `MarlinFP8LinearReloadPolicy`，对 block 和非 block 权重使用
+临时模块执行 Marlin packing、scale 展开/重排和 bias 重排，然后拷回原
+Parameter。临时模块使用独立的小 workspace，避免 helper 的清零操作
+修改 live workspace；运行时 workspace 另行绑定，校验身份与地址。
+目前仅接入 dynamic activation 配置，static checkpoint 的 input_scale
+会在冷加载时删除，尚需处理该加载角色的生命周期。
+
+H200 `fp8-policy-expansion-06.log` 四项测试均在冷加载 packing 阶段失败，
+尚未进入 reload：固定环境 `_C::gptq_marlin_repack` 仍使用带 `Tensor perm`
+参数的旧 ABI，而当前 Python wrapper 使用不带 perm 的新 ABI。
+因此 Marlin policy 目前是已实现、未通过 GPU 验证，不能算作完成。
+没有修改固定环境依赖，也没有用 mock 或旧 ABI 适配替代真实验证；
+后续需在独立 worktree 内准备与源码匹配的 native extension。
+
+第五批新增 `MarlinMoEReloadPolicy`，复用 PlainMoE 的 checkpoint scale
+归并逻辑，并在临时对象上完成 Marlin 权重/scale 重排，不修改 live
+workspace、kernel 或 quant config。`fp8-policy-expansion-07.log` 为
+8 passed、8 failed：Triton Linear/MoE 八项通过，Marlin Linear/MoE
+八项均因上述冷加载 repack ABI 不匹配失败，尚未进入 reload 验证。
+
+另新增 `B12xBlockFP8LinearReloadPolicy`，保持 B12x warmup provider，
+复用标准 block 转换后按冷加载规则将 E8M0/uint8 scale 转为 FP32。
+H200 `fp8-policy-expansion-08.log` 实际 `status=ok rc=0`：
+12 passed、88 deselected，耗时 11.51 秒。其中八项为 Triton 回归，
+四项为 B12x block 的真实转换/存储验证，覆盖 FP32/E8M0 scale 和
+两种 checkpoint 暂存模式。B12x forward 需要 SM120，不能由 H200
+转换测试推断其 forward/CUDA graph 已验证；非 block B12x 仍待实现。
+
+为解除 Marlin ABI 限制，已尝试在远端 worktree 的
+`reload-native-build` 中配置独立 native 构建，日志为
+`reload-native-configure-01.log`。固定 Torch 为 2.11.0+cu128，
+系统 nvcc 为 13.0；CMake 找到 Torch 并继续配置，但在 CUTLASS
+依赖下载阶段达到 180 秒观察超时。随后完整进程查询确认该配置任务
+及其下载子进程已退出；没有启动 kernel 编译，没有替换任何 `.so`，
+固定环境依赖和已有 JIT 缓存未变。该构建尝试不能作为验证成功证据。
+
+第六批新增 `TrtllmMoEReloadPolicy`，接入 FLASHINFER_TRTLLM 的 block
+和静态 activation 非 block 路径。block 权重转换为四维 BlockMajorK
+布局；非 block 路径在完成 W31/行重排后，原地更新 monolithic experts
+中的 `_g1_alphas`、`_g2_alphas`、`_g1_scale_c`。转换仅操作暂存副本和
+临时配置对象，不替换 live kernel、experts 或 quant config。
+静态 activation scale 的 EPLB + EP > 1 限制仍保留。
+
+H200 `fp8-policy-expansion-09.log` 实际 `status=ok rc=0`：
+16 passed、92 deselected，耗时 16.52 秒。八项为 Triton 回归，八项为
+TRTLLM 转换测试，覆盖 block/非 block、EPLB 映射变化及两种暂存模式。
+这些测试比较真实冷加载转换与 reload 后权重/scale 的精确字节，
+并检查目标对象和地址不变。为在 H200 测试转换，测试在构造层后显式
+选择 TRTLLM experts，而不经过仅允许 SM100 的生产后端设备筛选；
+没有运行 TRTLLM forward 或 CUDA graph，不代表 SM100 kernel 已验证。
+
+第七批新增 `PlatformMoEReloadPolicy`，接入 CPU 的 VNNI packing、
+XPU 的权重/scale 转置及 AITER 的 shuffle。转换使用独立暂存；
+AITER 保留并校验 runtime weight 的 `is_shuffled` 标志。
+另新增 `HPCMoEReloadPolicy`，保持普通 expert 权重布局，在非 block
+路径原地更新 `g1_alphas`、`g2_alphas`、`a1_gscale`、`a2_gscale`。
+目前 FNUZ 平台仍由入口拒绝；CPU/AITER 原生转换尚未实测。
+
+H200 `fp8-policy-expansion-10.log` 实际 `status=ok rc=0`：
+28 passed、92 deselected，耗时 23.70 秒。包含 Triton 八项回归、
+TRTLLM 八项转换回归、HPC 八项转换/派生 scale 测试以及 XPU 四项
+纯布局测试。HPC 测试显式构造 backend experts，但未运行 HPC GEMM；
+XPU 测试使用真实转换 helper 和 ReloadState，不构造或模拟 XPU kernel。
+这些结果证明对应转换与目标存储管理，不代表平台 forward 或
+CUDA graph 已验证。全后端实现及原生验证目标仍未完成。
+
+第八批新增 `XPUTensorFP8LinearReloadPolicy` 和
+`XPUBlockFP8LinearReloadPolicy`，接入 XPU W8A8、W8A16 和 block
+Linear 后端。非 block 路径在公共重量化/转置后处理 scale 的形状；
+block 路径按冷加载规则展开 ragged-N scale 并保持 KN 连续存储视图。
+BMM 同时绑定 `bmm_weight` view 和独立的 `bmm_scale` 缓存，reload
+更新其内容而不替换对象；block/BMM 配置变化会被拒绝。
+
+`fp8-policy-expansion-11.log` 为 30 passed、4 failed，四项非 block
+XPU 用例因构造函数的平台检查失败，尚未执行转换。转换测试随后仅在
+构造 kernel 时临时绕过 `is_supported` 设备检查，没有替换冷加载或
+reload 的数值逻辑，也没有更改生产筛选规则。
+H200 `fp8-policy-expansion-12.log` 实际退出 rc=0：
+34 passed、96 deselected，耗时 25.44 秒，其中十项新增 XPU Linear
+用例覆盖对齐/block ragged-N/BMM/W8A8/W8A16 和两种暂存模式。
+检查包括精确权重/scale 字节、BMM 缓存、对象及地址保持；
+未执行 XPU 原生 forward 或 graph。全后端目标仍未完成。
+
+第九批接入 CPU block Linear、ROCm tensor Linear，以及 AITER 的
+三种非 block 和两种 block kernel 类。`AiterTensorFP8LinearReloadPolicy`
+区分 NK、shuffle NK 和 shuffle KN view；`AiterBlockFP8LinearReloadPolicy`
+保持 MLA/BMM direct-read 例外及 E8M0 scale 规则；
+`CPUBlockFP8LinearReloadPolicy` 复用 VNNI packing 并校验 skip-dispatch
+模式，不套用 GPU padding。ROCm tensor 复用已有 Tensor policy。
+
+Linear 公共转换 helper 已含 FN→FNUZ 规则，因此移除 Linear 入口的
+统一 FNUZ 拒绝；MoE 的 FNUZ 限制尚未移除。
+H200 `fp8-policy-expansion-13.log` 实际 `status=ok rc=0`：
+36 passed、112 deselected，耗时 23.53 秒。新增十八项平台转换用例，
+覆盖 AITER block 普通/direct-read 路径、FP32/E8M0 scale、
+FN/FNUZ、ROCm tensor 及 CPU skip-dispatch，两种暂存模式均验证；
+其余十八项为 XPU Linear 和 Triton 回归。
+FNUZ 测试在 H200 上显式切换归一化分支，只证明数值转换与存储一致。
+未运行 AITER shuffle、CPU VNNI packing 或 AMD/CPU 原生 forward，
+也没有由 CPU skip-dispatch 测试推断 AMX kernel 已验证。
+
+第十批新增 `B12xTensorFP8LinearReloadPolicy`，接入静态非 block FP8。
+B12x 冷加载后将原始 weight/scale 置空，policy 递归绑定 packed dataclass
+中的张量，保留原 packed 对象、warmup provider 和张量地址。
+布局元数据独立快照，快照复用 Tensor 引用而不复制 packed 权重。
+重新 packing 后先检查完整布局，再通过 ReloadState 原地写入 packed
+张量和 input scale；不兼容布局在首次写入前拒绝。
+
+固定环境未安装 B12x，新增测试沿用现有 B12x suite 的 dataclass packer
+替身，只验证 policy 生命周期。首次 `fp8-policy-expansion-14.log`
+四项新增用例因测试输入位于 CPU、真实 FP8 重量化算子仅支持 CUDA
+而失败；改用 CUDA 张量后，`fp8-policy-expansion-15.log` 实际
+`status=ok rc=0`：16 passed、165 deselected，耗时 12.39 秒。
+四项新增测试覆盖嵌套 packed 张量、两种暂存模式和布局不兼容时拒绝写入；
+其余十二项为 Triton 与 B12x block 转换回归。该结果不是 B12x 原生
+packing/SM120 forward 验证，相关测试仍待依赖和对应硬件具备后执行。
+
+第十一批为 Humming 参数重命名补充 trace 基础设施：
+`ReloadState.runtime_names` 显式映射 checkpoint role 到 runtime 属性名。
+绑定和身份校验始终指向 canonical runtime 参数；每轮加载时临时注册
+共享同一存储的独立 Parameter 别名，使 `named_parameters()` 保留
+checkpoint 名称而不因对象去重丢失它。转换仍使用 policy 选择的
+destination；退出轮次时移除别名，不替换原运行时参数。
+已有同名属性会在开始写入前拒绝，避免覆盖其他参数。
+
+H200 固定环境 `fp8-policy-expansion-17.log` 实际 `status=ok rc=0`：
+37 passed、47 deselected，pytest 耗时 4.75 秒。新增五项用例覆盖
+按 checkpoint 名称加载、重复轮次、保留/不保留暂存、空轮次、
+异常退出清理和名称冲突；其余为已有 trace 回归。
+这些测试使用 CPU 张量，证明的是 trace 生命周期与地址不变性，
+不是 Humming GPU packing 或 forward。Humming policy 尚未接入，
+冷加载删除参数而无同名 runtime 目标的情况仍需继续处理。
+
+第十二批接入 `HummingFP8LinearReloadPolicy` 的 Tensor/Block Linear
+路径。冷加载转换提取为 `prepare_weights()`；reload 在独立暂存层上
+调用该方法，检查返回 schema、参数集合与 shape/dtype，再原地写入
+全部 runtime 参数。live kernel、layer config、weight schema 与 locks
+保持不变。修正非 block FP8 进入 Humming standardization 时缺失的
+KN 维度标记，避免按 NK 直接 reinterpret 非连续权重。
+
+`runtime_names` 的 None 值现在表示仅供转换消费、没有 runtime
+对应参数的 checkpoint role。此类输入通过仅占一个元素存储的临时
+Parameter proxy 暴露名称，真实 payload 按需分配；它仍参与 slot
+完整性检查。初始化代理途中失败也会移除已安装的 loader/别名并
+poison tracer，不留下半初始化轮次。
+
+H200 `fp8-policy-expansion-18.log` 为 2 passed、4 failed：
+两项 input-only role 测试通过；Humming 原生冷加载先暴露非 block
+布局错误，block 则在导入 `humming.transform` 时失败。固定环境安装
+Humming 0.1.10，而本仓库 `requirements/cuda.txt` 要求 0.1.12；
+未安装、升级或覆盖固定环境依赖。
+随后生命周期测试仅替换 schema/packing helper，保留真实 FP8
+重量化与 KN/NK standardization。第十九次运行发现不保留暂存时
+直接包装 vLLM Parameter 子类的问题，已改用 detach Tensor 视图。
+
+`fp8-policy-expansion-21.log` 实际 `status=ok rc=0`：
+53 passed、191 deselected，pytest 耗时 17.23 秒，包括 41 项 trace
+测试、8 项 Triton 回归及 4 项 Humming Linear 生命周期用例。
+后四项使用 CUDA 张量和 packing 替身，覆盖 Tensor/Block、两种
+暂存模式、重复 reload、runtime 字节和对象/地址不变性；
+不代表 Humming 原生 packing、forward 或 graph 已验证。
+Humming MoE 及剩余配置缺口仍待实现，全后端目标尚未完成。
+
+第十三批接入 `HummingMoEReloadPolicy`，覆盖 Tensor/Block MoE。
+每轮仍由 RoutedExperts plan 按当前 expert mapping 加载 checkpoint；
+policy 在暂存层进行归一化和 Humming 转换，先校验转换后的配置、
+参数集合及 shape/dtype，再更新已绑定的普通参数和派生 scale。
+live kernel、quant config、Humming configs/schema 字典和参数地址
+均不替换，完成后沿用逐层释放暂存逻辑。
+
+同时修正 Humming oracle 分支的输入传递：schema converter 原先读取
+layer 参数，可能绕过传入的 W13 重量化结果及新 scale。现在转换前
+显式使用传入的归一化参数，沿用该 layer 原有的 scale 名称；转换后
+恢复 `Fp8MoEMethod` 仍需读取的 activation scale 属性。
+不会仅因 `weight_block_size` 属性存在但值为 None 就选择 inverse
+scale，也不把其他量化方法的 canonical scale 强制改成 inverse 名称。
+
+第 22 次运行为 53 passed、8 failed：新增替身错误地假设所有 schema
+都有 `strategy` 字段，同时发现上述非 block scale 名称判定问题。
+修正后，H200 `fp8-policy-expansion-24.log` 实际 `status=ok rc=0`：
+61 passed、199 deselected，pytest 耗时 24.03 秒。
+其中新增 8 项 MoE 生命周期用例覆盖 Tensor/Block、EPLB 关闭/开启、
+两种暂存模式、两轮 mapping 切换及派生 scale 更新。
+使用真实 FP8 归一化和 expert loading，但 packing 与 kernel 为替身。
+
+随后原生 block Humming MoE 用例在 `fp8-policy-expansion-25.log`
+实际 `status=failed rc=1`，冷加载阶段报
+`ModuleNotFoundError: No module named 'humming.transform'`；
+尚未执行 reload、forward 或 CUDA graph。固定环境仍为 Humming
+0.1.10，未修改依赖或 JIT 缓存。原生验证及其他配置缺口仍未完成。
+
+第十四批补齐 Marlin Linear 静态 activation checkpoint 配置，以及
+Triton/Batched Triton/AITER MoE 的 FN→FNUZ 转换。
+Marlin 仍执行 W8A16：`input_scale` 被记录为 input-only role，
+参与完整性检查及可选 checkpoint 保留，不重新创建已被冷加载删除
+的 runtime activation scale。Marlin 暂存参数使用 detach Tensor
+构造，避免直接包装 vLLM 参数子类的限制。
+
+MoE policy 在重量化之前调用与冷加载相同的 FNUZ normalization，
+同步处理 weight、weight scale 和可选 input scale，并记录/校验
+FNUZ 模式。只解除适用 Triton/AITER 后端的入口限制，其他后端仍
+保留 FNUZ 拒绝。新增转换用例显式走 FNUZ 分支，并包含 FP8 负零；
+checkpoint 保留断言升级为原始字节比较，不只比较浮点值。
+
+H200 `fp8-policy-expansion-27.log` 实际 `status=ok rc=0`：
+71 passed、201 deselected，pytest 耗时 30.14 秒。新增八项 FNUZ
+MoE 用例覆盖 Tensor/Block、两种暂存模式和 EPLB mapping 切换，
+两项 Marlin static 生命周期用例使用 packing 替身；其余 61 项
+为已有 trace、Triton 和 Humming 生命周期回归。FNUZ 测试在 CUDA
+上运行真实转换，但未运行 AMD/AITER 原生计算。
+
+原生 Marlin static 用例 `fp8-policy-expansion-28.log` 实际
+`status=failed rc=1`：冷加载的 `_C::gptq_marlin_repack` 仍因固定
+环境旧二进制要求 `perm: Tensor`、当前源码传入 `size_k: int`
+而失败，未进入 reload/forward。相关原生验证仍未完成；
+未修改固定环境、替换其扩展二进制或清理编译缓存。
+
+### 11.7 后端扩展后的完整回归
+
+静态核对三个 Linear FP8 候选表（普通 FP8、block FP8、WFP8A16）
+中的 24 个 kernel 类，均在 `Fp8LinearMethod.create_reload_state`
+中有引用/分支。MoE factory 未引用的枚举仅为 `NONE`、
+`EMULATION`、`TRITON_MXFP8`、`AITER_MXFP8`，后三者属于独立
+MXFP8 路径。此检查只能证明注册覆盖，不能证明所有配置或计算正确性。
+
+完整运行三个文件中的全部 `reload_trace` 用例：
+
+```text
+tests/model_executor/model_loader/test_reload.py
+tests/quantization/test_fp8.py
+tests/model_executor/kernels/test_b12x_linear.py
+```
+
+第 29 次运行暴露 Humming 非 block MoE 的额外适配问题：虽然 W13
+已合并为每个 expert 一个 scale，Humming schema 仍按 W1/W3 两个
+逻辑 stack 展开。修复为向两个 stack 传递相同的归一化 scale，
+并加强生命周期测试检查两列完全相同，不再把此断言失败归为依赖问题。
+
+修复后 `fp8-policy-expansion-30.log` 实际 `status=failed rc=1`：
+158 passed、24 failed、123 deselected，pytest 耗时 110.00 秒。
+逐项检查失败堆栈，24 项全部归于以下三类：
+
+| 失败项 | 数量 | 实际错误 |
+| --- | --- | --- |
+| Torch block Linear | 2 | 128x128 blockwise GEMM 要求 CUDA 12.9+，固定 Torch 为 cu128 |
+| Marlin Linear/MoE，包括 static Linear | 10 | `_C::gptq_marlin_repack` 的 `perm` ABI 与当前源码不匹配 |
+| Humming Linear/MoE | 12 | 冷加载导入 `humming.transform` 失败 |
+
+W13 scale 形状断言已不再出现。这不是全量通过结果；
+158 项中包含前文明确标记的 packing 替身和跨平台纯转换测试。
+本轮全部已修改文件的 pre-commit 检查通过。
+
+随后在 GPU 0/1、限制 2 GPU/8 CPU 的独立 Ray 实例上，完整重跑
+`tests/distributed/test_weight_transfer.py`。日志为
+`reload-transfer-regression-post-policy.log`，实际 `status=ok rc=0`：
+106 passed，pytest 耗时 68.69 秒，包含原生 NCCL 多进程、
+IPC Ray/HTTP、默认 layerwise 及 opt-in trace 生命周期路径。
+退出时仍出现 CUDA IPC producer 早于共享 tensor 释放的警告，
+不以测试 rc0 推断该退出警告已经解决。
+退出后的独立核查实际 `status=ok rc=0`：compute-apps 为空，
+`ps` 未发现 Ray、pytest 或本轮传输 runner 残留，仅匹配到检查用 grep。
+
+### 11.8 Marlin 原生扩展的隔离构建进展
+
+为解决固定环境的 Marlin repack ABI 不匹配，在远端工作区内构建
+`_C_stable_libtorch` 和 `_moe_C_stable_libtorch`，未升级固定环境依赖，
+未替换其二进制，也未清理 JIT 缓存。
+
+完整 CMake 配置在下载 Triton 外部项目时达到 300 秒上限
+（`reload-native-configure-02.log`，实际 `status=failed rc=124`）。
+随后使用临时 CMake 副本，仅在两个 native target 定义完成后、外部项目
+include 前结束配置；kernel 源码和正式仓库 CMake 保持不变。
+CUTLASS 使用仓库要求的 v4.7.1，配置采用固定 vLLM Python、
+CUDA 13.0 nvcc 和 H200 的 9.0 架构。
+`reload-native-configure-03.log` 实际 `status=ok rc=0`，
+生成目录为远端工作区的 `reload-native-only-build`。
+
+第一次构建 `reload-native-build-01.log` 完成 54/112 项后，
+提交客户端在约 297 秒报告连接中断，没有可用的构建退出码。
+独立进程核查先发现残留 nvcc，随后再次核查确认全部构建进程消失，
+之后才启动增量构建。第二次构建复用已有对象文件，
+`reload-native-build-02.log` 新完成 25/58 项后按 240 秒上限退出，
+实际 `status=failed rc=124`。日志未记录编译错误，
+但扩展尚未链接完成，不能算作 Marlin 原生验证成功。
+
+第二次构建后的独立核查实际 `status=ok rc=0`：compute-apps 为空，
+无 nvcc/cicc/ptxas/ninja/cmake 或本轮构建 runner 残留。
+后续仍需增量构建、核对实际算子 ABI，再运行 Marlin reload 测试。

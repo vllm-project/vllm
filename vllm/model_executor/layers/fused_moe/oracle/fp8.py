@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+    compute_fp8_moe_per_tensor_scales,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,
 )
@@ -522,10 +525,36 @@ def convert_to_fp8_moe_kernel_format(
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
         )
+        from vllm.model_executor.utils import replace_parameter
 
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
+        # The schema converter reads layer parameters. Pass it the normalized
+        # values, especially the new W13 scale after per-tensor requantization.
+        quant_config = _humming_fp8_weight_schema(layer, w13, w13_scale)
+        if (
+            quant_config.get("strategy") == "tensor"
+            and layer.moe_config.activation.is_gated
+            and w13_scale.numel() == w13.shape[0]
+        ):
+            # The schema still expects one scale per W1/W3 logical stack.
+            # Both stacks now use the same normalized per-expert scale.
+            w13_scale = w13_scale.reshape(-1, 1).expand(-1, 2).contiguous()
+        scale_name = (
+            "weight_scale_inv"
+            if getattr(layer, "w13_weight_scale_inv", None) is not None
+            else "weight_scale"
         )
+        for name, tensor in (
+            ("w13_weight", w13),
+            ("w2_weight", w2),
+            (f"w13_{scale_name}", w13_scale),
+            (f"w2_{scale_name}", w2_scale),
+        ):
+            replace_parameter(layer, name, tensor)
+        convert_to_humming_moe_kernel_format(layer, quant_config=quant_config)
+        # Schema conversion may discard these checkpoint-only parameters.
+        # Fp8MoEMethod still reads them when constructing its quant config.
+        replace_parameter(layer, "w13_input_scale", w13_input_scale)
+        replace_parameter(layer, "w2_input_scale", w2_input_scale)
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -660,8 +689,11 @@ def make_fp8_moe_quant_config(
         and block_shape is None
     ):
         assert a1_scale is not None and a2_scale is not None
-        g1_alphas = w1_scale * a1_scale
-        g2_alphas = w2_scale * a2_scale
+        scales = compute_fp8_moe_per_tensor_scales(
+            w1_scale, w2_scale, a1_scale, a2_scale
+        )
+        g1_alphas = scales["g1_alphas"]
+        g2_alphas = scales["g2_alphas"]
         if layer is not None:
             layer.register_parameter(
                 "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
@@ -678,8 +710,8 @@ def make_fp8_moe_quant_config(
             w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            a1_gscale=(1.0 / a1_scale),
-            a2_gscale=(1.0 / a2_scale),
+            a1_gscale=scales["a1_gscale"],
+            a2_gscale=scales["a2_gscale"],
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,

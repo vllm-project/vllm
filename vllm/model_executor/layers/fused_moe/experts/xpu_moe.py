@@ -171,6 +171,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
+                expert_map=expert_map,
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
@@ -179,6 +180,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            expert_map=expert_map,
             a1q_scale=a1q_scale,
         )
 

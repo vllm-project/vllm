@@ -66,6 +66,8 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                # Construct modules, parameters, and quantization methods before
+                # loading checkpoint values or running post-load processing.
                 model = self.create_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
@@ -80,8 +82,13 @@ class BaseModelLoader(ABC):
                     create_model_reload_tracer,
                 )
 
+                # Register per-layer reload states in the pre-load layout;
+                # runtime tensor/kernel/config bindings are captured after PWAL.
                 trace = create_model_reload_tracer(model)
+            # Temporarily wrap loaders to capture cold-load metadata and ordinary
+            # shard slots; RoutedExperts slots use each reload's expert mapping.
             with trace.observe() if trace is not None else nullcontext():
+                # Populate parameters with the actual checkpoint weights.
                 self.load_weights(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
@@ -98,9 +105,12 @@ class BaseModelLoader(ABC):
             if _has_online_quant(model):
                 finalize_layerwise_processing(model, model_config)
 
+            # Cold-load PWAL converts loaded weights into the runtime layout.
             process_weights_after_loading(model, model_config, target_device)
             if trace is not None:
+                # Bind the resulting runtime tensors, kernels, and quant configs.
                 trace.bind_runtime()
+                # Expose the bound tracer to subsequent reload requests.
                 model._reload_tracer = trace
 
         return model.eval()

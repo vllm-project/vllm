@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import regex as re
 import torch
+from packaging.version import Version
 
 from tests.quantization.utils import (
     is_quant_method_supported,
@@ -900,7 +901,20 @@ def test_fp8_reloading(
     "backend,moe,block,eplb",
     [
         ("deep_gemm", False, True, False),
+        ("cutlass", False, True, False),
+        ("triton", False, True, False),
+        ("torch", False, True, False),
+        ("cutlass", False, False, False),
+        ("flashinfer", False, False, False),
+        ("torch", False, False, False),
+        ("marlin", False, True, False),
+        ("marlin", False, False, False),
         ("deep_gemm", True, True, False),
+        ("triton", True, True, False),
+        ("triton", True, False, False),
+        ("marlin", True, True, False),
+        ("marlin", True, False, False),
+        ("triton", True, True, True),
         ("flashinfer_cutlass", True, True, False),
         ("flashinfer_cutlass", True, False, False),
         ("deep_gemm", True, True, True),
@@ -920,12 +934,56 @@ def test_fp8_reload_trace_matches_cold_load(
     eplb,
     preserve,
     check_forward=True,
+    e8m0_scales=False,
+    ragged=False,
+    is_bmm=False,
+    marlin_static=False,
+    legacy_reference=False,
+    capture_graph=True,
 ):
     """Real backend conversion must match cold load without replacing targets."""
     from transformers import LlamaConfig
 
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterFp8BlockScaledMMKernel,
+        AiterPreshuffledFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+        B12xFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+        CPUFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        CutlassFp8BlockScaledMMKernel,
+        CutlassFP8ScaledMMLinearKernel,
+    )
     from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
         DeepGemmFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+        FlashInferFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+        HummingFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+        MarlinFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+        BlockWiseTorchFP8ScaledMMLinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+        ROCmFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+        TritonFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+        XPUFp8BlockScaledMMKernel,
+        XPUW8A8FP8LinearKernel,
+        XPUW8A16FP8LinearKernel,
     )
     from vllm.utils.deep_gemm import is_deep_gemm_supported
     from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -935,6 +993,15 @@ def test_fp8_reload_trace_matches_cold_load(
         pytest.skip("DeepGEMM is unavailable")
     if backend == "flashinfer_cutlass" and not has_flashinfer_cutlass_fused_moe():
         pytest.skip("FlashInfer CUTLASS is unavailable")
+    if (
+        backend == "torch"
+        and not moe
+        and block
+        and check_forward
+        and torch.version.cuda is not None
+        and Version(torch.version.cuda) < Version("12.9")
+    ):
+        pytest.skip("PyTorch block-scaled GEMM requires a CUDA >= 12.9 build")
     LlamaConfig(
         architectures=["LlamaForCausalLM"],
         hidden_size=256,
@@ -947,13 +1014,38 @@ def test_fp8_reload_trace_matches_cold_load(
     default_vllm_config.model_config = ModelConfig(
         model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
     )
-    default_vllm_config.kernel_config.moe_backend = backend
+    if moe:
+        # Exercise conversion even when the optional compute backend is absent.
+        default_vllm_config.kernel_config.moe_backend = (
+            "triton"
+            if backend.startswith("batched_")
+            or (
+                backend
+                in (
+                    "flashinfer_trtllm",
+                    "hpc",
+                    "humming",
+                    "cpu",
+                    "vllm_cutlass",
+                    "aiter",
+                    "xpu",
+                )
+                and not check_forward
+            )
+            else backend
+        )
     default_vllm_config.parallel_config.enable_eplb = eplb
     config = Fp8Config(
         is_checkpoint_fp8_serialized=True,
-        activation_scheme="dynamic" if block else "static",
+        activation_scheme=(
+            "dynamic"
+            if block or (backend == "marlin" and not marlin_static)
+            else "static"
+        ),
         weight_block_size=[128, 128] if block else None,
     )
+    if e8m0_scales:
+        config.is_scale_e8m0 = True
 
     layer_index = 0
 
@@ -966,7 +1058,13 @@ def test_fp8_reload_trace_matches_cold_load(
                     num_experts=2,
                     top_k=1,
                     hidden_size=256,
-                    intermediate_size=256 if block else 260,
+                    intermediate_size=(
+                        256
+                        if block
+                        or backend.startswith("batched_")
+                        or backend in ("flashinfer_trtllm", "hpc")
+                        else 260
+                    ),
                     quant_config=config,
                     prefix=f"trace_{layer_index}.experts",
                     enable_eplb=eplb,
@@ -976,24 +1074,128 @@ def test_fp8_reload_trace_matches_cold_load(
                         [[0], [1]], device="cuda"
                     )
                 method = layer.quant_method
+                if backend == "flashinfer_trtllm" and not check_forward:
+                    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (  # noqa: E501
+                        TrtLlmFp8ExpertsMonolithic,
+                    )
+                    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+                        Fp8MoeBackend,
+                    )
+
+                    method.fp8_backend = Fp8MoeBackend.FLASHINFER_TRTLLM
+                    method.experts_cls = TrtLlmFp8ExpertsMonolithic
+                elif backend == "hpc" and not check_forward:
+                    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+                    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+                        Fp8MoeBackend,
+                    )
+
+                    method.fp8_backend = Fp8MoeBackend.HPC
+                    method.experts_cls = HPCExperts
+                elif backend == "humming" and not check_forward:
+                    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+                        Fp8MoeBackend,
+                    )
+
+                    method.fp8_backend = Fp8MoeBackend.HUMMING
+                elif backend.startswith("batched_") or (
+                    backend in ("cpu", "vllm_cutlass", "aiter", "xpu")
+                    and not check_forward
+                ):
+                    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+                        Fp8MoeBackend,
+                        backend_to_kernel_cls,
+                    )
+
+                    method.fp8_backend = {
+                        "cpu": Fp8MoeBackend.CPU,
+                        "vllm_cutlass": Fp8MoeBackend.VLLM_CUTLASS,
+                        "batched_triton": Fp8MoeBackend.BATCHED_TRITON,
+                        "batched_cutlass": Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+                        "aiter": Fp8MoeBackend.AITER,
+                        "xpu": Fp8MoeBackend.XPU,
+                    }[backend]
+                    method.experts_cls = backend_to_kernel_cls(method.fp8_backend)[0]
             else:
                 layer = torch.nn.Module()
                 method = Fp8LinearMethod(config)
+                widths = [128, 132] if backend == "cutlass" and not block else [256]
+                if ragged:
+                    widths = [272]
                 method.create_weights(
                     layer,
                     256,
-                    [256],
+                    widths,
                     256,
-                    256,
+                    sum(widths),
                     torch.bfloat16,
                     weight_loader=default_weight_loader,
                 )
-                method.fp8_linear = DeepGemmFp8BlockScaledMMKernel(
-                    method.fp8_linear.config
-                )
+                kernel_cls = {
+                    "deep_gemm": DeepGemmFp8BlockScaledMMKernel,
+                    "cutlass": (
+                        CutlassFp8BlockScaledMMKernel
+                        if block
+                        else CutlassFP8ScaledMMLinearKernel
+                    ),
+                    "triton": TritonFp8BlockScaledMMKernel,
+                    "torch": (
+                        BlockWiseTorchFP8ScaledMMLinearKernel
+                        if block
+                        else PerTensorTorchFP8ScaledMMLinearKernel
+                    ),
+                    "flashinfer": FlashInferFP8ScaledMMLinearKernel,
+                    "marlin": MarlinFP8ScaledMMLinearKernel,
+                    "humming": HummingFP8ScaledMMLinearKernel,
+                    "b12x": B12xFp8BlockScaledMMKernel,
+                    "xpu": (
+                        XPUFp8BlockScaledMMKernel if block else XPUW8A8FP8LinearKernel
+                    ),
+                    "xpu_w8a16": XPUW8A16FP8LinearKernel,
+                    "aiter_block": AiterFp8BlockScaledMMKernel,
+                    "aiter_direct": AiterPreshuffledFp8BlockScaledMMKernel,
+                    "cpu_direct": CPUFp8BlockScaledMMKernel,
+                    "rocm": ROCmFP8ScaledMMLinearKernel,
+                }[backend]
+                if block and backend not in ("marlin", "humming"):
+                    method.fp8_linear = kernel_cls(method.fp8_linear.config)
+                else:
+                    with pytest.MonkeyPatch.context() as patch:
+                        if (
+                            backend in ("xpu", "xpu_w8a16", "rocm")
+                            and not check_forward
+                        ):
+                            patch.setattr(
+                                kernel_cls,
+                                "is_supported",
+                                classmethod(lambda cls, *args: (True, None)),
+                            )
+                        method.fp8_linear = kernel_cls(
+                            method.fp8_linear.config,
+                            (
+                                "weight",
+                                "weight_scale_inv" if block else "weight_scale",
+                                "input_scale",
+                                "input_scale_ub",
+                            ),
+                        )
+                method.use_marlin = backend == "marlin"
                 layer.quant_method = method
-                layer.bias = torch.nn.Parameter(torch.zeros(256), requires_grad=False)
+                if backend == "aiter_direct":
+                    layer.skip_weight_relayout = True
+                if backend == "cpu_direct":
+                    layer._cpu_skip_gemm_dispatch = True
+                if is_bmm:
+                    layer.is_bmm = True
+                    layer.bmm_batch_size = 2
+                layer.bias = torch.nn.Parameter(
+                    torch.zeros(sum(widths)), requires_grad=False
+                )
                 layer.bias.weight_loader = default_weight_loader
+                if backend == "humming":
+                    layer.output_partition_sizes = widths
+                    layer.params_dtype = torch.bfloat16
+                    layer.has_bias = True
         return layer, method
 
     def load(layer, sources):
@@ -1034,6 +1236,13 @@ def test_fp8_reload_trace_matches_cold_load(
         )
         if backend == "flashinfer_cutlass" and block and "scale" in role:
             source_a[role].view(-1)[0] = 1e-23
+        if (
+            moe
+            and current_platform.is_fp8_fnuz()
+            and "weight" in role
+            and "scale" not in role
+        ):
+            source_a[role].view(torch.int8).view(-1)[0] = -128
     with trace.observe():
         load(layer, source_a)
     method.process_weights_after_loading(layer)
@@ -1042,7 +1251,45 @@ def test_fp8_reload_trace_matches_cold_load(
         name: (target.tensor, target.tensor.data_ptr())
         for name, target in state.targets.items()
     }
+    prepare_calls = []
+    tracks_preparation = hasattr(state.policy, "prepare_for_load") and not (
+        backend.startswith(("marlin", "humming"))
+    )
+    if tracks_preparation:
+        prepare_for_load = state.policy.prepare_for_load
+
+        def checked_prepare(current):
+            assert not current.checkpoint
+            prepare_for_load(current)
+            prepare_calls.append(True)
+            assert set(current.checkpoint) == set(current.roles)
+            for role in current.roles:
+                source = current.checkpoint[role]
+                if moe and backend == "flashinfer_cutlass":
+                    target = current.targets[role].tensor
+                    expected_alias = not preserve and (
+                        block or role in ("w13_weight", "w2_weight")
+                    )
+                    assert (
+                        source.untyped_storage().data_ptr()
+                        == target.untyped_storage().data_ptr()
+                    ) == expected_alias
+                assert source.shape == current.metadata[role].shape
+                assert source.stride() == current.metadata[role].stride()
+                assert source.dtype == current.metadata[role].dtype
+            for target in current.targets.values():
+                target.validate()
+
+        state.policy.prepare_for_load = checked_prepare
     kernel = method.moe_kernel if moe else method.fp8_linear
+    processing_plan = getattr(method, "processing_plan", None)
+    if processing_plan is not None:
+
+        def reject_kernel_reinitialization(*args, **kwargs):
+            pytest.fail("Reload must not execute cold-only kernel initialization")
+
+        method._init_moe_kernel = reject_kernel_reinitialization
+        method._setup_kernel = reject_kernel_reinitialization
     x = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
     topk_ids = (torch.arange(128, device="cuda", dtype=torch.int32) % 2)[:, None]
     topk_weights = torch.ones(128, 1, device="cuda")
@@ -1056,9 +1303,10 @@ def test_fp8_reload_trace_matches_cold_load(
         for _ in range(3):
             forward(method, layer)
         torch.accelerator.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_output = forward(method, layer)
+        if capture_graph:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                graph_output = forward(method, layer)
 
     for factor in (0.5, 1.5):
         source_b = {
@@ -1073,21 +1321,38 @@ def test_fp8_reload_trace_matches_cold_load(
                     torch.tensor(placement, device="cuda")[:, None]
                 )
         load(reference, source_b)
+        if legacy_reference:
+            # Compare against the pre-split cold path, not plan against itself.
+            reference_method._create_processing_plan = lambda _: None
         reference_method.process_weights_after_loading(reference)
         with trace.round(preserve_checkpoint=preserve):
             load(layer, dict(reversed(list(source_b.items()))))
             assert state.complete
             assert bool(state.checkpoint) is preserve
+        if tracks_preparation:
+            assert len(prepare_calls) == (1 if factor == 0.5 else 2)
         assert (method.moe_kernel if moe else method.fp8_linear) is kernel
+        assert getattr(method, "processing_plan", None) is processing_plan
+        if moe and backend == "aiter":
+            assert layer.w13_weight.is_shuffled and layer.w2_weight.is_shuffled
         for name, target in state.targets.items():
             original, pointer = identities[name]
             assert target.resolve() is original
             assert original.data_ptr() == pointer
-            expected = (
-                getattr(reference, name)
-                if name in state.roles
-                else getattr(reference_method.moe_quant_config, name)
-            )
+            if name == "humming_locks":
+                expected = reference_method.fp8_linear.locks
+            elif name.startswith("humming."):
+                expected = getattr(reference, name.removeprefix("humming."))
+            elif name in state.roles or name in (
+                "workspace",
+                "bmm_weight",
+                "bmm_scale",
+            ):
+                expected = getattr(reference, state.runtime_names.get(name, name))
+            elif name in ("_g1_alphas", "_g2_alphas", "_g1_scale_c"):
+                expected = getattr(reference_method.moe_kernel.fused_experts, name)
+            else:
+                expected = getattr(reference_method.moe_quant_config, name)
             torch.testing.assert_close(
                 target.tensor.reshape(-1).contiguous().view(torch.uint8),
                 expected.reshape(-1).contiguous().view(torch.uint8),
@@ -1095,18 +1360,330 @@ def test_fp8_reload_trace_matches_cold_load(
                 atol=0,
             )
         if check_forward:
-            graph.replay()
+            if capture_graph:
+                graph.replay()
+                actual_output = graph_output
+            else:
+                actual_output = forward(method, layer)
             torch.testing.assert_close(
-                graph_output, forward(reference_method, reference), rtol=0, atol=0
+                actual_output, forward(reference_method, reference), rtol=0, atol=0
             )
         if preserve:
             for name, source in source_b.items():
+                expected_checkpoint = source[placement] if moe else source
                 torch.testing.assert_close(
-                    state.checkpoint[name].float(),
-                    source[placement].float() if moe else source.float(),
+                    state.checkpoint[name].contiguous().view(torch.uint8),
+                    expected_checkpoint.contiguous().view(torch.uint8),
                     rtol=0,
                     atol=0,
                 )
+    if moe and backend == "aiter":
+        from vllm.model_executor.model_loader.reload.trace import ReloadError
+
+        layer.w13_weight.is_shuffled = False
+        with pytest.raises(ReloadError, match="shuffled layout marker"):
+            state.policy.validate(state)
+        layer.w13_weight.is_shuffled = True
+
+
+def test_fp8_processing_plan_cutlass_canonical_input():
+    """Each round starts at W13; neither previous output nor a layer is needed."""
+    from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+        Fp8MoEProcessingPlan,
+        Fp8MoEWeights,
+    )
+
+    plan = Fp8MoEProcessingPlan(
+        backend="flashinfer_cutlass",
+        block_shape=(128, 128),
+        is_act_and_mul=True,
+        is_gated=True,
+        shard_size=128,
+        num_experts=1,
+        static_input=False,
+        enable_eplb=False,
+        use_e8m0=False,
+    )
+    # Layout and scale clamping do not require a GPU kernel.
+    for gate, up in ((1.0, 2.0), (3.0, 4.0)):
+        w13 = torch.cat(
+            (torch.full((1, 128, 128), gate), torch.full((1, 128, 128), up)), dim=1
+        )
+        source = Fp8MoEWeights(
+            w13,
+            torch.ones(1, 128, 128),
+            torch.tensor([[[1e-23], [0.25]]]),
+            torch.zeros(1, 1, 1),
+            None,
+            None,
+        )
+        result = plan.process(source)
+        torch.testing.assert_close(result.w13[:, :128], torch.full((1, 128, 128), up))
+        torch.testing.assert_close(result.w13[:, 128:], torch.full((1, 128, 128), gate))
+        torch.testing.assert_close(
+            result.w13_scale, torch.tensor([[[0.25], [1e-10]]]), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            result.w2_scale, torch.full((1, 1, 1), 1e-10), rtol=0, atol=0
+        )
+        assert result.w13_input_scale is None
+        assert result.w2_input_scale is None
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_fnuz_moe_conversion(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    block,
+    preserve,
+    eplb,
+):
+    """Exercise the real FN-to-FNUZ conversion, not an AMD forward on CUDA."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: True)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "triton",
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+    )
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_marlin_static_lifecycle(
+    default_vllm_config, dist_init, workspace_init, tmp_path, monkeypatch, preserve
+):
+    """A static checkpoint scale is tracked even though W8A16 discards it."""
+    from vllm.model_executor.kernels.linear.scaled_mm import marlin
+    from vllm.model_executor.layers.quantization.utils import marlin_utils_fp8
+
+    def pack(layer, size_k_first, input_dtype):
+        assert size_k_first
+        layer.weight = torch.nn.Parameter(
+            layer.weight.t().contiguous().view(torch.int32), requires_grad=False
+        )
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.detach().clone().mul_(2), requires_grad=False
+        )
+        if not hasattr(layer, "workspace"):
+            layer.workspace = torch.empty(
+                16, dtype=torch.int32, device=layer.weight.device
+            )
+        layer.workspace.zero_()
+
+    monkeypatch.setattr(marlin, "prepare_fp8_layer_for_marlin", pack)
+    monkeypatch.setattr(marlin_utils_fp8, "prepare_fp8_layer_for_marlin", pack)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "marlin",
+        False,
+        False,
+        False,
+        preserve,
+        check_forward=False,
+        marlin_static=True,
+    )
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_marlin_static(
+    default_vllm_config, dist_init, workspace_init, tmp_path, preserve
+):
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "marlin",
+        False,
+        False,
+        False,
+        preserve,
+        marlin_static=True,
+    )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_humming_moe_lifecycle(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    block,
+    preserve,
+    eplb,
+):
+    """Exercise dynamic expert placement and derived targets with a packer stub."""
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+
+    def pack(layer, quant_config):
+        if block:
+            assert quant_config["weight_block_size"] == [128, 128]
+        else:
+            assert quant_config["strategy"] == "tensor"
+        scale_name = "weight_scale_inv" if block else "weight_scale"
+        converted = {}
+        for prefix in ("w13", "w2"):
+            weight = getattr(layer, f"{prefix}_weight")
+            scale = getattr(layer, f"{prefix}_{scale_name}")
+            if prefix == "w13" and not block:
+                # Each logical stack gets the same normalized scale, not
+                # the original, potentially different W1/W3 checkpoint scales.
+                assert scale.shape == (2, 2)
+                torch.testing.assert_close(scale[:, 0], scale[:, 1], rtol=0, atol=0)
+            converted[f"{prefix}_weight"] = weight.view(torch.int32).roll(1, 1)
+            converted[f"{prefix}_weight_scale"] = scale.clone().mul_(2)
+            converted[f"{prefix}_weight_scale_2"] = scale.float().sum().reshape(1)
+        for name, _ in list(layer.named_parameters()):
+            if name.startswith(("w13_", "w2_")):
+                delattr(layer, name)
+        for name, value in converted.items():
+            layer.register_parameter(
+                name, torch.nn.Parameter(value, requires_grad=False)
+            )
+        layer.humming_configs = {
+            prefix: tuple(converted[f"{prefix}_weight"].shape)
+            for prefix in ("w13", "w2")
+        }
+        layer.weight_schemas = {}
+        layer.input_schemas = {}
+        return layer.humming_configs
+
+    def init_kernel(method, layer):
+        method.moe_quant_config = SimpleNamespace()
+        method.moe_kernel = SimpleNamespace()
+
+    monkeypatch.setattr(humming_utils, "convert_to_humming_moe_kernel_format", pack)
+    monkeypatch.setattr(Fp8MoEMethod, "_init_moe_kernel", init_kernel)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "humming",
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+    )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_humming_moe(
+    default_vllm_config, dist_init, workspace_init, tmp_path, block, preserve, eplb
+):
+    from vllm.utils.import_utils import has_humming
+
+    if not has_humming():
+        pytest.skip("Humming is unavailable")
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "humming",
+        True,
+        block,
+        eplb,
+        preserve,
+    )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_humming_linear_lifecycle(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    block,
+    preserve,
+):
+    """Test deleted/renamed roles without depending on Humming's native packing."""
+    from vllm.model_executor.kernels.linear.scaled_mm import humming
+    from vllm.utils.import_utils import has_humming
+
+    if not has_humming():
+        pytest.skip("Humming dtype definitions are unavailable")
+
+    def pack(layer, config):
+        # Keep the real KN-to-NK standardization, but substitute the optional
+        # schema/packing library. This is a lifecycle test, not a kernel test.
+        assert layer.weight.shape == (256, 64)
+        assert layer.weight.dtype == torch.int32
+        converted = {
+            "weight": layer.weight.roll(1, 0).contiguous(),
+            "weight_scale": layer.weight_scale.clone().mul_(2),
+            "bias": layer.bias.clone(),
+        }
+        for name, _ in list(layer.named_parameters()):
+            delattr(layer, name)
+        for name, value in converted.items():
+            layer.register_parameter(
+                name, torch.nn.Parameter(value, requires_grad=False)
+            )
+        layer.weight_schema = object()
+        return {"shape": (256, 256), "scale_type": config["weight_scale_type"]}
+
+    monkeypatch.setattr(humming, "prepare_humming_linear_layer_config", pack)
+    test_fp8_reload_trace_humming_linear(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        block,
+        preserve,
+        check_forward=False,
+    )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_humming_linear(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    block,
+    preserve,
+    check_forward=True,
+):
+    from vllm.utils.import_utils import has_humming
+
+    if not has_humming():
+        pytest.skip("Humming is unavailable")
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "humming",
+        False,
+        block,
+        False,
+        preserve,
+        check_forward=check_forward,
+    )
 
 
 @pytest.mark.parametrize("block", [False, True])
@@ -1128,6 +1705,497 @@ def test_fp8_reload_trace_cutlass_conversion(
         preserve,
         check_forward=False,
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_torch_block_conversion(
+    default_vllm_config, dist_init, workspace_init, tmp_path, preserve
+):
+    """Validate reload even when the CUDA build lacks block-scaled torch GEMM."""
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "torch",
+        False,
+        True,
+        False,
+        preserve,
+        check_forward=False,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize(
+    "backend,block,fnuz,e8m0_scales",
+    [
+        ("aiter_block", True, False, False),
+        ("aiter_block", True, False, True),
+        ("aiter_direct", True, False, True),
+        ("aiter_block", True, True, False),
+        ("aiter_block", True, True, True),
+        ("aiter_direct", True, True, True),
+        ("cpu_direct", True, False, False),
+        ("rocm", False, False, False),
+        ("rocm", False, True, False),
+    ],
+)
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_platform_linear_conversion(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    backend,
+    block,
+    fnuz,
+    e8m0_scales,
+    preserve,
+):
+    """Test platform-independent transforms, not AMX/ROCm compute or AITER shuffle."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: fnuz)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        False,
+        block,
+        False,
+        preserve,
+        check_forward=False,
+        e8m0_scales=e8m0_scales,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize(
+    "backend,block,ragged,is_bmm",
+    [
+        ("xpu", True, False, False),
+        ("xpu", True, True, False),
+        ("xpu", True, False, True),
+        ("xpu", False, False, False),
+        ("xpu_w8a16", False, False, False),
+    ],
+)
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_xpu_linear_conversion(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    backend,
+    block,
+    ragged,
+    is_bmm,
+    preserve,
+):
+    """Check XPU layout/BMM caches with real cold conversion, not an XPU GEMM."""
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        False,
+        block,
+        False,
+        preserve,
+        check_forward=False,
+        ragged=ragged,
+        is_bmm=is_bmm,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize("e8m0_scales", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_b12x_block_conversion(
+    default_vllm_config, dist_init, workspace_init, tmp_path, preserve, e8m0_scales
+):
+    """Compare real B12x conversion, not its SM120-only GEMM, on CUDA."""
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        "b12x",
+        False,
+        True,
+        False,
+        preserve,
+        check_forward=False,
+        e8m0_scales=e8m0_scales,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("backend", ["flashinfer_trtllm", "hpc"])
+def test_fp8_reload_trace_optional_moe_conversion(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    block,
+    eplb,
+    preserve,
+    backend,
+):
+    """Check optional backend packing/cached scales independently of its GEMM."""
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "backend", ["triton", "vllm_cutlass", "flashinfer_trtllm", "hpc", "cpu"]
+)
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_planned_moe_matches_legacy(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    backend,
+    block,
+    preserve,
+    eplb,
+):
+    """Reuse the cold plan across reloads; CPU uses a packing lifecycle stub."""
+    if backend == "cpu":
+        from vllm.model_executor.layers.fused_moe.experts import cpu_moe
+
+        def pack(w13, w2):
+            return w13.view(torch.uint8).roll(1, -1).view(w13.dtype), (
+                w2.view(torch.uint8).roll(1, -1).view(w2.dtype)
+            )
+
+        monkeypatch.setattr(cpu_moe, "prepare_fp8_moe_layer_for_cpu", pack)
+        # The legacy oracle imported the same helper lazily.
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=backend == "triton",
+        legacy_reference=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "backend,block",
+    [("batched_triton", False), ("batched_triton", True), ("batched_cutlass", False)],
+)
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_batched_moe(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    backend,
+    block,
+    preserve,
+    eplb,
+):
+    """Run native batched kernels before/after reload with no-comms dispatch."""
+    from vllm.model_executor.layers.fused_moe.oracle import fp8
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
+        BatchedPrepareAndFinalize,
+    )
+
+    monkeypatch.setattr(
+        fp8,
+        "maybe_make_prepare_finalize",
+        lambda **_: BatchedPrepareAndFinalize(128, 2, 1, 0),
+    )
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        True,
+        block,
+        eplb,
+        preserve,
+        legacy_reference=True,
+        capture_graph=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "backend,fnuz", [("aiter", False), ("aiter", True), ("xpu", False)]
+)
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_fp8_reload_trace_platform_moe_matches_legacy(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    tmp_path,
+    monkeypatch,
+    backend,
+    fnuz,
+    block,
+    preserve,
+    eplb,
+):
+    """Compare platform conversion lifecycles without AMD/Intel compute kernels."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: fnuz)
+
+    def shuffle(*weights):
+        return tuple(w.view(torch.uint8).roll(1, -1).view(w.dtype) for w in weights)
+
+    def init_kernel(method, layer):
+        method.moe_quant_config = method.get_fused_moe_quant_config(layer)
+        method.moe_kernel = SimpleNamespace(
+            fused_experts=SimpleNamespace(fused_moe_impl=None)
+        )
+
+    monkeypatch.setattr(rocm_aiter_ops, "shuffle_weights", shuffle)
+    monkeypatch.setattr(Fp8MoEMethod, "_init_moe_kernel", init_kernel)
+    test_fp8_reload_trace_matches_cold_load(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        tmp_path,
+        backend,
+        True,
+        block,
+        eplb,
+        preserve,
+        check_forward=False,
+        legacy_reference=True,
+    )
+
+
+@pytest.mark.parametrize("is_act_and_mul", [False, True])
+def test_fp8_moe_derived_scales_change_with_new_weights(is_act_and_mul):
+    """Derived scales must use this round's weights and activation scales."""
+    from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+        compute_fp8_moe_per_tensor_scales,
+        compute_fp8_moe_trtllm_scales,
+    )
+
+    for factor in (0.5, 1.5):
+        w1, w2 = torch.tensor([2.0, 4.0]) * factor, torch.tensor([3.0, 5.0])
+        a1, a2 = torch.tensor(0.25), torch.tensor(0.5) * factor
+        scales = compute_fp8_moe_per_tensor_scales(w1, w2, a1, a2)
+        torch.testing.assert_close(scales["g1_alphas"], w1 * a1)
+        torch.testing.assert_close(scales["g2_alphas"], w2 * a2)
+        torch.testing.assert_close(scales["a1_gscale"], a1.reciprocal())
+        torch.testing.assert_close(scales["a2_gscale"], a2.reciprocal())
+        scales = compute_fp8_moe_trtllm_scales(w1, w2, a1, a2, is_act_and_mul)
+        torch.testing.assert_close(scales["_g1_alphas"], w1 * a1)
+        torch.testing.assert_close(scales["_g2_alphas"], w2 * a2)
+        expected = w1 * a1 / a2 if is_act_and_mul else torch.ones_like(w1) / a2
+        torch.testing.assert_close(scales["_g1_scale_c"], expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA tensors")
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_fp8_reload_trace_xpu_moe_layout(block, preserve):
+    """XPU's pure tensor conversion must preserve live targets across reloads."""
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        prepare_fp8_moe_layer_for_xpu,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.utils.fp8_processing import (
+        Fp8MoEProcessingPlan,
+    )
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        process_fp8_weight_tensor_strategy_moe,
+    )
+    from vllm.model_executor.model_loader.reload.fp8 import PlannedMoEReloadPolicy
+    from vllm.model_executor.model_loader.reload.trace import ReloadError, ReloadState
+    from vllm.model_executor.utils import replace_parameter
+
+    suffix = "weight_scale_inv" if block else "weight_scale"
+    s13, s2 = f"w13_{suffix}", f"w2_{suffix}"
+    shapes = {
+        "w13_weight": (2, 256, 128),
+        "w2_weight": (2, 128, 128),
+        s13: (2, 2, 1) if block else (2, 2),
+        s2: (2, 1, 1) if block else (2,),
+    }
+    sources = {
+        name: (torch.rand(shape, device="cuda") + 0.1).to(
+            torch.float32 if "scale" in name else torch.float8_e4m3fn
+        )
+        for name, shape in shapes.items()
+    }
+
+    def convert(values):
+        w13, ws13 = values["w13_weight"].clone(), values[s13].clone()
+        if not block:
+            w13, ws13 = process_fp8_weight_tensor_strategy_moe(w13, ws13, 128, 2, True)
+        w13, ws13, w2, ws2 = prepare_fp8_moe_layer_for_xpu(
+            w13, ws13, values["w2_weight"].clone(), values[s2].clone()
+        )
+        return {"w13_weight": w13, "w2_weight": w2, s13: ws13, s2: ws2}
+
+    layer = torch.nn.Module()
+    # Only layout is under test: no XPU kernel is constructed or emulated.
+    experts = SimpleNamespace(fused_moe_impl=None)
+    layer.quant_method = SimpleNamespace(
+        moe_kernel=SimpleNamespace(fused_experts=experts),
+        moe_quant_config=object(),
+        fp8_backend=Fp8MoeBackend.XPU,
+        processing_plan=Fp8MoEProcessingPlan(
+            backend="xpu",
+            block_shape=(128, 128) if block else None,
+            is_act_and_mul=True,
+            is_gated=True,
+            shard_size=128,
+            num_experts=2,
+            static_input=False,
+            enable_eplb=False,
+            use_e8m0=False,
+        ),
+    )
+    for name, source in sources.items():
+        param = torch.nn.Parameter(torch.empty_like(source), requires_grad=False)
+        param.weight_loader = default_weight_loader
+        layer.register_parameter(name, param)
+    state = ReloadState(
+        "experts",
+        layer,
+        tuple(shapes),
+        PlannedMoEReloadPolicy(),
+    )
+    trace = ModelReloadTracer()
+    trace.register_state(state)
+
+    def load(values):
+        for name, source in values.items():
+            param = getattr(layer, name)
+            param.weight_loader(param, source)
+
+    with trace.observe():
+        load(sources)
+    for name, value in convert(sources).items():
+        replace_parameter(layer, name, value)
+    trace.bind_runtime()
+    # Simulate first forward installing the dependency's tensor references.
+    cached = {
+        "w13": layer.w13_weight,
+        "w2": layer.w2_weight,
+        "gemm1_wei_scales": getattr(layer, s13),
+        "gemm2_wei_scales": getattr(layer, s2),
+    }
+    experts.fused_moe_impl = SimpleNamespace(**cached)
+    identities = {
+        name: (target.tensor, target.tensor.data_ptr())
+        for name, target in state.targets.items()
+    }
+    for factor in (0.5, 1.5):
+        incoming = {
+            name: (source.float() * factor).to(source.dtype)
+            for name, source in sources.items()
+        }
+        with trace.round(preserve_checkpoint=preserve):
+            load(dict(reversed(list(incoming.items()))))
+            assert state.complete
+            assert bool(state.checkpoint) is preserve
+        for name, expected in convert(incoming).items():
+            actual = getattr(layer, name)
+            assert actual is identities[name][0]
+            assert actual.data_ptr() == identities[name][1]
+            torch.testing.assert_close(actual.float(), expected.float(), rtol=0, atol=0)
+            if preserve:
+                torch.testing.assert_close(
+                    state.checkpoint[name].float(),
+                    incoming[name].float(),
+                    rtol=0,
+                    atol=0,
+                )
+    for name, tensor in cached.items():
+        setattr(experts.fused_moe_impl, name, tensor.clone())
+        with pytest.raises(ReloadError, match="no longer references"):
+            state.policy.validate(state)
+        setattr(experts.fused_moe_impl, name, tensor)
+
+
+def test_xpu_moe_forwards_current_expert_map(monkeypatch):
+    """A cached XPU executor must receive each call's current expert mapping."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts import xpu_moe
+
+    initial = {}
+    calls = []
+
+    def factory(**kwargs):
+        initial.update(kwargs)
+        return SimpleNamespace(apply=lambda **args: calls.append(args))
+
+    monkeypatch.setattr(xpu_moe, "XpuFusedMoe", factory, raising=False)
+    experts = SimpleNamespace(
+        fused_moe_impl=None,
+        quant_config=None,
+        w1_scale=None,
+        w2_scale=None,
+        w1_bias=None,
+        w2_bias=None,
+        moe_config=SimpleNamespace(num_local_experts=2, ep_rank=0, ep_size=2),
+        gemm1_clamp_limit=None,
+    )
+    tensor = torch.zeros(1, 1)
+    args = dict(
+        output=tensor,
+        hidden_states=tensor,
+        w1=tensor,
+        w2=tensor,
+        topk_weights=tensor,
+        topk_ids=torch.zeros(1, 1, dtype=torch.int32),
+        activation=MoEActivation.SILU,
+        global_num_experts=4,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=tensor,
+        workspace2=tensor,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    first = torch.tensor([0, 1, -1, -1])
+    second = torch.tensor([-1, -1, 1, 0])
+    xpu_moe.XPUExperts.apply(experts, **args, expert_map=first)
+    impl = experts.fused_moe_impl
+    xpu_moe.XPUExperts.apply(experts, **args, expert_map=second)
+    assert experts.fused_moe_impl is impl
+    assert initial["expert_map"] is first
+    assert calls[0]["expert_map"] is first
+    assert calls[1]["expert_map"] is second
 
 
 def test_fp8_reload_trace_rejects_uncoordinated_eplb_collectives(monkeypatch):

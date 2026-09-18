@@ -472,15 +472,45 @@ def prepare_fp8_moe_layer_for_fi(
     block_quant = (
         hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
     )
+    result = convert_fp8_moe_weights_for_fi(
+        w13,
+        w2,
+        w13_scale,
+        w13_input_scale,
+        w2_scale,
+        w2_input_scale,
+        block_quant=block_quant,
+        is_act_and_mul=layer.moe_config.is_act_and_mul,
+        is_gated=layer.activation.is_gated,
+        is_trtllm=is_trtllm,
+    )
+    if not block_quant:
+        layer.moe_config.intermediate_size_per_partition = result[1].shape[-1]
+    return result
+
+
+def convert_fp8_moe_weights_for_fi(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_input_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor | None,
+    *,
+    block_quant: bool,
+    is_act_and_mul: bool,
+    is_gated: bool,
+    is_trtllm: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Consume checkpoint-layout tensors without mutating layer metadata."""
     is_mxfp8 = block_quant and w13_scale.dtype == torch.uint8
     is_deepseek_fp8 = block_quant and not is_mxfp8
-    is_gated = layer.activation.is_gated
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
         # FlashInfer TRT-LLM SwiGLU expects [up; gate] but vLLM stores
         # [gate; up].  Swap both weights and scales before interleaving.
-        if layer.moe_config.is_act_and_mul:
+        if is_act_and_mul:
             w13 = swap_w13_to_w31(w13)
             # Scales may be 2D [E, flat] from _quantize_mxfp8_moe_weight;
             # reshape to 3D so swap_w13_to_w31 can flip the two halves,
@@ -502,16 +532,15 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        w13, w2, new_intermediate = align_moe_weights_for_fi(
+        w13, w2, _ = align_moe_weights_for_fi(
             w13,
             w2,
-            layer.moe_config.is_act_and_mul,
+            is_act_and_mul,
             min_alignment,
         )
-        layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
-    if layer.moe_config.is_act_and_mul:
+    if is_act_and_mul:
         w13 = swap_w13_to_w31(w13)
         if block_quant:
             w13_scale = swap_w13_to_w31(w13_scale)

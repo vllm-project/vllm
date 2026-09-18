@@ -76,7 +76,7 @@ class _TraceCopyPolicy:
         self.finished.append(state.key)
 
 
-def _make_reload_trace():
+def _make_reload_trace(runtime_name=None):
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
     layer.weight.weight_loader = _trace_weight_loader
@@ -91,8 +91,251 @@ def _make_reload_trace():
             layer.weight.weight_loader(layer.weight, torch.ones(2, 3), "remote")
             is False
         )
+    if runtime_name is not None:
+        setattr(layer, runtime_name, layer.weight)
+        del layer.weight
+        state.runtime_names = {"weight": runtime_name}
     trace.bind_runtime()
     return layer, trace, state, finished
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_loading_view_reuses_padded_storage(preserve):
+    """A canonical proxy may borrow capacity without resizing the live tensor."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(6, 3), requires_grad=False)
+    state = ReloadState("linear", layer, ("weight",), _TraceCopyPolicy([]))
+    state.metadata["weight"] = to_meta_tensor(torch.zeros(4, 3))
+    state.bind_target("weight", lambda: layer.weight)
+    state.preserve_checkpoint = preserve
+    view = layer.weight.detach().view(-1)[:12].view(4, 3)
+    source = state.source("weight", alias_runtime=True, loading_view=view)
+    source.fill_(7)
+    state.targets["weight"].validate()
+    assert source.shape == (4, 3)
+    assert (
+        source.untyped_storage().data_ptr() == layer.weight.untyped_storage().data_ptr()
+    ) is (not preserve)
+    torch.testing.assert_close(
+        layer.weight[:4], torch.full((4, 3), 0.0 if preserve else 7.0)
+    )
+    torch.testing.assert_close(layer.weight[4:], torch.zeros(2, 3))
+
+
+def test_reload_trace_loading_view_rejects_unrelated_storage():
+    """A policy cannot masquerade an independent allocation as a runtime view."""
+    layer, _, state, _ = _make_reload_trace()
+    with pytest.raises(ReloadError, match="invalid runtime loading view"):
+        state.source(
+            "weight", alias_runtime=True, loading_view=torch.empty_like(layer.weight)
+        )
+
+
+@pytest.mark.parametrize("block", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+def test_reload_trace_cutlass_prepares_scale_layout(block, preserve):
+    """Block scales reuse runtime storage; merged tensor scales need staging."""
+    from vllm.model_executor.model_loader.reload.fp8 import CutlassMoEReloadPolicy
+
+    role = "w13_weight_scale_inv" if block else "w13_weight_scale"
+    shape = (2, 4, 2) if block else (2, 2)
+    runtime_shape = shape if block else (2,)
+    layer = torch.nn.Module()
+    runtime = torch.nn.Parameter(torch.ones(runtime_shape), requires_grad=False)
+    layer.register_parameter(role, runtime)
+    policy = CutlassMoEReloadPolicy()
+    policy.plan = types.SimpleNamespace(block_shape=(128, 128) if block else None)
+    state = ReloadState("experts", layer, (role,), policy)
+    state.metadata[role] = to_meta_tensor(torch.empty(shape))
+    state.bind_target(role, lambda: getattr(layer, role))
+    state.preserve_checkpoint = preserve
+
+    policy.prepare_for_load(state)
+    source = state.checkpoint[role]
+    assert source.shape == shape
+    assert (
+        source.untyped_storage().data_ptr() == runtime.untyped_storage().data_ptr()
+    ) == (block and not preserve)
+    # Preparation never swaps old values or changes the live tensor's metadata.
+    torch.testing.assert_close(runtime, torch.ones(runtime_shape))
+    state.targets[role].validate()
+    source.copy_(torch.full(shape, 3.0))
+    torch.testing.assert_close(
+        runtime, torch.full(runtime_shape, 3.0 if block and not preserve else 1.0)
+    )
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize(
+    "layout,can_reuse",
+    [
+        ("transpose", True),
+        ("padded", True),
+        ("expanded", False),
+        ("strided", False),
+        ("strided_checkpoint", False),
+        ("small", False),
+        ("dtype", False),
+    ],
+)
+def test_reload_trace_prepares_canonical_storage(layout, can_reuse, preserve):
+    """Reuse dense capacity, never holes, overlapping views or encoded dtypes."""
+    runtime = {
+        "transpose": lambda: torch.zeros(4, 3).t(),
+        "padded": lambda: torch.zeros(6, 4).t(),
+        "expanded": lambda: torch.zeros(1, 3).expand(4, 3),
+        "strided": lambda: torch.zeros(4, 6)[:, ::2],
+        "strided_checkpoint": lambda: torch.zeros(4, 6)[:, ::2],
+        "small": lambda: torch.zeros(2, 3),
+        "dtype": lambda: torch.zeros(4, 3, dtype=torch.float16),
+    }[layout]()
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(runtime, requires_grad=False)
+    state = ReloadState("linear", layer, ("weight",), _TraceCopyPolicy([]))
+    # .to("meta") compacts non-dense strides, so construct this metadata directly.
+    checkpoint = torch.empty_strided(
+        (4, 3),
+        (6, 2) if layout == "strided_checkpoint" else (3, 1),
+        device="meta",
+    )
+    state.metadata["weight"] = checkpoint
+    state.bind_target("weight", lambda: layer.weight)
+    state.preserve_checkpoint = preserve
+    state.prepare_sources(reuse_roles=("weight",))
+    source = state.checkpoint["weight"]
+    assert source.shape == (4, 3)
+    assert source.stride() == checkpoint.stride()
+    assert source.dtype == torch.float32
+    aliases = (
+        source.untyped_storage().data_ptr() == runtime.untyped_storage().data_ptr()
+    )
+    assert aliases == (can_reuse and not preserve)
+    source.fill_(7)
+    state.targets["weight"].validate()
+    if not aliases:
+        torch.testing.assert_close(runtime, torch.zeros_like(runtime))
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("abort", [False, True])
+def test_reload_trace_renamed_parameter_loads_by_checkpoint_name(preserve, abort):
+    """Backend renaming must not hide checkpoint keys or replace live weights."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4, 3), requires_grad=False)
+    layer.weight.weight_loader = _trace_weight_loader
+    state = ReloadState(
+        "linear",
+        layer,
+        ("weight",),
+        _TraceCopyPolicy([]),
+        runtime_names={"weight": "packed_weight"},
+    )
+    trace = ModelReloadTracer()
+    trace.register_state(state)
+    with trace.observe():
+        layer.weight.weight_loader(layer.weight, torch.ones(4, 3))
+    layer.packed_weight = layer.weight
+    del layer.weight
+    trace.bind_runtime()
+    runtime = layer.packed_weight
+    address = runtime.data_ptr()
+
+    with trace.round():
+        assert "weight" in dict(layer.named_parameters())
+    assert not hasattr(layer, "weight")
+    torch.testing.assert_close(runtime, torch.ones_like(runtime))
+
+    for value in (2, 3):
+        try:
+            with trace.round(preserve_checkpoint=preserve):
+                params = dict(layer.named_parameters())
+                param = params["weight"]
+                assert params["packed_weight"] is runtime
+                assert param is not runtime
+                if abort:
+                    raise ValueError("interrupt before arrival")
+                param.weight_loader(param, torch.full((4, 3), float(value)))
+                assert state.complete
+                assert bool(state.checkpoint) == preserve
+        except ValueError:
+            assert abort
+        assert not hasattr(layer, "weight")
+        assert layer.packed_weight is runtime
+        assert runtime.data_ptr() == address
+        torch.testing.assert_close(
+            runtime, torch.full_like(runtime, 1 if abort else value * 2)
+        )
+        if abort:
+            assert trace.failed
+            break
+
+
+def test_reload_trace_renamed_parameter_rejects_existing_checkpoint_attribute():
+    """Installing a checkpoint alias must not overwrite an unrelated tensor."""
+    layer, trace, _, _ = _make_reload_trace(runtime_name="packed_weight")
+    unexpected = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+    layer.weight = unexpected
+    with pytest.raises(ReloadError, match="checkpoint alias already exists"):
+        trace.begin_round()
+    assert layer.weight is unexpected
+    assert not trace.active
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+@pytest.mark.parametrize("interrupt_setup", [False, True])
+def test_reload_trace_consumed_scale_has_no_runtime_parameter(
+    monkeypatch, preserve, interrupt_setup
+):
+    """A discarded checkpoint scale still participates in per-layer readiness."""
+
+    class ScalePolicy(_TraceCopyPolicy):
+        def finish(self, state):
+            state.copy_("weight", state.work("weight") * state.work("scale"))
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.ones(4, 3), requires_grad=False)
+    layer.scale = torch.nn.Parameter(torch.ones(()), requires_grad=False)
+    state = ReloadState(
+        "linear",
+        layer,
+        ("weight", "scale"),
+        ScalePolicy([]),
+        runtime_names={"scale": None},
+    )
+    trace = ModelReloadTracer()
+    trace.register_state(state)
+    with trace.observe():
+        for param in layer.parameters():
+            param.weight_loader(param, torch.ones_like(param))
+    del layer.scale
+    trace.bind_runtime()
+    runtime = layer.weight
+    if interrupt_setup:
+        install = trace._wrap
+
+        def fail_on_scale(state, role, param):
+            if role == "scale":
+                raise RuntimeError("interrupted proxy setup")
+            install(state, role, param)
+
+        monkeypatch.setattr(trace, "_wrap", fail_on_scale)
+        with pytest.raises(RuntimeError, match="interrupted proxy setup"):
+            trace.begin_round(preserve_checkpoint=preserve)
+        assert trace.failed and not trace.active
+        assert "scale" not in dict(layer.named_parameters())
+        assert not hasattr(runtime, "weight_loader")
+        return
+    for value in (2, 3):
+        with trace.round(preserve_checkpoint=preserve):
+            params = dict(layer.named_parameters())
+            params["scale"].weight_loader(params["scale"], torch.tensor(float(value)))
+            assert not state.complete
+            params["weight"].weight_loader(params["weight"], torch.ones(4, 3))
+            assert state.complete
+        assert "scale" not in dict(layer.named_parameters())
+        assert layer.weight is runtime
+        torch.testing.assert_close(runtime, torch.full_like(runtime, value))
+        assert bool(state.checkpoint) == preserve
 
 
 def test_reload_trace_base_loader_captures_checkpoint_load(monkeypatch):
