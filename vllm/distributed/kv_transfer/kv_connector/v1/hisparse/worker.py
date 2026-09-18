@@ -159,16 +159,6 @@ def _is_hisparse_host_writer(
 
 
 def _use_ipc_host_events() -> bool:
-    """Whether imported IPC events can carry the host-write handshake.
-
-    ROCm imposes a hard limit of 32 record/wait cycles on an imported
-    interprocess event: the 33rd raises ``hipErrorInvalidValue``, even when the
-    two sides are fully serialized, so it is a resource limit rather than a
-    race. The events here are recorded once per step and live for the process,
-    so decoding past 32 steps would always fail. Fall back to the local-event
-    handshake in :meth:`HiSparseConnectorWorker.sync_host_writes`, which orders
-    the same writes without an interprocess object.
-    """
     return not current_platform.is_rocm()
 
 
@@ -455,14 +445,6 @@ class HiSparseConnectorWorker:
             self.set_request_state_indices(request_state_indices)
 
     def sync_host_writes(self, event: torch.Event) -> None:
-        """Order every rank behind the writer's host writes up to ``event``.
-
-        With usable IPC events the followers wait on the writer's event
-        directly and this is a no-op. Where they are unusable (see
-        :func:`_use_ipc_host_events`) each rank holds a private event, so the
-        writer blocks until its own writes land and the group meets at a
-        barrier -- the same shape ``_copy_host_blocks`` already uses.
-        """
         if self.shared_host_region is None or self._ipc_host_events:
             return
         if self.is_host_writer:
