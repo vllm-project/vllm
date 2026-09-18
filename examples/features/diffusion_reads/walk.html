@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>djev walk</title>
+<style>
+  :root { --bg: #111; --fg: #f2f2f2; --muted: #9a9a9a; --clear: #1f8f3a; --danger: #b3261e; --door: #1f5fb3; --idle: #333; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 16px/1.3 system-ui, sans-serif; overflow: hidden; }
+  body { display: grid; grid-template-rows: 1fr auto; height: 100dvh; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #stage { position: relative; min-height: 0; background: #000; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #banner { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 16px; background: var(--idle); color: #fff; font-size: clamp(22px, 6vw, 34px); font-weight: 700; letter-spacing: .02em; text-transform: uppercase; transition: background .15s; }
+  #banner.clear { background: var(--clear); }
+  #banner.danger { background: var(--danger); }
+  #banner.door { background: var(--door); }
+  /* Always in the layout. Only its visibility changes, so nothing moves. */
+  #arrow { position: absolute; top: 10px; right: 12px; width: 84px; height: 84px; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; font-size: 60px; line-height: 84px; text-align: center; font-weight: 700; visibility: hidden; }
+  #arrow.turn { background: rgba(179,38,30,.85); visibility: visible; }
+  #arrow.ahead { background: rgba(31,143,58,.85); visibility: visible; }
+  /* Its own line, always present, one line tall, so text length never reflows the layout. */
+  #meta, #status { display: block; height: 1.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #panel { padding: 10px 14px 12px; display: grid; gap: 8px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; font-size: 18px; padding: 10px 18px; border: 0; border-radius: 10px; background: #2a6df4; color: #fff; }
+  button.stop { background: #555; }
+  .muted { color: var(--muted); font-size: 14px; }
+  #bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 4px 10px; font-size: 14px; align-items: center; }
+  .bar { height: 8px; background: #2a2a2a; border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: #6fb3ff; }
+  label.small { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  input[type=password] { width: 9em; font: inherit; background: #1e1e1e; color: var(--fg); border: 1px solid #333; border-radius: 6px; padding: 4px 6px; }
+  canvas { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="arrow" title="recommended direction">↑</div>
+  <div id="banner">tap start</div>
+</div>
+<div id="panel">
+  <div class="row">
+    <button id="toggle">Start</button>
+    <label class="small"><input id="think" type="checkbox"> think (64 tokens)</label>
+  </div>
+  <div id="meta" class="muted">&nbsp;</div>
+  <div id="bars"></div>
+  <div class="row">
+    <label class="small">api key <input id="key" type="password" placeholder="optional"></label>
+  </div>
+  <div id="status" class="muted">&nbsp;</div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const $ = id => document.getElementById(id);
+// What the model is asked every frame. The hazard is one choice on its own,
+// because a direction question in the same read biases the hazard slot toward
+// obstacles: all clear fell from 0.8 to 0.04 on a clear frame.
+// The side of the obstacle is a second stage the server runs only when the
+// hazard is a danger (ask_if), with the hazard restated in its prompt.
+const DANGER = ["danger: stairs", "danger: wall ahead", "danger: object ahead", "danger: pet ahead"];
+const QUESTIONS = {
+  ahead: {
+    type: "choice",
+    instructions: "You are the eyes of a person walking forward. Judge only the center of the image, a window "
+      + "about 30 degrees wide directly ahead; ignore everything to the sides. Say all clear if there is no obstacle "
+      + "within 2 meters in that window. Otherwise name the nearest hazard in it.",
+    criteria: {
+      "all clear ahead": "the path straight ahead is free for at least 2 meters",
+      "danger: stairs": "stairs, steps or a curb ahead, up or down",
+      "danger: wall ahead": "a wall, fence or closed barrier ahead",
+      "danger: object ahead": "furniture, a pole, a parked bike, a box or another object in the path",
+      "danger: pet ahead": "a dog, cat or other animal in the path",
+      "door ahead": "a door directly ahead, open or closed"
+    }
+  },
+  // Asked as perception. "which side is more open" biased right whatever
+  // the frame showed (p(left) 0.03 to 0.25 with the obstacle on either side),
+  // while "which half is the obstacle in" was right at 0.95 to 1.00 on the
+  // same frames. The arrow points the other way.
+  side: {
+    type: "choice",
+    instructions: "There is an obstacle ahead. Where is the nearest obstacle, stairs, wall or obstruction in the frame?",
+    criteria: {"left half": null, "right half": null},
+    ask_if: {ahead: DANGER}
+  }
+};
+const ARROWS = {"turn left": "\u2190", "go ahead": "\u2191", "turn right": "\u2192"};
+const STATE = {note: "one frame from a phone's back camera, pointed the way the person is walking; only the center 30 degrees matters"};
+
+let stream = null, running = false, inflight = false;
+try { $("key").value = localStorage.getItem("djev_api_key") || ""; } catch (e) {}
+$("key").onchange = () => { try { localStorage.setItem("djev_api_key", $("key").value); } catch (e) {} };
+
+async function startCam() {
+  if (stream) return true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 640}, height: {ideal: 480}}, audio: false});
+  } catch (e) {
+    $("status").textContent = "camera: " + e.message + (location.protocol === "http:" && location.hostname !== "localhost" ? " (the webcam needs https, so use the TLS port)" : "");
+    return false;
+  }
+  $("video").srcObject = stream;
+  return true;
+}
+function frame() {
+  const v = $("video"), c = $("canvas");
+  const w = 512, h = Math.round(w * (v.videoHeight || 480) / (v.videoWidth || 640));
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(v, 0, 0, w, h);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.7));
+}
+function showArrow(choice, conf) {
+  const a = $("arrow");
+  if (choice) a.textContent = ARROWS[choice] || "?";
+  a.className = choice === "go ahead" ? "ahead" : choice ? "turn" : "";
+  a.title = choice ? choice + " " + Math.round(conf * 100) + "%" : "";
+}
+function show(answer, ms, thought) {
+  const label = answer.choice, conf = answer.confidence;
+  const b = $("banner");
+  b.textContent = label;
+  b.className = label.startsWith("danger") ? "danger" : label.startsWith("door") ? "door" : "clear";
+  $("meta").textContent = Math.round(conf * 100) + "% · " + ms + " ms" + (thought ? " · thought " + thought.tokens + " tok" : "");
+  for (const [name, p] of Object.entries(answer.probabilities)) {
+    const row = BAR_ROWS[name];
+    if (!row) continue;
+    row.fill.style.width = Math.round(p * 100) + "%";
+    row.pct.textContent = Math.round(p * 100) + "%";
+  }
+}
+// The rows exist from the start, in a fixed order, so an answer changes
+// only the bar widths.
+const BAR_ROWS = {};
+for (const name of Object.keys(QUESTIONS.ahead.criteria)) {
+  $("bars").insertAdjacentHTML("beforeend", `<span>${name}</span><span class="bar"><i style="width:0%"></i></span><span class="muted">0%</span>`);
+  const cells = $("bars").children;
+  BAR_ROWS[name] = {fill: cells[cells.length - 2].firstElementChild, pct: cells[cells.length - 1]};
+}
+async function decide(blob, req) {
+  const fd = new FormData();
+  fd.append("request", JSON.stringify(req));
+  fd.append("frame", blob, "frame.jpg");
+  const headers = {}; const k = $("key").value.trim(); if (k) headers["authorization"] = "Bearer " + k;
+  const resp = await fetch("/v1/systemone", {method: "POST", headers, body: fd});
+  const d = await resp.json();
+  if (!resp.ok) throw new Error((d.error && d.error.message) || resp.status);
+  return d;
+}
+async function step() {
+  if (!running || inflight) return;
+  inflight = true;
+  const blob = await frame();
+  const req = {model: "jev-latest", state: STATE, samples: 1, questions: QUESTIONS};
+  if ($("think").checked) {
+    // The model tends to restate the task first, so this points the short budget at the scene.
+    req.think = 64;
+    req.instructions = "Before answering, think in one short sentence about what is within 2 meters straight ahead. Do not restate the question.";
+  }
+  const t0 = performance.now();
+  try {
+    const d = await decide(blob, req);
+    const hazard = d.answers.ahead, side = d.answers.side;
+    show(hazard, Math.round(performance.now() - t0), d.diagnostics && d.diagnostics.thought);
+    if (side) {
+      showArrow(side.choice === "left half" ? "turn right" : "turn left", side.confidence);
+      $("meta").textContent += " · obstacle " + side.choice.replace(" half", "");
+    } else {
+      showArrow("go ahead", hazard.confidence);
+    }
+    $("status").textContent = "";
+  } catch (e) {
+    $("status").textContent = "error: " + e.message;
+  }
+  inflight = false;
+  if (running) step();
+}
+$("toggle").onclick = async () => {
+  if (running) {
+    running = false; $("toggle").textContent = "Start"; $("toggle").className = "";
+    $("banner").textContent = "stopped"; $("banner").className = ""; showArrow(null); return;
+  }
+  if (!(await startCam())) return;
+  running = true; $("toggle").textContent = "Stop"; $("toggle").className = "stop";
+  $("banner").textContent = "looking..."; $("banner").className = ""; showArrow(null);
+  step();
+};
+</script>
+</body>
+</html>
