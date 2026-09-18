@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the MOE permute/unpermute kernel
+"""Tests for the MOE permute/unpermute kernel.
 
 Run `pytest tests/kernels/test_moe_permute_unpermute.py`.
 """

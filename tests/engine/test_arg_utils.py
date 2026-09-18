@@ -394,8 +394,7 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    """Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
@@ -414,9 +413,7 @@ def test_optimization_level(args, expected):
     ],
 )
 def test_mode_parser(args, expected):
-    """
-    Test compilation config modes (-cc.mode=int) map to compilation_config.
-    """
+    """Test compilation config modes (-cc.mode=int) map to compilation_config."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
     assert parsed_args.compilation_config.mode == expected

@@ -219,6 +219,7 @@ class OPTDecoder(nn.Module):
         )
 
         # Project out & in will be replicated if they exist.
+        self.project_out: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_out = ReplicatedLinear(
                 config.hidden_size,
@@ -230,6 +231,7 @@ class OPTDecoder(nn.Module):
         else:
             self.project_out = None
 
+        self.project_in: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_in = ReplicatedLinear(
                 config.word_embed_proj_dim,
@@ -245,6 +247,7 @@ class OPTDecoder(nn.Module):
         # keep backward compatibility with checkpoints that have been fine-tuned
         # before transformers v4.20.1
         # see https://github.com/facebookresearch/metaseq/pull/164
+        self.final_layer_norm: StandardLayerNorm | None
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
             self.final_layer_norm = StandardLayerNorm(
                 config.hidden_size,
