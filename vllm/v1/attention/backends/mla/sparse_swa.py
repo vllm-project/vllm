@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, ClassVar, cast
 
 import torch
@@ -585,8 +587,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             self.token_to_req_indices
         )
 
+        # Validity is derived from slot_mapping inside the SWA index kernels,
+        # which cover every decode and prefill row of the padded batch.
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
-        is_valid_token.copy_(slot_mapping >= 0)
 
         non_causal = not common_attn_metadata.causal
         decode_swa_width = (
@@ -594,7 +597,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
         decode_swa_indices = self.decode_swa_indices
         if num_decode_tokens > 0:
-            self.decode_swa_lens[num_decode_tokens:] = 0
             if non_causal:
                 assert self.is_dspark, (
                     "Non-causal DeepseekV4 SWA is only supported for the DSpark "
@@ -618,6 +620,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     token_to_req_indices,
                     is_valid_token,
+                    slot_mapping,
                     block_table,
                     self.block_size,
                     num_tokens=num_decode_tokens,
@@ -635,6 +638,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     token_to_req_indices,
                     is_valid_token,
+                    slot_mapping,
                     block_table,
                     self.block_size,
                     num_tokens=num_decode_tokens,
@@ -681,6 +685,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens,
                 token_to_req_indices,
                 is_valid_token,
+                slot_mapping,
                 block_table,
                 self.block_size,
                 num_tokens=num_prefill_tokens,
@@ -791,6 +796,56 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         end = num_decode_tokens + num_prefill_tokens
         return self.left_visible[:end], self.right_visible[:end]
 
+    def build_dflash_metadata_refresh(
+        self, metadata: DeepseekSparseSWAMetadata, num_query_per_req: int
+    ) -> Callable[[], None] | None:
+        """Refresh this group's decode SWA rows from inside a captured graph.
+
+        Only the all-decode non-causal DSpark draft batch is supported; every
+        other shape returns None so the caller keeps the eager build.
+        """
+        if (
+            not current_platform.is_cuda()
+            or not self.is_dspark
+            or metadata.num_prefills
+            or metadata.decode_swa_width != self.noncausal_index_width
+        ):
+            return None
+        # A DFlash draft batch gives every request the same query width, so the
+        # token -> request map is this constant and can be baked into the graph.
+        # The builder's shared buffer cannot be: an eager build for a different
+        # shape would overwrite it while this graph still points at it.
+        #
+        # Padded rows land on a request index past num_reqs instead of the 0 the
+        # mapping kernel writes. Neither is ever read: a padded row's slot is
+        # PAD, so the kernel marks it invalid and returns before the lookup.
+        assert metadata.num_decode_tokens % num_query_per_req == 0, (
+            "DFlash draft batches must have a uniform query width, got "
+            f"{metadata.num_decode_tokens} tokens for {num_query_per_req} per request"
+        )
+        metadata.token_to_req_indices = (
+            torch.arange(
+                metadata.num_decode_tokens, dtype=torch.int32, device=self.device
+            )
+            // num_query_per_req
+        )
+        return partial(
+            _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+            metadata.decode_swa_indices,
+            metadata.decode_swa_lens,
+            self.window_size,
+            self.noncausal_index_width,
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.token_to_req_indices,
+            metadata.is_valid_token,
+            metadata.slot_mapping,
+            metadata.block_table,
+            self.block_size,
+            num_tokens=metadata.num_decode_tokens,
+            token_offset=0,
+        )
+
     def update_draft_decode_metadata(
         self,
         metadata: DeepseekSparseSWAMetadata,
@@ -815,6 +870,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             metadata.seq_lens,
             metadata.token_to_req_indices,
             metadata.is_valid_token,
+            metadata.slot_mapping,
             metadata.block_table,
             self.block_size,
             num_tokens=metadata.num_decode_tokens,
@@ -979,6 +1035,7 @@ def _compute_swa_indices_and_lens_kernel(
     seq_lens_ptr,
     token_to_req_indices_ptr,
     is_valid_token_ptr,
+    slot_mapping_ptr,
     block_table_ptr,
     block_table_stride,
     block_size,
@@ -988,7 +1045,8 @@ def _compute_swa_indices_and_lens_kernel(
 ):
     pid = tl.program_id(0)
     token_idx = pid + token_offset
-    is_valid = tl.load(is_valid_token_ptr + token_idx)
+    is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
+    tl.store(is_valid_token_ptr + token_idx, is_valid)
     if not is_valid:
         tl.store(swa_lens_ptr + pid, 0)
         # Clear the row so a padded token cannot gather through stale indices.
@@ -1109,6 +1167,7 @@ class ComputeSWAIndicesAndLensKernel(
             seq_lens=int32_ptr,
             token_to_req_indices=int32_ptr,
             is_valid_token=TritonWarmupTensor(torch.bool),
+            slot_mapping=TritonWarmupTensor(torch.int64),
             block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
             block_size=compile_key.block_size,
             num_tokens=1,
@@ -1129,6 +1188,7 @@ class ComputeSWAIndicesAndLensKernel(
         seq_lens: torch.Tensor,
         token_to_req_indices: torch.Tensor,
         is_valid_token: torch.Tensor,
+        slot_mapping: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
         *,
@@ -1172,6 +1232,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         seq_lens_ptr,
         token_to_req_indices_ptr,
         is_valid_token_ptr,
+        slot_mapping_ptr,
         block_table_ptr,
         block_table_stride,
         block_size,
@@ -1185,7 +1246,8 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         """
         pid = tl.program_id(0)
         token_idx = pid + token_offset
-        is_valid = tl.load(is_valid_token_ptr + token_idx)
+        is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
+        tl.store(is_valid_token_ptr + token_idx, is_valid)
         if not is_valid:
             tl.store(swa_lens_ptr + pid, 0)
             # Clear the row so a padded token cannot gather through stale indices.
@@ -1271,6 +1333,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
             seq_lens=int32_ptr,
             token_to_req_indices=int32_ptr,
             is_valid_token=TritonWarmupTensor(torch.bool),
+            slot_mapping=TritonWarmupTensor(torch.int64),
             block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
             block_size=compile_key.block_size,
             num_tokens=1,
@@ -1288,6 +1351,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         seq_lens: torch.Tensor,
         token_to_req_indices: torch.Tensor,
         is_valid_token: torch.Tensor,
+        slot_mapping: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
         *,
