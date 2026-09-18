@@ -14,11 +14,21 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers import logits_processor
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrConfig, LiLiCorrHead
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
+
+
+@pytest.fixture(autouse=True)
+def replicated_head_tp(monkeypatch):
+    # The head has no collectives; unit tests only need TP metadata.
+    monkeypatch.setattr(
+        parallel_state, "_TP", SimpleNamespace(rank_in_group=0, world_size=1)
+    )
 
 
 def _config(**overrides):
@@ -109,8 +119,14 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
             rms_norm_eps=1e-6,
             config=_config(hidden_size=head_width),
         ).to(dtype)
-    # Exercise learned biases rather than only the zero-initialized defaults.
+    # vLLM linear parameters are initialized by the checkpoint loader.
     with torch.no_grad():
+        for module in head.modules():
+            if isinstance(module, ReplicatedLinear):
+                for parameter in module.parameters():
+                    parameter.weight_loader(
+                        parameter, torch.randn_like(parameter) * 0.1
+                    )
         for layer in head.layers:
             layer.attn.in_proj_weight.normal_(std=0.1)
             layer.attn.in_proj_bias.normal_(std=0.1)

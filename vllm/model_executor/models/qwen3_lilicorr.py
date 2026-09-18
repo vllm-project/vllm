@@ -14,6 +14,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
@@ -86,7 +87,7 @@ class LiLiCorrLatticeAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.in_proj_weight = nn.Parameter(torch.zeros(3 * hidden_size, hidden_size))
         self.in_proj_bias = nn.Parameter(torch.zeros(3 * hidden_size))
-        self.out_proj = nn.Linear(hidden_size, hidden_size)
+        self.out_proj = ReplicatedLinear(hidden_size, hidden_size, return_bias=False)
 
     def forward(
         self, hidden_states: torch.Tensor, attention_bias: torch.Tensor
@@ -119,9 +120,9 @@ class LiLiCorrLayer(nn.Module):
         self.mlp_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_size),
+            ReplicatedLinear(hidden_size, mlp_hidden_size, return_bias=False),
             nn.SiLU(),
-            nn.Linear(mlp_hidden_size, hidden_size),
+            ReplicatedLinear(mlp_hidden_size, hidden_size, return_bias=False),
         )
 
     def forward(
@@ -159,14 +160,18 @@ class LiLiCorrHead(nn.Module):
         self.token_proj = (
             nn.Identity()
             if model_hidden_size == hidden_size
-            else nn.Linear(model_hidden_size, hidden_size)
+            else ReplicatedLinear(model_hidden_size, hidden_size, return_bias=False)
         )
-        self.pass_hidden_proj = nn.Linear(model_hidden_size, hidden_size)
+        self.pass_hidden_proj = ReplicatedLinear(
+            model_hidden_size, hidden_size, return_bias=False
+        )
         self.feature_mlp = nn.Sequential(
             nn.LayerNorm(self.num_candidate_features),
-            nn.Linear(self.num_candidate_features, hidden_size),
+            ReplicatedLinear(
+                self.num_candidate_features, hidden_size, return_bias=False
+            ),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size),
+            ReplicatedLinear(hidden_size, hidden_size, return_bias=False),
         )
         self.slot_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_candidate_slots, 1, hidden_size)
@@ -178,7 +183,9 @@ class LiLiCorrHead(nn.Module):
             torch.zeros(self.num_heads, 2 * self.block_size - 1)
         )
         self.same_slot_bias = nn.Parameter(torch.zeros(self.num_heads))
-        self.context_proj = nn.Linear(model_hidden_size, hidden_size)
+        self.context_proj = ReplicatedLinear(
+            model_hidden_size, hidden_size, return_bias=False
+        )
         self.layers = nn.ModuleList(
             [
                 LiLiCorrLayer(
@@ -192,10 +199,16 @@ class LiLiCorrHead(nn.Module):
         )
         self.output_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
         self.anchor_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
-        self.factor_input_proj = nn.Linear(hidden_size * 3, hidden_size)
-        self.out_head = nn.Linear(hidden_size, self.factor_dim)
-        self.in_head = nn.Linear(hidden_size, self.factor_dim)
-        self.anchor_out_head = nn.Linear(hidden_size, self.factor_dim)
+        self.factor_input_proj = ReplicatedLinear(
+            hidden_size * 3, hidden_size, return_bias=False
+        )
+        self.out_head = ReplicatedLinear(
+            hidden_size, self.factor_dim, return_bias=False
+        )
+        self.in_head = ReplicatedLinear(hidden_size, self.factor_dim, return_bias=False)
+        self.anchor_out_head = ReplicatedLinear(
+            hidden_size, self.factor_dim, return_bias=False
+        )
         self._attn_bias: torch.Tensor | None = None
         self._fused_edge_weight: torch.Tensor | None = None
         self._fused_edge_bias: torch.Tensor | None = None
