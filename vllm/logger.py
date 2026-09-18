@@ -245,6 +245,18 @@ def configure_logging(config: "LoggingConfig") -> None:
     _configure_vllm_root_logger(config)
     global _last_configured_logging_config
     _last_configured_logging_config = config
+    _log_platform_warnings(config)
+
+
+def _log_platform_warnings(config: "LoggingConfig") -> None:
+    """Emit platform diagnostics only after an enabled config is active."""
+    if not config.configure_logging:
+        return
+
+    # Import lazily because platform modules use init_logger during import.
+    from vllm.platforms import current_platform
+
+    current_platform.log_warnings()
 
 
 def configure_logging_if_needed(config: "LoggingConfig") -> None:
