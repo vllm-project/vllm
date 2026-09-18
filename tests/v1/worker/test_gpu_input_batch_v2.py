@@ -186,3 +186,21 @@ def test_maybe_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA buffers.")
+def test_query_start_loc_aliases_the_uploaded_cumsum_row():
+    """prepare_inputs uploads batch_cumsums; query_start_loc must see row 1.
+
+    The single H2D only reaches query_start_loc because it shares storage with
+    that row, and everything reading input_buffers.query_start_loc directly
+    (make_dummy, the PCP manager, dummy runs) depends on the alias holding.
+    """
+    buffers = InputBuffers(
+        max_num_reqs=8, max_num_tokens=64, device=torch.device("cuda")
+    )
+    row = buffers.batch_cumsums[1]
+    assert buffers.query_start_loc.shape == row.shape
+    assert buffers.query_start_loc.data_ptr() == row.data_ptr()
+    buffers.batch_cumsums[1, 3] = 7
+    assert int(buffers.query_start_loc[3]) == 7

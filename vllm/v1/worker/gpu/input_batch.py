@@ -30,9 +30,12 @@ class InputBuffers:
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
         self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
-        self.query_start_loc = torch.zeros(
-            max_num_reqs + 1, dtype=torch.int32, device=device
+        # Per-request prefix sums, one H2D per step: cu_num_logits, query_start_loc.
+        self.batch_cumsums = torch.zeros(
+            2, max_num_reqs + 1, dtype=torch.int32, device=device
         )
+        self.batch_cumsums_np = np.zeros((2, max_num_reqs + 1), dtype=np.int32)
+        self.query_start_loc = self.batch_cumsums[1]
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         # DCP: per-request local seq_lens buffer
         self.dcp_local_seq_lens = torch.zeros(

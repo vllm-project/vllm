@@ -1295,9 +1295,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(
                 num_reqs, dtype=torch.int32, device=self.device
@@ -1319,7 +1316,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
@@ -1340,14 +1336,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        cumsums_np = self.input_buffers.batch_cumsums_np
+        cumsums_np[0, : num_reqs + 1] = cu_num_logits_np
+        query_start_loc_np = cumsums_np[1]
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-        query_start_loc = self.input_buffers.query_start_loc
-        async_tensor_h2d(query_start_loc_np, out=query_start_loc)
+        cumsums = async_tensor_h2d(cumsums_np, out=self.input_buffers.batch_cumsums)
+        cu_num_logits = cumsums[0, : num_reqs + 1]
+        query_start_loc = cumsums[1]
         if adaptive_verification is not None:
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
