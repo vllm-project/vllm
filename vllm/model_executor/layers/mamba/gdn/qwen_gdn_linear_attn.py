@@ -93,7 +93,7 @@ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "sycl"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -115,6 +115,22 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+
+    if current_platform.is_xpu():
+        # Unlike the other backends here, the SYCL op covers the whole GDN
+        # core, not just prefill. Absent unless vllm-xpu-kernels was built
+        # with VLLM_GDN_ENABLED.
+        has_sycl = hasattr(torch.ops._xpu_C, "gdn_attention")
+        if backend == "sycl" and not has_sycl:
+            raise ValueError(
+                "--gdn-prefill-backend sycl was requested but "
+                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
+                "vllm-xpu-kernels with VLLM_GDN_ENABLED, or use "
+                "--gdn-prefill-backend triton."
+            )
+        if backend in ("sycl", "auto") and has_sycl:
+            return backend, "sycl"
+        return backend, "triton"
 
     if not current_platform.is_cuda():
         return backend, "triton"
@@ -172,6 +188,7 @@ def _log_gdn_backend_decision(
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
         "triton": "Triton/FLA",
+        "sycl": "SYCL",
     }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
@@ -245,7 +262,7 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
+        if backend in ("flashinfer", "cutedsl", "sycl") and active_backend != backend:
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
@@ -399,7 +416,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.gdn_xpu_backend: Literal["sycl", "triton"] | None = None
         if current_platform.is_xpu():
+            requested, self.gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
+            _log_gdn_backend_decision(vllm_config, requested, self.gdn_xpu_backend)
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
@@ -975,7 +995,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """Forward pass with three parts:
         1. Input projection
-        2. Core attention (custom op)
+        2. Core attention (custom op, SYCL or Triton per --gdn-prefill-backend)
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
@@ -994,15 +1014,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        z = torch.empty_like(core_attn_out)
 
-        torch.ops.vllm.gdn_attention_core_xpu(
-            core_attn_out,
-            z,
-            projected_states_qkvz,
-            projected_states_ba,
-            self.prefix,
-        )
+        if self.gdn_xpu_backend == "triton":
+            # Triton consumes unpacked q/k/v/z/b/a; the SYCL op unpacks
+            # internally and takes the raw projections instead.
+            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
+                projected_states_qkvz, projected_states_ba, num_tokens
+            )
+            torch.ops.vllm.qwen_gdn_attention_core(
+                mixed_qkv,
+                b.contiguous(),
+                a.contiguous(),
+                core_attn_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
+        else:
+            z = torch.empty_like(core_attn_out)
+            torch.ops.vllm.gdn_attention_core_xpu(
+                core_attn_out,
+                z,
+                projected_states_qkvz,
+                projected_states_ba,
+                self.prefix,
+            )
 
         # ============================================================
         # Part 3: Output Projection
