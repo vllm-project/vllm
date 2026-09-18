@@ -340,13 +340,13 @@ def _pin_mmap_region_coordinated(
             )
         return
 
-    error = RuntimeError(
+    registration_error = RuntimeError(
         "Coordinated cudaHostRegister failed because a CUDA call raised or "
         "the group could not roll back every successful registration"
     )
     if local_registration_error is not None:
-        raise error from local_registration_error
-    raise error
+        raise registration_error from local_registration_error
+    raise registration_error
 
 
 def pin_mmap_region(
