@@ -349,27 +349,13 @@ class MistralTokenizer(TokenizerLike):
         truncation: bool = False,
         max_length: int | None = None,
     ) -> "BatchEncoding":
-        if text_pair is not None:
-            raise ValueError(
-                "`text_pair` is not supported by `MistralTokenizer.__call__`."
-            )
-
-        encoded = self.transformers_tokenizer(
+        return self.transformers_tokenizer(
             text=text,
             text_pair=text_pair,
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
         )
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, revert to only call self.transformers_tokenizer(...).
-        # Hack to fix wrongly added eos token, when fix will be supported the condition
-        # below will be False even before the revert is done.
-        if encoded["input_ids"] and encoded["input_ids"][-1] == self.eos_token_id:
-            encoded["input_ids"].pop(-1)
-            if attention_mask := encoded.get("attention_mask"):
-                attention_mask.pop(-1)
-        return encoded
 
     @property
     def vocab(self) -> list[str]:
@@ -389,14 +375,12 @@ class MistralTokenizer(TokenizerLike):
         max_length: int | None = None,
         add_special_tokens: bool = True,
     ) -> list[int]:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.encode(...).
-        encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
-
-        if truncation is not False and max_length is not None:
-            return encoded[:max_length]
-        else:
-            return encoded
+        return self.transformers_tokenizer.encode(
+            text,
+            truncation=truncation,
+            max_length=max_length,
+            add_special_tokens=add_special_tokens,
+        )
 
     def apply_chat_template(
         self,
@@ -437,11 +421,6 @@ class MistralTokenizer(TokenizerLike):
     def decode(
         self, ids: Sequence[int] | int, skip_special_tokens: bool = False
     ) -> str:
-        # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
-        # is in, directly call self.transformers_tokenizer.decode(...).
-        if isinstance(ids, int):
-            ids = [ids]
-
         return self.transformers_tokenizer.decode(
             ids, skip_special_tokens=skip_special_tokens
         )
