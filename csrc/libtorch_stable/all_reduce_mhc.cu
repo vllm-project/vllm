@@ -34,14 +34,32 @@ __global__ __launch_bounds__(kThreads)
   vllm::store_multimem_lamport_payload(
       multicast + stage * stage_size + rank * size + idx,
       vllm::sanitize_lamport_payload(value));
-  cudaTriggerProgrammaticLaunchCompletion();
+  // Multi-token forwards benefit from launching dependents before mHC finishes.
+  if (gridDim.x > 1) cudaTriggerProgrammaticLaunchCompletion();
   vllm::lamport_cta_arrive(epochs + 1);
   for (int i = idx; i < dirty_size; i += size) {
     local[dirty * stage_size + i] = vllm::lamport_sentinel<Pack>();
   }
   Pack peers[kRanks];
-  vllm::wait_lamport_payloads<Pack, kRanks>(local + stage * stage_size + idx,
-                                            rank, size, value, peers);
+  bool pending;
+  do {
+    vllm::LamportPack<Pack> packets[kRanks];
+  #pragma unroll
+    for (int peer = 0; peer < kRanks; ++peer) {
+      auto ptr = local + stage * stage_size + idx + peer * size;
+      asm volatile("ld.relaxed.sys.global.v4.u32 {%0,%1,%2,%3}, [%4];"
+                   : "=r"(packets[peer].words[0]), "=r"(packets[peer].words[1]),
+                     "=r"(packets[peer].words[2]), "=r"(packets[peer].words[3])
+                   : "l"(ptr)
+                   : "memory");
+    }
+    pending = false;
+  #pragma unroll
+    for (int peer = 0; peer < kRanks; ++peer) {
+      pending |= vllm::is_lamport_dirty(packets[peer]);
+      peers[peer] = packets[peer].packed;
+    }
+  } while (pending);
   auto sum = vllm::upcast(peers[0]);
   #pragma unroll
   for (int r = 1; r < kRanks; ++r) {
@@ -88,18 +106,20 @@ __global__ __launch_bounds__(kThreads)
   for (int delta = 16; delta; delta /= 2) {
     sqr += __shfl_xor_sync(0xffffffff, sqr, delta);
   }
-  __shared__ float warp_sums[kThreads / 32];
-  if (threadIdx.x % 32 == 0) warp_sums[threadIdx.x / 32] = sqr;
+  __shared__ float warp_sums[kCluster][kThreads / 32];
   auto cluster = cooperative_groups::this_cluster();
+  const int lane = threadIdx.x % 32;
+  if (lane < kCluster) {
+    *cluster.map_shared_rank(&warp_sums[blockIdx.y][threadIdx.x / 32], lane) =
+        sqr;
+  }
   cluster.sync();
   float total = 0;
   #pragma unroll
   for (int c = 0; c < kCluster; ++c) {
-    auto peer_sums = cluster.map_shared_rank(warp_sums, c);
   #pragma unroll
-    for (int w = 0; w < kThreads / 32; ++w) total += peer_sums[w];
+    for (int w = 0; w < kThreads / 32; ++w) total += warp_sums[c][w];
   }
-  cluster.sync();
   const float scale = rsqrtf(__fadd_rn(total / kHidden, eps));
   auto weights = vllm::upcast(weight[column]);
   #pragma unroll
@@ -115,6 +135,7 @@ __global__ __launch_bounds__(kThreads)
     epochs[0] = vllm::mnnvl_lamport_next_stage(stage);
     epochs[1] = 0;
   }
+  if (gridDim.x == 1) cudaTriggerProgrammaticLaunchCompletion();
 #else
   asm volatile("trap;");
 #endif

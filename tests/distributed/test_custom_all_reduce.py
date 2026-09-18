@@ -49,6 +49,9 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         def run(n):
             torch.manual_seed(42 + rank)
             x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
+            # Packed +0/-0 pairs collide with the Lamport sentinel.
+            x[:, :16] = 0
+            x[:, 9:16:2] = -0.0
             torch.manual_seed(123)
             residual = torch.randn(n, 4, 5120, device=device, dtype=torch.bfloat16)
             post = torch.rand(n, 4, device=device)
