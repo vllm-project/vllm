@@ -24,6 +24,7 @@ def mhc_pre_delayed_overlap(
     norm_eps: float = 1e-6,
     *,
     stream: torch.cuda.Stream,
+    layer_input: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare the input on the caller stream and coefficients on another stream.
 
@@ -47,7 +48,11 @@ def mhc_pre_delayed_overlap(
     post = torch.empty((n, hc), device=residual.device, dtype=torch.float32)
     comb = torch.empty((n, hc * hc), device=residual.device, dtype=torch.float32)
     next_pre = torch.empty_like(post)
-    layer_input = torch.empty((n, hidden), device=residual.device, dtype=torch.bfloat16)
+    compute_input = layer_input is None
+    if layer_input is None:
+        layer_input = torch.empty(
+            (n, hidden), device=residual.device, dtype=torch.bfloat16
+        )
     mix = torch.empty(
         (splits, n, hc * (hc + 2)), device=residual.device, dtype=torch.float32
     )
@@ -86,7 +91,7 @@ def mhc_pre_delayed_overlap(
     )
     main = torch.cuda.current_stream()
     # Prioritize input readiness for small SP shards before releasing statistics.
-    if n <= 8:
+    if compute_input and n <= 8:
         MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="input")
     stream.wait_stream(main)
     with torch.cuda.stream(stream):
@@ -94,6 +99,6 @@ def mhc_pre_delayed_overlap(
         MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="stats")
     for tensor in (residual, x, fn, hc_scale, hc_base, mix, sqr, post, comb, next_pre):
         tensor.record_stream(stream)
-    if n > 8:
+    if compute_input and n > 8:
         MHC_PRE_NORM_KERNEL(*args, **fields, split_mode="input")
     return outputs
