@@ -49,14 +49,14 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
         base_layer = base_layer.routed_experts
 
     # unquantizedLinear
-    if hasattr(base_layer, "weight"):
-        return base_layer.weight.device
+    if (weight := getattr(base_layer, "weight", None)) is not None:
+        return weight.device
     # Compressed Tensor
-    elif hasattr(base_layer, "weight_packed"):
-        return base_layer.weight_packed.device
+    elif (weight_packed := getattr(base_layer, "weight_packed", None)) is not None:
+        return weight_packed.device
     # GPTQ/AWQ
-    elif hasattr(base_layer, "qweight"):
-        return base_layer.qweight.device
+    elif (qweight := getattr(base_layer, "qweight", None)) is not None:
+        return qweight.device
     # INC WNA16 (AutoRound)
     elif hasattr(base_layer, "ark_linear"):
         return base_layer.ark_linear.qweight.device

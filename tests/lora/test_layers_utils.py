@@ -20,6 +20,14 @@ def test_get_lora_device_unquantized():
     assert _get_lora_device(base_layer) == base_layer.weight.device
 
 
+def test_get_lora_device_skips_none_weights():
+    base_layer = nn.Module()
+    base_layer.weight = None
+    base_layer.weight_packed = None
+    base_layer.qweight = _param()
+    assert _get_lora_device(base_layer) == base_layer.qweight.device
+
+
 def test_get_lora_device_gptq_awq():
     base_layer = nn.Module()
     base_layer.qweight = _param()
