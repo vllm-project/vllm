@@ -130,6 +130,9 @@ class GroupShape(_GroupShape):
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
+    def is_per_block(self) -> bool:
+        return self.row > 0 and self.col > 0
+
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
