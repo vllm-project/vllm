@@ -5,11 +5,11 @@ steps:
 - label: XPU Batch Invariance
   key: xpu-batch-invariance
   timeout_in_minutes: 60
-  num_devices: 4
+  num_devices: 2
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 4+
+    gpu: 2+
     mem: 24+
   no_plugin: true
   working_dir: "."

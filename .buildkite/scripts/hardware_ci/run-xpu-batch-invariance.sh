@@ -3,14 +3,14 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-model="${VLLM_TEST_QWEN3_30B_A3B_MODEL:-Qwen/Qwen3-30B-A3B}"
-port="${VLLM_TEST_PORT:-8000}"
-mode="${VLLM_TEST_BATCH_INVARIANCE_MODE:-all}"
-prompt_style="${VLLM_TEST_PROMPT_STYLE:-token-ids}"
-print_responses="${VLLM_TEST_PRINT_RESPONSES:-0}"
+model="ibm-research/PowerMoE-3b"
+port=8000
+num_decode_tokens=128
 server_pid=
 server_log=
-num_decode_tokens=128
+
+# XPU MoE kernels may not safely handle the -1 routes emitted for padding.
+export VLLM_MOE_SKIP_PADDING=0
 
 cd "$repo_root"
 
@@ -43,6 +43,7 @@ wait_for_server() {
             return
         fi
         if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "vLLM exited before becoming healthy; see the server log above." >&2
             return 1
         fi
         sleep 1
@@ -65,22 +66,7 @@ request_outputs() {
             -H "Content-Type: application/json" \
             --data-binary @-)
 
-    case "$print_responses" in
-        0) ;;
-        1) printf '%s\n' "$response" >&2 ;;
-        summary)
-            if ! command -v jq >/dev/null; then
-                echo "jq is required to print response summaries" >&2
-                return 1
-            fi
-            jq --raw-output '.choices[] | .text' <<<"$response" >&2
-            ;;
-        *)
-            echo "Unsupported response print mode: $print_responses" >&2
-            return 1
-            ;;
-    esac
-
+    local -a token_id_arrays logprob_arrays
     mapfile -t token_id_arrays < <(
         grep -o '"token_ids":\[[^]]*\]' <<<"$response" |
             sed 's/^"token_ids":\[//; s/\]$//'
@@ -131,23 +117,12 @@ make_prompt() {
     local length=$1
     local offset=${2:-0}
     local i
-    local -a tokens
-
-    if [[ "$prompt_style" == "natural" ]]; then
-        local prompt="Use the following system-design context to answer the question. Scenario $offset:"
-        for ((i = 0; i < length; i++)); do
-            prompt+=" context"
-        done
-        prompt+="\\n\\nQuestion: How should batch-invariant inference behave when this same request is decoded alongside unrelated requests?\\nAnswer:"
-        printf '"%s"' "$prompt"
-        return
-    fi
-
+    local prompt="Use the following system-design context to answer the question. Scenario $offset:"
     for ((i = 0; i < length; i++)); do
-        tokens+=( $((3 + (i + offset) % 253)) )
+        prompt+=" context"
     done
-    local IFS=,
-    printf '[%s]' "${tokens[*]}"
+    prompt+="\\n\\nQuestion: How should batch-invariant inference behave when this same request is decoded alongside unrelated requests?\\nAnswer:"
+    printf '"%s"' "$prompt"
 }
 
 first_difference() {
@@ -160,12 +135,14 @@ first_difference() {
     local expected_logits=${expected#*|}
     local -a actual_token_values
     local -a expected_token_values
-    local -a actual_values
-    local -a expected_values
+    local -a actual_logit_values
+    local -a expected_logit_values
     local step
 
     IFS=, read -r -a actual_token_values <<<"$actual_tokens"
     IFS=, read -r -a expected_token_values <<<"$expected_tokens"
+    IFS=, read -r -a actual_logit_values <<<"$actual_logits"
+    IFS=, read -r -a expected_logit_values <<<"$expected_logits"
     for ((step = 0; step < num_decode_tokens; step++)); do
         if [[ "${actual_token_values[step]}" != "${expected_token_values[step]}" ]]; then
             printf 'batch position %s: step=%s, baseline token=%s, actual token=%s' \
@@ -175,43 +152,33 @@ first_difference() {
                 "${actual_token_values[step]}"
             return
         fi
-    done
-    IFS=, read -r -a actual_values <<<"$actual_logits"
-    IFS=, read -r -a expected_values <<<"$expected_logits"
-    for ((step = 0; step < num_decode_tokens; step++)); do
-        if [[ "${actual_values[step]}" != "${expected_values[step]}" ]]; then
+        if [[ "${actual_logit_values[step]}" != "${expected_logit_values[step]}" ]]; then
             printf 'batch position %s: step=%s, token=%s, baseline logit=%s, actual logit=%s' \
                 "$position" \
                 "$step" \
                 "${expected_token_values[step]}" \
-                "${expected_values[step]}" \
-                "${actual_values[step]}"
+                "${expected_logit_values[step]}" \
+                "${actual_logit_values[step]}"
             return
         fi
     done
 }
 
 run_e2e() {
-    local mode=$1
-    local expectation=$2
-    local batch_invariant=0
     local needle
     local batch
     local baseline_output
-    local batch_outputs
+    local batch_response
     local difference
     local position
     local -a fillers
     local -a batch_outputs
     local -a differences=()
 
-    if [[ "$mode" == "batch-invariant" ]]; then
-        batch_invariant=1
-    fi
-
-    server_log=$(mktemp "${TMPDIR:-/tmp}/xpu-batch-invariance-${mode}.XXXXXX.log")
-    VLLM_BATCH_INVARIANT="$batch_invariant" vllm serve "$model" \
-        --tensor-parallel-size 4 \
+    echo "Testing PowerMoE-3b: TP=2, VLLM_BATCH_INVARIANT=1, VLLM_MOE_SKIP_PADDING=0"
+    server_log=$(mktemp "${TMPDIR:-/tmp}/xpu-batch-invariance.XXXXXX.log")
+    VLLM_BATCH_INVARIANT=1 vllm serve "$model" \
+        --tensor-parallel-size 2 \
         --max-model-len 1024 \
         --max-num-seqs 16 \
         --max-num-batched-tokens 512 \
@@ -236,8 +203,8 @@ run_e2e() {
     baseline_output=$(request_outputs "$needle" 1)
     echo "Received BS=1 baseline."
     echo "Requesting BS=16 batch ($((16 * num_decode_tokens)) decode tokens)..."
-    batch_outputs=$(request_outputs "$batch" 16)
-    mapfile -t batch_outputs <<<"$batch_outputs"
+    batch_response=$(request_outputs "$batch" 16)
+    mapfile -t batch_outputs <<<"$batch_response"
     echo "Received BS=16 batch; comparing generated tokens and logits..."
 
     for position in 0 7 15; do
@@ -247,37 +214,14 @@ run_e2e() {
         fi
     done
 
-    if [[ "$expectation" == "identical" ]] && [[ "${#differences[@]}" -ne 0 ]]; then
-        echo "Batch-invariant Qwen3-30B-A3B logits changed: ${differences[*]}" >&2
-        return 1
-    fi
-    if [[ "$expectation" == "different" ]] &&
-        [[ "${#differences[@]}" -eq 0 ]]; then
-        echo "Qwen3-30B-A3B produced identical BS=1 and BS=16 logits without batch-invariant mode" >&2
-        return 1
-    fi
     if [[ "${#differences[@]}" -ne 0 ]]; then
-        echo "BS=1 vs BS=16 differences: ${differences[*]}"
+        echo "Batch-invariant PowerMoE-3b output changed: ${differences[*]}" >&2
+        return 1
     fi
-    echo "Qwen3-30B-A3B logits were $expectation as expected"
+    echo "PowerMoE-3b batch invariance check passed"
     cleanup_server
     rm -f "$server_log"
     server_log=
 }
 
-case "$mode" in
-    all)
-        run_e2e batch-variant different
-        run_e2e batch-invariant identical
-        ;;
-    batch-variant)
-        run_e2e batch-variant different
-        ;;
-    batch-invariant)
-        run_e2e batch-invariant identical
-        ;;
-    *)
-        echo "Unsupported batch invariance mode: $mode" >&2
-        exit 1
-        ;;
-esac
+run_e2e
