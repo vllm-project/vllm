@@ -11,6 +11,7 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
@@ -155,6 +156,8 @@ pub struct GenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Opaque routing decisions emitted by engine-core.
+    pub routed_experts: Option<OpaqueData>,
 }
 
 impl GenerateOutput {
@@ -202,6 +205,7 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
         }
     }
 }
@@ -291,6 +295,7 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
+            routed_experts: raw.routed_experts_payload,
         };
 
         Poll::Ready(Some(Ok(output)))

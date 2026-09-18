@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        .bytes(".vllm.OpaqueData.data")
         .compile_fds(file_descriptor_set)?;
 
     Ok(())
