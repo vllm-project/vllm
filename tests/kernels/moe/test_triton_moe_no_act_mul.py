@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MoE with non-gated activations (*_no_mul).
-
-These tests verify that MoE layers work correctly with activations like
-silu_no_mul, gelu_no_mul, relu2_no_mul where the activation output dimension
-equals N (not N // 2 like gated activations).
-"""
+"""MoE with non-gated activations preserves the projection width."""
 
 import pytest
 import torch
@@ -39,7 +34,6 @@ pytestmark = [
     ),
 ]
 
-# Test parameters
 M_SIZES = [1, 16, 64]
 N_SIZES = [128, 256]
 K_SIZES = [64, 128]
