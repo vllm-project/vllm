@@ -54,6 +54,8 @@ def nvfp4_kernel_exposes_input_quant_key() -> bool:
     FlashInferCutlassNvFp4LinearKernel does expose input_quant_key() and supports
     manual fusion.
     """
+    import vllm.envs as envs
+
     if not current_platform.is_cuda():
         return False
 
@@ -63,7 +65,8 @@ def nvfp4_kernel_exposes_input_quant_key() -> bool:
         )
 
         is_supported, _ = FlashInferCuteDslNvFp4LinearKernel.is_supported()
-        if is_supported:
+        is_disabled = "FlashInferCuteDslNvFp4LinearKernel" in envs.VLLM_DISABLED_KERNELS
+        if is_supported and not is_disabled:
             return False
     except ImportError:
         pass
@@ -74,7 +77,8 @@ def nvfp4_kernel_exposes_input_quant_key() -> bool:
         )
 
         is_supported, _ = FlashInferCutlassNvFp4LinearKernel.is_supported()
-        if is_supported:
+        is_disabled = "FlashInferCutlassNvFp4LinearKernel" in envs.VLLM_DISABLED_KERNELS
+        if is_supported and not is_disabled:
             return True
     except ImportError:
         pass
