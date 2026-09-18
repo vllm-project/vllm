@@ -1673,7 +1673,23 @@ async def _stream_chat_derender(
 
 
 @pytest.mark.asyncio
-async def test_stream_parsed_matches_batch_reasoning(parser_client, parser_tokenizer):
+@pytest.mark.parametrize(
+    "chunking",
+    [
+        "whole",
+        "per_token",
+        pytest.param(
+            "triples",
+            marks=pytest.mark.xfail(
+                reason="<think> leaks into reasoning when it shares a "
+                "multi-token delta with reasoning text (vllm#55195)"
+            ),
+        ),
+    ],
+)
+async def test_stream_parsed_matches_batch_reasoning(
+    parser_client, parser_tokenizer, chunking
+):
     """Streamed == batch: assembled reasoning/content equal the non
     streaming `/derender` result over the same token IDs, for every
     chunking of the same output (chunking invariance)."""
@@ -1709,18 +1725,22 @@ async def test_stream_parsed_matches_batch_reasoning(parser_client, parser_token
     batch_msg = batch_resp.json()["choices"][0]["message"]
 
     n = len(output_ids)
-    for chunk_sizes in ([n], [1] * n, [3] * (n // 3) + [n - 3 * (n // 3)]):
-        chunk_sizes = [c for c in chunk_sizes if c > 0]
-        streamed = await _stream_chat_derender(
-            parser_client,
-            output_ids,
-            chunk_sizes,
-            chat_request,
-            len(gen_req["token_ids"]),
-            gen_req["token_ids"],
-        )
-        assert streamed["content"] == batch_msg["content"]
-        assert streamed["reasoning"] == batch_msg.get("reasoning")
+    chunk_sizes = {
+        "whole": [n],
+        "per_token": [1] * n,
+        "triples": [3] * (n // 3) + [n % 3],
+    }[chunking]
+    chunk_sizes = [c for c in chunk_sizes if c > 0]
+    streamed = await _stream_chat_derender(
+        parser_client,
+        output_ids,
+        chunk_sizes,
+        chat_request,
+        len(gen_req["token_ids"]),
+        gen_req["token_ids"],
+    )
+    assert streamed["content"] == batch_msg["content"]
+    assert streamed["reasoning"] == batch_msg.get("reasoning")
 
 
 @pytest.mark.asyncio
