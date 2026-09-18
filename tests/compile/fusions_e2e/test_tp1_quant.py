@@ -30,6 +30,8 @@ from .models import (
     llama3_8b_fp8,
     llama4_scout_fp4,
     llama4_scout_fp8,
+    mistral3_fp8,
+    qwen2_fp8,
     qwen3_a3b_fp8,
 )
 
@@ -38,8 +40,10 @@ from .models import (
     "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
     [
         (*llama3_8b_fp8, False),
+        (*qwen2_fp8, False),
         (*qwen3_a3b_fp8, False),
         (*qwen3_a3b_fp8, True),
+        (*mistral3_fp8, False),
         (*deepseek_coder_v2_lite_fp8, False),
         (*deepseek_v3_fp8, False),
         (*deepseek_v3_fp8, True),
@@ -93,7 +97,9 @@ def test_tp1_fp8_fusions(
 
     matches = matches_fn(n_layers)
 
-    block_fp8 = "qwen" in model_name.lower() or "deepseek" in model_name.lower()
+    # Qwen3 MoE and DeepSeek use block/group FP8 quantization
+    # Qwen2 uses per-tensor FP8, so it should not be flagged as block_fp8
+    block_fp8 = "qwen3" in model_name.lower() or "deepseek" in model_name.lower()
     if block_fp8 and "-quant_fp8" in custom_ops:
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
