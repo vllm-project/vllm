@@ -1525,9 +1525,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padding images via boolean-mask indexing, LlavaOnevision
         # branches on per-sample batch counts).
         with gpu_sync_allowed():
-            features = getattr(self.model, f"get_{modality}_features")(
-                pixel_values, **kwargs
-            )
+            get_modality_features = getattr(self.model, f"get_{modality}_features")
+            features = get_modality_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_*_features` returns a tuple
         # containing the features and optionally attentions/hidden_states
@@ -1611,9 +1610,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
+                position = feature.mm_position
+                offset, length = position.offset, position.length
+                is_embed = position.is_embed
+                if is_embed is None:
+                    is_embed = slice(None)
                 mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
-                for start, end in feature.mm_position.extract_embeds_range():
-                    mm_token_type_ids[start : end + 1] = mm_token_type_id
+                mm_token_type_ids[offset : offset + length][is_embed] = mm_token_type_id
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
