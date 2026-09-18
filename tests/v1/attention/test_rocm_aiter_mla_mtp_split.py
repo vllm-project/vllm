@@ -629,6 +629,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         use_gluon_decode=False,
         use_gluon_verify=False,
         dcp_verify=None,
+        ab_verify=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
     )
@@ -895,6 +896,7 @@ def test_native_dcp_verify_matches_causal_attention():
             use_gluon_decode=False,
             use_gluon_verify=False,
             dcp_verify=None,
+            ab_verify=None,
             has_persistent_metadata=True,
             attn_out_dtype=torch.bfloat16,
         )

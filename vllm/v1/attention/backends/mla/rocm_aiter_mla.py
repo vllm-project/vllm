@@ -564,6 +564,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Served by passing the mask to the kernel; _build_decode turns away the
     # shapes AITER has no non-causal kernel for.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    # Selection is broad; __init__ narrows this to the DCP routes available
+    # for the current world size, interleave, AITER build, and feature flags.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
     # Set from the common metadata every build; a batch is causal unless the
     # drafter says otherwise.
     _decode_causal: bool = True
@@ -628,17 +631,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        supports_dcp_verify = (
+            supports_segmented_dcp_verify
+            or supports_native_dcp_verify
+            or supports_ab_dcp_verify
+        )
+        self.supports_non_causal_multi_token_dcp = supports_dcp_verify
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             AiterMLAMetadata,
-            supports_dcp_with_varlen=(
-                supports_segmented_dcp_verify
-                or supports_native_dcp_verify
-                or supports_ab_dcp_verify
-            ),
+            supports_dcp_with_varlen=supports_dcp_verify,
         )
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
         self._supports_native_dcp_verify = supports_native_dcp_verify
