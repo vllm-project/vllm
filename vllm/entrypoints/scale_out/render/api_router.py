@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.serving import resolve_cache_salt_header
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
@@ -43,6 +44,8 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
             "The model does not support Chat Completions Render API"
         )
 
+    resolve_cache_salt_header(request, raw_request)
+
     result = await handler.render_chat_request(request)
 
     if isinstance(result, ErrorResponse):
@@ -67,6 +70,8 @@ async def render_messages(request: AnthropicMessagesRequest, raw_request: Reques
     if handler is None:
         raise NotImplementedError("The model does not support Messages Render API")
 
+    resolve_cache_salt_header(request, raw_request)
+
     result = await handler.render_messages_request(request)
 
     if isinstance(result, ErrorResponse):
@@ -89,6 +94,8 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Completions Render API")
+
+    resolve_cache_salt_header(request, raw_request)
 
     result = await handler.render_completion_request(request)
 
@@ -113,6 +120,8 @@ async def render_responses(request: ResponsesRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Responses Render API")
+
+    resolve_cache_salt_header(request, raw_request)
 
     result = await handler.render_responses_request(request)
     if isinstance(result, ErrorResponse):

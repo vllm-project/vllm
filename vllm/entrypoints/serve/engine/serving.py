@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
+from typing import Protocol, cast
 
 from fastapi import Request
+from pydantic import BaseModel
 
 from vllm import PromptType, SamplingParams, envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -15,7 +18,7 @@ from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMNotFoundError
+from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers.inputs.preprocess import (
@@ -24,6 +27,48 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import random_uuid
+
+CACHE_SALT_HEADER = "X-Cache-Salt"
+
+
+class SupportsCacheSalt(Protocol):
+    """A request that can carry a prefix cache salt."""
+
+    cache_salt: str | None
+
+
+def resolve_cache_salt_header(
+    request: BaseModel,
+    raw_request: Request | None,
+) -> None:
+    """Apply the ``X-Cache-Salt`` header to ``request.cache_salt`` in place.
+
+    The header wins over the body field so that a trusted proxy can pin a
+    request to a prefix cache partition the client cannot escape. Must be
+    called before the request is rendered, since the renderer reads
+    ``request.cache_salt``.
+
+    Fails closed: a header that cannot be honored is an error rather than an
+    unsalted request silently sharing the global prefix cache.
+
+    Raises:
+        VLLMValidationError: If the header value is not a valid cache salt, or
+            the endpoint's request type does not support ``cache_salt``.
+
+    """
+    if raw_request is None:
+        return
+    cache_salt = raw_request.headers.get(CACHE_SALT_HEADER)
+    if cache_salt is None:
+        return
+
+    validate_cache_salt(cache_salt)
+    if "cache_salt" not in type(request).model_fields:
+        raise VLLMValidationError(
+            f"This endpoint does not support the {CACHE_SALT_HEADER} header.",
+            parameter="cache_salt",
+        )
+    cast(SupportsCacheSalt, request).cache_salt = cache_salt
 
 
 class BaseServing:
