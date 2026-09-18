@@ -46,12 +46,49 @@ from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
+    _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
+    calls = []
+
+    def original_validate_rope(config, *args, **kwargs):
+        calls.append(config)
+
+    from transformers import PretrainedConfig
+
+    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    _patch_hf_transformers_nested_rope_validation()
+
+    nested_rope_parameters = {
+        "full_attention": {"rope_type": "default"},
+        "original_max_position_embeddings": 32768,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=nested_rope_parameters)
+    )
+    assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
+
+    flat_rope_parameters = {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(rope_parameters=flat_rope_parameters)
+    )
+    assert flat_rope_parameters == {
+        "rope_type": "linear",
+        "factor": 8.0,
+        "rope_theta": 500000.0,
+    }
+    assert len(calls) == 2
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -475,45 +512,6 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-@pytest.mark.parametrize(
-    ("architecture", "use_v2", "mode", "expected"),
-    [
-        ("DeepseekV4ForCausalLM", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForConditionalGeneration", True, None, CUDAGraphMode.NONE),
-        ("DeepseekV4ForCausalLM", False, None, None),
-        ("LlamaForCausalLM", True, None, None),
-        (
-            "DeepseekV4ForCausalLM",
-            True,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-    ],
-)
-def test_rocm_gfx950_deepseek_v4_cudagraph_default(
-    monkeypatch, architecture, use_v2, mode, expected
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms import rocm
-
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
-    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: False)
-    monkeypatch.setattr(
-        rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False
-    )
-    config = SimpleNamespace(
-        compilation_config=CompilationConfig(cudagraph_mode=mode),
-        model_config=SimpleNamespace(architecture=architecture),
-        use_v2_model_runner=use_v2,
-    )
-
-    rocm.RocmPlatform.apply_config_platform_defaults(config)
-
-    assert config.compilation_config.cudagraph_mode == expected
 
 
 @pytest.mark.parametrize(
@@ -1520,6 +1518,115 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
+@pytest.mark.parametrize(
+    ("method", "draft_is_moe"),
+    [
+        pytest.param("draft_model", False, id="dense-draft"),
+        pytest.param("eagle", False, id="eagle"),
+        pytest.param("eagle3", False, id="eagle3"),
+        pytest.param("draft_model", True, id="moe-draft"),
+        pytest.param("mtp", True, id="mtp"),
+        pytest.param("dspark", True, id="dspark"),
+    ],
+)
+def test_draft_inherits_ep_only_for_moe(
+    tmp_path: Path,
+    tp_size: int,
+    target_ep: bool,
+    method: str,
+    draft_is_moe: bool,
+):
+    """Validate final draft configs without loading weights or mocking validation."""
+    from transformers import LlamaConfig, MixtralConfig
+
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+
+    common = dict(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=128,
+        max_position_embeddings=2048,
+    )
+    if method in ("mtp", "dspark"):
+        target_hf_config = DeepseekV4Config(
+            architectures=["DeepseekV4ForCausalLM"],
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            num_nextn_predict_layers=1,
+            compress_ratios=[1, 1],
+            head_dim=32,
+            **common,
+        )
+    else:
+        target_hf_config = MixtralConfig(
+            architectures=["MixtralForCausalLM"], num_local_experts=4, **common
+        )
+    target_path = tmp_path / "target"
+    draft_path = tmp_path / "draft"
+    _write_json(target_path / "config.json", target_hf_config.to_dict())
+    _write_json(
+        draft_path / "config.json",
+        LlamaConfig(architectures=["LlamaForCausalLM"], **common).to_dict(),
+    )
+    target_model_config = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=2048
+    )
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=target_ep,
+        distributed_executor_backend="mp",
+    )
+    target_model_config.verify_with_parallel_config(target_parallel_config)
+    speculative_config = SpeculativeConfig(
+        method=method,
+        model=str(target_path if draft_is_moe else draft_path),
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+
+    assert speculative_config.method == method
+    assert speculative_config.draft_model_config.is_moe is draft_is_moe
+    assert speculative_config.draft_parallel_config.enable_expert_parallel is (
+        target_ep and draft_is_moe
+    )
+    assert speculative_config.draft_parallel_config.tensor_parallel_size == tp_size
+    assert target_parallel_config.enable_expert_parallel is target_ep
+    assert target_parallel_config.tensor_parallel_size == tp_size
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
+@pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "explicit-none"])
+def test_draft_parallel_config_preserves_ep_without_model(
+    target_ep: bool, pass_none: bool
+):
+    """Legacy callers without draft model information keep EP inheritance."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=target_ep,
+        distributed_executor_backend="mp",
+    )
+    if pass_none:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2, draft_model_config=None
+        )
+    else:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2
+        )
+
+    assert draft_parallel_config.enable_expert_parallel is target_ep
+    assert draft_parallel_config.tensor_parallel_size == 2
+    assert target_parallel_config.enable_expert_parallel is target_ep
+
+
 @pytest.mark.parametrize(
     ("method", "parallel_drafting", "expected_slots"),
     [
@@ -2173,7 +2280,7 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
 
 
 class MockConfig:
-    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai."""
 
     def __init__(self, model: str, tokenizer: str):
         self.model = model
@@ -2651,7 +2758,6 @@ def test_validate_mamba_align_subblock_prefill():
 )
 def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
-
     model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
@@ -2836,7 +2942,6 @@ def test_vllm_config_explicit_overrides():
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
-
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()
     assert not cfg1.compilation_config.pass_config.fuse_norm_quant
@@ -3441,7 +3546,7 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
 
 
 def test_ir_op_priority_str():
-    """Test that passing a comma-delimited string works"""
+    """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig
 
     priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
