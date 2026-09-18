@@ -1552,32 +1552,26 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         if not (isinstance(videos, list) and len(videos) > 0):
             return prepared_data, prepared_kwargs
 
-        hf_videos = []
+        raw_metadata = prepared_data.get("video_metadata")
         hf_video_metadata = []
-        for item in videos:
-            if isinstance(item, tuple) and len(item) == 2:
-                video_array, metadata = item
-                hf_videos.append(video_array)
-                if isinstance(metadata, VideoMetadata):
-                    hf_video_metadata.append(metadata)
-                elif isinstance(metadata, Mapping):
-                    hf_video_metadata.append(_to_video_metadata(metadata))
-                    if "do_sample_frames" in metadata:
-                        prepared_kwargs["do_sample_frames"] = metadata[
-                            "do_sample_frames"
-                        ]
-                elif metadata is not None:
-                    raise TypeError(
-                        "Video metadata must be a mapping or VideoMetadata, "
-                        f"got {type(metadata)}"
-                    )
-            else:
-                hf_videos.append(item)
+        for metadata in raw_metadata if isinstance(raw_metadata, Sequence) else ():
+            if isinstance(metadata, VideoMetadata):
+                hf_video_metadata.append(metadata)
+            elif isinstance(metadata, Mapping):
+                hf_video_metadata.append(_to_video_metadata(metadata))
+                if "do_sample_frames" in metadata:
+                    prepared_kwargs["do_sample_frames"] = metadata["do_sample_frames"]
+            elif metadata is not None:
+                raise TypeError(
+                    "Video metadata must be a mapping or VideoMetadata, "
+                    f"got {type(metadata)}"
+                )
 
-        prepared_data["videos"] = hf_videos
         if hf_video_metadata:
             prepared_data["video_metadata"] = hf_video_metadata
             prepared_kwargs["return_metadata"] = True
+        else:
+            prepared_data.pop("video_metadata", None)
 
         return prepared_data, prepared_kwargs
 

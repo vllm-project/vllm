@@ -56,6 +56,40 @@ def test_frame_size_hwc_chw(frame):
     assert items.get_frame_size(0) == (W, H)
 
 
+def test_processor_data_without_metadata():
+    """Plain videos must not grow a `video_metadata` argument."""
+    frames = np.zeros((4, H, W, 3), dtype=np.uint8)
+    items = VideoProcessorItems([frames, frames])
+
+    assert items.get_processor_data() == {"videos": [frames, frames]}
+
+
+def test_processor_data_splits_metadata():
+    """HF takes `videos` and `video_metadata` as parallel arguments, so the
+    bundled `(frames, metadata)` items the parser produces must be split."""
+    first = np.zeros((4, H, W, 3), dtype=np.uint8)
+    second = np.ones((2, H, W, 3), dtype=np.uint8)
+    items = VideoProcessorItems(
+        [(first, {"fps": 2.0}), (second, {"fps": 4.0})],
+    )
+
+    data = items.get_processor_data()
+
+    assert [v.shape for v in data["videos"]] == [first.shape, second.shape]
+    assert data["video_metadata"] == [{"fps": 2.0}, {"fps": 4.0}]
+
+
+def test_processor_data_pads_missing_metadata():
+    """A bare video alongside bundled ones keeps the two lists aligned."""
+    frames = np.zeros((4, H, W, 3), dtype=np.uint8)
+    items = VideoProcessorItems([(frames, {"fps": 2.0}), frames])
+
+    data = items.get_processor_data()
+
+    assert len(data["videos"]) == 2
+    assert data["video_metadata"] == [{"fps": 2.0}, None]
+
+
 def test_video_with_metadata_tensor_passthrough():
     """Tensor frames pass through unchanged regardless of device: HF video
     processors accept tensors, and device-resident frames (e.g. NVDEC-decoded)

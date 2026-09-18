@@ -417,6 +417,26 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
                 return item, metadata
         return item
 
+    def get_processor_data(self) -> Mapping[str, object]:
+        """Split bundled items into the two arguments HF processors take.
+
+        The parser bundles metadata into each item so that it travels with the
+        video through hashing and caching, whereas HF video processors take
+        `videos` and a parallel `video_metadata` kwarg.
+        """
+        items = self.get_all()
+        if not any(isinstance(item, tuple) for item in items):
+            return {"videos": items}
+
+        videos = list[Any]()
+        metadata = list[Any]()
+        for item in items:
+            frames, item_metadata = item if isinstance(item, tuple) else (item, None)
+            videos.append(frames)
+            metadata.append(item_metadata)
+
+        return {"videos": videos, "video_metadata": metadata}
+
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)
         if video is None:

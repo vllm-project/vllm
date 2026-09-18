@@ -322,9 +322,23 @@ def prepare_codec_video_input(video_path: str) -> tuple:
     return (dummy, {_CODEC_VIDEO_MARKER: str(video_path)})
 
 
-def _extract_codec_video_paths(videos: Any) -> list[str] | None:
-    # vLLM's parser yields list-of-(ndarray, metadata-dict) for tuple inputs.
-    # We accept either that shape or a single raw tuple (pre-parser cases).
+def _extract_codec_video_paths(videos: Any, metadata: Any = None) -> list[str] | None:
+    # vLLM's parser splits tuple inputs into `videos` and a parallel
+    # `video_metadata` list. Raw tuples still arrive in pre-parser cases.
+    def _path_from_metadata(item):
+        if isinstance(item, dict) and _CODEC_VIDEO_MARKER in item:
+            return item[_CODEC_VIDEO_MARKER]
+        return None
+
+    if isinstance(metadata, list) and metadata:
+        meta_paths: list[str] = []
+        for item in metadata:
+            p = _path_from_metadata(item)
+            if p is None:
+                return None
+            meta_paths.append(p)
+        return meta_paths or None
+
     def _path_from(item):
         if (
             isinstance(item, tuple)
@@ -1602,7 +1616,9 @@ class LlavaOnevision2MultiModalProcessor(
         videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
-            _extract_codec_video_paths(hf_data["videos"]) if videos_present else None
+            _extract_codec_video_paths(hf_data["videos"], hf_data.get("video_metadata"))
+            if videos_present
+            else None
         )
         is_codec_marker = codec_video_paths is not None
         # Fallback: caller passed video_backend=codec via mm_processor_kwargs
