@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: "XPU GPQA Eval (GPT-OSS)"
-  key: xpu-gpqa-eval-gpt-oss
+  key: xpu-gpqa-eval-gpt-oss-xpu
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
