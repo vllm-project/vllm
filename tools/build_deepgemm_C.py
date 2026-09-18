@@ -44,9 +44,10 @@ subprocess.check_call(
 shim = _pkg / "_C.py"
 shutil.copy2(shim, out / shim.name)
 
-so_files = sorted(_pkg.glob("_C_extension*.so"))
-if not so_files:
-    sys.exit(f"DeepGEMM build did not produce deep_gemm/_C_extension*.so under {src}")
-for so in so_files:
-    shutil.copy2(so, out / so.name)
-    print(f"[build_deepgemm_C] installed {so.name} -> {out}", flush=True)
+so = _pkg / "_C_extension.abi3.so"
+if not so.is_file():
+    sys.exit(f"DeepGEMM build did not produce {so}")
+for stale in out.glob("_C_extension*.so"):
+    stale.unlink()
+shutil.copy2(so, out / so.name)
+print(f"[build_deepgemm_C] installed {so.name} -> {out}", flush=True)
