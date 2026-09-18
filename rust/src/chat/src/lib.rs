@@ -31,15 +31,16 @@ pub use parser::reasoning::{
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::{ParserSelection, validate_parser_overrides};
+pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
-    RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
+    RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
@@ -52,6 +53,7 @@ mod event;
 pub mod multimodal;
 mod output;
 mod parser;
+mod reasoning;
 mod renderer;
 mod request;
 mod stream;
@@ -112,6 +114,10 @@ impl ChatRequestProcessor {
         request: &ChatRequest,
         rendered: RenderedPrompt,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
+        let media_is_empty = match &rendered.media_order {
+            Some(media_order) => media_order.is_empty(),
+            None => !request.has_multimodal(),
+        };
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
@@ -122,7 +128,7 @@ impl ChatRequestProcessor {
                 )
                 .await
             }
-            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None if media_is_empty => Ok((rendered.prompt, None)),
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
