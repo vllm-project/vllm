@@ -41,6 +41,9 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cpu():
     from vllm.models.glm5next.cpu.kda import (
+        causal_conv1d_update_cpu as causal_conv1d_update,
+    )
+    from vllm.models.glm5next.cpu.kda import (
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
@@ -499,12 +502,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
-        if current_platform.is_cpu() and use_spec:
-            raise NotImplementedError(
-                "GLM5Next speculative decoding is not supported on CPU because "
-                "the CPU causal convolution does not implement accepted-token "
-                "rollback."
-            )
         # Safe-gate checkpoints use the bounded sigmoid variant.
         safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound

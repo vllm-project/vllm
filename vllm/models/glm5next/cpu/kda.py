@@ -34,11 +34,16 @@ from __future__ import annotations
 
 import torch
 
+from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+    causal_conv1d_update_cpu as _causal_conv1d_update_cpu,
+)
+
 __all__ = [
     "chunk_kda_with_fused_gate",
     "fused_recurrent_kda",
     "gather_initial_states_cpu",
     "scatter_states_cpu",
+    "causal_conv1d_update_cpu",
 ]
 
 # A padded or otherwise invalid state slot. Matches NULL_BLOCK_ID / PAD_SLOT_ID
@@ -46,6 +51,96 @@ __all__ = [
 _NULL_BLOCK_ID = 0
 
 _QK_L2NORM_EPS = 1e-6
+
+
+def causal_conv1d_update_cpu(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: bool | str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    max_query_len: int = -1,
+    pad_slot_id: int = 0,
+    **kwargs,
+) -> torch.Tensor:
+    """CPU short-convolution update with the GLM speculative contract."""
+    if num_accepted_tokens is None:
+        return _causal_conv1d_update_cpu(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation,
+            conv_state_indices,
+            query_start_loc,
+            pad_slot_id,
+            **kwargs,
+        )
+    if query_start_loc is None or conv_state_indices is None:
+        raise ValueError(
+            "speculative CPU convolution requires query_start_loc and "
+            "conv_state_indices"
+        )
+    if x.ndim != 2 or conv_state.ndim != 3 or weight.ndim != 2:
+        raise ValueError("invalid speculative CPU convolution shapes")
+    if max_query_len < 1:
+        raise ValueError("max_query_len must be positive for speculative convolution")
+    state_len_full = conv_state.shape[-1]
+    width = weight.shape[-1]
+    if state_len_full < width - 1:
+        raise ValueError("conv_state is shorter than the convolution window")
+    if conv_state_indices.ndim != 1:
+        raise ValueError("CPU speculative convolution expects 1-D cache slots")
+
+    original_dtype = x.dtype
+    x_work = x.to(conv_state.dtype)
+    weight_work = weight.to(conv_state.dtype)
+    bias_work = None if bias is None else bias.to(conv_state.dtype)
+    output = torch.zeros_like(x_work)
+    batch = conv_state_indices.numel()
+    if query_start_loc.numel() != batch + 1:
+        raise ValueError("query_start_loc must have one more entry than cache slots")
+    if num_accepted_tokens.numel() != batch:
+        raise ValueError("num_accepted_tokens must match cache slots")
+
+    for seq in range(batch):
+        bos = int(query_start_loc[seq].item())
+        eos = int(query_start_loc[seq + 1].item())
+        slot = int(conv_state_indices[seq].item())
+        if slot <= pad_slot_id or eos <= bos:
+            continue
+        offset = int(num_accepted_tokens[seq].item()) - 1
+        seq_len = eos - bos
+        state_len = state_len_full - (max_query_len - seq_len)
+        if offset < 0 or state_len < width - 1:
+            raise ValueError("invalid speculative convolution state window")
+
+        window = conv_state[slot, :, offset : offset + width - 1].clone()
+        for token in range(seq_len):
+            value = x_work[bos + token]
+            acc = (window * weight_work[:, :-1]).sum(-1)
+            acc = acc + value * weight_work[:, -1]
+            if bias_work is not None:
+                acc = acc + bias_work
+            if activation in (True, "silu", "swish"):
+                acc = torch.nn.functional.silu(acc)
+            elif activation not in (None, False):
+                raise ValueError(f"unsupported activation: {activation}")
+            output[bos + token] = acc
+            window = torch.cat((window[:, 1:], value[:, None]), dim=-1)
+
+        updated = conv_state[slot].clone()
+        for idx in range(state_len):
+            if idx + seq_len < state_len:
+                updated[:, idx] = conv_state[slot, :, offset + idx + 1]
+            else:
+                updated[:, idx] = x_work[bos + idx - (state_len - seq_len)]
+        conv_state[slot, :, :state_len].copy_(updated[:, :state_len])
+
+    return output.to(original_dtype)
 
 
 def _native_recurrent_kda(

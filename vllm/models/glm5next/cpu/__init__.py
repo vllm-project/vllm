@@ -8,6 +8,7 @@ dispatch to this package without changing any call site.
 """
 
 from .kda import (
+    causal_conv1d_update_cpu,
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
     gather_initial_states_cpu,
@@ -15,6 +16,7 @@ from .kda import (
 )
 
 __all__ = [
+    "causal_conv1d_update_cpu",
     "chunk_kda_with_fused_gate",
     "fused_recurrent_kda",
     "gather_initial_states_cpu",

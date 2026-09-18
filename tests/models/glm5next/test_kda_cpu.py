@@ -905,41 +905,58 @@ def test_common_layer_uses_cpu_kda_and_state_helpers():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cpu(), reason="the fail-closed guard is CPU-only"
+    not current_platform.is_cpu(), reason="the CPU convolution path is CPU-only"
 )
-def test_common_layer_rejects_unsupported_speculative_convolution(monkeypatch):
-    """Speculative CPU convolution must not silently ignore rollback metadata."""
-    from types import SimpleNamespace
+def test_cpu_speculative_conv_matches_rolling_reference():
+    """The CPU speculative conv mirrors the CUDA rolling-window contract."""
+    from vllm.models.glm5next.cpu import causal_conv1d_update_cpu
 
-    import vllm.models.glm5next.common.kda as common_kda
-    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    torch.manual_seed(41)
+    width, num_spec, dim = 4, 3, 5
+    state_len = width - 1 + num_spec
+    x = torch.randn(5, dim)
+    weight = torch.randn(dim, width)
+    bias = torch.randn(dim)
+    state = torch.randn(2, dim, state_len)
+    before = state.clone()
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32)
+    slots = torch.tensor([1, 0], dtype=torch.int32)
+    accepted = torch.tensor([2, 1], dtype=torch.int32)
 
-    metadata = GDNAttentionMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=0,
-        num_decode_tokens=0,
-        num_spec_decodes=1,
-        num_spec_decode_tokens=2,
-        num_actual_tokens=2,
-        spec_sequence_masks=torch.tensor([True]),
+    output = causal_conv1d_update_cpu(
+        x,
+        state,
+        weight,
+        bias,
+        activation="silu",
+        conv_state_indices=slots,
+        num_accepted_tokens=accepted,
+        query_start_loc=query_start_loc,
+        max_query_len=num_spec + 1,
     )
-    monkeypatch.setattr(
-        common_kda,
-        "get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={"layer": metadata}),
-    )
-    layer = SimpleNamespace(prefix="layer")
-    empty = torch.empty(0)
-
-    with pytest.raises(NotImplementedError, match="causal convolution"):
-        common_kda.Glm5NextLinearAttention._forward(
-            layer,
-            qkv_proj_states=empty,
-            g1=empty,
-            beta=empty,
-            core_attn_out=empty,
-        )
+    expected = torch.zeros_like(x)
+    expected_state = before.clone()
+    for seq, (bos, eos) in enumerate(((0, 3), (3, 5))):
+        slot = int(slots[seq].item())
+        if slot == NULL_BLOCK_ID:
+            continue
+        offset = int(accepted[seq].item()) - 1
+        local_state_len = state_len - (num_spec + 1 - (eos - bos))
+        window = before[slot, :, offset : offset + width - 1].clone()
+        for token in range(bos, eos):
+            value = x[token]
+            y = (window * weight[:, :-1]).sum(-1) + value * weight[:, -1] + bias
+            expected[token] = torch.nn.functional.silu(y)
+            window = torch.cat((window[:, 1:], value[:, None]), dim=-1)
+        for idx in range(local_state_len):
+            if idx + eos - bos < local_state_len:
+                expected_state[slot, :, idx] = before[slot, :, offset + idx + 1]
+            else:
+                expected_state[slot, :, idx] = x[
+                    bos + idx - (local_state_len - (eos - bos))
+                ]
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(state, expected_state)
 
 
 @pytest.mark.skipif(
@@ -1093,6 +1110,82 @@ def test_common_layer_prefill_state_feeds_decode(monkeypatch):
 
     assert torch.isfinite(decode_output).all()
     assert not torch.equal(layer.kv_cache[1][2], prefill_state)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="the common-layer dispatch is CPU-only"
+)
+def test_common_layer_speculative_decode_uses_cpu_conv_and_kda(monkeypatch):
+    """Speculative layer execution uses the CPU rolling conv and KDA routes."""
+    from types import SimpleNamespace
+
+    import vllm.models.glm5next.common.kda as common_kda
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.models.glm5next.cpu import kda as cpu_kda
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+    monkeypatch.setattr(common_kda, "_cast_sigmoid", lambda x: x.float().sigmoid())
+    native_calls = 0
+    native_recurrent = cpu_kda._native_recurrent_kda
+
+    def count_native_calls(*args, **kwargs):
+        nonlocal native_calls
+        native_calls += 1
+        return native_recurrent(*args, **kwargs)
+
+    monkeypatch.setattr(cpu_kda, "_native_recurrent_kda", count_native_calls)
+    layer = object.__new__(Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    layer.kda_safe_gate = True
+    layer.kda_lower_bound = LOWER_BOUND
+    layer.kda_prefill_backend = "cpu"
+    layer._conv_state_dim_first = True
+    layer.local_projection_size = H * D
+    layer.local_num_heads = H
+    layer.head_dim = D
+    layer.A_log = torch.nn.Parameter(torch.zeros(1, 1, H, 1))
+    layer.dt_bias = torch.nn.Parameter(torch.zeros(H * D))
+    layer._merged_conv_weight = torch.randn(3 * H * D, 4)
+    layer.q_conv1d = SimpleNamespace(bias=torch.randn(3 * H * D))
+    conv_state = torch.randn(8, 3 * H * D, 6)
+    recurrent_state = torch.randn(8, H, D, D)
+    before_conv = conv_state.clone()
+    before_recurrent = recurrent_state.clone()
+    layer.kv_cache = [conv_state, recurrent_state]
+
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=1,
+        num_spec_decode_tokens=3,
+        num_actual_tokens=3,
+        spec_query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        spec_state_indices_tensor=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+        spec_sequence_masks=torch.tensor([True]),
+        num_accepted_tokens=torch.tensor([2], dtype=torch.int32),
+    )
+    monkeypatch.setattr(
+        common_kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer": metadata}),
+    )
+
+    output = torch.empty(1, 3, H, D)
+    layer._forward(
+        torch.randn(3, 3 * H * D),
+        torch.randn(1, 3, H, D),
+        torch.randn(1, 3, H),
+        output,
+    )
+
+    assert torch.isfinite(output).all()
+    assert native_calls == 3
+    assert not torch.equal(conv_state[1], before_conv[1])
+    for slot in (1, 2, 3):
+        assert not torch.equal(recurrent_state[slot], before_recurrent[slot])
 
 
 @pytest.mark.skipif(
