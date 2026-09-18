@@ -621,7 +621,7 @@ class InternS1ProForConditionalGeneration(
         return mapper
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """load weights"""
+        """Load weights"""
         orig_to_new_prefix: dict[str, str | None] = {
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",

@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared HTTP helpers for the RL dev-endpoint tests."""
+"""Shared fixtures and helpers for the RL lifecycle test suite.
+"""
 
+import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 
+# ---------------------------------------------------------------------------
 # Model / server defaults
+# ---------------------------------------------------------------------------
 
 
 MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
@@ -51,6 +58,9 @@ _DUMMY_ARGS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Server harness
+# ---------------------------------------------------------------------------
 @contextmanager
 def server(
     extra_args=None,
@@ -94,12 +104,12 @@ def server(
     if weight_transfer_config is not None:
         args += ["--weight-transfer-config", json.dumps(weight_transfer_config)]
     with RemoteOpenAIServer(
-        model or MODEL_NAME,
-        args,
-        auto_port=port is None,
-        seed=None if "--seed" in args else 0,
-        env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
-        max_wait_seconds=timeout,
+            model or MODEL_NAME,
+            args,
+            auto_port=port is None,
+            seed=None if "--seed" in args else 0,
+            env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
+            max_wait_seconds=timeout,
     ) as remote:
         yield remote.url_root
 
@@ -120,7 +130,9 @@ def reusable_server(*args, **kwargs):
         cleanup_dist_env_and_memory()
 
 
+# ---------------------------------------------------------------------------
 # HTTP helpers — generation
+# ---------------------------------------------------------------------------
 
 
 def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
@@ -168,7 +180,10 @@ def ok(resp) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
 # HTTP helpers — stream generation
+# ---------------------------------------------------------------------------
+
 
 # First-token wait for a streaming request; loaded machines need the slack.
 STREAM_START_TIMEOUT = 20.0
@@ -241,7 +256,9 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
     return result, thread
 
 
+# ---------------------------------------------------------------------------
 # HTTP helpers — pause / resume
+# ---------------------------------------------------------------------------
 
 
 def pause(url, mode="abort", clear_cache=True):
@@ -293,7 +310,9 @@ def cached_tokens(response: dict[str, Any]) -> int:
     return response["usage"]["prompt_tokens_details"]["cached_tokens"]
 
 
+# ---------------------------------------------------------------------------
 # HTTP helpers — sleep / wake
+# ---------------------------------------------------------------------------
 
 
 def sleep(url, level=1, mode="abort"):
@@ -327,7 +346,9 @@ def health(url) -> int:
         return 0
 
 
-# HTTP helpers — weight checker
+# ---------------------------------------------------------------------------
+# HTTP helpers — weight transfer
+# ---------------------------------------------------------------------------
 
 
 def weight_checker(url: str, action: str, baseline=None) -> requests.Response:
@@ -345,9 +366,6 @@ def collective_rpc(url: str, method: str) -> requests.Response:
         json={"method": method, "timeout": 900},
         timeout=900,
     )
-
-
-# HTTP helpers — weight transfer
 
 
 def start_weight_update(url, is_checkpoint_format=True):
@@ -373,7 +391,9 @@ def get_world_size(url, include_dp=True):
     )
 
 
+# ---------------------------------------------------------------------------
 # GPU / metrics helpers
+# ---------------------------------------------------------------------------
 
 
 def gpu_free_bytes(device: int = 0) -> int:
