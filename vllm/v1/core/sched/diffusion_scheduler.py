@@ -2,15 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Async scheduling for diffusion requests.
 
-This rule lives here so Scheduler.schedule() and AsyncScheduler stay
+These rules live here so Scheduler.schedule() and AsyncScheduler stay
 unchanged. VllmConfig selects this class for a diffusion model under async
-scheduling. A sync scheduler creates no output placeholders, which the rule
-reads.
+scheduling. A sync scheduler creates no output placeholders, which both rules
+read.
 """
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
+
+
+def diffusion_canvas_width(request: Request, canvas_length: int) -> int:
+    """The canvas width a diffusion request asked for, else the served one."""
+    params = request.sampling_params
+    extra = params.extra_args if params is not None else None
+    width = extra.get("diffusion_canvas_length") if extra else None
+    return int(width) if width else canvas_length
 
 
 def _read_in_flight(request: Request, width: int) -> bool:
@@ -33,7 +41,11 @@ def _read_in_flight(request: Request, width: int) -> bool:
 class DiffusionAsyncScheduler(AsyncScheduler):
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         for request in self.running:
-            if _read_in_flight(request, self.num_spec_tokens):
+            width = diffusion_canvas_width(request, self.num_spec_tokens)
+            # The placeholders are as wide as the served canvas.
+            if len(request.spec_token_ids) > width:
+                request.spec_token_ids = request.spec_token_ids[:width]
+            if _read_in_flight(request, width):
                 # Scheduler.schedule()'s max_tokens guard cannot be reached
                 # from a subclass. schedule() advances current_step before it
                 # checks decode eligibility, so current_step + 2 skips this
