@@ -2285,6 +2285,11 @@ class HiSparseSourceManager(FullAttentionManager):
                 assert self.coordinator is not None
                 assert self.coordinator.gpu_pool is not None
                 return self.coordinator.gpu_pool.num_gpu_blocks + 1
+        if self.coordinator is not None and request_id not in self.num_cached_block:
+            num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
+            return self.coordinator.get_num_copy_blocks_to_pin(
+                new_computed_blocks[:num_host_pages]
+            )
         return 0
 
     def allocate_new_blocks(
