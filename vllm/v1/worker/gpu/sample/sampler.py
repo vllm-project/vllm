@@ -63,15 +63,15 @@ class Sampler:
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
         self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
-        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
-        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+        self.logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
+        self.bad_words_state = BadWordsState(vllm_config, lp_req_state)
 
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.
         self.logits_processors: list[LogitsProcessor] = [
-            logit_bias_state,
+            self.logit_bias_state,
             self.penalties_state,
-            bad_words_state,
+            self.bad_words_state,
             *custom_logits_processors,
         ]
 
@@ -108,6 +108,29 @@ class Sampler:
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
+
+    def target_only_sampling_transforms(self, idx_mapping_np: np.ndarray) -> np.ndarray:
+        """Per-request mask of sampling transforms the draft sampler ignores.
+
+        Draft sampling copies temperature and seed only. The target still
+        applies allowed_token_ids, logit_bias, penalties, bad_words, min_p,
+        top_k, top_p, and thinking-budget constraints, which biases
+        accept/reject labels relative to the draft features. Those
+        observations must not update the shared acceptance estimator.
+        """
+        states = self.sampling_states
+        mask = (
+            self.logit_bias_state.use_logit_bias[idx_mapping_np]
+            | self.penalties_state.use_penalty[idx_mapping_np]
+            | (self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0)
+            | (states.min_p.np[idx_mapping_np] != 0.0)
+            | (states.top_k.np[idx_mapping_np] != states.vocab_size)
+            | (states.top_p.np[idx_mapping_np] != 1.0)
+        )
+        if self.thinking_budget_state.enabled:
+            thinking = self.thinking_budget_state.use_thinking_budget[idx_mapping_np]
+            mask = mask | thinking
+        return mask
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()

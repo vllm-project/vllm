@@ -147,6 +147,25 @@ class BaseSpeculator(ABC):
         return
 
 
+def select_estimator_observations(
+    idx_mapping: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    skip_np: np.ndarray | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Drop batch rows whose observations must not train the estimator.
+
+    Returns None when every row is skipped.
+    """
+    if skip_np is None or not skip_np.any():
+        return idx_mapping, num_sampled, num_rejected
+    keep_idx = np.nonzero(~skip_np)[0]
+    if keep_idx.size == 0:
+        return None
+    keep = torch.as_tensor(keep_idx, device=idx_mapping.device)
+    return idx_mapping[keep], num_sampled[keep], num_rejected[keep]
+
+
 class DraftModelSpeculator(BaseSpeculator):
     # Whether every slot mapping the speculator builds goes through its attention
     # groups' map_to_kernel_slot_mapping, so packed token caches may split.
@@ -641,14 +660,23 @@ class DraftModelSpeculator(BaseSpeculator):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
+        skip_np: np.ndarray | None = None,
     ) -> None:
         """Fold the target's verdict on the last drafts into the estimator.
 
         Must run before the next `propose`, which overwrites the per-slot
-        features the verdict grades.
+        features the verdict grades. `skip_np` is a batch-order mask: True
+        means the target applied sampling transforms the draft does not, so
+        the observation is dropped.
         """
-        if self.acceptance_estimator is not None:
-            self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
+        if self.acceptance_estimator is None:
+            return
+        selected = select_estimator_observations(
+            idx_mapping, num_sampled, num_rejected, skip_np
+        )
+        if selected is None:
+            return
+        self.acceptance_estimator.step(*selected)
 
     def prepare_watermarking(
         self,
@@ -674,7 +702,15 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> None:
         """Per-step work between verifying the last drafts and the next
         `propose`."""
-        self.observe_verification(input_batch.idx_mapping, num_sampled, num_rejected)
+        if self.acceptance_estimator is not None:
+            self.observe_verification(
+                input_batch.idx_mapping,
+                num_sampled,
+                num_rejected,
+                skip_np=sampler.target_only_sampling_transforms(
+                    input_batch.idx_mapping_np
+                ),
+            )
         if isinstance(sampler, GPUWatermarkSampler):
             self.prepare_watermarking(sampler, input_batch.idx_mapping)
         if self.draft_logits is not None:

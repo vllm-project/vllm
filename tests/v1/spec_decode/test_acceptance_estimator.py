@@ -9,6 +9,7 @@ to another request -- so it is asserted here rather than left to acceptance
 metrics to hint at.
 """
 
+import numpy as np
 import pytest
 import torch
 
@@ -19,6 +20,7 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     _accumulate_kernel,
     _refit_kernel,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 pytest.importorskip("triton")
 if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
@@ -488,3 +490,34 @@ def test_warmup_covers_every_batch_size_and_the_refit():
 
     assert estimator._refits == 1
     assert compiled_variants() == warmed
+
+
+def test_observe_verification_drops_target_only_sampling_requests():
+    """Requests whose target sampling is not applied to the draft are excluded.
+
+    Their accept/reject labels must not accumulate into the shared estimator.
+    """
+    device = torch.device("cuda")
+    estimator = _make_estimator(device)
+    speculator = DraftModelSpeculator.__new__(DraftModelSpeculator)  # type: ignore[type-abstract]
+    speculator.acceptance_estimator = estimator
+
+    slots = torch.tensor([0, 1], device=device, dtype=torch.int32)
+    estimator.features[slots.long()] = 1.0
+    estimator.predictions[slots.long()] = 0.5
+    num_sampled = torch.ones(2, device=device, dtype=torch.int32)
+    num_rejected = torch.full((2,), NUM_STEPS, device=device, dtype=torch.int32)
+
+    before_steps = estimator._steps_since_refit
+    before_counts = estimator.counts.clone()
+    speculator.observe_verification(
+        slots, num_sampled, num_rejected, skip_np=np.array([True, True])
+    )
+    assert estimator._steps_since_refit == before_steps
+    torch.testing.assert_close(estimator.counts, before_counts, rtol=0, atol=0)
+
+    speculator.observe_verification(
+        slots, num_sampled, num_rejected, skip_np=np.array([True, False])
+    )
+    assert estimator._steps_since_refit == before_steps + 1
+    assert estimator.counts.sum() > before_counts.sum()
