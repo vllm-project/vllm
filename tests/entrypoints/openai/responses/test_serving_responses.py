@@ -1394,7 +1394,7 @@ def _make_serving_instance(
     *,
     reasoning_parser: str = "",
     enable_per_request_metrics: bool = False,
-    per_request_output_token_metrics: bool = False,
+    enable_per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
@@ -1415,13 +1415,15 @@ def _make_serving_instance(
         chat_template_content_format="auto",
         reasoning_parser=reasoning_parser,
         enable_per_request_metrics=enable_per_request_metrics,
-        per_request_output_token_metrics=per_request_output_token_metrics,
+        enable_per_request_output_token_metrics=(
+            enable_per_request_output_token_metrics
+        ),
     )
 
 
 def test_output_token_metrics_require_reasoning_parser():
     with pytest.raises(ValueError, match="requires --reasoning-parser"):
-        _make_serving_instance(per_request_output_token_metrics=True)
+        _make_serving_instance(enable_per_request_output_token_metrics=True)
 
 
 async def _empty_context_generator():
@@ -1482,7 +1484,7 @@ async def test_responses_per_request_metrics_follow_server_flag():
 async def test_responses_output_token_metrics_follow_parser_classification():
     serving = _make_serving_instance(
         reasoning_parser="qwen3",
-        per_request_output_token_metrics=True,
+        enable_per_request_output_token_metrics=True,
     )
     request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
     sampling_params = SamplingParams(max_tokens=16)

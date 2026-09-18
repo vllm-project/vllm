@@ -211,18 +211,15 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
         validate_parsed_serve_args(args)
 
 
-def test_per_request_metrics_requires_log_stats(serve_parser):
-    args = serve_parser.parse_args(
-        args=["--enable-per-request-metrics", "--disable-log-stats"]
-    )
-    with pytest.raises(ValueError):
-        validate_parsed_serve_args(args)
-
-
-def test_per_request_output_token_metrics_requires_log_stats(serve_parser):
-    args = serve_parser.parse_args(
-        args=["--per-request-output-token-metrics", "--disable-log-stats"]
-    )
+@pytest.mark.parametrize(
+    "metrics_flag",
+    [
+        "--enable-per-request-metrics",
+        "--enable-per-request-output-token-metrics",
+    ],
+)
+def test_per_request_metrics_require_log_stats(serve_parser, metrics_flag):
+    args = serve_parser.parse_args(args=[metrics_flag, "--disable-log-stats"])
     with pytest.raises(ValueError):
         validate_parsed_serve_args(args)
 

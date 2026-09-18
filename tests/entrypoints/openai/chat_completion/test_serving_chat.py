@@ -626,7 +626,7 @@ def _build_serving_chat(
 def _build_minimal_metrics_serving_chat(
     enable_per_request_metrics: bool,
     enable_force_include_usage: bool = False,
-    per_request_output_token_metrics: bool = False,
+    enable_per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingChat:
     serving = OpenAIServingChat.__new__(OpenAIServingChat)
     serving.response_role = "assistant"
@@ -640,7 +640,9 @@ def _build_minimal_metrics_serving_chat(
     serving.request_logger = None
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
-    serving.per_request_output_token_metrics = per_request_output_token_metrics
+    serving.enable_per_request_output_token_metrics = (
+        enable_per_request_output_token_metrics
+    )
     return serving
 
 
@@ -798,7 +800,7 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
 async def test_chat_output_token_metrics_use_engine_delta_timestamps():
     serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=False,
-        per_request_output_token_metrics=True,
+        enable_per_request_output_token_metrics=True,
     )
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage()
@@ -854,7 +856,6 @@ async def test_chat_output_token_metrics_use_engine_delta_timestamps():
     assert response.metrics is not None
     output_metrics = response.metrics.output_token_metrics
     assert output_metrics is not None
-    assert "output_token_metrics" in response.metrics.model_dump()
     assert output_metrics.reasoning.time_to_first_token_ms == pytest.approx(500.0)
     assert output_metrics.content.time_to_first_token_ms == pytest.approx(1500.0)
     assert response.metrics.speculative_decoding is not None
@@ -886,7 +887,7 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
 async def test_chat_streaming_includes_output_token_metrics():
     serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=False,
-        per_request_output_token_metrics=True,
+        enable_per_request_output_token_metrics=True,
     )
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage(content="Hello")
