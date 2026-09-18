@@ -317,6 +317,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_CUDAGRAPH_MEMORY_MARGIN: int = 0
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -2131,6 +2132,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
+    # Extra safety margin (bytes) added to the CUDA graph memory estimate during
+    # memory profiling. The estimate is measured with a minimal KV cache, while the
+    # real capture runs with the full KV pool allocated and can need more (see
+    # vllm#57475). Default 0 (no margin).
+    "VLLM_CUDAGRAPH_MEMORY_MARGIN": lambda: int(
+        os.getenv("VLLM_CUDAGRAPH_MEMORY_MARGIN", "0")
+    ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
@@ -2348,6 +2356,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        # Runtime memory-plan knob (CUDA graph safety margin, see vllm#57475);
+        # only affects KV pool sizing, never compiled artifacts.
+        "VLLM_CUDAGRAPH_MEMORY_MARGIN",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",

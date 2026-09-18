@@ -589,9 +589,22 @@ class Worker(WorkerBase):
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
+        # Safety margin (bytes) added on top of the CUDA graph estimate. The
+        # profiler measures capture memory with a minimal KV cache, while the real
+        # capture runs with the full KV pool allocated and can need more (see
+        # vllm#57475 / NVFP4-GRAFIX-PLAN.md).
+        cudagraph_margin = envs.VLLM_CUDAGRAPH_MEMORY_MARGIN
+        if cudagraph_margin:
+            logger.info(
+                "Applying VLLM_CUDAGRAPH_MEMORY_MARGIN: +%d bytes (%.3f GiB) to the "
+                "CUDA graph memory estimate.",
+                cudagraph_margin,
+                cudagraph_margin / (1 << 30),
+            )
+
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
+            cudagraph_memory_estimate + cudagraph_margin
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
             else 0
         )
