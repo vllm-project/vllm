@@ -150,7 +150,7 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
-    if hidden_states.is_cuda:
+    if hidden_states.is_cuda or hidden_states.is_xpu:
         return dflash2_grouped_conv(hidden_states, delta, base, block_size, group_size)
 
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
