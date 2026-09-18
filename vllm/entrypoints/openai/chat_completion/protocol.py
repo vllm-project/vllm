@@ -483,7 +483,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If true, this request may reuse existing prefix-cache entries but "
-            "will not add newly computed blocks to the local prefix cache."
+            "will not add newly computed blocks to the local prefix cache or "
+            "native CPU KV offload cache."
         ),
     )
 
