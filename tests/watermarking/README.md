@@ -21,8 +21,9 @@ evidence, but compatibility is the deciding criterion.
 
 If a fix prevents reliable detection of previous generations or materially
 changes their calibration, introduce it as a new version of the scheme or PRF.
-Keep the previous detector version and its goldens so those generations remain
-detectable. Continuing to generate with the previous version is not required.
+Generate and commit goldens for the new version, and keep the previous version's
+detector and goldens alongside them so both contracts remain covered and
+previous generations remain detectable.
 
 When a reviewed compatible change requires updating the existing contract,
 rebuild the snapshot from the repository root:
