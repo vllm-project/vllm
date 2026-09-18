@@ -4,14 +4,26 @@
 from collections.abc import Iterator
 from enum import Enum
 from typing import NamedTuple
+from unittest.mock import MagicMock
 
 import regex as re
 import torch
 
 from vllm import CompletionOutput
+from vllm.config import ReasoningConfig
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
+
+
+def create_mock_reasoning_config(
+    start_token_ids: list[int], end_token_ids: list[int]
+) -> ReasoningConfig:
+    return MagicMock(
+        spec=ReasoningConfig,
+        reasoning_start_token_ids=start_token_ids,
+        reasoning_end_token_ids=end_token_ids,
+    )
 
 
 class BatchLogprobsComposition(Enum):
