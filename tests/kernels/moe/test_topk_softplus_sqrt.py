@@ -636,7 +636,11 @@ def _on_gfx950() -> bool:
 )
 @pytest.mark.parametrize(
     ("topk", "renormalize", "has_bias", "indices_dtype"),
-    [(6, False, False, torch.int32), (8, True, True, torch.int64)],
+    [
+        (1, False, True, torch.int32),
+        (6, False, False, torch.int32),
+        (8, True, True, torch.int64),
+    ],
 )
 def test_rocm_fused_router_gate_matches_gate_gemm_plus_selection(
     num_tokens: int,

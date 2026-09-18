@@ -213,7 +213,10 @@ def _router_gate_reduce_topk(
     bits = ranked.to(tl.uint32, bitcast=True)
     ordered = tl.where(bits & 0x80000000 != 0, ~bits, bits ^ 0x80000000)
     keys = (ordered.to(tl.uint64) << 32) | (BLOCK_N - experts).to(tl.uint64)
-    selected_keys = tl.topk(keys, BLOCK_TOPK)
+    if BLOCK_TOPK == 1:
+        selected_keys = tl.max(keys, axis=0)[None]
+    else:
+        selected_keys = tl.topk(keys, BLOCK_TOPK)
     selected_ids = BLOCK_N - (selected_keys & 0xFFFFFFFF).to(tl.int32)
     selected_weights = tl.gather(scores, selected_ids, axis=0)
     slots = tl.arange(0, BLOCK_TOPK)
