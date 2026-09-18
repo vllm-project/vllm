@@ -36,6 +36,8 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.diffusion_scheduler import DiffusionAsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -6794,3 +6796,76 @@ def test_update_draft_token_ids_in_output_strips_padding():
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
+def _diffusion_request(req_id: str, extra_args: dict) -> Request:
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=64, req_ids=[req_id]
+    )
+    request.sampling_params.extra_args = extra_args
+    return request
+
+
+def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        diffusion_canvas_length=8,
+        scheduler_cls=DiffusionAsyncScheduler,
+        **kwargs,
+    )
+    assert isinstance(scheduler, DiffusionAsyncScheduler)
+    return scheduler
+
+
+def test_diffusion_scheduler_is_selected_with_async_scheduling():
+    def selected(**kwargs):
+        config = create_scheduler(**kwargs).vllm_config.scheduler_config
+        return config.get_scheduler_cls(), config.async_scheduling
+
+    # The platform has the last word on async scheduling (CPU turns it off).
+    cls, is_async = selected(async_scheduling=True, diffusion_canvas_length=8)
+    assert cls is (DiffusionAsyncScheduler if is_async else Scheduler)
+    cls, _ = selected(async_scheduling=False, diffusion_canvas_length=8)
+    assert cls is Scheduler
+    cls, is_async = selected(async_scheduling=True)
+    assert cls is (AsyncScheduler if is_async else Scheduler)
+
+
+def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
+    scheduler = _diffusion_scheduler()
+    one = _diffusion_request(
+        "one", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    two = _diffusion_request(
+        "two", {"diffusion_read_only": True, "diffusion_max_steps": 2}
+    )
+    # Only reads are deferred. A capped generation keeps its extra async step.
+    gen = _diffusion_request("gen", {"diffusion_max_steps": 1})
+    for request in (one, two, gen):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"one", "two", "gen"}
+    assert one.num_output_placeholders == 8
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"two", "gen"}
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+    # The deferral is renewed every call.
+    assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
+
+
+def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
+    scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
+    read = _diffusion_request(
+        "read", {"diffusion_read_only": True, "diffusion_max_steps": 1}
+    )
+    scheduler.add_request(read)
+
+    scheduler.schedule()
+    assert read.next_decode_eligible_step == 4
+    for _ in range(2):
+        assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert "read" in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7
+    # Deferring this step alone would ask for 6. The PP wait to 7 stands.
+    assert "read" not in scheduler.schedule().num_scheduled_tokens
+    assert read.next_decode_eligible_step == 7
