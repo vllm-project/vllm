@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
-from typing import Any
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -28,7 +28,114 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplingMode
+
 logger = init_logger(__name__)
+
+
+@contextmanager
+def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
+    """Restore request-seed, CPU and CUDA generators after startup checks."""
+    numpy_state = np.random.get_state()
+    cpu_state = torch.random.get_rng_state()
+    cuda_state = None
+    device_index = None
+    if device is not None and device.type == "cuda" and torch.cuda.is_available():
+        device_index = (
+            torch.accelerator.current_device_index()
+            if device.index is None
+            else device.index
+        )
+        cuda_state = torch.cuda.get_rng_state(device_index)
+    try:
+        yield
+    finally:
+        np.random.set_state(numpy_state)
+        torch.random.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state(cuda_state, device_index)
+
+
+@contextmanager
+def uno_sampler_warmup_state(
+    sampler: Any, mode: "UnoSamplingMode", num_reqs: int
+) -> Iterator[None]:
+    """Install declared request parameters and restore every modified state."""
+    assert num_reqs >= mode.min_num_reqs
+    states = sampler.sampling_states
+    state_arrays = {
+        name: getattr(states, name).np
+        for name in ("temperature", "top_k", "top_p", "min_p", "seeds")
+    }
+    state_arrays.update(
+        seeds_set=states.seeds_set,
+        num_logprobs=states.num_logprobs,
+        needs_logits_processing=sampler.needs_logits_processing,
+        use_logit_bias=sampler.logit_bias_state.use_logit_bias,
+        num_bad_words=sampler.bad_words_state.num_bad_words.np,
+    )
+    thinking_budget = sampler.thinking_budget_state
+    if thinking_budget.enabled:
+        state_arrays["use_thinking_budget"] = thinking_budget.use_thinking_budget
+    penalties = sampler.penalties_state
+    assert not penalties._new_penalties_reqs, "Uno warmup requires committed state"
+    state_arrays["use_penalty"] = penalties.use_penalty
+    for name in ("repetition_penalty", "frequency_penalty", "presence_penalty"):
+        state_arrays[name] = getattr(penalties, name).np
+    saved = {name: array[:num_reqs].copy() for name, array in state_arrays.items()}
+    penalty_buffers = (
+        (penalties.prompt_bin_mask, penalties.output_bin_counts)
+        if mode.penalties
+        else ()
+    )
+    saved_buffers = [buffer[:num_reqs].clone() for buffer in penalty_buffers]
+    try:
+        for name in ("use_logit_bias", "num_bad_words", "use_thinking_budget"):
+            if name in state_arrays:
+                state_arrays[name][:num_reqs] = 0
+        for buffer in penalty_buffers:
+            buffer[:num_reqs].zero_()
+        for req_index in range(num_reqs):
+            params = mode.sampling_params(req_index)
+            top_k = params.top_k
+            if top_k <= 0 or top_k > states.vocab_size:
+                top_k = states.vocab_size
+            states.temperature.np[req_index] = params.temperature
+            states.top_k.np[req_index] = top_k
+            states.top_p.np[req_index] = params.top_p
+            states.min_p.np[req_index] = 0.0
+            states.seeds_set[req_index] = params.seed is not None
+            if params.seed is not None:
+                states.seeds.np[req_index] = params.seed
+            states.num_logprobs[req_index] = (
+                -1 if params.logprobs is None else params.logprobs
+            )
+            penalties.use_penalty[req_index] = mode.penalties
+            for name in (
+                "repetition_penalty",
+                "frequency_penalty",
+                "presence_penalty",
+            ):
+                getattr(penalties, name).np[req_index] = getattr(params, name)
+            sampler.needs_logits_processing[req_index] = (
+                params.temperature not in (0.0, 1.0)
+                or top_k != states.vocab_size
+                or params.top_p != 1.0
+                or mode.penalties
+            )
+        states.apply_staged_writes()
+        penalties.apply_staged_writes()
+        sampler.bad_words_state.num_bad_words.copy_to_uva()
+        yield
+    finally:
+        for name, array in state_arrays.items():
+            array[:num_reqs] = saved[name]
+        for buffer, saved_buffer in zip(penalty_buffers, saved_buffers):
+            buffer[:num_reqs].copy_(saved_buffer)
+        states.apply_staged_writes()
+        penalties.apply_staged_writes()
+        sampler.bad_words_state.num_bad_words.copy_to_uva()
 
 
 def _reserved_block_count(
@@ -233,6 +340,16 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+        if isinstance(getattr(model_runner, "speculator", None), UnoSpeculator):
+            graph_manager = model_runner.cudagraph_manager
+            assert graph_manager is not None
+            if (
+                model_runner.model_config.enforce_eager
+                or not graph_manager.needs_capture()
+            ):
+                model_runner._warm_up_draft_kernels()
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
@@ -249,6 +366,11 @@ def _warmup_kernels(
         return
 
     num_spec_steps = model_runner.num_speculative_steps
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+    warm_two_request_verification = num_spec_steps > 0 and isinstance(
+        getattr(model_runner, "speculator", None), UnoSpeculator
+    )
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
@@ -259,6 +381,11 @@ def _warmup_kernels(
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
         num_decode_steps = 5 if num_spec_steps > 0 else 3
+        if (
+            warm_two_request_verification
+            and model_runner.scheduler_config.max_num_seqs > 2
+        ):
+            num_decode_steps += 1
     # Size the block allocation for the worst case: every request advancing
     # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
@@ -428,6 +555,8 @@ def _warmup_kernels(
             (all_indices, [use_spec_decode] * num_reqs),
         ]
         if num_reqs >= 2:
+            if warm_two_request_verification and num_reqs > 2:
+                decode_steps.append(([0, 1], [True, True]))
             # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
             # as a prefill and split the batch into spec/non-spec token indices.
             decode_steps.append(([0, 1], [use_spec_decode, False]))

@@ -54,6 +54,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
+from vllm.v1.core.sched.uno_tail import UnoTailPolicy
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
@@ -271,6 +272,10 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        self.use_uno = (
+            speculative_config is not None and speculative_config.method == "uno"
+        )
+        self.uno_tail = UnoTailPolicy(self.use_uno, self.max_model_len)
         self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -720,6 +725,10 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            num_new_tokens = self.uno_tail.apply(
+                request, request.num_computed_tokens, num_new_tokens
+            )
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -1056,11 +1065,14 @@ class Scheduler(SchedulerInterface):
                             + self.num_sampled_tokens_per_step
                             <= self.max_model_len
                         ):
+                            padded_num_tokens = self.uno_tail.apply(
+                                request, num_computed_tokens, padded_num_tokens
+                            )
                             if padded_num_tokens > request_token_budget:
                                 # Prefer to not schedule than schedule un-padded.
                                 break
                             num_new_tokens = padded_num_tokens
-                            pad_spec_decode = True
+                            pad_spec_decode = padded_num_tokens > 1
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -1126,6 +1138,13 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                if not load_kv_async:
+                    num_new_tokens = self.uno_tail.apply(
+                        request, num_computed_tokens, num_new_tokens
+                    )
+                    if self.uno_tail.in_tail(request):
+                        pad_spec_decode = False
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1407,6 +1426,22 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        # Snapshot before async scheduling adds this step's placeholders. A
+        # nonfinal prefill cannot contribute the current target-sample token.
+        zero_next_draft_req_ids: set[str] = set()
+        if self.use_uno:
+            for req_id in num_scheduled_tokens:
+                request = self.requests[req_id]
+                if self.uno_tail.in_tail(request):
+                    zero_next_draft_req_ids.add(req_id)
+        skip_speculator_proposal = (
+            self.use_uno
+            and bool(num_scheduled_tokens)
+            and all(
+                req_id in zero_next_draft_req_ids for req_id in num_scheduled_tokens
+            )
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1428,6 +1463,8 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_speculator_proposal=skip_speculator_proposal,
+            zero_next_draft_req_ids=zero_next_draft_req_ids,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -1577,6 +1614,8 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
+        self.uno_tail.forget(session)
+
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
@@ -2440,8 +2479,8 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-            if request.is_prefill_chunk:
-                # Ignore draft tokens for prefill chunks.
+            if request.is_prefill_chunk or self.uno_tail.in_tail(request):
+                # Ignore stale proposals for prefill chunks and persistent tails.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
                 continue
@@ -2593,6 +2632,7 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self.uno_tail.forget(request)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 

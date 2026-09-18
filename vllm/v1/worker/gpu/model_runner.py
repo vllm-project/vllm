@@ -63,6 +63,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -163,6 +164,12 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.uno import (
+    UnoSamplerWarmup,
+    UnoSpeculator,
+    enumerate_uno_served_launches,
+)
+from vllm.v1.worker.gpu.spec_decode.uno_lora import UnoLoRAState
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -288,6 +295,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self._zero_next_draft_req_ids: frozenset[str] = frozenset()
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "uno"
+        ):
+            logger.info("Uno draft tail mode: early")
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -410,6 +423,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
+                    if isinstance(self.speculator, UnoSpeculator):
+                        self._install_uno_lora(self.speculator)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
@@ -526,6 +541,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def _install_uno_lora(self, speculator: UnoSpeculator) -> None:
+        self._ensure_lora_enabled()
+        self.uno_lora_state = UnoLoRAState(self.lora_manager, speculator.lora_request)
+        self.uno_lora_state.ensure_adapter()
+        active_shape = (0, 0)
+
+        def set_draft_mapping(shape: tuple[int, int] | None) -> None:
+            nonlocal active_shape
+            if shape is None:
+                num_reqs, num_model_tokens = active_shape
+                self.uno_lora_state.install_base(
+                    num_model_tokens, num_reqs * speculator.k
+                )
+                return
+            active_shape = shape
+            num_reqs, num_model_tokens = shape
+            self.uno_lora_state.install_draft(num_model_tokens, num_reqs, speculator.k)
+
+        speculator.set_lora_hook(set_draft_mapping)
 
     def get_draft_model(self) -> nn.Module | None:
         speculator = self.speculator
@@ -906,19 +941,118 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
+    @staticmethod
+    def _sampler_row_counts(num_reqs: int, num_rows: int) -> np.ndarray:
+        """Distribute a real sampler row count across active request slots."""
+        assert 0 < num_reqs <= num_rows
+        row_counts = np.full(num_reqs, num_rows // num_reqs, dtype=np.int32)
+        num_extra = num_rows % num_reqs
+        if num_extra:
+            row_counts[-num_extra:] += 1
+        return row_counts
+
     @torch.inference_mode()
-    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
-        num_reqs = hidden_states.shape[0]
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        num_reqs: int | None = None,
+        native_verification: bool = False,
+    ) -> None:
+        """Run the production sampler over a dummy row layout.
+
+        The ordinary profile path has one sampler row per request. Serving can
+        also produce verification and chunked/mixed layouts whose row count is
+        not divisible by the request count, so this builds the same uneven
+        expanded-index layout the real sampler consumes.
+        """
+        num_rows = hidden_states.shape[0]
+        if num_reqs is None:
+            num_reqs = num_rows
+        assert 0 < num_reqs <= num_rows
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
-            num_reqs, num_reqs, self.input_buffers
+            num_reqs, num_rows, self.input_buffers
         )
+
+        if num_rows != num_reqs:
+            row_counts = self._sampler_row_counts(num_reqs, num_rows)
+            row_count_tensor = torch.from_numpy(row_counts).to(self.device)
+            row_ids = torch.arange(num_reqs, dtype=torch.int64, device=self.device)
+            dummy_input_batch.expanded_idx_mapping = torch.repeat_interleave(
+                row_ids, row_count_tensor
+            )
+            dummy_input_batch.cu_num_logits = torch.cat(
+                (
+                    torch.zeros(1, dtype=torch.int32, device=self.device),
+                    torch.cumsum(row_count_tensor, dim=0, dtype=torch.int32),
+                )
+            )
+            dummy_input_batch.cu_num_logits_np = np.concatenate(
+                (np.zeros(1, dtype=np.int32), np.cumsum(row_counts, dtype=np.int32))
+            )
+            starts = torch.repeat_interleave(
+                dummy_input_batch.cu_num_logits[:-1], row_count_tensor
+            )
+            dummy_input_batch.expanded_local_pos = (
+                torch.arange(num_rows, dtype=torch.int32, device=self.device) - starts
+            )
+            dummy_input_batch.logits_indices = torch.arange(
+                num_rows, dtype=torch.int64, device=self.device
+            )
+            if native_verification:
+                dummy_input_batch.num_draft_tokens = num_rows - num_reqs
+                dummy_input_batch.num_draft_tokens_per_req = row_counts - 1
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         assert self.sampler is not None
-        self.sampler(logits, dummy_input_batch)
+        if native_verification:
+            assert self.rejection_sampler is not None
+            assert num_rows > num_reqs
+            assert isinstance(self.speculator, UnoSpeculator)
+            assert self.speculator.draft_logits is not None
+            self.rejection_sampler(
+                logits, dummy_input_batch, self.speculator.draft_logits
+            )
+        else:
+            self.sampler(logits, dummy_input_batch)
+
+    @torch.inference_mode()
+    def _warm_up_uno_sampler(
+        self,
+        sample_hidden_states: torch.Tensor,
+        *,
+        warmup: UnoSamplerWarmup,
+    ) -> str:
+        """Warm one real Uno sampler branch through the production ``Sampler``.
+
+        The plan comes from ``enumerate_uno_served_launches`` rather than a
+        hand-maintained ``num_reqs * K`` table. Temporarily install each flag
+        combination and restore all persistent request state before serving
+        starts. The sampler's own FlashInfer decision remains intact: startup
+        must exercise the same branch the served request will take.
+        """
+        assert self.sampler is not None
+        num_reqs = warmup.num_reqs
+        num_rows = warmup.num_rows
+        assert sample_hidden_states.shape[0] == num_reqs
+
+        from vllm.v1.worker.gpu.warmup import uno_sampler_warmup_state
+
+        with uno_sampler_warmup_state(self.sampler, warmup.mode, num_reqs):
+            row_count_tensor = torch.from_numpy(
+                self._sampler_row_counts(num_reqs, num_rows)
+            ).to(self.device)
+            native_verification = warmup.sampler_branch == "native_verification"
+            kwargs = {"native_verification": True} if native_verification else {}
+            self._dummy_sampler_run(
+                sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
+                num_reqs=num_reqs,
+                **kwargs,
+            )
+        return warmup.sampler_branch
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -974,6 +1108,151 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
+
+    def _warm_up_draft_kernels(self) -> None:
+        """Compile the speculator's own kernel shapes before serving starts.
+
+        Graph capture does not exercise a drafter's input preparation, so a
+        drafter whose kernels specialise per request count meets each of those
+        shapes for the first time on a real request and compiles it there. The
+        dummy runs below are the same mechanism adaptive verification already
+        uses for its piecewise shapes. Uno's production launch enumerator
+        supplies every bounded prepare and sampler call; other drafters remain
+        untouched.
+        """
+        if not isinstance(self.speculator, UnoSpeculator):
+            return
+        plan = enumerate_uno_served_launches(
+            max_num_reqs=self.max_num_reqs,
+            k=self.speculator.k,
+            max_num_tokens=self.max_num_tokens,
+            max_model_len=self.max_model_len,
+            num_sm=num_compute_units(self.device.index),
+            use_flashinfer=bool(
+                self.sampler is not None and self.sampler.use_flashinfer
+            ),
+            logprobs_mode=self.model_config.logprobs_mode,
+            max_num_logprobs=(
+                self.vocab_size
+                if self.model_config.max_logprobs < 0
+                else min(self.model_config.max_logprobs, self.vocab_size)
+            ),
+        )
+        if not plan.prepare_request_counts:
+            return
+        warmups_by_request_count: dict[int, list[UnoSamplerWarmup]] = {}
+        for warmup in plan.sampler_warmups:
+            warmups_by_request_count.setdefault(warmup.num_reqs, []).append(warmup)
+        # This runs before the worker's ordinary seed reset, but sampler
+        # implementations are allowed to use a global generator. Preserve it
+        # anyway so warmup never becomes observable if that implementation
+        # changes. Import locally to avoid the warmup -> model_runner import
+        # cycle at module initialization.
+        from vllm.v1.worker.gpu.warmup import preserve_rng_state
+
+        executed_prepare_shapes = 0
+        executed_sampler_calls = 0
+        executed_sampler_keys: set[tuple[object, ...]] = set()
+        executed_sampler_branches: dict[str, str] = {}
+        executed_sampler_kernels: dict[str, set[str]] = {}
+        try:
+            with preserve_rng_state(self.device):
+                for num_tokens in plan.prepare_request_counts:
+                    _, sample_hidden_states = self._dummy_run(num_tokens)
+                    executed_prepare_shapes += 1
+                    if sample_hidden_states is not None:
+                        for warmup in warmups_by_request_count.get(num_tokens, []):
+                            branch = self._warm_up_uno_sampler(
+                                sample_hidden_states, warmup=warmup
+                            )
+                            executed_sampler_calls += 1
+                            executed_sampler_keys.update(warmup.kernel_keys)
+                            mode_name = warmup.mode.name
+                            if branch == "native_verification":
+                                mode_name = f"verification/{mode_name}"
+                            executed_sampler_branches[mode_name] = branch
+                            kernels = executed_sampler_kernels.setdefault(
+                                mode_name, set()
+                            )
+                            if branch == "flashinfer":
+                                kernels.add("flashinfer_sample")
+                            else:
+                                kernels.update(
+                                    str(key[0]) for key in warmup.kernel_keys
+                                )
+        finally:
+            # Dummy proposals increment Uno's noise step. Startup must not
+            # make the first served proposal begin at a later step.
+            self.speculator._step = 0
+        self.speculator.report_draft_warmup(
+            executed_prepare_shapes,
+            executed_sampler_calls,
+            len(executed_sampler_keys),
+            executed_sampler_branches,
+            {
+                mode: tuple(sorted(kernels))
+                for mode, kernels in executed_sampler_kernels.items()
+            },
+        )
+
+    @torch.inference_mode()
+    def _run_speculator_proposal(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        dp_sync: DPSyncState | None,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+    ) -> None:
+        """Run one proposal and retain its device-resident draft tokens."""
+        assert self.speculator is not None
+        assert self.sampler is not None
+        if isinstance(self.sampler, GPUWatermarkSampler):
+            self.speculator.prepare_watermarking(
+                self.sampler._get_contexts(input_batch.idx_mapping),
+                self.sampler.watermarking.gpu[input_batch.idx_mapping],
+            )
+        with use_workspace_lane(self._draft_workspace_lane):
+            draft_tokens = self.speculator.propose(
+                input_batch,
+                attn_metadata,
+                slot_mappings_by_layer,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                self.req_states.last_sampled_tokens,
+                self.req_states.next_prefill_tokens,
+                self.sampler.sampling_states.temperature.gpu,
+                self.sampler.sampling_states.seeds.gpu,
+                dp_sync=dp_sync,
+                mm_inputs=mm_inputs,
+            )
+        self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+        if self.adaptive_verification is not None:
+            self.adaptive_verification.record_confidences(
+                self.speculator.draft_token_confidence_probs, input_batch
+            )
+
+    def _publish_draft_tokens(
+        self,
+        input_batch: InputBatch,
+        zero_next_draft_req_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        """Make device draft tokens visible to the scheduler and PP peers."""
+        if self.num_speculative_steps <= 0:
+            return
+        self._zero_next_draft_req_ids = zero_next_draft_req_ids
+        self.draft_tokens_handler.set_draft_tokens(
+            input_batch,
+            self.req_states.draft_tokens[input_batch.idx_mapping],
+        )
+        if self.pp_handler is not None:
+            self.pp_handler.broadcast_drafts(self.req_states.draft_tokens, input_batch)
 
     def needs_cudagraph_capture(self) -> bool:
         """Whether capture_model() has any CUDA graphs left to capture."""
@@ -1034,6 +1313,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
+                            self._warm_up_draft_kernels()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
@@ -1724,7 +2004,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.num_computed_tokens.gpu,
             )
 
-            if self.lora_config:
+            if isinstance(self.speculator, UnoSpeculator):
+                self.uno_lora_state.install_base(
+                    input_batch.num_tokens_after_padding,
+                    input_batch.logits_indices.numel(),
+                )
+            elif self.lora_config:
                 # Activate LoRA adapters.
                 lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,
@@ -1982,6 +2267,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
+            skip_speculator_proposal=scheduler_output.skip_speculator_proposal,
+            zero_next_draft_req_ids=frozenset(scheduler_output.zero_next_draft_req_ids),
         )
 
         if not self.is_last_pp_rank:
@@ -2012,6 +2299,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        skip_speculator_proposal = self.execute_model_state.skip_speculator_proposal
+        zero_next_draft_req_ids = self.execute_model_state.zero_next_draft_req_ids
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2039,6 +2328,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert draft_hidden_states is not None
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
+        )
+        is_uno = isinstance(self.speculator, UnoSpeculator)
+        if not is_uno:
+            zero_next_draft_req_ids = frozenset()
+        skip_speculator_proposal = (
+            is_uno
+            and skip_speculator_proposal
+            and bool(input_batch.req_ids)
+            and all(req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids)
         )
         if self.pcp_manager is not None and aux_hidden_states is not None:
             aux_hidden_states = [
@@ -2079,7 +2377,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
         )
-        # Start async output copy here so that it can overlap with speculator proposal.
+        # Start the async output copy before postprocessing. The proposal is
+        # queued below, after this copy-stream handoff, so it can overlap the
+        # token copy without retaining a prior turn's tensors.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -2121,7 +2421,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None:
+        if self.speculator is not None and not skip_speculator_proposal:
             assert self.sampler is not None
             if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.observe_verification(
@@ -2135,44 +2435,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
-            if isinstance(self.sampler, GPUWatermarkSampler):
-                self.speculator.prepare_watermarking(
-                    self.sampler._get_contexts(input_batch.idx_mapping),
-                    self.sampler.watermarking.gpu[input_batch.idx_mapping],
-                )
-            with use_workspace_lane(self._draft_workspace_lane):
-                draft_tokens = self.speculator.propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.next_prefill_tokens,
-                    self.sampler.sampling_states.temperature.gpu,
-                    self.sampler.sampling_states.seeds.gpu,
-                    dp_sync=dp_sync,
-                    mm_inputs=mm_inputs,
-                )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
-
-        if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.set_draft_tokens(
+            # AsyncOutput has already recorded its D2H copy event on the
+            # output stream. Queue Uno's K-row proposal only after that
+            # handoff; the main-stream work cannot delay the already-recorded
+            # token copy, and no proposal inputs must survive into another
+            # worker turn.
+            self._run_speculator_proposal(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                attn_metadata,
+                slot_mappings_by_layer,
+                spec_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                dp_sync,
+                mm_inputs,
             )
-            if self.pp_handler is not None:
-                self.pp_handler.broadcast_drafts(
-                    self.req_states.draft_tokens, input_batch
-                )
+
+        # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+        # not have a speculator (i.e. self.speculator is None).
+        self._publish_draft_tokens(input_batch, zero_next_draft_req_ids)
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -2182,7 +2464,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.draft_tokens_handler.get_draft_tokens()
+        drafts = self.draft_tokens_handler.get_draft_tokens()
+        if drafts is not None and self._zero_next_draft_req_ids:
+            drafts.draft_token_ids = [
+                [] if req_id in self._zero_next_draft_req_ids else tokens
+                for req_id, tokens in zip(drafts.req_ids, drafts.draft_token_ids)
+            ]
+        return drafts
 
     @torch.inference_mode()
     @step_eplb_after()
@@ -2314,6 +2602,8 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
+    skip_speculator_proposal: bool = False
+    zero_next_draft_req_ids: frozenset[str] = frozenset()
 
 
 class BatchReqState(NamedTuple):
