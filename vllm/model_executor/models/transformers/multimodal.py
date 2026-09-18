@@ -239,6 +239,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
         The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either
         exact or an area budget, which `divisors` splits over its items.
+        `shortest_edge` bounds only the small side, so it says nothing about
+        the largest output and is no candidate at all.
         """
         size = getattr(sub_processor, "size", None) or {}
         height = size.get("height", size.get("max_height"))
@@ -250,8 +252,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             return [
                 ImageSize(width=side, height=side) for side in sorted(sides) if side
             ]
-        if shortest_edge := size.get("shortest_edge"):
-            return [ImageSize(width=shortest_edge, height=shortest_edge)]
         return []
 
     def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
