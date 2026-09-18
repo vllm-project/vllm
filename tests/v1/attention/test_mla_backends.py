@@ -37,7 +37,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
@@ -1138,7 +1138,10 @@ def test_flashattn_mla_xpu_gating_matches_slm_limits(monkeypatch):
     assert backend.supports_compute_capability(DeviceCapability(1, 0))
 
 
-def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(monkeypatch):
+@pytest.mark.parametrize("q_is_tuple", [True, False])
+def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(
+    monkeypatch, q_is_tuple
+):
     """XPU decode sends one 576-wide query per request against a 512-wide value."""
     flashattn_mla_module = _import_flashattn_mla()
     monkeypatch.setattr(flashattn_mla_module, "current_platform", _ForceXPUPlatform())
@@ -1162,16 +1165,25 @@ def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(monkeypatch):
         num_decodes=2,
         query_start_loc=query_start_loc,
         decode=SimpleNamespace(
-            max_seq_len=17, seq_lens=seq_lens, block_table=block_table
+            max_seq_len=17,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            query_start_loc=query_start_loc[:3],
         ),
     )
-    impl = SimpleNamespace(
-        kv_cache_dtype="auto", kv_lora_rank=512, qk_rope_head_dim=64, scale=0.125
+    impl = flashattn_mla_module.FlashAttnMLAImpl.__new__(
+        flashattn_mla_module.FlashAttnMLAImpl
     )
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = 0.125
 
-    out, lse = flashattn_mla_module.FlashAttnMLAImpl.forward_mqa(
-        impl,
-        (torch.randn(2, 4, 512), torch.randn(2, 4, 64)),
+    q_nope, q_pe = torch.randn(2, 4, 512), torch.randn(2, 4, 64)
+    q = (q_nope, q_pe) if q_is_tuple else torch.cat([q_nope, q_pe], dim=-1)
+
+    out, lse = impl.forward_mqa(
+        q,
         torch.randn(3, 64, 576),
         attn_metadata,
         SimpleNamespace(),
@@ -1181,12 +1193,25 @@ def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(monkeypatch):
     # The XPU kernel cannot emit LSE, so DCP combination must be skipped.
     assert lse is None
     assert captured["q"].shape == (2, 4, 576)
+    torch.testing.assert_close(captured["q"], torch.cat([q_nope, q_pe], dim=-1))
+    if not q_is_tuple:
+        assert captured["q"] is q
     assert captured["k"].shape == (3, 64, 1, 576)
     assert captured["v"].shape == (3, 64, 1, 512)
     # Only the decode prefix of a mixed batch may reach the MQA kernel.
     torch.testing.assert_close(captured["cu_seqlens_q"], query_start_loc[:3])
     assert captured["max_seqlen_q"] == 1
     assert captured["causal"] is False
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU-only builder config")
+def test_flashattn_mla_xpu_builder_is_single_token_decode_only():
+    """``_forward_mqa_xpu`` hardcodes ``max_seqlen_q=1``; the builder must agree."""
+    builder = _import_flashattn_mla().FlashAttnMLAMetadataBuilder
+
+    assert builder.query_len_support == QueryLenSupport.SINGLE_ONLY
+    assert builder.reorder_batch_threshold == 1
+    assert builder._cudagraph_support == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
 
 def test_xpu_platform_routes_mla_to_flash_attn_mla():
@@ -1235,6 +1260,22 @@ def test_xpu_platform_routes_mla_to_flash_attn_mla():
         )
         == AttentionBackendEnum.TRITON_MLA.get_path()
     )
+
+    assert (
+        XPUPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.FLASH_ATTN_MLA,
+            attn_selector_config=selector_config,
+            num_heads=16,
+        )
+        == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
+    )
+
+    with pytest.raises(ValueError, match="Invalid attention backend"):
+        XPUPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.FLASH_ATTN,
+            attn_selector_config=selector_config,
+            num_heads=16,
+        )
 
 
 def test_xpu_varlen_attn_allocates_output_with_value_head_size(monkeypatch):

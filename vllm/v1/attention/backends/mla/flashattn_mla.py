@@ -116,7 +116,11 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        if current_platform.is_xpu()
+        else AttentionCGSupport.UNIFORM_BATCH
+    )
     query_len_support: ClassVar[QueryLenSupport] = (
         QueryLenSupport.SINGLE_ONLY
         if current_platform.is_xpu()
@@ -324,6 +328,31 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
 
+    def _forward_mqa_xpu(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        decode: FlashAttnMLADecodeMetadata,
+    ) -> tuple[torch.Tensor, None]:
+        kv_cache = kv_c_and_k_pe_cache.unsqueeze(-2)
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
+
+        out = flash_attn_varlen_func(
+            q=q.contiguous(),
+            k=kv_cache,
+            v=kv_cache[..., : self.kv_lora_rank],
+            max_seqlen_q=1,
+            cu_seqlens_q=decode.query_start_loc,
+            max_seqlen_k=decode.max_seq_len,
+            seqused_k=decode.seq_lens,
+            block_table=decode.block_table,
+            softmax_scale=self.scale,
+            causal=False,
+            return_softmax_lse=False,
+        )
+        return out, None
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -334,47 +363,18 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
+
+        if current_platform.is_xpu():
+            return self._forward_mqa_xpu(q, kv_c_and_k_pe_cache, attn_metadata.decode)
+
         if type(q) is tuple:
             q_nope, q_pe = q
         else:
             q_nope, q_pe = torch.split(
                 q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
-
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
-
-        if current_platform.is_xpu():
-            num_decodes = attn_metadata.num_decodes
-            decode_cu_seqlens_q = attn_metadata.query_start_loc[: num_decodes + 1]
-
-            cache = kv_c_and_k_pe_cache
-            if cache.dim() == 3:
-                cache = cache.unsqueeze(-2)  # add num_heads_kv=1 dim
-            assert cache.dim() == 4 and cache.size(-2) == 1, (
-                "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
-                "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
-            )
-
-            q = torch.cat([q_nope, q_pe], dim=-1)
-            if not q.is_contiguous():
-                q = q.contiguous()
-
-            out = flash_attn_varlen_func(
-                q,
-                cache,
-                cache.narrow(-1, 0, self.kv_lora_rank),
-                max_seqlen_q=1,
-                cu_seqlens_q=decode_cu_seqlens_q,
-                max_seqlen_k=attn_metadata.decode.max_seq_len,
-                seqused_k=attn_metadata.decode.seq_lens,
-                block_table=attn_metadata.decode.block_table,
-                softmax_scale=self.scale,
-                causal=False,
-                fa_version=2,
-                return_softmax_lse=False,
-            )
-            return out, None
 
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
