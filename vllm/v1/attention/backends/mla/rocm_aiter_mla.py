@@ -231,6 +231,97 @@ def _native_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
     return {"g_kv_indptr", "cp_world_size", "cp_rank", "causal"} <= set(params)
 
 
+def _merge_two_partials(
+    out_a: torch.Tensor,
+    lse_a: torch.Tensor,
+    out_b: torch.Tensor,
+    lse_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Softmax-merge two disjoint attention partials of the same rows.
+
+    Written out rather than routed through ``merge_attn_states`` because that
+    op takes its LSE head-major, while every AITER MLA entry here returns it
+    token-major alongside a ``[tokens, heads, dim]`` output. Both LSEs must be
+    natural-log, which ``lse_base_on_e`` asserts for this backend.
+    """
+    max_lse = torch.maximum(lse_a, lse_b)
+    both_empty = torch.isneginf(max_lse)
+    max_lse = torch.where(both_empty, torch.zeros_like(max_lse), max_lse)
+    w_a = torch.exp(lse_a - max_lse)
+    w_b = torch.exp(lse_b - max_lse)
+    denom = w_a + w_b
+    safe_denom = torch.where(both_empty, torch.ones_like(denom), denom)
+    out = (
+        out_a.float() * (w_a / safe_denom).unsqueeze(-1)
+        + out_b.float() * (w_b / safe_denom).unsqueeze(-1)
+    ).to(out_a.dtype)
+    lse = torch.where(
+        both_empty,
+        max_lse.new_full((), float("-inf")),
+        torch.log(safe_denom) + max_lse,
+    )
+    return out, lse
+
+
+_AB_VERIFY_MODES: Final = ("off", "mask0", "gluon")
+
+
+@functools.lru_cache(maxsize=1)
+def _ab_dcp_verify_mode() -> str:
+    """Which kernel serves stage A of the two-stage DCP verify.
+
+    The verify block's causal structure only interacts with the shard layout
+    inside the draft window, so splitting there leaves stage A with one KV
+    length per request and no mask at all. ``mask0`` keeps the verify block
+    whole and reads that prefix once per request; ``gluon`` flattens it to one
+    row per query token, which is the shape SGLang ships, and re-reads the
+    prefix ``qlen`` times. Both are offered so the pair can be measured.
+    """
+    mode = os.environ.get("VLLM_ROCM_AITER_DCP_AB_VERIFY", "off").lower()
+    if mode not in _AB_VERIFY_MODES:
+        logger.warning(
+            "Ignoring VLLM_ROCM_AITER_DCP_AB_VERIFY=%s, expected one of %s.",
+            mode,
+            ", ".join(_AB_VERIFY_MODES),
+        )
+        return "off"
+    return mode
+
+
+@functools.lru_cache(maxsize=1)
+def _gluon_mla_decode_lse_supported() -> bool:
+    """Whether the Gluon MLA entry can return the LSE stage B merging needs."""
+    try:
+        return "return_lse" in inspect.signature(_get_mla_gluon()).parameters
+    except (ImportError, ModuleNotFoundError, ValueError, TypeError):
+        return False
+
+
+def _ab_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
+    """Whether this configuration can serve DCP verify in two stages.
+
+    Stage A trusts that its shard's first ``local_prefix_len`` slots are
+    exactly the prefix positions this rank owns, which holds only for plain
+    round-robin. Stage B is a dense window that always runs on Gluon's MTP
+    entry and has to hand back an LSE for the local merge.
+    """
+    if _ab_dcp_verify_mode() == "off":
+        return False
+    if dcp_world_size <= 1 or cp_interleave != 1:
+        return False
+    if _ab_dcp_verify_mode() == "gluon":
+        # Stage A on Gluon needs the flattened one-row-per-query-token view,
+        # which is not wired up yet. Refuse rather than quietly serving the
+        # mask0 shape, so an A/B measurement cannot compare a mode against
+        # itself.
+        logger.warning(
+            "VLLM_ROCM_AITER_DCP_AB_VERIFY=gluon is not implemented yet; "
+            "falling back to the single-range DCP verify paths."
+        )
+        return False
+    return _gluon_mla_decode_supported() and _gluon_mla_decode_lse_supported()
+
+
 def _aiter_mla_small_head_mode() -> str:
     """Small-head (<16) MLA decode kernel selection.
 
@@ -386,6 +477,29 @@ class AiterMLADCPVerifyMetadata:
 
 
 @dataclass
+class AiterMLAABVerifyMetadata:
+    """Plan for a DCP verify served as a prefix stage plus a window stage.
+
+    Its presence on the decode metadata *is* the routing decision, the same
+    contract ``AiterMLADCPVerifyMetadata`` follows. The prefix stage reuses the
+    ordinary decode metadata on this object's sibling fields, which the builder
+    has already sized from ``prefix_lens`` rather than the full sequence, so
+    only the window stage needs anything extra here.
+    """
+
+    # Verify block width, i.e. 1 + num_speculative_tokens.
+    qlen: int
+    # Which kernel serves stage A; see _ab_dcp_verify_mode.
+    stage_a_mode: str
+    # This rank's committed-prefix length per request, shape [num_reqs]. Every
+    # verify row of a request shares it, which is the whole point of the split.
+    prefix_lens: torch.Tensor
+    # Rows stage A hands the kernel. Equal to num_reqs when the verify block
+    # stays whole, and num_reqs * qlen once it is flattened.
+    num_stage_a_rows: int
+
+
+@dataclass
 class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The indptr of the paged kv cache, shape: [batch_size + 1]
     paged_kv_indptr: torch.Tensor | None = None
@@ -406,6 +520,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     min_kv_seq_len: int = 1
     # Set exactly when this batch routes to segmented DCP verification.
     dcp_verify: AiterMLADCPVerifyMetadata | None = None
+    # Set exactly when this batch routes to two-stage DCP verification.
+    ab_verify: AiterMLAABVerifyMetadata | None = None
     # Small-head decode uses Gluon (avoids padding to 16).
     use_gluon_decode: bool = False
     # Small-head non-DCP multi-token verify uses Gluon's native MTP entry.
@@ -511,6 +627,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        supports_ab_dcp_verify = _ab_dcp_verify_supported(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+        )
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -518,11 +638,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device,
             AiterMLAMetadata,
             supports_dcp_with_varlen=(
-                supports_segmented_dcp_verify or supports_native_dcp_verify
+                supports_segmented_dcp_verify
+                or supports_native_dcp_verify
+                or supports_ab_dcp_verify
             ),
         )
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
         self._supports_native_dcp_verify = supports_native_dcp_verify
+        self._supports_ab_dcp_verify = supports_ab_dcp_verify
+        self._ab_dcp_verify_mode = _ab_dcp_verify_mode()
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -679,6 +803,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._dcp_verify_buffers: AiterMLADCPVerifyMetadata | None = None
         self._graph_seq_lens: torch.Tensor | None = None
         self._graph_dcp_global_kv_indptr: torch.Tensor | None = None
+        self._graph_ab_combine_seq_lens: torch.Tensor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
@@ -696,6 +821,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if self._supports_native_dcp_verify:
                 self._graph_dcp_global_kv_indptr = torch.zeros(
                     max_num_reqs + 1, dtype=torch.int32, device=device
+                )
+
+            if self._supports_ab_dcp_verify:
+                # Stage A is sized from the prefix, but the cross-rank combine
+                # has to be told that rank 0's partial also covers the window,
+                # or it treats an empty prefix shard as an empty partial and
+                # drops stage B. Separate buffer so widening the reported
+                # length cannot perturb the indptr stage A was built from.
+                self._graph_ab_combine_seq_lens = torch.zeros(
+                    max_num_reqs, dtype=torch.int32, device=device
                 )
 
             if self._supports_segmented_dcp_verify and self._mtp_decode_qlen > 1:
@@ -1068,7 +1203,36 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_qo_len = padded_mtp_qo_len
         pad_uniform_mtp = padded_mtp_qo_len > 0
 
+        # Two-stage verify decides before anything is sized, because stage A
+        # stops at the window boundary and therefore runs the whole ordinary
+        # decode build against the committed prefix instead of the full
+        # sequence. Once split, stage A has one length per request and no mask,
+        # so it is a non-causal decode no matter what the batch asked for.
+        use_ab_verify = (
+            self._supports_ab_dcp_verify
+            and max_qo_len > 1
+            and causal
+            and dcp_tot_seq_lens_device is not None
+        )
+        stage_a_causal = causal and not use_ab_verify
+
         seq_lens_for_kernel = seq_lens_device
+        if use_ab_verify:
+            assert dcp_tot_seq_lens_device is not None
+            # The window is the last qlen global positions, so the prefix is
+            # what every verify row of the request sees in full. Truncating in
+            # global coordinates before the shard mapping is what makes the
+            # per-rank length uniform across the block.
+            prefix_global_lens = (dcp_tot_seq_lens_device - int(max_qo_len)).clamp_(
+                min=0
+            )
+            seq_lens_for_kernel = get_dcp_local_seq_lens(
+                prefix_global_lens,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            ).to(torch.int32)
+
         num_kernel_reqs = num_reqs
         if pad_uniform_mtp:
             qo_lens_device = (
@@ -1103,22 +1267,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             int(max_qo_len),
             self._kv_cache_dtype_str,
         )
-        use_gluon_verify = AiterMLAHelper.use_gluon_verify(
-            self._decode_num_heads,
-            int(max_qo_len),
-            self._kv_cache_dtype_str,
-            self.dcp_world_size,
-            causal,
+        use_gluon_verify = (
+            AiterMLAHelper.use_gluon_verify(
+                self._decode_num_heads,
+                int(max_qo_len),
+                self._kv_cache_dtype_str,
+                self.dcp_world_size,
+                causal,
+            )
+            and not use_ab_verify
         )
         use_native_dcp_verify = (
             self._supports_native_dcp_verify
             and max_qo_len > 1
-            and causal
+            and stage_a_causal
             and max_qo_len <= self._persistent_metadata_max_qo_len
         )
         use_segmented_dcp_verify = (
             self._supports_segmented_dcp_verify
             and max_qo_len > 1
+            and not use_ab_verify
             and not use_native_dcp_verify
         )
 
@@ -1265,7 +1433,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
-                causal and not use_native_dcp_verify,
+                stage_a_causal and not use_native_dcp_verify,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
                 self._mla_work_indptr,
@@ -1310,9 +1478,31 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dcp_tot_seq_lens_device,
             )
 
+        ab_verify = None
+        seq_lens_for_combine = seq_lens_for_kernel
+        if use_ab_verify:
+            ab_verify = AiterMLAABVerifyMetadata(
+                qlen=int(max_qo_len),
+                stage_a_mode=self._ab_dcp_verify_mode,
+                prefix_lens=seq_lens_for_kernel,
+                num_stage_a_rows=num_kernel_reqs,
+            )
+            # Only rank 0 attends the window, so only its partial grows.
+            if self.dcp_rank == 0:
+                widened = seq_lens_for_kernel + int(max_qo_len)
+                if self._graph_ab_combine_seq_lens is not None:
+                    self._graph_ab_combine_seq_lens[:num_kernel_reqs].copy_(
+                        widened, non_blocking=True
+                    )
+                    seq_lens_for_combine = self._graph_ab_combine_seq_lens[
+                        :num_kernel_reqs
+                    ]
+                else:
+                    seq_lens_for_combine = widened
+
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens_for_kernel,
+            seq_lens=seq_lens_for_combine,
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
@@ -1322,6 +1512,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_qo_len=max_qo_len,
             min_kv_seq_len=min_kv_seq_len,
             dcp_verify=dcp_verify,
+            ab_verify=ab_verify,
             use_gluon_decode=use_gluon_decode,
             use_gluon_verify=use_gluon_verify,
             attn_out_dtype=self.decode_attn_out_dtype,
@@ -1661,6 +1852,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Return the query-head count after DCP gathering."""
         return self.num_heads * self.dcp_world_size
 
+    @property
+    def wants_verify_window(self) -> bool:
+        """Whether the layer should hand down the dense draft-window latent.
+
+        Two-stage verify attends the window directly, because the cache is
+        owner-filtered under DCP and holds only a shard of it. Gated so the
+        single-range paths do not pay for a concatenation nobody reads.
+        """
+        return self.dcp_world_size > 1 and _ab_dcp_verify_mode() != "off"
+
     def __init__(
         self,
         num_heads: int,
@@ -1985,12 +2186,63 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             out_dtype,
         )
 
+    def _forward_ab_verify_window(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        verify_window: torch.Tensor,
+        ab: AiterMLAABVerifyMetadata,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stage B: attend the draft window, which every rank holds in full.
+
+        The window latent is request-major and contiguous -- row ``t`` of
+        request ``b`` sits at ``b * qlen + t`` -- so it is its own page table.
+        Handing Gluon's MTP entry a sequence exactly ``qlen`` long makes its
+        in-kernel bound ``seq_len - qlen + q_pos + 1`` collapse to ``q_pos + 1``,
+        which is the dense causal window this stage owes, with no shard mapping
+        anywhere in it.
+        """
+        qlen = ab.qlen
+        num_rows = q_nope.shape[0]
+        num_reqs = num_rows // qlen
+        if num_reqs * qlen != num_rows:
+            raise ValueError(
+                f"verify block {num_rows} rows is not a multiple of qlen {qlen}"
+            )
+        device = q_nope.device
+        o = torch.empty(
+            num_rows,
+            q_nope.shape[1],
+            self.kv_lora_rank,
+            dtype=out_dtype,
+            device=device,
+        )
+        _, lse = _get_mla_gluon()(
+            q_nope=q_nope.unflatten(0, (num_reqs, qlen)),
+            q_pe=q_pe.unflatten(0, (num_reqs, qlen)),
+            kv_c=verify_window,
+            o=o.unflatten(0, (num_reqs, qlen)),
+            page_table=torch.arange(num_rows, dtype=torch.int32, device=device),
+            seq_info=torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+            * qlen,
+            sm_scale=self.scale,
+            k_pe=None,
+            kv_pe_offset=self.kv_lora_rank,
+            use_2d_view=False,
+            kv_scale=1.0,
+            min_kv_seq_len=qlen,
+            return_lse=True,
+        )
+        return o, lse.view(num_rows, q_nope.shape[1])
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         layer: AttentionLayer,
+        verify_window: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -2117,14 +2369,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.attn_out_dtype,
             )
 
+        ab = decode.ab_verify
         if (
             attn_metadata.causal
             and self.dcp_world_size > 1
             and int(decode.max_qo_len) > 1
+            and ab is None
             and getattr(decode, "dcp_global_kv_indptr", None) is None
         ):
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires segmented MLA."
+            )
+        if ab is not None and verify_window is None:
+            raise RuntimeError(
+                "Two-stage DCP verify needs the draft window latent; the MLA "
+                "layer did not hand one down."
             )
 
         if type(q) is tuple:
@@ -2189,7 +2448,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.max_qo_len,
                 sm_scale=self.scale,
                 return_lse=self.dcp_world_size > 1,
-                causal=attn_metadata.causal,
+                # Stage A stops at the window boundary, so every row of a
+                # request sees its whole prefix shard and there is no mask.
+                causal=attn_metadata.causal and ab is None,
                 g_kv_indptr=dcp_global_kv_indptr,
                 cp_world_size=(
                     self.dcp_world_size if dcp_global_kv_indptr is not None else 1
@@ -2220,4 +2481,31 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
         if lse is not None:
             lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
+
+        if ab is not None and self.dcp_rank == 0:
+            # The window is identical on every rank, so exactly one rank may
+            # attend it; the others hand back their prefix partial untouched
+            # and the cross-rank merge completes the causal block.
+            assert lse is not None
+            assert verify_window is not None
+            # q was concatenated above, and it still carries the unpadded head
+            # count the window stage wants.
+            q_nope, q_pe = torch.split(
+                q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and q_nope.dtype != torch.bfloat16
+            ):
+                q_nope = q_nope.to(torch.bfloat16) * layer._q_scale
+                q_pe = q_pe.to(torch.bfloat16) * layer._q_scale
+            window_out, window_lse = self._forward_ab_verify_window(
+                q_nope,
+                q_pe,
+                verify_window,
+                ab,
+                decode.attn_out_dtype,
+            )
+            output, lse = _merge_two_partials(output, lse, window_out, window_lse)
+
         return output, lse

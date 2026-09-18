@@ -103,11 +103,14 @@ def _builder(
             dcp_world_size, 1
         ),
         _supports_native_dcp_verify=False,
+        _supports_ab_dcp_verify=False,
+        _ab_dcp_verify_mode="off",
         # Derived once in the real constructor, so derive it once here too.
         _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _graph_dcp_global_kv_indptr=None,
+        _graph_ab_combine_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -323,6 +326,197 @@ def test_native_dcp_verify_uses_global_indptr_and_regular_page_table(monkeypatch
     # Work scheduling covers every local KV entry. The native AITER kernel
     # applies the global causal bound using dcp_global_kv_indptr.
     assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+def _ab_builder(*, qlen, dcp_world_size, dcp_rank, **kwargs):
+    builder = _builder(
+        mtp_decode_qlen=qlen,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        **kwargs,
+    )
+    builder._supports_ab_dcp_verify = True
+    builder._ab_dcp_verify_mode = "mask0"
+    return builder
+
+
+def _build_ab_decode(monkeypatch, builder, *, qlen, tot_seq_lens, local_seq_lens):
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _ExpandPageIndicesKernel()
+    )
+    num_reqs = len(tot_seq_lens)
+    starts = torch.arange(num_reqs + 1, dtype=torch.int32) * qlen
+    return AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(num_reqs * 16, dtype=torch.int32).reshape(
+            num_reqs, 16
+        ),
+        seq_lens_device=torch.tensor(local_seq_lens, dtype=torch.int32),
+        max_seq_len=max(local_seq_lens),
+        query_start_loc_cpu=starts,
+        query_start_loc_device=starts,
+        num_decode_tokens=num_reqs * qlen,
+        dcp_tot_seq_lens_device=torch.tensor(tot_seq_lens, dtype=torch.int32),
+    )
+
+
+@pytest.mark.parametrize("qlen", [3, 5])
+def test_ab_verify_shards_partition_exactly_the_committed_prefix(monkeypatch, qlen):
+    """Stage A must stop at the window boundary, on every rank.
+
+    The split is only sound if the per-rank prefix lengths add up to the
+    committed prefix and nothing more -- the window tokens are attended once,
+    by stage B, and must not also be reachable through a shard.
+    """
+    dcp_world_size = 4
+    tot_seq_lens = [23, 31]
+    shards = []
+    for rank in range(dcp_world_size):
+        builder = _ab_builder(qlen=qlen, dcp_world_size=dcp_world_size, dcp_rank=rank)
+        metadata = _build_ab_decode(
+            monkeypatch,
+            builder,
+            qlen=qlen,
+            tot_seq_lens=tot_seq_lens,
+            local_seq_lens=[8, 8],
+        )
+        assert metadata.ab_verify is not None
+        assert metadata.ab_verify.qlen == qlen
+        shards.append(metadata.ab_verify.prefix_lens.to(torch.int64))
+
+    expected = [length - qlen for length in tot_seq_lens]
+    assert torch.stack(shards).sum(dim=0).tolist() == expected
+
+
+def test_ab_verify_tells_the_combine_that_rank_zero_holds_the_window(monkeypatch):
+    """Only rank 0 attends the window, so only its partial may claim it.
+
+    The cross-rank combine reads ``seq_lens`` to drop empty shards. A rank 0
+    whose prefix shard is empty still carries stage B, so its reported length
+    has to include the window or the merge discards the window entirely.
+    """
+    qlen = 3
+    tot_seq_lens = [23]
+    reported = {}
+    for rank in (0, 1):
+        builder = _ab_builder(qlen=qlen, dcp_world_size=4, dcp_rank=rank)
+        metadata = _build_ab_decode(
+            monkeypatch,
+            builder,
+            qlen=qlen,
+            tot_seq_lens=tot_seq_lens,
+            local_seq_lens=[6],
+        )
+        reported[rank] = (
+            metadata.seq_lens.tolist(),
+            metadata.ab_verify.prefix_lens.tolist(),
+        )
+
+    rank0_seq_lens, rank0_prefix = reported[0]
+    rank1_seq_lens, rank1_prefix = reported[1]
+    assert rank0_seq_lens == [rank0_prefix[0] + qlen]
+    assert rank1_seq_lens == rank1_prefix
+
+
+def test_ab_verify_replaces_the_single_range_routes(monkeypatch):
+    """Two-stage verify owns the batch; no other verify route may also fire."""
+    qlen = 3
+    builder = _ab_builder(qlen=qlen, dcp_world_size=4, dcp_rank=0)
+    builder._supports_native_dcp_verify = True
+    builder._supports_segmented_dcp_verify = True
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _ExpandPageIndicesKernel()
+    )
+    starts = torch.tensor([0, qlen], dtype=torch.int32)
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(16, dtype=torch.int32).reshape(1, 16),
+        seq_lens_device=torch.tensor([6], dtype=torch.int32),
+        max_seq_len=6,
+        query_start_loc_cpu=starts,
+        query_start_loc_device=starts,
+        num_decode_tokens=qlen,
+        dcp_tot_seq_lens_device=torch.tensor([23], dtype=torch.int32),
+    )
+
+    assert metadata.ab_verify is not None
+    assert metadata.dcp_verify is None
+    assert metadata.dcp_global_kv_indptr is None
+    assert metadata.use_gluon_verify is False
+    # Stage A reads a whole shard per row, so the schedule is built non-causal.
+    assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+def _reference_attend(q_rows, k_rows, mask):
+    """Plain attention returning (out, natural-log lse) with lse shaped [q, h].
+
+    ``mask`` is ``[heads, q, k]``; fully masked rows come back as -inf so the
+    merge under test has to handle them.
+    """
+    scale = q_rows.shape[-1] ** -0.5
+    scores = torch.einsum("qhd,khd->hqk", q_rows, k_rows) * scale
+    scores = scores.masked_fill(~mask, float("-inf"))
+    lse = torch.logsumexp(scores, dim=-1)
+    weights = torch.nan_to_num(torch.softmax(scores, dim=-1))
+    out = torch.einsum("hqk,khd->qhd", weights, k_rows)
+    return out, lse.transpose(0, 1)
+
+
+@pytest.mark.parametrize("qlen", [2, 3, 4])
+@pytest.mark.parametrize("dcp_world_size", [2, 4])
+def test_ab_split_reconstructs_causal_verify(qlen, dcp_world_size):
+    """The identity the whole two-stage design rests on.
+
+    A verify row's causal range only meets the shard layout inside the window,
+    so cutting there leaves a prefix that every row of the request sees in
+    full. Unmasked per-rank prefix partials plus one dense replicated window
+    partial, merged by LSE, must equal an ordinary causal verify.
+    """
+    torch.manual_seed(0)
+    num_heads, head_dim = 2, 8
+    seq_len = 4 * dcp_world_size + qlen + 1
+    prefix = seq_len - qlen
+    q = torch.randn(qlen, num_heads, head_dim, dtype=torch.float32)
+    k = torch.randn(seq_len, num_heads, head_dim, dtype=torch.float32)
+
+    causal = torch.arange(seq_len)[None, :] <= (prefix + torch.arange(qlen))[:, None]
+    ref_out, ref_lse = _reference_attend(
+        q, k, causal.unsqueeze(0).expand(num_heads, -1, -1)
+    )
+
+    partials = []
+    for rank in range(dcp_world_size):
+        owned = (torch.arange(prefix) % dcp_world_size) == rank
+        k_local = k[:prefix][owned]
+        if k_local.shape[0] == 0:
+            continue
+        # No mask: the prefix is identical for every row of the request.
+        unmasked = torch.ones(num_heads, qlen, k_local.shape[0], dtype=torch.bool)
+        partials.append(_reference_attend(q, k_local, unmasked))
+
+    window = torch.arange(qlen)[None, :] <= torch.arange(qlen)[:, None]
+    partials.append(
+        _reference_attend(q, k[prefix:], window.unsqueeze(0).expand(num_heads, -1, -1))
+    )
+
+    out, lse = partials[0]
+    for next_out, next_lse in partials[1:]:
+        out, lse = rocm_aiter_mla._merge_two_partials(out, lse, next_out, next_lse)
+
+    torch.testing.assert_close(out, ref_out, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
 def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):

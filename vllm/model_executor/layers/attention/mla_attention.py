@@ -1107,7 +1107,29 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            if getattr(self.impl, "wants_verify_window", False):
+                # A backend that splits verify at the window boundary reads the
+                # draft window from this dense latent rather than the cache,
+                # which is owner-filtered under DCP and so holds only a shard
+                # of it. Rows are request-major, matching the query layout.
+                verify_window = torch.cat(
+                    [
+                        k_c_normed[:num_mqa_tokens],
+                        k_pe[:num_mqa_tokens].reshape(num_mqa_tokens, -1),
+                    ],
+                    dim=-1,
+                )
+                attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    mqa_q,
+                    kv_cache,
+                    attn_metadata,
+                    self,
+                    verify_window=verify_window,
+                )
+            else:
+                attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    mqa_q, kv_cache, attn_metadata, self
+                )
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
