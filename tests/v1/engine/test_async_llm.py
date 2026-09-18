@@ -439,6 +439,42 @@ async def test_mid_stream_cancellation(
         assert not engine.output_processor.has_unfinished_requests()
 
 
+@pytest.mark.parametrize(
+    "engine_args,prompt",
+    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+)
+@pytest.mark.asyncio
+async def test_cancel_during_add_request(engine_args, prompt):
+    """A task cancelled inside add_request must not leave request state
+    registered: the caller never receives the output collector and can
+    never finish or abort the request."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        tasks = [
+            asyncio.create_task(
+                engine.add_request(
+                    f"request-{i}", prompt, SamplingParams(max_tokens=1000)
+                )
+            )
+            for i in range(100)
+        ]
+        await asyncio.sleep(0)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Requests whose add completed are still live; abort them properly.
+        for task in tasks:
+            if not task.cancelled() and task.exception() is None:
+                queue = task.result()
+                await engine.abort(queue.request_id, internal=True)
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
 class MockLoggingStatLogger(LoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         super().__init__(vllm_config, engine_index)
