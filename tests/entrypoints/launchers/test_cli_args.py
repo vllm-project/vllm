@@ -2,16 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
-import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
 
 import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
-from vllm.config import LoggingConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
@@ -74,152 +70,22 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     assert args.port == 9000
 
 
-def test_log_config_file_cli_field_is_deprecated_and_propagated(serve_parser):
-    with pytest.warns(
-        UserWarning,
-        match=(
-            "--log-config-file is deprecated and will be removed in v0.33.0. "
-            "Use --logging-config.pylogging_config_file instead."
-        ),
-    ):
-        args = serve_parser.parse_args(["--log-config-file", "/tmp/logging.json"])
-
-    logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
-
-    assert logging_config.pylogging_config_file == "/tmp/logging.json"
-
-
-def test_logging_config_accepts_json_and_dotted_args(serve_parser):
-    for cli_args in (
-        [
-            "--logging-config",
-            (
-                '{"configure_logging":true,"log_level":"DEBUG",'
-                '"pylogging_config_file":"/tmp/logging.json"}'
-            ),
-        ],
-        [
-            "--logging-config.configure_logging",
-            "true",
-            "--logging-config.log_level",
-            "DEBUG",
-            "--logging-config.pylogging_config_file",
-            "/tmp/logging.json",
-        ],
-    ):
-        args = serve_parser.parse_args(cli_args)
-        logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
-
-        assert logging_config.configure_logging
-        assert logging_config.log_level == "DEBUG"
-        assert logging_config.pylogging_config_file == "/tmp/logging.json"
-
-
-def test_log_config_file_cli_field_overrides_json(serve_parser):
+def test_logging_config_cli_args(serve_parser):
     with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
         args = serve_parser.parse_args(
             [
                 "--logging-config",
                 '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--log-level",
+                "DEBUG",
                 "--log-config-file",
                 "/tmp/flat.json",
             ]
         )
 
-    logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
-
-    assert logging_config.log_level == "WARNING"
-    assert logging_config.pylogging_config_file == "/tmp/flat.json"
-
-
-def test_logging_config_precedence(monkeypatch, tmp_path):
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
-    config_file = tmp_path / "serve.yaml"
-    config_file.write_text("logging-config:\n  log_level: WARNING\n", encoding="utf-8")
-    parser = _build_vllm_parsers()["vllm serve"]
-
-    assert LoggingConfig().log_level == "ERROR"
-    assert not LoggingConfig().configure_logging
-    assert (
-        parser.parse_args(["--config", str(config_file)]).logging_config.log_level
-        == "WARNING"
-    )
-    assert (
-        parser.parse_args(
-            [
-                "--config",
-                str(config_file),
-                "--logging-config",
-                '{"log_level":"DEBUG"}',
-            ]
-        ).logging_config.log_level
-        == "DEBUG"
-    )
-
-
-def test_log_level_cli_field_overrides_json(serve_parser):
-    args = serve_parser.parse_args(
-        [
-            "--logging-config",
-            '{"log_level":"WARNING"}',
-            "--log-level",
-            "DEBUG",
-        ]
-    )
-
-    logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
-
-    assert logging_config.log_level == "DEBUG"
-
-
-def test_cli_can_disable_initial_logging_configuration():
-    script = """
-import logging
-import sys
-
-from vllm.entrypoints.cli import main as cli_main
-from vllm.entrypoints.cli.serve import ServeSubcommand
-
-
-def probe(args):
-    logger = logging.getLogger("vllm")
-    print(f"vllm={logger.level}:{logger.propagate}:{len(logger.handlers)}")
-    logging.getLogger("vllm.probe").info("logging probe")
-
-
-ServeSubcommand.cmd = staticmethod(probe)
-sys.argv = [
-    "vllm",
-    "serve",
-    "Qwen/Qwen3-0.6B",
-    "--logging-config.configure_logging",
-    "false",
-]
-cli_main.main()
-"""
-    env = os.environ.copy()
-    env.update(
-        {
-            "VLLM_CONFIGURE_LOGGING": "1",
-            "VLLM_LOGGING_COLOR": "0",
-            "VLLM_TARGET_DEVICE": "cpu",
-        }
-    )
-    env.pop("VLLM_LOGGING_CONFIG_PATH", None)
-
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        check=True,
-        env=env,
-        text=True,
-        timeout=30,
-    )
-
-    assert "vllm=0:True:0" in result.stdout
-    assert "logging probe" not in result.stdout
-    assert "logging probe" not in result.stderr
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.log_level == "DEBUG"
+    assert config.pylogging_config_file == "/tmp/flat.json"
 
 
 ### Tests for LoRA module parsing

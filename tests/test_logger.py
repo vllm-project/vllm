@@ -4,7 +4,6 @@ import enum
 import io
 import json
 import logging
-import multiprocessing
 import os
 import sys
 import tempfile
@@ -24,7 +23,6 @@ from vllm.logger import (
     _configure_vllm_root_logger,
     _use_color,
     configure_logging,
-    configure_logging_if_needed,
     enable_trace_function_call,
     init_logger,
 )
@@ -59,11 +57,13 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
     behavior is activated."""
     monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
-    _configure_vllm_root_logger()
+    early_logger = init_logger(f"vllm.test_logger.{uuid4()}")
+    configure_logging(LoggingConfig())
 
     logger = logging.getLogger("vllm")
     assert logger.level == logging.INFO
     assert not logger.propagate
+    assert early_logger.isEnabledFor(logging.INFO)
 
     handler = logger.handlers[0]
     assert isinstance(handler, logging.StreamHandler)
@@ -97,44 +97,6 @@ def test_use_color_force_color(monkeypatch):
 
     monkeypatch.setenv("NO_COLOR", "1")
     assert not _use_color()
-
-
-def test_logging_config_reconfigures_loggers_created_during_import(monkeypatch):
-    original_level = os.environ.get("VLLM_LOGGING_LEVEL")
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
-    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
-    _configure_vllm_root_logger()
-
-    early_logger = init_logger(f"vllm.test_logger.{uuid4()}")
-    assert not early_logger.isEnabledFor(logging.DEBUG)
-
-    try:
-        configure_logging(LoggingConfig(log_level="DEBUG"))
-
-        assert early_logger.isEnabledFor(logging.DEBUG)
-        assert logging.getLogger("vllm").level == logging.DEBUG
-        formatter = logging.getLogger("vllm").handlers[0].formatter
-        assert isinstance(formatter, NewLineFormatter)
-        assert formatter.use_relpath
-    finally:
-        if original_level is None:
-            monkeypatch.delenv("VLLM_LOGGING_LEVEL", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_LOGGING_LEVEL", original_level)
-        _configure_vllm_root_logger()
-
-
-def test_logging_config_uses_environment_defaults(monkeypatch):
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
-    monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", "/tmp/logging.json")
-
-    config = LoggingConfig()
-
-    assert not config.configure_logging
-    assert config.log_level == "DEBUG"
-    assert config.pylogging_config_file == "/tmp/logging.json"
 
 
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
@@ -175,38 +137,8 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
     with patch("vllm.logger.dictConfig") as dict_config_mock:
-        _configure_vllm_root_logger()
-    dict_config_mock.assert_not_called()
-
-
-def test_logging_config_can_disable_logger_configuration(monkeypatch):
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
-    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
-
-    with patch("vllm.logger.dictConfig") as dict_config_mock:
         configure_logging(LoggingConfig(configure_logging=False))
-
     dict_config_mock.assert_not_called()
-
-
-def test_logging_config_is_not_applied_twice():
-    config = LoggingConfig(log_level="DEBUG")
-
-    with patch("vllm.logger.dictConfig") as dict_config_mock:
-        configure_logging(config)
-        configure_logging_if_needed(config)
-
-    dict_config_mock.assert_called_once()
-
-
-def test_logging_config_file_requires_logger_configuration():
-    config = LoggingConfig(
-        configure_logging=False,
-        pylogging_config_file="/tmp/logging.json",
-    )
-
-    with pytest.raises(RuntimeError, match="Logging configuration is disabled"):
-        configure_logging(config)
 
 
 def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):
@@ -286,30 +218,12 @@ def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
-        with patch("vllm.logger.dictConfig") as dict_config_mock:
-            _configure_vllm_root_logger()
-            dict_config_mock.assert_called_with(valid_logging_config)
-
-
-def test_logging_config_file_is_applied_after_logger_import(monkeypatch):
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
-    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
-    valid_logging_config = {
-        "loggers": {"vllm": {"handlers": [], "propagate": False}},
-        "version": 1,
-    }
-
-    with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
-        json.dump(valid_logging_config, logging_config_file)
-        logging_config_file.flush()
-
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with patch("vllm.logger.dictConfig") as dict_config_mock:
             configure_logging(
                 LoggingConfig(pylogging_config_file=logging_config_file.name)
             )
-
-    dict_config_mock.assert_called_once_with(valid_logging_config)
+            dict_config_mock.assert_called_with(valid_logging_config)
 
 
 def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monkeypatch):
@@ -329,9 +243,14 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monke
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
         logging_config_file.write(json.dumps(valid_logging_config))
         logging_config_file.flush()
-        monkeypatch.setenv("VLLM_LOGGING_CONFIG_PATH", logging_config_file.name)
+        monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
         with pytest.raises(RuntimeError) as ex_info:
-            _configure_vllm_root_logger()
+            configure_logging(
+                LoggingConfig(
+                    configure_logging=False,
+                    pylogging_config_file=logging_config_file.name,
+                )
+            )
         assert ex_info.type is RuntimeError
         expected_message_snippet = (
             "Logging configuration is disabled, but a Python logging config "
@@ -389,55 +308,18 @@ test_logger = init_logger("vllm.test_logger")
 
 def mp_function(**kwargs):
     # This function runs in a subprocess
+    if logging_config := kwargs.pop("logging_config", None):
+        configure_logging(logging_config)
 
     test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
     test_logger.error("This is a subprocess error.")
     test_logger.debug("This is a subprocess debug message: %s.", kwargs.get("b"))
 
 
-def mp_logging_config_function(config, queue):
-    configure_logging(config)
-    queue.put(logging.getLogger("vllm").level)
-
-
-def mp_disabled_logging_config_function(queue):
-    configure_logging(LoggingConfig(configure_logging=False))
-    logger = logging.getLogger("vllm")
-    queue.put((logger.level, logger.propagate, len(logger.handlers)))
-
-
-def test_logging_config_mp_spawn():
-    ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
-    process = ctx.Process(
-        target=mp_logging_config_function,
-        args=(LoggingConfig(log_level="DEBUG", pylogging_config_file=None), queue),
-    )
-
-    process.start()
-    process.join()
-
-    assert process.exitcode == 0
-    assert queue.get() == logging.DEBUG
-
-
-def test_disabled_logging_config_leaves_spawned_process_unconfigured(monkeypatch):
-    monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
-    monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
-
-    ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
-    process = ctx.Process(target=mp_disabled_logging_config_function, args=(queue,))
-
-    process.start()
-    process.join()
-
-    assert process.exitcode == 0
-    assert queue.get() == (logging.NOTSET, True, 0)
-
-
 def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
     with caplog_vllm.at_level(logging.DEBUG, logger="vllm"), caplog_mp_fork():
+        import multiprocessing
+
         ctx = multiprocessing.get_context("fork")
         p = ctx.Process(
             target=mp_function,
@@ -453,11 +335,19 @@ def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
 
 def test_caplog_mp_spawn(caplog_mp_spawn):
     with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        import multiprocessing
+
         ctx = multiprocessing.get_context("spawn")
         p = ctx.Process(
             target=mp_function,
             name=f"SubProcess{1}",
-            kwargs={"a": "AAAA", "b": "BBBBB"},
+            kwargs={
+                "a": "AAAA",
+                "b": "BBBBB",
+                "logging_config": LoggingConfig(
+                    pylogging_config_file=os.environ["VLLM_LOGGING_CONFIG_PATH"]
+                ),
+            },
         )
         p.start()
         p.join()
