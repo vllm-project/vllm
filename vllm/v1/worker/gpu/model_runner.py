@@ -1290,21 +1290,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
-        if not draft_tokens:
-            # No draft token scheduled (common case). A model state that
-            # samples no new token per step (diffusion prefill) gets no
-            # logits rows at all.
-            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        if not draft_tokens and self.model_state.num_new_sampled_tokens_per_step == 1:
+            # No draft token scheduled (common case).
             total_num_draft_tokens = 0
-            total_num_logits = num_reqs * num_bonus_tokens
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32) * num_bonus_tokens
-            cu_num_logits = (
-                torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
-                * num_bonus_tokens
+            total_num_logits = num_reqs
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits = torch.arange(
+                num_reqs + 1, device=self.device, dtype=torch.int32
             )
-            expanded_idx_mapping = idx_mapping[:total_num_logits]
+            expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(
-                total_num_logits, dtype=torch.int32, device=self.device
+                num_reqs, dtype=torch.int32, device=self.device
             )
         else:
             num_draft_tokens_per_req = np.fromiter(
@@ -1325,9 +1321,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
-        adaptive_verification = (
-            self.adaptive_verification if num_draft_tokens_per_req is not None else None
-        )
+        # The general branch also serves a no-draft batch with k != 1, and
+        # compact_batch's budget is only primed when drafts are scheduled.
+        adaptive_verification = self.adaptive_verification if draft_tokens else None
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
             # num_scheduled_tokens represents the draft budget evenly distributed across
@@ -1357,7 +1353,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
-        if draft_tokens:
+        if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
@@ -1536,6 +1532,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        # A diffusion prefill has no logit rows even when a bitmask row
+        # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
