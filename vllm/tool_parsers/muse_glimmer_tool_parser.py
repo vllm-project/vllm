@@ -61,6 +61,9 @@ from vllm.reasoning.muse_glimmer_utils import (
     MSG_HEADER_RE as _MSG_HEADER_RE,
 )
 from vllm.reasoning.muse_glimmer_utils import (
+    TRAILING_MSG_END_RE as _TRAILING_MSG_END_RE,
+)
+from vllm.reasoning.muse_glimmer_utils import (
     REASONING_RECIPIENT as _REASONING_RECIPIENT,
 )
 from vllm.reasoning.muse_glimmer_utils import (
@@ -258,9 +261,12 @@ class MuseGlimmerToolParser(ToolParser):
         content, reasoning, _c_open, _r_open = visible_channels(text)
         if content:
             return content
-        # No framing at all -> the whole thing is plain content.
+        # No framing at all -> the whole thing is plain content. Strip a
+        # trailing end marker: it is framing, and the streaming path never
+        # surfaces it.
         if not reasoning and _MSG_HEADER_RE.search(text) is None:
-            return text or None
+            trimmed = _TRAILING_MSG_END_RE.sub("", text)
+            return trimmed or None
         return None
 
     # ---------------- non-streaming ----------------

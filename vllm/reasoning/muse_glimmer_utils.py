@@ -22,6 +22,8 @@ MSG_HEADER_RE = re.compile(
     r"(?:to=(?P<recipient>[A-Za-z0-9_.\-]+))?<\|message\|>"
 )
 MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
+# A channel terminator at the very end of the text (framing, not content).
+TRAILING_MSG_END_RE = re.compile(r"(?:<\|eom\|>|<\|eot\|>)\s*$")
 
 # Whitespace handling must match MSG_HEADER_RE exactly. If this pattern were
 # stricter, a header it rejected but MSG_HEADER_RE accepted would be recognised
@@ -127,7 +129,24 @@ def safe_open_body(body: str) -> str:
 
         if trimmed == body:
             return body
+        # A trailing partial-marker strip cannot expose more trailing
+        # framing: in a run of marker prefixes, only the last can still start
+        # a marker. Settle immediately unless a header fragment was also
+        # trimmed, which can expose a new partial marker to re-check.
+        if partial_marker and trimmed == body[: len(body) - partial_marker]:
+            return trimmed
         body = trimmed
+
+
+def flush_open_body(body: str) -> str:
+    """Trim only a trailing partial structural marker from a finished body.
+
+    At end-of-stream nothing more arrives: a held-back ` to=…` fragment is
+    real text and must flush, while a trailing partial marker (cut by the
+    token limit) is framing and stays dropped.
+    """
+    partial = _trailing_partial_marker_len(body)
+    return body[: len(body) - partial] if partial else body
 
 
 def visible_channels(
@@ -148,18 +167,26 @@ def visible_channels(
             reasoning_parts.append(body)
             reasoning_open = not closed
         elif recipient is None or recipient == USER_RECIPIENT:
-            # An UNTAGGED body carrying ATEM markup is a tool channel whose
-            # ``to=`` never arrived, so surfacing it would leak markup that
-            # tool-call parsing (scoped to recipient-tagged bodies) never
-            # claims. A ``to=user`` body is addressed to the client and may
-            # legitimately quote ATEM -- e.g. answering a question about
-            # tool-call syntax -- so it is surfaced as written.
-            if recipient is None and (
-                FUNCTION_CALLS_OPEN in body or "<atem:invoke" in body
-            ):
-                continue
             if recipient is None and not closed and withhold_open_untagged:
+                # An open untagged body may still grow ATEM markup; hold it
+                # back until its classification can no longer change.
                 continue
+            if recipient is None:
+                # An untagged body carrying ATEM markup is a tool channel
+                # whose ``to=`` never arrived: keep only the prefix before
+                # the markup; the markup itself is never surfaced.
+                atem_starts = [
+                    i
+                    for i in (
+                        body.find(FUNCTION_CALLS_OPEN),
+                        body.find("<atem:invoke"),
+                    )
+                    if i != -1
+                ]
+                if atem_starts:
+                    body = body[: min(atem_starts)]
+                    if not body:
+                        continue
             content_parts.append(body)
             content_open = not closed
 

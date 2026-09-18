@@ -503,40 +503,30 @@ def test_untagged_atem_does_not_hide_following_answer(tokenizer, preamble):
         + "<|eot|><|start|>assistant to=user<|message|>real answer<|eot|>",
     )
     assert reasoning == ""
-    assert content == "real answer"
+    # The prefix before the markup is kept; the markup itself never surfaces.
+    assert content == preamble + "real answer"
     assert tools == []
     assert_no_framing(content)
 
 
-def test_mixed_hermes_tool_parser_keeps_muse_channels_clean(tokenizer):
-    reasoning, content, tools = drive_tokenwise(
-        tokenizer,
-        " to=self<|message|>think<|eom|>"
-        "<|start|>assistant to=user<|message|>The answer.<|eot|>",
-        tool_parser_name="hermes",
-    )
-    assert reasoning == "think"
-    assert content == "The answer."
-    assert not tools
-    assert_no_framing(reasoning + content)
+def test_mixed_hermes_tool_parser_rejected(tokenizer):
+    # A foreign tool parser cannot read ATEM channels: the mixed configuration
+    # is rejected at construction instead of leaking raw framing.
+    with pytest.raises(VLLMValidationError, match="tool-call-parser"):
+        ParserManager.get_parser(
+            reasoning_parser_name="muse_glimmer",
+            tool_parser_name="hermes",
+            enable_auto_tools=True,
+        )(tokenizer)
 
 
-def test_nonstreaming_mixed_hermes_tool_parser_keeps_muse_channels_clean(tokenizer):
-    parser = ParserManager.get_parser(
-        reasoning_parser_name="muse_glimmer",
-        tool_parser_name="hermes",
-        enable_auto_tools=True,
-    )(tokenizer)
-    reasoning, content, tools = parser.parse(
-        " to=self<|message|>think<|eom|>"
-        "<|start|>assistant to=user<|message|>The answer.<|eot|>",
-        SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True),
-        enable_auto_tools=True,
-    )
-    assert reasoning == "think"
-    assert content == "The answer."
-    assert not tools
-    assert_no_framing(reasoning + content)
+def test_nonstreaming_mixed_hermes_tool_parser_rejected(tokenizer):
+    with pytest.raises(VLLMValidationError, match="tool-call-parser"):
+        ParserManager.get_parser(
+            reasoning_parser_name="muse_glimmer",
+            tool_parser_name="hermes",
+            enable_auto_tools=True,
+        )(tokenizer)
 
 
 def test_closed_body_preserves_quoted_start_marker(tokenizer):
@@ -580,6 +570,35 @@ def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
     assert reasoning == "think"
     assert content == ""
     assert tools == []
+
+
+def test_finish_flushes_held_back_fragments_but_not_partial_markers(tokenizer):
+    # Truncated mid-answer: the ` to=…` fragment is real text and flushes.
+    reasoning, content, _tools = drive(
+        tokenizer,
+        [" to=user<|message|>the answer is about to"],
+        with_tool_parser=False,
+    )
+    assert content == "the answer is about to"
+    assert reasoning == ""
+
+    # Truncated mid-marker: the partial framing stays dropped.
+    reasoning, content, _tools = drive(
+        tokenizer,
+        [" to=user<|message|>the answer<|eo"],
+        with_tool_parser=False,
+    )
+    assert content == "the answer"
+    assert_no_framing(content)
+
+    # Same on the reasoning side.
+    reasoning, content, _tools = drive(
+        tokenizer,
+        [" to=self<|message|>thinking hard<|eo"],
+        with_tool_parser=False,
+    )
+    assert reasoning == "thinking hard"
+    assert_no_framing(reasoning)
 
 
 def test_streaming_never_leaks_partial_tool_header(tokenizer):

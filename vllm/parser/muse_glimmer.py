@@ -13,8 +13,8 @@ from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningPar
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
+    flush_open_body,
     open_recipient,
-    safe_open_body,
     visible_channels,
 )
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
@@ -26,6 +26,28 @@ if TYPE_CHECKING:
 
 class MuseGlimmerParser(DelegatingParser):
     """Compose MuseGlimmer reasoning, answer, and tool channels."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # The MuseGlimmer channel framing is only handled end-to-end when the
+        # muse parsers are paired: a foreign tool parser cannot read ATEM, and
+        # a foreign reasoning parser reports a boundary the composite's stream
+        # ownership does not expect. Reject the mix instead of leaking raw
+        # channel markup to the client.
+        if self._tool_parser is not None and not isinstance(
+            self._tool_parser, MuseGlimmerToolParser
+        ):
+            raise VLLMValidationError(
+                "the muse_glimmer reasoning parser only works with "
+                "--tool-call-parser muse_glimmer"
+            )
+        if self._reasoning_parser is not None and not isinstance(
+            self._reasoning_parser, MuseGlimmerReasoningParser
+        ):
+            raise VLLMValidationError(
+                "the muse_glimmer tool parser only works with "
+                "--reasoning-parser muse_glimmer"
+            )
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -88,25 +110,27 @@ class MuseGlimmerParser(DelegatingParser):
         )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """Bypass frontend reasoning only for the paired ATEM tool parser."""
-        if isinstance(self._tool_parser, MuseGlimmerToolParser):
-            return True
-        if isinstance(self._reasoning_parser, MuseGlimmerReasoningParser):
-            try:
-                text = self.model_tokenizer.decode(input_ids)
-            except Exception:
-                return False
-            recipient = open_recipient(current_assistant_turn(text))
-            return self._tool_parser is not None and recipient not in (
-                None,
-                "self",
-                "user",
-            )
-        return super().is_reasoning_end(input_ids)
+        """Stream ownership transfers only to the paired ATEM tool parser.
+
+        Engine-side callers (the structured-output seed in serving.py) use
+        the bare reasoning parser directly, which keeps the wider boundary
+        (any non-`self` channel, including `to=user`).
+        """
+        return isinstance(self._tool_parser, MuseGlimmerToolParser)
 
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
+        return self.is_reasoning_end(input_ids)
+
+    def _is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        # The base implementation asks the bare reasoning parser directly,
+        # whose boundary (any non-`self` channel, including `to=user`) is the
+        # ENGINE-side grammar rule. The frontend phase machine must use the
+        # composite's narrower rule, or a `to=user` answer ends the reasoning
+        # phase mid-turn and later channels leak through the passthrough.
         return self.is_reasoning_end(input_ids)
 
     def finalize_generation(
@@ -135,11 +159,13 @@ class MuseGlimmerParser(DelegatingParser):
         if not isinstance(tool_parser, MuseGlimmerToolParser):
             return delta_message
 
-        content, reasoning, content_open, _reasoning_open = visible_channels(
+        content, reasoning, content_open, reasoning_open = visible_channels(
             state.previous_text
         )
         if content_open:
-            content = safe_open_body(content)
+            content = flush_open_body(content)
+        if reasoning_open:
+            reasoning = flush_open_body(reasoning)
         content_remainder, emitted_content = advance_emitted(
             tool_parser._emitted_content, content
         )

@@ -288,3 +288,29 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+# ----------------------------------------------------------- misc utilities
+
+
+def test_safe_open_body_settles_on_marker_prefix_runs():
+    from vllm.reasoning.muse_glimmer_utils import safe_open_body
+
+    # A run of marker prefixes holds back only the last one: the rest can
+    # never grow into a marker (a marker's third character is a letter), and
+    # the trim must settle in one pass instead of re-scanning the run.
+    assert safe_open_body("text" + "<|" * 64) == "text" + "<|" * 63
+    # A marker strip can expose a header fragment that must also be trimmed.
+    assert safe_open_body("body to=skill<") == "body"
+    assert safe_open_body("body to=skill") == "body"
+    assert safe_open_body("plain text") == "plain text"
+
+
+def test_unframed_fallback_strips_trailing_end_marker():
+    # The unframed fallback mirrors the streaming path, which never surfaces
+    # the channel terminator.
+    assert (
+        MuseGlimmerToolParser._extract_content("plain answer<|eot|>")
+        == "plain answer"
+    )
+    assert MuseGlimmerToolParser._extract_content("plain answer") == "plain answer"

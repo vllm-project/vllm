@@ -13,6 +13,7 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
+    flush_open_body,
     open_recipient,
     safe_open_body,
     visible_channels,
@@ -48,7 +49,13 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         return self.is_reasoning_end(input_ids)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """Continue classifying generation in the prompt's open channel."""
+        """Continue classifying generation in the prompt's open channel.
+
+        Only the open channel's recipient is seeded, not its body text: a
+        `continue_final_message` that stops mid-tool-call therefore parses
+        nothing from the prefilled body (documented limitation, matching the
+        Rust parser).
+        """
         try:
             text = self.model_tokenizer.decode(prompt_token_ids)
         except Exception:
@@ -74,7 +81,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             self._seeded_text(previous_text)
         )
         if content_open:
-            content = safe_open_body(content)
+            content = flush_open_body(content)
         remainder, self._emitted_content = advance_emitted(
             self._emitted_content, content
         )
@@ -82,9 +89,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
 
     def get_streaming_fallback_reasoning(self, previous_text: str) -> str | None:
         """Flush reasoning text held back while its channel was still open."""
-        _content, reasoning, _content_open, _reasoning_open = visible_channels(
+        _content, reasoning, _content_open, reasoning_open = visible_channels(
             self._seeded_text(previous_text)
         )
+        if reasoning_open:
+            reasoning = flush_open_body(reasoning)
         remainder, self._emitted_reasoning = advance_emitted(
             self._emitted_reasoning, reasoning
         )
