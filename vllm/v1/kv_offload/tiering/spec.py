@@ -243,7 +243,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             OffloadingHistogramMetadata(
                 documentation=(
                     "Histogram of per-job promotion latency from secondary tiers "
-                    "to the primary tier, labeled by tier, in seconds."
+                    "to the primary tier, measured from manager job registration "
+                    "until the secondary tier reports completion, including tier "
+                    "queueing, labeled by tier, in seconds."
                 ),
                 labelnames=("tier",),
                 buckets=(
