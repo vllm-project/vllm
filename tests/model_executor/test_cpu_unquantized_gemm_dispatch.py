@@ -6,7 +6,58 @@ import pytest
 import torch
 
 from vllm.model_executor.layers import utils
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+
+
+def test_dispatch_prepacks_arm_bf16_causal_conv(monkeypatch):
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
+
+    packed = torch.randn(32, 4, dtype=torch.bfloat16)
+    pack_inputs = []
+
+    def pack(weight):
+        pack_inputs.append(weight.clone())
+        return packed
+
+    monkeypatch.setattr(utils.ops, "causal_conv1d_weight_pack", pack)
+    original = torch.randn(32, 1, 4, dtype=torch.bfloat16)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(original.clone(), requires_grad=False)
+
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
+    assert len(pack_inputs) == 1
+    # Check causal_conv1d_weight_pack received the expected weights
+    torch.testing.assert_close(pack_inputs[0], original.view(32, 4))
+    # Check we have correctly stashed the unpacked weights
+    torch.testing.assert_close(layer._cpu_unpacked_conv_weight, original.view(32, 4))
+    # Check we have correctly stored the packed weights
+    assert layer.weight.data_ptr() == packed.data_ptr()
+
+
+def test_dispatch_does_not_pack_3d_expert_weight(monkeypatch):
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
+    pack_calls = []
+    monkeypatch.setattr(
+        utils.ops,
+        "causal_conv1d_weight_pack",
+        lambda weight: pack_calls.append(weight),
+    )
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.randn(8, 32, 4, dtype=torch.bfloat16), requires_grad=False
+    )
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+    assert pack_calls == []
 
 
 @pytest.fixture(scope="module")
