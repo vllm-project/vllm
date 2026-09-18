@@ -7,7 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 
 from vllm.entrypoints.chat_utils import (
@@ -258,7 +258,9 @@ class DelegatingParser(Parser):
     def _get_function_name(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> str:
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+        if request.tool_choice and isinstance(
+            request.tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
+        ):
             return request.tool_choice.name
         if request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
@@ -297,7 +299,7 @@ class DelegatingParser(Parser):
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
         is_auto_tool_choice = enable_auto_tools and (
@@ -406,7 +408,11 @@ class DelegatingParser(Parser):
             or request.tool_choice == "required"
             or isinstance(
                 request.tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
             )
         )
         if not need_tool_calling:
@@ -555,7 +561,11 @@ class DelegatingParser(Parser):
             and request.tool_choice
             and isinstance(
                 request.tool_choice,
-                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+                (
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                    ChatCompletionNamedToolChoiceParam,
+                ),
             )
         ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
