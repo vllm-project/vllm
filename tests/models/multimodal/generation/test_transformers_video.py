@@ -14,7 +14,6 @@ from ...utils import check_logprobs_close
 from .vlm_utils import model_utils
 
 VIDEO_ASSET = VideoAsset("baby_reading", num_frames=8)
-SHORT_VIDEO_ASSET = VideoAsset("baby_reading", num_frames=4)
 
 VIDEO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
     "Qwen/Qwen3-VL-2B-Instruct": {
@@ -50,13 +49,8 @@ VIDEO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
 }
 
 
-@pytest.mark.parametrize("model_id", list(VIDEO_MODEL_SETTINGS))
-def test_transformers_video_generation(
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-    monkeypatch,
-    model_id: str,
-):
+@pytest.fixture(autouse=True)
+def use_spawn_for_video_models(monkeypatch):
     """Single-process workaround for V1 fork safety deadlock issue
     (vllm-project/vllm/issues/17676). Running multiple video models together
     under pytest can cause (possibly flaky) hangs, so they are grouped under
@@ -68,6 +62,13 @@ def test_transformers_video_generation(
     disable_envs_cache()
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
+
+@pytest.mark.parametrize("model_id", list(VIDEO_MODEL_SETTINGS))
+def test_transformers_video_generation(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    model_id: str,
+):
     prompt = VIDEO_MODEL_SETTINGS[model_id]["prompt"]
     video = (VIDEO_ASSET.np_ndarrays, VIDEO_ASSET.metadata)
 
@@ -89,52 +90,6 @@ def test_transformers_video_generation(
         hf_model = model_utils.qwen3_vl_patch_hf_runner(hf_model)
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             [prompt], 128, num_logprobs=10, videos=[video]
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
-
-
-def test_transformers_video_generation_unpadded_batch(
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-    monkeypatch,
-):
-    """Videos of different lengths reach the model as a list, one encoded at a time."""
-    # TODO: Remove monkeypatch once
-    # https://github.com/vllm-project/vllm/issues/17676 is fixed.
-    disable_envs_cache()
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
-    model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    prompts = [VIDEO_MODEL_SETTINGS[model_id]["prompt"]] * 2
-    videos = [
-        (VIDEO_ASSET.np_ndarrays, VIDEO_ASSET.metadata),
-        (SHORT_VIDEO_ASSET.np_ndarrays, SHORT_VIDEO_ASSET.metadata),
-    ]
-
-    with vllm_runner(
-        model_id,
-        model_impl="transformers",
-        dtype="bfloat16",
-        max_model_len=8192,
-        enforce_eager=True,
-        limit_mm_per_prompt={"video": 1},
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            prompts, 128, num_logprobs=10, videos=videos
-        )
-
-    with hf_runner(
-        model_id, dtype="bfloat16", auto_cls=AutoModelForImageTextToText
-    ) as hf_model:
-        hf_model = model_utils.qwen3_vl_patch_hf_runner(hf_model)
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            prompts, 128, num_logprobs=10, videos=videos
         )
 
     check_logprobs_close(

@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
@@ -89,7 +90,8 @@ _MODALITY_SIZE_KEYS = {
     "video": "num_video_patches",
 }
 # NOTE: Profiling cap as in https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_onevision.py#L52
-# a processor's `max_frames` bounds sampling only (Qwen3-VL's 768 is a 215 GiB dummy)
+# past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
+# 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
 _MAX_FRAMES_PER_VIDEO = 16
 
 
@@ -205,14 +207,59 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return processor._get_num_multimodal_tokens(**sizes, **mm_processor_kwargs)
 
     def get_max_image_tokens(self) -> int:
-        width, height = self.get_image_size_with_most_features()
-        mm_tokens = self._get_num_mm_tokens(image_sizes=([height, width],))
+        size = self.get_image_size_with_most_features()
+        return self._get_num_image_tokens(size)
+
+    def _get_num_image_tokens(self, size: ImageSize) -> int:
+        mm_tokens = self._get_num_mm_tokens(image_sizes=([size.height, size.width],))
         return mm_tokens["num_image_tokens"][0]
 
-    def get_num_video_tokens(self, num_frames: int) -> int:
-        width, height = self.get_image_size_with_most_features()
-        mm_tokens = self._get_num_mm_tokens(video_sizes=([num_frames, height, width],))
+    def _get_size_candidates(
+        self, sub_processor: Any, divisors: tuple[int, ...]
+    ) -> list[ImageSize]:
+        """Sizes a sub-processor's `size` bounds its output to.
+
+        The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either
+        exact or an area budget, which `divisors` splits over its items.
+        """
+        size = getattr(sub_processor, "size", None) or {}
+        height = size.get("height", size.get("max_height"))
+        width = size.get("width", size.get("max_width"))
+        if height and width:
+            return [ImageSize(width=width, height=height)]
+        if max_pixels := size.get("max_pixels", size.get("longest_edge")):
+            sides = {math.isqrt(max_pixels // divisor) for divisor in divisors}
+            return [
+                ImageSize(width=side, height=side) for side in sorted(sides) if side
+            ]
+        if shortest_edge := size.get("shortest_edge"):
+            return [ImageSize(width=shortest_edge, height=shortest_edge)]
+        return []
+
+    def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
+        mm_tokens = self._get_num_mm_tokens(
+            video_sizes=([num_frames, size.height, size.width],)
+        )
         return mm_tokens["num_video_tokens"][0]
+
+    def get_num_video_tokens(self, num_frames: int) -> int:
+        size = self.get_video_size_with_most_features(num_frames)
+        return self._get_num_video_tokens(num_frames, size)
+
+    def get_video_size_with_most_features(self, num_frames: int) -> ImageSize:
+        """Per-frame size that yields the most video tokens.
+
+        It is bound by the video processor's `size`, whose budget can
+        contain the temporal compression factor, so the frames are also
+        tried against the temporal patches they group into.
+        """
+        video_processor = self.get_hf_processor().video_processor
+        grid_t = max(num_frames // self._get_min_video_frames(), 1)
+        sizes = self._get_size_candidates(video_processor, (num_frames, grid_t, 1))
+        sizes.append(self.get_image_size_with_most_features())
+
+        num_tokens = [self._get_num_video_tokens(num_frames, size) for size in sizes]
+        return sizes[num_tokens.index(max(num_tokens))]
 
     def get_num_frames_with_most_features(
         self, seq_len: int, mm_counts: Mapping[str, int]
@@ -228,7 +275,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(width=10_000, height=10_000)  # arbitrary very large size
+        """Image size that yields the most image tokens.
+
+        It is bound by the image processor's `size`, but processors which
+        tile images or skip resizing produce more than `size` says, so the
+        size is picked by the token count instead.
+        """
+        image_processor = getattr(self.get_hf_processor(), "image_processor", None)
+        sizes = self._get_size_candidates(image_processor, (1,))
+        # arbitrary very large size
+        sizes.append(ImageSize(width=10_000, height=10_000))
+
+        num_tokens = [self._get_num_image_tokens(size) for size in sizes]
+        return sizes[num_tokens.index(max(num_tokens))]
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
@@ -289,7 +348,10 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 overrides=mm_options.get("image"),
             )
         if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
-            target_width, target_height = self.info.get_image_size_with_most_features()
+            num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+            target_width, target_height = self.info.get_video_size_with_most_features(
+                num_frames
+            )
             video_overrides = mm_options.get("video")
             assert video_overrides is None or isinstance(
                 video_overrides, VideoDummyOptions
@@ -297,9 +359,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             data["video"] = self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
-                ),
+                num_frames=num_frames,
                 num_videos=num_videos,
                 overrides=video_overrides,
             )
@@ -314,6 +374,12 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ) -> list["VideoItem"]:
+        """Attach the metadata the parser requires to each dummy video.
+
+        `video_needs_metadata=True` (see `get_data_parser`) makes the parser
+        require a metadata dict on every item, and `do_sample_frames=False`
+        plus `frames_indices=range(T)` has the frames consumed verbatim.
+        """
         videos = super()._get_dummy_videos(
             width=width,
             height=height,
@@ -323,12 +389,15 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         )
         videos = [v.copy() for v in videos]
 
+        video_processor = self.info.get_hf_processor().video_processor
+        fps = getattr(video_processor, "fps", None) or 2.0
+
         video_items: list[VideoItem] = []
         for video in videos:
             video_num_frames = video.shape[0]
             video_metadata = {
-                "fps": 2.0,
-                "duration": video_num_frames / 2.0,
+                "fps": fps,
+                "duration": video_num_frames / fps,
                 "total_num_frames": video_num_frames,
                 "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
@@ -1526,13 +1595,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
-                position = feature.mm_position
-                offset, length = position.offset, position.length
-                is_embed = position.is_embed
-                if is_embed is None:
-                    is_embed = slice(None)
                 mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
-                mm_token_type_ids[offset : offset + length][is_embed] = mm_token_type_id
+                for start, end in feature.mm_position.extract_embeds_range():
+                    mm_token_type_ids[start : end + 1] = mm_token_type_id
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
