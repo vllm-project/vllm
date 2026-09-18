@@ -5,11 +5,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -126,7 +126,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             kv_in_stride=input_stride,
             kv_out_stride=(input_stride, kv_size),
             eps=float(hf_config.rms_norm_eps),
-            launch_pdl=(False, True),
+            launch_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:

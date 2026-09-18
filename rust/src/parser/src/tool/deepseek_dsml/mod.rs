@@ -14,14 +14,11 @@ use crate::tool::Tool;
 
 mod deepseek_v32;
 mod deepseek_v4;
+mod deepseek_v41;
 
 pub use deepseek_v4::DeepSeekV4ToolParser;
 pub use deepseek_v32::DeepSeekV32ToolParser;
-
-const INVOKE_START: &str = "<｜DSML｜invoke";
-const INVOKE_END: &str = "</｜DSML｜invoke>";
-const PARAMETER_START: &str = "<｜DSML｜parameter";
-const PARAMETER_END: &str = "</｜DSML｜parameter>";
+pub use deepseek_v41::DeepSeekV41ToolParser;
 
 type DsmlInput<'i> = Partial<&'i str>;
 
@@ -30,6 +27,10 @@ struct DsmlTokens {
     tool_calls_start: &'static str,
     framed_tool_calls_start: &'static str,
     tool_calls_end: &'static str,
+    invoke_start: &'static str,
+    invoke_end: &'static str,
+    parameter_start: &'static str,
+    parameter_end: &'static str,
 }
 
 impl DsmlTokens {
@@ -37,11 +38,25 @@ impl DsmlTokens {
         tool_calls_start: "<｜DSML｜function_calls>",
         framed_tool_calls_start: "\n\n<｜DSML｜function_calls>",
         tool_calls_end: "</｜DSML｜function_calls>",
+        invoke_start: "<｜DSML｜invoke",
+        invoke_end: "</｜DSML｜invoke>",
+        parameter_start: "<｜DSML｜parameter",
+        parameter_end: "</｜DSML｜parameter>",
     };
     const V4: Self = Self {
         tool_calls_start: "<｜DSML｜tool_calls>",
         framed_tool_calls_start: "\n\n<｜DSML｜tool_calls>",
         tool_calls_end: "</｜DSML｜tool_calls>",
+        ..Self::V32
+    };
+    const V41: Self = Self {
+        tool_calls_start: "<｜DSML｜ calls>",
+        framed_tool_calls_start: "\n\n<｜DSML｜ calls>",
+        tool_calls_end: "</｜DSML｜ calls>",
+        invoke_start: "<｜DSML｜ invoke",
+        invoke_end: "</｜DSML｜ invoke>",
+        parameter_start: "<｜DSML｜ parameter",
+        parameter_end: "</｜DSML｜ parameter>",
     };
 }
 
@@ -205,7 +220,7 @@ fn parse_tool_block_event(
 ) -> ModalResult<DsmlEvent> {
     ws0.void().parse_next(input)?;
     alt((
-        |input: &mut DsmlInput<'_>| invoke_event(input, invoke_end_scan),
+        |input: &mut DsmlInput<'_>| invoke_event(input, tokens, invoke_end_scan),
         |input: &mut DsmlInput<'_>| tool_calls_end_event(input, tokens),
     ))
     .parse_next(input)
@@ -243,19 +258,20 @@ fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult
 /// Parse a DSML invoke block.
 fn invoke_event(
     input: &mut DsmlInput<'_>,
+    tokens: DsmlTokens,
     invoke_end_scan: &mut MarkerScanState,
 ) -> ModalResult<DsmlEvent> {
     let (name, body) = seq!(
-        _: literal(INVOKE_START),
+        _: literal(tokens.invoke_start),
         _: ws1,
         dsml_name_attr,
         _: ws0,
         _: ">",
-        take_until_marker(INVOKE_END, invoke_end_scan),
-        _: literal(INVOKE_END),
+        take_until_marker(tokens.invoke_end, invoke_end_scan),
+        _: literal(tokens.invoke_end),
     )
     .parse_next(input)?;
-    let raw_params = parse_invoke_params(body)?;
+    let raw_params = parse_invoke_params(body, tokens)?;
     Ok(DsmlEvent::Invoke {
         name: name.to_string(),
         raw_params,
@@ -263,23 +279,31 @@ fn invoke_event(
 }
 
 /// Parse a DSML invoke body.
-fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<DsmlParameter>> {
+fn parse_invoke_params(invoke_body: &str, tokens: DsmlTokens) -> ModalResult<Vec<DsmlParameter>> {
     let mut input = invoke_body;
-    delimited(ws0, repeat(0.., terminated(parse_parameter, ws0)), eof).parse_next(&mut input)
+    delimited(
+        ws0,
+        repeat(
+            0..,
+            terminated(|input: &mut &str| parse_parameter(input, tokens), ws0),
+        ),
+        eof,
+    )
+    .parse_next(&mut input)
 }
 
 /// Parse a DSML parameter block.
-fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
+fn parse_parameter(input: &mut &str, tokens: DsmlTokens) -> ModalResult<DsmlParameter> {
     seq! {DsmlParameter {
-        _: literal(PARAMETER_START),
+        _: literal(tokens.parameter_start),
         _: ws1,
         name: name_attr.map(|name: &str| name.to_string()),
         _: ws1,
         is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
-        value: take_until(0.., PARAMETER_END).map(str::to_string),
-        _: literal(PARAMETER_END),
+        value: take_until(0.., tokens.parameter_end).map(str::to_string),
+        _: literal(tokens.parameter_end),
     }}
     .parse_next(input)
 }

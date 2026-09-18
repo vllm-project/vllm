@@ -268,14 +268,14 @@ mod tests {
         assert!(matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "float32" && tensor.shape.first() == Some(&128)
+                if tensor.dtype.as_str() == "float32" && tensor.shape.first() == Some(&128)
         ));
         let lengths = &item.data["audio_feature_lengths"];
         assert!(matches!(&lengths.field, MmField::Batched(_)));
         assert!(matches!(
             lengths.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "int64" && tensor.shape.is_empty()
+                if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
     }
 
@@ -314,14 +314,14 @@ mod tests {
         assert!(matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "float32" && tensor.shape.get(1) == Some(&80)
+                if tensor.dtype.as_str() == "float32" && tensor.shape.get(1) == Some(&80)
         ));
         let count = &item.data["num_audio_tokens"];
         assert!(matches!(&count.field, MmField::Batched(_)));
         assert!(matches!(
             count.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
-                if tensor.dtype == "int64" && tensor.shape.is_empty()
+                if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
         ));
     }
 }

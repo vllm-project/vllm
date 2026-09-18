@@ -137,8 +137,8 @@ class GLUFuser(MergedColumnParallelFuser):
         """Replace `act(gate(x)) * up(x)` with `act(gate_up(x))` in source."""
         funcdef, fn = recover_forward(type(module))
         act_call = single_self_call(funcdef, self.act_name)
-        gate_call = single_self_call(funcdef, self.gate_name)
-        up_call = single_self_call(funcdef, self.up_name)
+        calls = self._unguarded_calls(funcdef, (self.gate_name, self.up_name))
+        gate_call, up_call = calls
         if act_call.args[0] is not gate_call:
             raise ValueError("activation does not directly wrap the gate")
         if ast.dump(gate_call.args[0]) != ast.dump(up_call.args[0]):

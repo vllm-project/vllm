@@ -5,21 +5,28 @@ import importlib.util
 import os
 
 
-def _get_torch_cuda_version():
-    """Peripheral function to _maybe_set_cuda_compatibility_path().
+def _get_torch_root():
+    """Locate the installed torch package without importing it."""
+    spec = importlib.util.find_spec("torch")
+    if not spec:
+        return None
+    if spec.origin:
+        return os.path.dirname(spec.origin)
+    if spec.submodule_search_locations:
+        return spec.submodule_search_locations[0]
+    return None
+
+
+def _get_torch_version_attr(attr):
+    """Read an attribute of torch.version without importing torch.
+
     PyTorch version must not be determined by importing directly
     because it will trigger the CUDA initialization, losing the
     chance to set the LD_LIBRARY_PATH beforehand.
     """
     try:
-        spec = importlib.util.find_spec("torch")
-        if not spec:
-            return None
-        if spec.origin:
-            torch_root = os.path.dirname(spec.origin)
-        elif spec.submodule_search_locations:
-            torch_root = spec.submodule_search_locations[0]
-        else:
+        torch_root = _get_torch_root()
+        if not torch_root:
             return None
         version_path = os.path.join(torch_root, "version.py")
         if not os.path.exists(version_path):
@@ -31,9 +38,14 @@ def _get_torch_cuda_version():
         module = importlib.util.module_from_spec(ver_spec)
         # Avoid registering in sys.modules to not confuse future imports
         ver_spec.loader.exec_module(module)
-        return getattr(module, "cuda", None)
+        return getattr(module, attr, None)
     except Exception:
         return None
+
+
+def _get_torch_cuda_version():
+    """Peripheral function to _maybe_set_cuda_compatibility_path()."""
+    return _get_torch_version_attr("cuda")
 
 
 def _maybe_set_cuda_compatibility_path():
@@ -82,7 +94,58 @@ def _maybe_set_cuda_compatibility_path():
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
 
 
+def _maybe_promote_torch_symbols_for_rocm():
+    """Put libtorch_cpu.so in the global symbol scope on ROCm, for GPU profiling.
+
+    Must run before 'import torch'. libkineto advertises itself to
+    rocprofiler-sdk by exporting rocprofiler_configure from libtorch_cpu.so,
+    and rocprofiler-sdk looks for that symbol exactly once, from a lazy
+    initializer that runs *during* 'import torch'. CPython loads extension
+    modules RTLD_LOCAL, so unless something has already placed the symbol in
+    the global scope the lookup misses and no client is ever registered.
+
+    The failure is silent and total: no queue interception, so roctracer
+    yields no GPU records, while torch.profiler still writes a complete
+    CPU-only trace and reports success.
+
+    Best effort. If the library cannot be loaded early we leave the process
+    exactly as it would have been, losing only GPU tracing.
+    """
+    if _get_torch_version_attr("hip") is None:
+        return
+    try:
+        import ctypes
+        import glob
+
+        torch_root = _get_torch_root()
+        if not torch_root:
+            return
+        lib = os.path.join(torch_root, "lib", "libtorch_cpu.so")
+        if not os.path.exists(lib):
+            return
+        try:
+            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            # Some ROCm wheel layouts leave a stale RUNPATH in libtorch_cpu.so,
+            # so a dependency that resolves once torch has set things up does
+            # not resolve for a standalone load. Satisfy it by search, then
+            # retry; give up quietly if it is not where we expect.
+            site_root = os.path.dirname(torch_root)
+            deps = glob.glob(
+                os.path.join(
+                    site_root, "_rocm_sdk_*", "lib", "*", "lib", "librocm-openblas.so.*"
+                )
+            )
+            if not deps:
+                return
+            ctypes.CDLL(deps[0], mode=ctypes.RTLD_LOCAL)
+            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+    except Exception:
+        return
+
+
 _maybe_set_cuda_compatibility_path()
+_maybe_promote_torch_symbols_for_rocm()
 
 import torch
 
@@ -198,8 +261,7 @@ def memory_plan_reuse_patched(self):
 def get_graph_partition_signature_patched(
     self, partitions, skip_cudagraphs: list[bool]
 ):
-    """
-    Gets signature for each graph partition, including input nodes, output nodes, and
+    """Gets signature for each graph partition, including input nodes, output nodes, and
     whether deallocating an input within graph partition.
     """
     from torch._inductor import dependencies
@@ -213,8 +275,7 @@ def get_graph_partition_signature_patched(
     name_to_node = self.get_name_to_nodes()
 
     def is_none_layout(buf_name: str) -> bool:
-        """
-        Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
+        """Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
         so graph partition should not take it as inputs or outputs.
         """
         buf = self.name_to_buf.get(buf_name, None)
@@ -362,8 +423,7 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # torch._inductor.scheduler.Scheduler.should_partition that modifies
     # the following piece of code so that we always return True:
     # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/_inductor/scheduler.py#L4712-L4724
-    """Return True if we should partition the inductor graph on this node"""
-
+    """Return True if we should partition the inductor graph on this node."""
     import torch._inductor.ir as ir
     from torch._inductor.scheduler import (
         BaseSchedulerNode,
@@ -444,8 +504,7 @@ def _update_scheduler_patched(self) -> None:
     # Copied from torch._inductor.graph.GrahLowering._update_scheduler. Patches
     # this method so that we can patch Scheduler.should_partition with the
     # function above
-    """
-    (Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
+    """(Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
     files should be generated (to avoid biasing any benchmarks and pessimizing
     fusion decisions).
     """

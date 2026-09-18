@@ -160,7 +160,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            positions=positions, x=hidden_states, input_ids=input_ids
         )
         if self.mtp_block.use_fused_mhc:
             hidden_states = self.mtp_block.hc_post(
@@ -496,8 +496,7 @@ class DeepSeekV4MTP(nn.Module):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """
