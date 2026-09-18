@@ -772,16 +772,50 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _batch_invariant_linear_shapes(self) -> set[tuple[int, int]]:
+        """Per-rank (N, K) of the dense linear layers that run through the
+        batch-invariant matmul: qkv_proj, o_proj, gate_up_proj, down_proj and
+        the (vocab-parallel) lm_head.
+        """
+        model_config = self.model_config
+        parallel_config = self.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        hidden_size = model_config.get_hidden_size()
+        head_size = model_config.get_head_size()
+        num_heads = model_config.get_num_attention_heads(parallel_config)
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        shapes = {
+            ((num_heads + 2 * num_kv_heads) * head_size, hidden_size),
+            (hidden_size, num_heads * head_size),
+            (model_config.get_vocab_size() // tp_size, hidden_size),
+        }
+        intermediate_size = getattr(
+            model_config.hf_text_config, "intermediate_size", None
+        )
+        if intermediate_size:
+            shapes.add((2 * intermediate_size // tp_size, hidden_size))
+            shapes.add((hidden_size, intermediate_size // tp_size))
+        return shapes
+
     def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
         """Batch-invariant mode picks its tuned matmul tile configs from the
         runtime M. Under torch.compile that lookup is traced once with the
         compile-time M and frozen (vllm-project/vllm#54243); without
         torch.compile it runs at CUDA graph capture time with the real M.
-        Only worth it on CUDA devices that actually have a tuned table."""
+        Only worth it on CUDA devices that actually have a tuned table.
+        Enable only when this model's bf16, unquantized linear layers have
+        entries in that table, since _get_matmul_config falls back to the
+        default config otherwise.
+        """
         if not envs.VLLM_BATCH_INVARIANT:
             return False
         model_config = self.model_config
         if model_config is None or model_config.enforce_eager:
+            return False
+        if (
+            model_config.dtype != torch.bfloat16
+            or model_config.quantization is not None
+        ):
             return False
         from vllm.platforms import current_platform
 
@@ -791,7 +825,7 @@ class VllmConfig:
             has_tuned_matmul_configs,
         )
 
-        return has_tuned_matmul_configs()
+        return has_tuned_matmul_configs(self._batch_invariant_linear_shapes())
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ:
@@ -1729,7 +1763,16 @@ class VllmConfig:
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
-            if self.parallel_config.tensor_parallel_size == 1:
+            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                logger.warning_once(
+                    "Sequence parallelism and async TP are torch.compile passes "
+                    "and require compilation mode VLLM_COMPILE (got %s); "
+                    "disabling them.",
+                    self.compilation_config.mode.name,
+                )
+                pass_config.enable_sp = False
+                pass_config.fuse_gemm_comms = False
+            elif self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
                 pass_config.fuse_gemm_comms = False

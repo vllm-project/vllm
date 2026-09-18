@@ -23,10 +23,15 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.parametrize(
-    ("capability", "expected"),
-    [(DeviceCapability(9, 0), True), (DeviceCapability(8, 0), False)],
+    ("capability", "shapes", "expected"),
+    [
+        (DeviceCapability(9, 0), None, True),
+        (DeviceCapability(8, 0), None, False),
+        (DeviceCapability(9, 0), [(12288, 2048)], True),
+        (DeviceCapability(9, 0), [(1, 1)], False),
+    ],
 )
-def test_has_tuned_matmul_configs(monkeypatch, capability, expected):
+def test_has_tuned_matmul_configs(monkeypatch, capability, shapes, expected):
     monkeypatch.setattr(
         batch_invariant_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", False
     )
@@ -36,7 +41,7 @@ def test_has_tuned_matmul_configs(monkeypatch, capability, expected):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "get_device_capability", lambda: capability)
 
-    assert batch_invariant_configs.has_tuned_matmul_configs() is expected
+    assert batch_invariant_configs.has_tuned_matmul_configs(shapes) is expected
 
 
 @skip_unsupported
