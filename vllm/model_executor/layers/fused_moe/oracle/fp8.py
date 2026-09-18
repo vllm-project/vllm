@@ -640,7 +640,6 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
-
     if fp8_backend == Fp8MoeBackend.CPU_W8A8:
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
