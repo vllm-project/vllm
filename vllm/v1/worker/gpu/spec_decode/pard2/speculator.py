@@ -274,9 +274,13 @@ class Pard2Speculator(DraftModelSpeculator):
         # Mark each request's first row; -1 would wrap to the previous request.
         src.scatter_(0, query_start_loc.to(torch.int64), -1)
         is_span_start = src < 0
+        src.clamp_(min=0)
 
-        self.hidden_states[:num_tokens].copy_(
-            target_hidden_states[:num_tokens].index_select(0, src.clamp(min=0))
+        torch.index_select(
+            target_hidden_states[:num_tokens],
+            0,
+            src,
+            out=self.hidden_states[:num_tokens],
         )
 
         # A span starting at position 0 is a prefill: feat[-1] = 0.
@@ -419,11 +423,9 @@ class Pard2Speculator(DraftModelSpeculator):
 
         # Repeat-last-feat: no new real features exist past the context, so all K
         # rows reuse the last accepted one.
-        self.hidden_states[:num_query_tokens].copy_(
-            target_hidden_states.index_select(0, last_accepted_rows).repeat_interleave(
-                self.num_query_per_req, dim=0
-            )
-        )
+        self.hidden_states[:num_query_tokens].view(
+            num_reqs, self.num_query_per_req, -1
+        ).copy_(target_hidden_states.index_select(0, last_accepted_rows).unsqueeze(1))
 
         if dummy_run and skip_attn_for_dummy_run:
             self._prepare_eplb_forward(num_query_tokens)
