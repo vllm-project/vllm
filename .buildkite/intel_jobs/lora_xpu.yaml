@@ -54,6 +54,7 @@ steps:
   - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
   - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
@@ -70,4 +71,5 @@ steps:
     test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py -k "not test_olmoe_lora_tp2 and not test_olmoe_lora_tp4" --deselect="tests/lora/test_olmoe_tp.py::test_olmoe_lora" || true &&
     test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py || true &&
     test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true &&
-    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp2" --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp4" || true'
+    test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp2" --deselect="tests/lora/test_gemma4_tp.py::test_gemma4_lora_tp4" || true &&
+    test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp || true'
