@@ -288,6 +288,9 @@ def test_truncated_cot_does_not_parse_contemplated_call(tokenizer):
     assert tools == []
     assert content == ""
     assert "Maybe I should call" in reasoning
+    # Quoted ATEM stays reasoning text; channel framing must never leak.
+    for marker in ("<|start|>", "<|message|>", "<|eom|>", "<|eot|>"):
+        assert marker not in reasoning
 
 
 def test_reasoning_can_be_suppressed(tokenizer):
@@ -396,8 +399,10 @@ def test_framed_answer_closes_open_reasoning(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,
         [
-            " to=self<|message|>think"
-            "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
+            (
+                " to=self<|message|>think"
+                "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
+            )
         ],
     )
     assert reasoning == "think"
@@ -520,15 +525,6 @@ def test_mixed_hermes_tool_parser_rejected(tokenizer):
         )(tokenizer)
 
 
-def test_nonstreaming_mixed_hermes_tool_parser_rejected(tokenizer):
-    with pytest.raises(VLLMValidationError, match="tool-call-parser"):
-        ParserManager.get_parser(
-            reasoning_parser_name="muse_glimmer",
-            tool_parser_name="hermes",
-            enable_auto_tools=True,
-        )(tokenizer)
-
-
 def test_closed_body_preserves_quoted_start_marker(tokenizer):
     reasoning, content, tools = drive_tokenwise(
         tokenizer,
@@ -544,8 +540,10 @@ def test_reasoning_only_keeps_straddled_answer_tail(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,
         [
-            " to=self<|message|>think<|eom|>"
-            "<|start|>assistant to=user<|message|>answer before ",
+            (
+                " to=self<|message|>think<|eom|>"
+                "<|start|>assistant to=user<|message|>answer before "
+            ),
             "tool<|eom|><|start|>assistant to=weather.get<|message|>"
             + TOOL_XML
             + "<|eot|>",
@@ -556,6 +554,104 @@ def test_reasoning_only_keeps_straddled_answer_tail(tokenizer):
     assert content == "answer before tool"
     assert tools == []
     assert_no_framing(content)
+
+
+def test_closed_body_preserves_literal_partial_header(tokenizer):
+    # A literal `<|start|>assistant` (no <|message|>) inside a CLOSED body is
+    # user text, not a partial header: kept, and the body stays closed.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer, " to=user<|message|>note <|start|>assistant<|eom|>"
+    )
+    assert reasoning == ""
+    assert content == "note <|start|>assistant"
+    assert tools == []
+
+
+def test_word_glued_bare_tool_header_stays_text(tokenizer):
+    # A `to=` glued to a word is not a channel boundary (bare switches
+    # require whitespace anchoring AND immediate ATEM markup).
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer,
+        " to=self<|message|>think xto=calc<|message|>" + EMPTY_TOOL_XML + "<|eot|>",
+    )
+    assert tools == []
+    assert "xto=calc" in reasoning
+
+
+def test_bare_tool_header_with_whitespace_before_atem_stays_reasoning(tokenizer):
+    # The defect switch requires ATEM *immediately* after the header.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer,
+        (
+            " to=self<|message|>think then to=calc<|message|>\n"
+            + EMPTY_TOOL_XML
+            + "<|eot|>"
+        ),
+    )
+    assert tools == []
+    assert "to=calc" in reasoning
+
+
+def test_finish_drops_complete_bare_header(tokenizer):
+    # A trailing COMPLETE bare header (a channel that never got a body) is
+    # framing and drops; partial fragments (` to`) still flush as text.
+    reasoning, content, tools = drive(
+        tokenizer,
+        [" to=self<|message|>thinking to=calc<|message|>"],
+        with_tool_parser=False,
+    )
+    assert reasoning == "thinking "
+    assert content == ""
+    assert tools == []
+
+
+def test_untagged_prefill_continuation_streams_content(tokenizer):
+    prompt = PROMPT + "<|message|>"
+    reasoning, content, tools = drive(
+        tokenizer, ['{"value":"x"}<|eot|>'], prompt=prompt, with_tool_parser=False
+    )
+    assert reasoning == ""
+    assert content == '{"value":"x"}'
+    assert tools == []
+
+
+def test_tool_only_prefill_continuation_streams_content(tokenizer):
+    # Tool-only config (no reasoning parser): the composite must seed from the
+    # prompt's open channel itself, or the continued body is silently dropped.
+    parser = ParserManager.get_parser(
+        tool_parser_name="muse_glimmer", enable_auto_tools=True
+    )(tokenizer)
+    prompt_ids = encode(tokenizer, PROMPT + " to=user<|message|>")
+    request = SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True)
+    text = '{"value":"x"}<|eot|>'
+    ids = encode(tokenizer, text)
+    chunks = [tokenizer.decode([token_id]) for token_id in ids]
+    content = ""
+    for index, chunk in enumerate(chunks):
+        message = parser.parse_delta(
+            chunk,
+            encode(tokenizer, chunk),
+            request,
+            prompt_token_ids=prompt_ids if index == 0 else None,
+            finished=index == len(chunks) - 1,
+        )
+        if message is not None and message.content:
+            content += message.content
+    assert content == '{"value":"x"}'
+
+
+def test_tool_only_nonstreaming_strips_channel_framing(tokenizer):
+    # Tool-only config, non-streaming: no reasoner runs, so the composite must
+    # strip the channel framing itself.
+    parser = ParserManager.get_parser(
+        tool_parser_name="muse_glimmer", enable_auto_tools=True
+    )(tokenizer)
+    request = SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True)
+    _reasoning, content, tools = parser.parse(
+        " to=user<|message|>The answer is 42.<|eot|>", request, enable_auto_tools=True
+    )
+    assert content == "The answer is 42."
+    assert not tools
 
 
 def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
@@ -651,8 +747,10 @@ def test_framed_header_without_space_still_bounds_a_body(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,
         [
-            " to=self<|message|>think"
-            "<|start|>assistant<|message|>The answer is 42.<|eot|>"
+            (
+                " to=self<|message|>think"
+                "<|start|>assistant<|message|>The answer is 42.<|eot|>"
+            )
         ],
     )
     assert reasoning == "think"

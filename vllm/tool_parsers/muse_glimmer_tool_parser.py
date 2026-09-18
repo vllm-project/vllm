@@ -61,16 +61,17 @@ from vllm.reasoning.muse_glimmer_utils import (
     MSG_HEADER_RE as _MSG_HEADER_RE,
 )
 from vllm.reasoning.muse_glimmer_utils import (
-    TRAILING_MSG_END_RE as _TRAILING_MSG_END_RE,
+    REASONING_RECIPIENT as _REASONING_RECIPIENT,
 )
 from vllm.reasoning.muse_glimmer_utils import (
-    REASONING_RECIPIENT as _REASONING_RECIPIENT,
+    TRAILING_MSG_END_RE as _TRAILING_MSG_END_RE,
 )
 from vllm.reasoning.muse_glimmer_utils import (
     USER_RECIPIENT as _USER_RECIPIENT,
 )
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
+    flush_open_body,
     iter_messages,
     safe_open_body,
     visible_channels,
@@ -258,7 +259,11 @@ class MuseGlimmerToolParser(ToolParser):
     @classmethod
     def _extract_content(cls, text: str) -> str | None:
         """Return the user-facing body, or the raw text when unframed."""
-        content, reasoning, _c_open, _r_open = visible_channels(text)
+        content, reasoning, content_open, _r_open = visible_channels(text)
+        # An open (truncated) body flushes minus trailing partial framing,
+        # matching the streaming path.
+        if content_open:
+            content = flush_open_body(content)
         if content:
             return content
         # No framing at all -> the whole thing is plain content. Strip a

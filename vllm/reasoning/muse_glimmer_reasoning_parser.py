@@ -67,8 +67,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         return []
 
     def _seeded_text(self, text: str) -> str:
+        # Mirrors `_channel_seed` in vllm/parser/muse_glimmer.py (kept separate
+        # to avoid a circular import): "" is an open untagged channel.
         if self._initial_recipient is None:
             return text
+        if self._initial_recipient == "":
+            return f"<|message|>{text}"
         return f"to={self._initial_recipient}<|message|>{text}"
 
     def get_streaming_fallback_content(
@@ -105,9 +109,13 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """Extract reasoning while preserving framed text for channel consumers."""
-        _content, reasoning, _content_open, _reasoning_open = visible_channels(
+        _content, reasoning, _content_open, reasoning_open = visible_channels(
             model_output
         )
+        # An open (truncated) reasoning body flushes minus trailing partial
+        # framing, matching the streaming path.
+        if reasoning_open:
+            reasoning = flush_open_body(reasoning)
         return reasoning or None, model_output or None
 
     def extract_reasoning_streaming(

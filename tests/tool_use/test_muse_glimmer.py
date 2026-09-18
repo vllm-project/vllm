@@ -230,11 +230,13 @@ RAW_TRUNCATED = (
 def test_truncated_cot_no_toolcall_nonstreaming():
     out = MuseGlimmerToolParser.extract_tool_calls(T, RAW_TRUNCATED, _FakeReq())
     assert not out.tools_called and out.tool_calls == []
+    assert out.content is None
     # partial reasoning must still be recovered by the reasoning parser
     reasoning, _ = MuseGlimmerReasoningParser.extract_reasoning(
         R, RAW_TRUNCATED, _FakeReq()
     )
     assert reasoning and "Maybe I should call" in reasoning, repr(reasoning)
+    assert "<|" not in reasoning
 
 
 # ------------------------------------------------------- name normalization
@@ -310,7 +312,6 @@ def test_unframed_fallback_strips_trailing_end_marker():
     # The unframed fallback mirrors the streaming path, which never surfaces
     # the channel terminator.
     assert (
-        MuseGlimmerToolParser._extract_content("plain answer<|eot|>")
-        == "plain answer"
+        MuseGlimmerToolParser._extract_content("plain answer<|eot|>") == "plain answer"
     )
     assert MuseGlimmerToolParser._extract_content("plain answer") == "plain answer"

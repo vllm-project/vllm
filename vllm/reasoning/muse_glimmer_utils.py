@@ -34,9 +34,13 @@ FRAMED_HEADER_PATTERN = (
     r"<\|start\|>\s*assistant[^\S\n]*"
     r"(?:to=[A-Za-z0-9_.\-]+)?<\|message\|>"
 )
+# The bare-header defect switch is anchored like the Rust parser: the header
+# must start at a word boundary (whitespace or body start -- a match at
+# body_start is preceded by the previous header's ``>`` and is rejected), and
+# the ATEM markup must follow immediately, with no gap.
 BARE_HEADER_WITH_ATEM_PATTERN = (
-    r"to=(?!(?:self|user)<\|message\|>)[A-Za-z0-9_.\-]+<\|message\|>"
-    r"(?=\s*<atem:(?:function_calls>|invoke(?:\s|>)))"
+    r"(?<!\S)to=(?!(?:self|user)<\|message\|>)[A-Za-z0-9_.\-]+<\|message\|>"
+    r"(?=<atem:(?:function_calls>|invoke(?:\s|>)))"
 )
 BODY_BOUNDARY_PATTERN = rf"(?:{FRAMED_HEADER_PATTERN}|{BARE_HEADER_WITH_ATEM_PATTERN})"
 BODY_BOUNDARY_RE = re.compile(BODY_BOUNDARY_PATTERN)
@@ -44,14 +48,30 @@ BODY_BOUNDARY_RE = re.compile(BODY_BOUNDARY_PATTERN)
 _STRUCTURAL_MARKERS = (EOM, EOT, "<|start|>", "<|message|>")
 _MAX_MARKER_LEN = max(len(marker) for marker in _STRUCTURAL_MARKERS)
 _OPEN_TAIL_HEADER_RE = re.compile(r"[^\S\n]+(?:t|to|to=[A-Za-z0-9_.\-]*)$")
+# A complete bare header at the very end of a finished body: its body never
+# arrived, so it is framing, not text. Anchored like the boundary pattern
+# (body start or right after whitespace); the preceding whitespace is
+# stripped with it, mirroring the mid-stream holdback.
+_TRAILING_BARE_HEADER_RE = re.compile(
+    r"[^\S\n]*(?<!\S)to=[A-Za-z0-9_.\-]+<\|message\|>$"
+)
 
 
 def current_assistant_turn(text: str) -> str:
-    """Return the text following the latest framed assistant marker."""
+    """Return the text following the latest framed assistant marker.
+
+    Only an occurrence that opens a real header counts -- or one that ends the
+    text, as in the generation prompt's trailing turn opener. A quoted or
+    partial ``<|start|>assistant`` inside a body is text, not a turn boundary.
+    """
     index = text.rfind(ASSISTANT_TURN_OPEN)
-    if index == -1:
-        return text
-    return text[index + len(ASSISTANT_TURN_OPEN) :]
+    while index != -1:
+        if MSG_HEADER_RE.match(text, index) is not None or index + len(
+            ASSISTANT_TURN_OPEN
+        ) == len(text):
+            return text[index + len(ASSISTANT_TURN_OPEN) :]
+        index = text.rfind(ASSISTANT_TURN_OPEN, 0, index)
+    return text
 
 
 def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
@@ -68,11 +88,16 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
 
         body_start = header.end()
         end = MSG_END_RE.search(text, body_start)
-        boundary = BODY_BOUNDARY_RE.search(text, body_start)
         body_end = end.start() if end is not None else len(text)
         closed = end is not None
 
-        if boundary is not None and boundary.start() < body_end:
+        # A boundary only matters when it starts before the end marker, so
+        # stop the search there: scanning the rest of the text is wasted work
+        # (quadratic on boundary-less message floods). The bare header's ATEM
+        # lookahead never spans an end marker, so nothing is clipped.
+        boundary = BODY_BOUNDARY_RE.search(text, body_start, body_end)
+
+        if boundary is not None:
             body_end = boundary.start()
             closed = False
             next_pos = boundary.start()
@@ -80,19 +105,20 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
             next_pos = end.end() if end is not None else len(text)
 
         body = text[body_start:body_end]
-        # Hold back only a trailing prefix of a framed header. A literal
-        # <|start|> inside a closed body is user text and must be preserved.
-        start_token = body.find("<|start|>")
-        while start_token != -1:
-            candidate = body[start_token:]
-            partial_header = re.fullmatch(
-                FRAMED_HEADER_PATTERN, candidate, partial=True
-            )
-            if partial_header is not None and partial_header.partial:
-                body = body[:start_token]
-                closed = False
-                break
-            start_token = body.find("<|start|>", start_token + 1)
+        # Hold back only a trailing prefix of a framed header, and only while
+        # the body can still grow: a literal <|start|> inside a closed body is
+        # user text and must be preserved.
+        if not closed:
+            start_token = body.find("<|start|>")
+            while start_token != -1:
+                candidate = body[start_token:]
+                partial_header = re.fullmatch(
+                    FRAMED_HEADER_PATTERN, candidate, partial=True
+                )
+                if partial_header is not None and partial_header.partial:
+                    body = body[:start_token]
+                    break
+                start_token = body.find("<|start|>", start_token + 1)
 
         yield header.group("recipient"), body, closed
         pos = next_pos
@@ -139,14 +165,22 @@ def safe_open_body(body: str) -> str:
 
 
 def flush_open_body(body: str) -> str:
-    """Trim only a trailing partial structural marker from a finished body.
+    """Trim trailing framing from a finished body.
 
     At end-of-stream nothing more arrives: a held-back ` to=…` fragment is
     real text and must flush, while a trailing partial marker (cut by the
-    token limit) is framing and stays dropped.
+    token limit) is framing and stays dropped. A trailing COMPLETE bare header
+    (``to=…<|message|>`` with nothing after it) is framing too -- its body
+    never arrived -- so it is stripped as well. The partial marker goes first:
+    a complete header ends with ``<|message|>``, so none can follow one.
     """
     partial = _trailing_partial_marker_len(body)
-    return body[: len(body) - partial] if partial else body
+    if partial:
+        body = body[: len(body) - partial]
+    header = _TRAILING_BARE_HEADER_RE.search(body)
+    if header is not None:
+        body = body[: header.start()]
+    return body
 
 
 def visible_channels(
@@ -213,9 +247,18 @@ def advance_emitted(emitted: str, current: str) -> tuple[str, str]:
 
 
 def open_recipient(text: str) -> str | None:
-    """Return the recipient of the last open message, if one exists."""
+    """Return the recipient of the last open message, if one exists.
+
+    An open UNTAGGED channel (a bare ``<|message|>`` header) yields ``""``
+    rather than None: the channel exists and is answer-side, it just carries
+    no recipient name. None still means no open channel. A prompt that ends
+    mid-header (a recipient with no ``<|message|>`` yet) is deliberately not
+    reported -- the channel has not opened (documented limitation, exotic).
+    """
     recipient: str | None = None
     is_open = False
     for recipient, _body, closed in iter_messages(text):
         is_open = not closed
-    return recipient if is_open else None
+    if not is_open:
+        return None
+    return recipient if recipient is not None else ""

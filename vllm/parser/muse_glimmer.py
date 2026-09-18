@@ -24,6 +24,15 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
+def _channel_seed(recipient: str | None) -> str | None:
+    """Seed text for a generation continuing the prompt's open channel."""
+    if recipient is None:
+        return None
+    if recipient == "":
+        return "<|message|>"
+    return f"to={recipient}<|message|>"
+
+
 class MuseGlimmerParser(DelegatingParser):
     """Compose MuseGlimmer reasoning, answer, and tool channels."""
 
@@ -95,10 +104,12 @@ class MuseGlimmerParser(DelegatingParser):
                 reasoner = self._reasoning_parser
                 if isinstance(reasoner, MuseGlimmerReasoningParser):
                     reasoner.adjust_initial_state_from_prompt(prompt_token_ids)
-                    if reasoner._initial_recipient is not None:
-                        state.previous_text = (
-                            f"to={reasoner._initial_recipient}<|message|>"
-                        )
+                    recipient = reasoner._initial_recipient
+                else:
+                    recipient = self._prompt_open_recipient(prompt_token_ids)
+                seed = _channel_seed(recipient)
+                if seed is not None:
+                    state.previous_text = seed
             state.reasoning_ended = True
             state.prompt_reasoning_checked = True
         return super().parse_delta(
@@ -108,6 +119,14 @@ class MuseGlimmerParser(DelegatingParser):
             prompt_token_ids=prompt_token_ids,
             finished=finished,
         )
+
+    def _prompt_open_recipient(self, prompt_token_ids: list[int]) -> str | None:
+        """Recipient of the prompt's open channel, without a muse reasoner."""
+        try:
+            text = self.model_tokenizer.decode(prompt_token_ids)
+        except Exception:
+            return None
+        return open_recipient(current_assistant_turn(text))
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """Stream ownership transfers only to the paired ATEM tool parser.
@@ -201,14 +220,18 @@ class MuseGlimmerParser(DelegatingParser):
         tool_calls, out_content = super()._extract_tool_calls(
             content, request, enable_auto_tools
         )
-        # ``extract_reasoning`` returns the raw framed turn as ``content`` so the
-        # tool parser can segment it. When no tool call fires (the model wrote a
-        # ``to=user`` answer), the base path returns that raw input unchanged, so
-        # strip the channel framing before it reaches the client.
+        # When no tool call fires (the model wrote a ``to=user`` answer), the
+        # base path returns its input unchanged. That input is still raw framed
+        # text -- the muse ``extract_reasoning`` deliberately preserves framing
+        # for the tool parser, and with no reasoning parser nothing touched it
+        # at all -- so strip the channel framing before it reaches the client.
         if (
             not tool_calls
             and out_content
-            and isinstance(self._reasoning_parser, MuseGlimmerReasoningParser)
+            and (
+                isinstance(self._reasoning_parser, MuseGlimmerReasoningParser)
+                or isinstance(self._tool_parser, MuseGlimmerToolParser)
+            )
         ):
             out_content = MuseGlimmerToolParser._extract_content(out_content)
         return tool_calls, out_content

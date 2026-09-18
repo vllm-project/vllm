@@ -160,6 +160,7 @@ class ParserManager:
             class _MuseGlimmerParser(MuseGlimmerParser):
                 reasoning_parser_cls = r_cls
                 tool_parser_cls = t_cls
+                tool_strict_level = strict_level
 
             return _MuseGlimmerParser
 
