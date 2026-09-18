@@ -144,6 +144,11 @@ vllm serve openai/gpt-oss-20b \
   --enable-per-request-output-token-metrics
 ```
 
+The selected parser configuration must support token classification. Legacy
+reasoning and tool parsers configured as separate parsers are rejected because
+they cannot reliably distinguish visible content from tool-call tokens. Unified
+parsers, including the Harmony parser used by gpt-oss, can classify both.
+
 This option does not require `--enable-per-request-metrics`; it includes the
 aggregate timing metrics and adds a nested `output_token_metrics` object to
 Responses and Chat Completions responses:

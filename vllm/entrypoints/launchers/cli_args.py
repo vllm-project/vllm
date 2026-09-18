@@ -470,6 +470,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     request_metrics_enabled = getattr(
         args, "enable_per_request_metrics", False
     ) or getattr(args, "enable_per_request_output_token_metrics", False)
+    if getattr(args, "enable_per_request_output_token_metrics", False) and not getattr(
+        args, "reasoning_parser", None
+    ):
+        raise ValueError(
+            "Error: --enable-per-request-output-token-metrics requires "
+            "--reasoning-parser."
+        )
     if request_metrics_enabled and getattr(args, "disable_log_stats", False):
         raise ValueError(
             "Error: per-request metrics require engine statistics logging; "

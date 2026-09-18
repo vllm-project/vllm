@@ -110,6 +110,7 @@ class ConversationContext(ABC):
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
     _output_token_metrics: OutputTokenMetricsTracker | None = None
+    _accumulated_token_ids: list[int]
 
     def record_output_token_metrics(self, output: RequestOutput) -> None:
         if not output.outputs:
@@ -121,8 +122,7 @@ class ConversationContext(ABC):
         if parser is None:
             counts = None
         else:
-            token_ids = getattr(self, "_accumulated_token_ids", [])
-            counts = parser.classify_token_phases(token_ids)
+            counts = parser.classify_token_phases(self._accumulated_token_ids)
             if not isinstance(counts, TokenPhaseCounts):
                 counts = None
         metrics = (
@@ -662,6 +662,7 @@ class HarmonyContext(ConversationContext):
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        self._accumulated_token_ids: list[int] = []
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
@@ -678,6 +679,7 @@ class HarmonyContext(ConversationContext):
             self._update_prefill_token_usage(output)
 
         output_token_ids = output.outputs[0].token_ids
+        self._accumulated_token_ids.extend(output_token_ids)
         result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count

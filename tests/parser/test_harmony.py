@@ -823,6 +823,7 @@ class TestProcessChunk:
         phase_counts = harmony_parser.process_chunk(token_ids)
         harmony_parser.flush()
         assert phase_counts.reasoning_token_count > 0
+        expected_classification = harmony_parser.classify_token_phases(token_ids)
         assert (
             harmony_parser.count_reasoning_tokens(token_ids)
             == phase_counts.reasoning_token_count
@@ -838,6 +839,9 @@ class TestProcessChunk:
         assert (
             harmony_parser.count_reasoning_tokens(token_ids)
             == phase_counts.reasoning_token_count
+        )
+        assert (
+            harmony_parser.classify_token_phases(token_ids) == expected_classification
         )
 
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):

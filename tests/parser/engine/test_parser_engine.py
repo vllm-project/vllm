@@ -992,10 +992,12 @@ def test_delegating_engine_adapter_does_not_provisionally_count_reasoning_as_con
     )
 
 
-def test_streaming_engine_adapter_classifies_content_after_reasoning_transition():
-    parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
+def test_delegating_streaming_engine_classifies_content_after_reasoning_transition():
+    parser = _CombinedReasoningOnlyDelegating(make_mock_tokenizer(_VOCAB))
     reasoning_ids = [ord("a"), ord("b")]
-    parser.extract_reasoning_streaming("", "ab", "ab", [], reasoning_ids, reasoning_ids)
+    parser.reasoning_parser.extract_reasoning_streaming(
+        "", "ab", "ab", [], reasoning_ids, reasoning_ids
+    )
     assert parser.classify_token_phases(reasoning_ids) == TokenPhaseCounts(
         reasoning=2,
         content=0,
@@ -1003,7 +1005,7 @@ def test_streaming_engine_adapter_classifies_content_after_reasoning_transition(
     )
 
     boundary_ids = [201]
-    parser.extract_reasoning_streaming(
+    parser.reasoning_parser.extract_reasoning_streaming(
         "ab",
         "ab</think>",
         "</think>",
