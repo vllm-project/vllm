@@ -54,6 +54,7 @@ class OnlineDerenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
+        tool_strict_level: str = "auto",
         default_chat_template_kwargs: dict[str, Any] | None = None,
         log_error_stack: bool = False,
     ) -> None:
@@ -68,6 +69,7 @@ class OnlineDerenderer:
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
         )
@@ -233,6 +235,7 @@ class OnlineDerenderer:
         Returns:
             (new_text, updated_state) — the delta text for this chunk and the
             state to pass to the next call.
+
         """
         prev_tokens = list(state.prev_tokens)
         prefix_offset = state.prefix_offset
@@ -296,6 +299,7 @@ class OnlineDerenderer:
         Returns:
             (chunk, updated_state) — the derendered SSE chunk and the state
             the client must pass to the next call.
+
         """
         if state is None:
             state = DerenderStreamState()
@@ -461,6 +465,7 @@ class OnlineDerenderer:
 
         Returns:
             (chunk, updated_state) — the derendered chunk and updated state.
+
         """
         if state is None:
             state = DerenderStreamState()
