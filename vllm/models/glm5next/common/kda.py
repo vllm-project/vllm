@@ -222,12 +222,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         _, recurrent_state_shape = self.get_state_shape()
         _, recurrent_state_dtype = self.get_state_dtype()
-        scatter_states.register_warmup(
-            state_shape=recurrent_state_shape,
-            state_dtype=recurrent_state_dtype,
-            indices_dtype=torch.int32,
-            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-        )
+        if not current_platform.is_cpu():
+            scatter_states.register_warmup(
+                state_shape=recurrent_state_shape,
+                state_dtype=recurrent_state_dtype,
+                indices_dtype=torch.int32,
+                max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+            )
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
