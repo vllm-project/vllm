@@ -12,18 +12,17 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
 )
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
-    BatchExecutionDescriptor,
-)
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -33,8 +32,7 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
 
     Unlike Eagle, the draft model runs fully independently of the target model.
     Step 0 builds an expanded buffer (accepted + correction token + rejected
-    slots masked with PAD_SLOT_ID) via a Triton kernel; steps 1..k-1 are
-    single-token decode steps.
+    slots) via a Triton kernel; steps 1..k-1 are single-token decode steps.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -61,20 +59,36 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
         self.expanded_positions = torch.zeros(
             _expanded_max, dtype=torch.int64, device=device
         )
-        self.is_rejected_mask = torch.zeros(
-            _expanded_max, dtype=torch.bool, device=device
-        )
-
+        self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass  # CUDA graph not yet supported for plain draft model speculator.
 
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         pass  # CUDA graph not yet supported for plain draft model speculator.
+
+    def set_attn(
+        self,
+        model_state: ModelState,
+        kv_cache_config: KVCacheConfig,
+        block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
+    ) -> None:
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
+        self.expanded_slot_mappings = torch.empty(
+            block_tables.num_kv_cache_groups,
+            self.max_num_tokens + self.max_num_reqs,
+            dtype=torch.int64,
+            device=self.device,
+        )
 
     def load_draft_model(
         self,
@@ -171,7 +185,6 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 num_rejected=num_rejected,
                 expanded_input_ids=self.expanded_input_ids,
                 expanded_positions=self.expanded_positions,
-                is_rejected_mask=self.is_rejected_mask,
                 last_token_indices=self.last_token_indices,
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.max_model_len,
@@ -182,11 +195,8 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 self.input_buffers.query_start_loc[: num_reqs + 1],
                 self.expanded_positions[:total_expanded],
                 total_expanded,
+                out=self.expanded_slot_mappings,
             )
-            # Mask rejected positions so they do not pollute the KV cache.
-            is_rejected = self.is_rejected_mask[:total_expanded]
-            prefill_slot_mappings[:, is_rejected] = PAD_SLOT_ID
-
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
                 prefill_slot_mappings, kv_cache_config
             )
@@ -299,7 +309,12 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                     step_slot_mappings, kv_cache_config
                 )
                 decode_attn_md = self._build_draft_attn_metadata(
-                    num_reqs, num_reqs, num_reqs
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs,
+                    num_tokens_padded=num_reqs,
+                    seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+                    # Include the correction token inserted during prefill.
+                    step=step + 1,
                 )
             hidden_states = self._run_model(
                 self.input_buffers.input_ids[:num_reqs],
@@ -385,7 +400,6 @@ def _prepare_prefill_inputs_kernel(
     idx_mapping_ptr,  # [num_reqs] int32
     out_input_ids_ptr,  # [src_tokens + num_reqs] int32
     out_positions_ptr,  # [src_tokens + num_reqs] int64
-    out_is_rejected_ptr,  # [src_tokens + num_reqs] bool
     last_token_indices_ptr,  # [max_num_reqs] int64
     out_query_start_loc_ptr,  # [max_num_reqs + 1] int32
     out_seq_lens_ptr,  # [max_num_reqs] int32
@@ -403,7 +417,7 @@ def _prepare_prefill_inputs_kernel(
     Output layout for request i (out_start = query_start_loc[i] + i):
         [out_start,              out_start + num_valid)      accepted tokens
         [out_start + num_valid]                              correction token
-        (out_start + num_valid, out_start + total_out)      rejected (masked)
+        (out_start + num_valid, out_start + total_out)      rejected slots
 
     where num_valid  = query_lens[i] - num_rejected[i]
           total_out  = query_lens[i] + 1
@@ -431,20 +445,15 @@ def _prepare_prefill_inputs_kernel(
 
         is_valid = j < num_valid
         is_correction = j == num_valid
-        is_rejected = (j > num_valid) & in_bounds
-
-        src_idx = tl.minimum(q_start + j, src_tokens - 1)
+        src_idx = q_start + j
         token_ids = tl.load(target_input_ids_ptr + src_idx, mask=is_valid, other=0)
-        positions = tl.load(target_positions_ptr + src_idx, mask=is_valid, other=0)
+        positions = tl.minimum(start_pos + j, max_model_len - 1)
         token_ids = tl.where(is_correction, correction_token, token_ids)
-        positions = tl.where(is_correction, correction_pos, positions)
-        token_ids = tl.where(is_rejected, 0, token_ids)
-        positions = tl.where(is_rejected, 0, positions)
+        positions = tl.where(j == num_valid, correction_pos, positions)
 
         out_idx = out_start + j
         tl.store(out_input_ids_ptr + out_idx, token_ids, mask=in_bounds)
         tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
-        tl.store(out_is_rejected_ptr + out_idx, is_rejected, mask=in_bounds)
 
     tl.store(last_token_indices_ptr + req_idx, out_start + num_valid)
     tl.store(out_query_start_loc_ptr + req_idx, out_start)
@@ -453,8 +462,8 @@ def _prepare_prefill_inputs_kernel(
     #   expanded_query_len = query_len + 1 (adds correction token)
     #   seqlen_k = pre_existing + expanded_query_len = seq_len + 1
     # num_rejected does NOT change seqlen_k — the expanded query always has
-    # query_len+1 slots (rejected ones are masked with PAD_SLOT_ID, so they
-    # don't write KV but still occupy query positions).
+    # query_len+1 slots. Rejected positions write temporary KV entries that
+    # are overwritten with valid tokens in a later round.
     new_seq_len = tl.minimum(seq_len + 1, max_model_len)
     tl.store(out_seq_lens_ptr + req_idx, new_seq_len)
 
@@ -479,7 +488,6 @@ def prepare_prefill_inputs(
     num_rejected: torch.Tensor,  # [num_reqs]     int64
     expanded_input_ids: torch.Tensor,  # [max_tokens + max_reqs] int32
     expanded_positions: torch.Tensor,  # [max_tokens + max_reqs] int64
-    is_rejected_mask: torch.Tensor,  # [max_tokens + max_reqs] bool
     last_token_indices: torch.Tensor,  # [max_num_reqs] int64
     max_num_reqs: int,
     max_model_len: int,
@@ -487,7 +495,7 @@ def prepare_prefill_inputs(
     """Call _prepare_prefill_inputs_kernel and return total_expanded tokens.
 
     Side-effects (kernel writes):
-      - expanded_input_ids, expanded_positions, is_rejected_mask
+      - expanded_input_ids, expanded_positions
       - last_token_indices
       - input_buffers.query_start_loc  (expanded: original[i] + i)
       - input_buffers.seq_lens         (= target_seq_lens - num_rejected + 1)
@@ -506,7 +514,6 @@ def prepare_prefill_inputs(
         input_batch.idx_mapping,
         expanded_input_ids,
         expanded_positions,
-        is_rejected_mask,
         last_token_indices,
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
