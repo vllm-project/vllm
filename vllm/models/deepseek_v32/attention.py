@@ -153,9 +153,9 @@ class DeepseekV32Attention(MLAAttention):
         # DSA checkpoints may use plain ("default") or yarn-scaled RoPE.
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
         if config.rope_parameters["rope_type"] == "deepseek_yarn":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
