@@ -1751,6 +1751,92 @@ def _decode_e8m0_scales_triton(encoded_scales):
 
 
 @triton.jit
+def _load_mxfp4_ds_mla_gfx950_chunk(
+    token_data_ptr,
+    token_scale_ptr,
+    valid,
+    CHUNK_START: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    packed_offsets = CHUNK_START // 2 + tl.arange(0, CHUNK_SIZE // 2)
+    packed = tl.load(
+        token_data_ptr[:, None] + packed_offsets[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scale_offsets = CHUNK_START // 32 + tl.arange(0, CHUNK_SIZE // 32)
+    scales = tl.load(
+        token_scale_ptr[:, None] + scale_offsets[None, :],
+        mask=valid[:, None],
+        other=127,
+    )
+    return packed, scales
+
+
+@triton.jit
+def _dequant_mxfp4_ds_mla_gfx950_chunk(
+    packed,
+    encoded_scales,
+    BLOCK_K: tl.constexpr,
+):
+    scales = _decode_e8m0_scales_triton(encoded_scales)
+    scales = tl.reshape(
+        tl.broadcast_to(scales[:, :, None], (BLOCK_K, 4, 16)),
+        (BLOCK_K, 64),
+    )
+    packed_bf16 = tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_bf16_fp4 $0, $1, $2",
+        constraints="=v,v,v",
+        args=[packed.to(tl.uint32), scales],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    )
+    lo = ((packed_bf16 & 0xFFFF) << 16).to(tl.float32, bitcast=True)
+    hi = ((packed_bf16 >> 16) << 16).to(tl.float32, bitcast=True)
+    return tl.interleave(lo.to(tl.bfloat16), hi.to(tl.bfloat16))
+
+
+@triton.jit
+def _load_nvfp4_ds_mla_gfx950_chunk(
+    token_data_ptr,
+    token_scale_ptr,
+    valid,
+    CHUNK_START: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    packed_offsets = CHUNK_START // 2 + tl.arange(0, CHUNK_SIZE // 2)
+    packed = tl.load(
+        token_data_ptr[:, None] + packed_offsets[None, :],
+        mask=valid[:, None],
+        other=0,
+    ).to(tl.uint32)
+    scale_bits = tl.load(
+        token_scale_ptr[:, None] + (packed_offsets // 8)[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scales = scale_bits.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+    packed_bf16 = tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_bf16_fp4 $0, $1, $2",
+        constraints="=v,v,v",
+        args=[packed, scales],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    )
+    lo_bits = (packed_bf16 & 0xFFFF) << 16
+    hi_bits = (packed_bf16 >> 16) << 16
+    lo = lo_bits.to(tl.float32, bitcast=True).to(tl.bfloat16)
+    hi = hi_bits.to(tl.float32, bitcast=True).to(tl.bfloat16)
+    value = tl.interleave(lo, hi)
+    zero = tl.zeros((BLOCK_K, CHUNK_SIZE), dtype=tl.bfloat16)
+    return tl.where(valid[:, None], value, zero)
+
+
+@triton.jit
 def _load_fp8_ds_mla_gfx950_nope_exact_chunk(
     token_data_ptr,
     token_scale_ptr,
@@ -2303,7 +2389,10 @@ def _sparse_attn_decode_partial_kernel(
 
 @triton.jit
 def _sparse_attn_decode_gfx950_partial_loaded_tile(
-    q_combined,
+    q_nope_0a,
+    q_nope_0b,
+    q_nope_1,
+    q_tail,
     cache_ptr,
     slot,
     valid,
@@ -2319,6 +2408,8 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
     BLOCK_SIZE: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    IS_MXFP4: tl.constexpr,
+    IS_NVFP4: tl.constexpr,
     IS_FNUZ: tl.constexpr,
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
 ):
@@ -2326,43 +2417,148 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
     block_idx = safe_slot // BLOCK_SIZE
     pos_in_block = safe_slot % BLOCK_SIZE
     cache_block_ptr = cache_ptr + block_idx.to(tl.int64) * cache_stride0
-    token_data_ptr = cache_block_ptr + pos_in_block * 576
-    token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
-    k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        0,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        128,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        256,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_tail = _load_fp8_ds_mla_gfx950_tail128(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        NOPE_DIM,
-        BLOCK_K,
-        IS_FNUZ,
-    )
+    if IS_MXFP4:
+        token_data_ptr = cache_block_ptr + pos_in_block * 256
+        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 256 + pos_in_block * 16
+        k_nope_0a, s_nope_0a = _load_mxfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K
+        )
+        k_nope_0b, s_nope_0b = _load_mxfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 128, 128, BLOCK_K
+        )
+        k_nope_1, s_nope_1 = _load_mxfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 256, 128, BLOCK_K
+        )
+        k_tail, s_tail = _load_mxfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 384, 128, BLOCK_K
+        )
+        score = tl.zeros((q_nope_0a.shape[0], BLOCK_K), dtype=tl.float32)
+        score = tl.dot_scaled(
+            q_nope_0a,
+            None,
+            "bf16",
+            tl.trans(k_nope_0a),
+            s_nope_0a,
+            "e2m1",
+            acc=score,
+            fast_math=True,
+        )
+        score = tl.dot_scaled(
+            q_nope_0b,
+            None,
+            "bf16",
+            tl.trans(k_nope_0b),
+            s_nope_0b,
+            "e2m1",
+            acc=score,
+            fast_math=True,
+        )
+        score = tl.dot_scaled(
+            q_nope_1,
+            None,
+            "bf16",
+            tl.trans(k_nope_1),
+            s_nope_1,
+            "e2m1",
+            acc=score,
+            fast_math=True,
+        )
+        score = tl.dot_scaled(
+            q_tail,
+            None,
+            "bf16",
+            tl.trans(k_tail),
+            s_tail,
+            "e2m1",
+            acc=score,
+            fast_math=True,
+        )
+        score *= scale * 1.4426950408889634
+        score = tl.where(
+            head_mask[:, None] & valid[None, :],
+            score,
+            -3.4028234663852886e38,
+        )
+        m_block = tl.max(score, axis=1)
+        m_new = tl.maximum(m_i, m_block)
+        alpha = tl.exp2(m_i - m_new)
+        p = tl.exp2(score - m_new[:, None])
+        p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
+        l_new = l_i * alpha + tl.sum(p, axis=1)
+        p_bf16 = p.to(tl.bfloat16)
+
+        v_nope_0a = _dequant_mxfp4_ds_mla_gfx950_chunk(k_nope_0a, s_nope_0a, BLOCK_K)
+        v_nope_0b = _dequant_mxfp4_ds_mla_gfx950_chunk(k_nope_0b, s_nope_0b, BLOCK_K)
+        v_nope_1 = _dequant_mxfp4_ds_mla_gfx950_chunk(k_nope_1, s_nope_1, BLOCK_K)
+        v_tail = _dequant_mxfp4_ds_mla_gfx950_chunk(k_tail, s_tail, BLOCK_K)
+        acc_nope_0a = acc_nope_0a * alpha[:, None] + tl.dot(p_bf16, v_nope_0a)
+        acc_nope_0b = acc_nope_0b * alpha[:, None] + tl.dot(p_bf16, v_nope_0b)
+        acc_nope_1 = acc_nope_1 * alpha[:, None] + tl.dot(p_bf16, v_nope_1)
+        acc_tail = acc_tail * alpha[:, None] + tl.dot(p_bf16, v_tail)
+        return (
+            m_new,
+            l_new,
+            acc_nope_0a,
+            acc_nope_0b,
+            acc_nope_1,
+            acc_tail,
+        )
+    q_nope_0 = tl.cat(q_nope_0a, q_nope_0b, dim=1)
+    q_tail_256 = tl.cat(q_nope_1, q_tail, dim=1)
+    q_combined = tl.cat(q_nope_0, q_tail_256, dim=1)
+    if IS_NVFP4:
+        token_data_ptr = cache_block_ptr + pos_in_block * 256
+        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 256 + pos_in_block * 32
+        k_nope_0a = _load_nvfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K
+        )
+        k_nope_0b = _load_nvfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 128, 128, BLOCK_K
+        )
+        k_nope_1 = _load_nvfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 256, 128, BLOCK_K
+        )
+        k_tail = _load_nvfp4_ds_mla_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 384, 128, BLOCK_K
+        )
+    else:
+        token_data_ptr = cache_block_ptr + pos_in_block * 576
+        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
+        k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            0,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            128,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            256,
+            128,
+            BLOCK_K,
+            IS_FNUZ,
+        )
+        k_tail = _load_fp8_ds_mla_gfx950_tail128(
+            token_data_ptr,
+            token_scale_ptr,
+            valid,
+            NOPE_DIM,
+            BLOCK_K,
+            IS_FNUZ,
+        )
     if not TRUST_EXTRA_CACHE_NAN_FREE:
         zero = tl.zeros((BLOCK_K, 128), dtype=tl.bfloat16)
         k_nope_0a = tl.where(k_nope_0a == k_nope_0a, k_nope_0a, zero)
@@ -2426,6 +2622,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     HAS_EXTRA: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
+    MAIN_IS_MXFP4: tl.constexpr,
+    EXTRA_IS_MXFP4: tl.constexpr,
+    MAIN_IS_NVFP4: tl.constexpr,
+    EXTRA_IS_NVFP4: tl.constexpr,
     IS_FNUZ_MAIN: tl.constexpr,
     IS_FNUZ_EXTRA: tl.constexpr,
     TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
@@ -2482,23 +2682,30 @@ def _sparse_attn_decode_gfx950_partial_kernel(
 
     nope_offsets_0a = tl.arange(0, 128)
     nope_offsets_0b = 128 + tl.arange(0, 128)
-    nope_offsets_0 = tl.arange(0, 256)
-    tail_offsets = 256 + tl.arange(0, 256)
     nope_offsets_1 = 256 + tl.arange(0, 128)
     tail_offsets_128 = 384 + tl.arange(0, 128)
 
     q_row_ptr = q_ptr + query_idx * q_stride0 + head_offsets[:, None] * q_stride1
-    q_nope_0 = tl.load(
-        q_row_ptr + nope_offsets_0[None, :],
+    q_nope_0a = tl.load(
+        q_row_ptr + nope_offsets_0a[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
+    )
+    q_nope_0b = tl.load(
+        q_row_ptr + nope_offsets_0b[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
+    )
+    q_nope_1 = tl.load(
+        q_row_ptr + nope_offsets_1[None, :],
         mask=head_mask[:, None],
         other=0.0,
     )
     q_tail = tl.load(
-        q_row_ptr + tail_offsets[None, :],
+        q_row_ptr + tail_offsets_128[None, :],
         mask=head_mask[:, None],
         other=0.0,
     )
-    q_combined = tl.cat(q_nope_0, q_tail, dim=1)
 
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
     l_i = tl.zeros((BLOCK_H,), dtype=tl.float32)
@@ -2534,7 +2741,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
             acc_nope_1,
             acc_tail,
         ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-            q_combined,
+            q_nope_0a,
+            q_nope_0b,
+            q_nope_1,
+            q_tail,
             main_cache_ptr,
             slot,
             valid,
@@ -2550,6 +2760,8 @@ def _sparse_attn_decode_gfx950_partial_kernel(
             MAIN_BLOCK_SIZE,
             NOPE_DIM,
             BLOCK_K,
+            MAIN_IS_MXFP4,
+            MAIN_IS_NVFP4,
             IS_FNUZ_MAIN,
             False,
         )
@@ -2588,7 +2800,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 acc_nope_1,
                 acc_tail,
             ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                q_combined,
+                q_nope_0a,
+                q_nope_0b,
+                q_nope_1,
+                q_tail,
                 extra_cache_ptr,
                 slot_lo,
                 valid_lo,
@@ -2604,6 +2819,8 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 EXTRA_BLOCK_SIZE,
                 NOPE_DIM,
                 BLOCK_K,
+                EXTRA_IS_MXFP4,
+                EXTRA_IS_NVFP4,
                 IS_FNUZ_EXTRA,
                 TRUST_EXTRA_CACHE_NAN_FREE,
             )
@@ -2615,7 +2832,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 acc_nope_1,
                 acc_tail,
             ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                q_combined,
+                q_nope_0a,
+                q_nope_0b,
+                q_nope_1,
+                q_tail,
                 extra_cache_ptr,
                 slot_hi,
                 valid_hi,
@@ -2631,6 +2851,8 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 EXTRA_BLOCK_SIZE,
                 NOPE_DIM,
                 BLOCK_K,
+                EXTRA_IS_MXFP4,
+                EXTRA_IS_NVFP4,
                 IS_FNUZ_EXTRA,
                 TRUST_EXTRA_CACHE_NAN_FREE,
             )
@@ -2653,7 +2875,10 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     acc_nope_1,
                     acc_tail,
                 ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                    q_combined,
+                    q_nope_0a,
+                    q_nope_0b,
+                    q_nope_1,
+                    q_tail,
                     extra_cache_ptr,
                     slot,
                     valid,
@@ -2669,6 +2894,8 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     EXTRA_BLOCK_SIZE,
                     NOPE_DIM,
                     BLOCK_K,
+                    EXTRA_IS_MXFP4,
+                    EXTRA_IS_NVFP4,
                     IS_FNUZ_EXTRA,
                     TRUST_EXTRA_CACHE_NAN_FREE,
                 )
@@ -3172,6 +3399,18 @@ def _rocm_sparse_attn_decode_ragged_triton(
         and extra_indices is not None
         and extra_indptr is not None
     )
+    main_is_mxfp4 = main_cache.shape[-1] == 272
+    main_is_nvfp4 = main_cache.shape[-1] == 288
+    extra_is_mxfp4 = bool(
+        has_extra and extra_cache is not None and extra_cache.shape[-1] == 272
+    )
+    extra_is_nvfp4 = bool(
+        has_extra and extra_cache is not None and extra_cache.shape[-1] == 288
+    )
+    if (
+        main_is_mxfp4 or main_is_nvfp4 or extra_is_mxfp4 or extra_is_nvfp4
+    ) and not _ON_GFX950:
+        raise ValueError("FP4 DS-MLA sparse decode requires ROCm gfx950")
     assert not extra_cache_nan_free or (_ON_GFX950 and has_extra), (
         "extra_cache_nan_free requires a gfx950 compressed cache with trusted "
         "canonical-writer provenance"
@@ -3249,7 +3488,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # MXFP4's scaled MFMA path amortizes its value dequantization better with a
+    # 64-token tile; the FP8/NVFP4 paths retain their tuned 32-token tile.
+    block_k = 64 if extra_is_mxfp4 and num_heads <= 16 else 32
     if _ON_GFX950:
         inv_q = 1.0 / max(1, num_queries)
         avg_main_len = main_indices.numel() * inv_q
@@ -3318,6 +3559,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
             HAS_EXTRA=has_extra,
             NOPE_DIM=nope_head_dim,
             ROPE_DIM=rope_head_dim,
+            MAIN_IS_MXFP4=main_is_mxfp4,
+            EXTRA_IS_MXFP4=extra_is_mxfp4,
+            MAIN_IS_NVFP4=main_is_nvfp4,
+            EXTRA_IS_NVFP4=extra_is_nvfp4,
             IS_FNUZ_MAIN=is_fnuz,
             IS_FNUZ_EXTRA=False,
             TRUST_EXTRA_CACHE_NAN_FREE=extra_cache_nan_free,

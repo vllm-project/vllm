@@ -51,6 +51,65 @@ ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
+def test_rocm_v41_backend_accepts_compressed_fp4_cache_formats() -> None:
+    from vllm.config import CacheConfig
+    from vllm.models.deepseek_v41.amd.rocm import (
+        DeepseekV4ROCMAiterMLASparseBackend,
+    )
+    from vllm.models.deepseek_v41.attention import _resolve_dsv4_kv_cache_dtype
+    from vllm.platforms.interface import DeviceCapability
+
+    for cache_dtype in ("mxfp4_ds_mla", "nvfp4_ds_mla"):
+        assert cache_dtype in (
+            DeepseekV4ROCMAiterMLASparseBackend.supported_kv_cache_dtypes
+        )
+        cache_config = CacheConfig(cache_dtype=cache_dtype)
+        resolved, torch_dtype = _resolve_dsv4_kv_cache_dtype(
+            True,
+            cache_dtype,
+            cache_config,
+        )
+        assert resolved == cache_dtype
+        assert torch_dtype == torch.uint8
+        common = dict(
+            head_size=HEAD_DIM,
+            dtype=torch.bfloat16,
+            kv_cache_dtype=cache_dtype,
+            block_size=64,
+            use_mla=True,
+            has_sink=True,
+            use_sparse=True,
+            use_mm_prefix=False,
+        )
+        assert (
+            DeepseekV4ROCMAiterMLASparseBackend.supports_combination(
+                **common, device_capability=DeviceCapability(9, 5)
+            )
+            is None
+        )
+        assert "gfx950" in (
+            DeepseekV4ROCMAiterMLASparseBackend.supports_combination(
+                **common, device_capability=DeviceCapability(9, 4)
+            )
+            or ""
+        )
+
+    assert (
+        DeepseekV4ROCMAiterMLASparseBackend.supports_combination(
+            head_size=HEAD_DIM,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8_ds_mla",
+            block_size=64,
+            use_mla=True,
+            has_sink=True,
+            use_sparse=True,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(9, 4),
+        )
+        is None
+    )
+
+
 def _ref_global_topk_ragged(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
@@ -133,6 +192,62 @@ def _pack_fp8_ds_mla_cache(
     return cache
 
 
+def _pack_nvfp4_ds_mla_cache(
+    kv: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    num_tokens = kv.shape[0]
+    num_blocks = (num_tokens + block_size - 1) // block_size
+    cache = torch.zeros(
+        (num_blocks, block_size, 288),
+        dtype=torch.uint8,
+        device=kv.device,
+    )
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    cos_sin = torch.cat(
+        (
+            torch.ones(num_tokens, 32, device=kv.device),
+            torch.zeros(num_tokens, 32, device=kv.device),
+        ),
+        dim=-1,
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    rope_quant_insert(kv, positions, cos_sin, cache, slot_mapping, 1)
+    return cache
+
+
+def _pack_mxfp4_ds_mla_cache(
+    kv: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    num_tokens = kv.shape[0]
+    num_blocks = (num_tokens + block_size - 1) // block_size
+    cache = torch.zeros(
+        (num_blocks, block_size, 272),
+        dtype=torch.uint8,
+        device=kv.device,
+    )
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    cos_sin = torch.cat(
+        (
+            torch.ones(num_tokens, 32, device=kv.device),
+            torch.zeros(num_tokens, 32, device=kv.device),
+        ),
+        dim=-1,
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    rope_quant_insert(kv, positions, cos_sin, cache, slot_mapping, 1)
+    return cache
+
+
 def _poison_fp8_ds_mla_cache_row(
     cache: torch.Tensor, block_size: int, slot: int = 0
 ) -> None:
@@ -177,6 +292,81 @@ def _read_fp8_ds_mla_cache_rows(
     return torch.cat([nope, rope], dim=1)
 
 
+def _read_nvfp4_ds_mla_cache_rows(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    flat = cache.flatten()
+    block_idx = slots // block_size
+    pos = slots % block_size
+    block_base = block_idx * cache.stride(0)
+    packed_offsets = torch.arange(256, device=cache.device)
+    packed = flat[block_base[:, None] + pos[:, None] * 256 + packed_offsets]
+    codes = torch.empty(
+        (slots.shape[0], HEAD_DIM),
+        dtype=torch.uint8,
+        device=cache.device,
+    )
+    codes[:, 0::2] = packed & 0xF
+    codes[:, 1::2] = packed >> 4
+    magnitudes = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        device=cache.device,
+    )
+    values = magnitudes[(codes & 7).long()]
+    values = torch.where(codes >= 8, -values, values)
+    scale_base = block_base + block_size * 256 + pos * 32
+    scale_offsets = torch.arange(32, device=cache.device)
+    scales = flat[scale_base[:, None] + scale_offsets]
+    scales = scales.contiguous().view(torch.float8_e4m3fn).float()
+    return (values * scales.repeat_interleave(16, dim=-1)).to(torch.bfloat16).float()
+
+
+def _read_mxfp4_ds_mla_cache_rows(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    flat = cache.flatten()
+    block_idx = slots // block_size
+    pos = slots % block_size
+    block_base = block_idx * cache.stride(0)
+    packed_offsets = torch.arange(256, device=cache.device)
+    packed = flat[block_base[:, None] + pos[:, None] * 256 + packed_offsets]
+    codes = torch.empty(
+        (slots.shape[0], HEAD_DIM),
+        dtype=torch.uint8,
+        device=cache.device,
+    )
+    codes[:, 0::2] = packed & 0xF
+    codes[:, 1::2] = packed >> 4
+    magnitudes = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        device=cache.device,
+    )
+    values = magnitudes[(codes & 7).long()]
+    values = torch.where(codes >= 8, -values, values)
+    scale_base = block_base + block_size * 256 + pos * 16
+    scale_offsets = torch.arange(16, device=cache.device)
+    encoded = flat[scale_base[:, None] + scale_offsets].float()
+    scales = torch.exp2(encoded - 127.0)
+    return (values * scales.repeat_interleave(32, dim=-1)).to(torch.bfloat16).float()
+
+
+def _read_ds_mla_cache_rows(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    block_size: int,
+    use_fnuz: bool,
+) -> torch.Tensor:
+    if cache.shape[-1] == 272:
+        return _read_mxfp4_ds_mla_cache_rows(cache, slots, block_size)
+    if cache.shape[-1] == 288:
+        return _read_nvfp4_ds_mla_cache_rows(cache, slots, block_size)
+    return _read_fp8_ds_mla_cache_rows(cache, slots, block_size, use_fnuz)
+
+
 def _ref_sparse_decode_ragged(
     q: torch.Tensor,
     main_cache: torch.Tensor,
@@ -188,6 +378,7 @@ def _ref_sparse_decode_ragged(
     extra_rows: list[list[int]] | None = None,
     main_use_fnuz: bool = False,
     extra_use_fnuz: bool = False,
+    extra_block_size: int | None = None,
 ) -> torch.Tensor:
     q_f32 = q.float()
     out = torch.empty_like(q_f32)
@@ -199,7 +390,7 @@ def _ref_sparse_decode_ragged(
                 main_rows[query_idx], dtype=torch.int64, device=q.device
             )
             row_kv.append(
-                _read_fp8_ds_mla_cache_rows(
+                _read_ds_mla_cache_rows(
                     main_cache, main_slots, block_size, main_use_fnuz
                 )
             )
@@ -208,8 +399,11 @@ def _ref_sparse_decode_ragged(
                 extra_rows[query_idx], dtype=torch.int64, device=q.device
             )
             row_kv.append(
-                _read_fp8_ds_mla_cache_rows(
-                    extra_cache, extra_slots, block_size, extra_use_fnuz
+                _read_ds_mla_cache_rows(
+                    extra_cache,
+                    extra_slots,
+                    block_size if extra_block_size is None else extra_block_size,
+                    extra_use_fnuz,
                 )
             )
 
@@ -476,6 +670,212 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+def test_v41_fp4_prefill_routes_to_direct_paged_attention(monkeypatch) -> None:
+    from vllm.models.deepseek_v41.amd import rocm as mod
+
+    device = torch.device("cuda")
+    num_decode_tokens = 1
+    num_prefill_tokens = 2
+    q = torch.empty(
+        num_prefill_tokens, 8, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    output = torch.empty_like(q)
+    compressed_cache = torch.empty(1, 32, 288, dtype=torch.uint8, device=device)
+    swa_cache = torch.empty(1, 64, 584, dtype=torch.uint8, device=device)
+    local_topk = torch.tensor(
+        [[-1, -1], [0, -1], [1, 0]], dtype=torch.int32, device=device
+    )
+    global_topk = torch.tensor([[17, -1], [18, 17]], dtype=torch.int32, device=device)
+    global_lens = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    prefill_swa = torch.tensor([[[3, -1]], [[3, 4]]], dtype=torch.int32, device=device)
+    prefill_swa_lens = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+
+    layer = SimpleNamespace(
+        compress_ratio=2,
+        topk_indices_buffer=local_topk,
+        max_model_len=1024,
+        window_size=128,
+        max_num_batched_tokens=16,
+        PREFILL_CHUNK_SIZE=4,
+        attn_sink=torch.zeros(8, dtype=torch.float32, device=device),
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+    )
+    swa_metadata = SimpleNamespace(
+        num_prefills=1,
+        num_prefill_tokens=num_prefill_tokens,
+        num_decodes=1,
+        num_decode_tokens=num_decode_tokens,
+        prefill_seq_lens=torch.tensor([2], dtype=torch.int32, device=device),
+        prefill_gather_lens=torch.tensor([2], dtype=torch.int32, device=device),
+        query_start_loc_cpu=torch.tensor([0, 1, 3], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32, device=device),
+        token_to_req_indices=torch.tensor([0, 0, 0], dtype=torch.int32, device=device),
+        is_valid_token=torch.ones(3, dtype=torch.bool, device=device),
+        prefill_swa_indices=prefill_swa,
+        prefill_swa_lens=prefill_swa_lens,
+    )
+    attn_metadata = SimpleNamespace(block_size=64, block_table=block_table)
+    compute_calls: list[tuple] = []
+    attention_calls = []
+
+    def fake_compute(*args):
+        row = len(compute_calls)
+        compute_calls.append(args)
+        return global_topk[row : row + 1], global_lens[row : row + 1]
+
+    def fake_attention(**kwargs):
+        attention_calls.append(kwargs)
+        kwargs["output"].zero_()
+
+    monkeypatch.setattr(mod, "compute_global_topk_indices_and_lens", fake_compute)
+    monkeypatch.setattr(mod, "rocm_sparse_attn_decode", fake_attention)
+    monkeypatch.setattr(mod, "_DIRECT_FP4_PREFILL_QUERY_CHUNK_SIZE", 1)
+    monkeypatch.setattr(
+        mod,
+        "dequantize_and_gather_k_cache",
+        lambda *args, **kwargs: pytest.fail(
+            "FP4 prefill unexpectedly gathered to BF16"
+        ),
+    )
+
+    mod.DeepseekV41ROCMAiterMLAAttention._forward_prefill(
+        layer,
+        q=q,
+        positions=torch.arange(num_prefill_tokens, device=device),
+        compressed_k_cache=compressed_cache,
+        swa_k_cache=swa_cache,
+        output=output,
+        attn_metadata=attn_metadata,
+        swa_metadata=swa_metadata,
+    )
+
+    assert len(compute_calls) == num_prefill_tokens
+    assert torch.equal(compute_calls[0][0], local_topk[1:2])
+    assert torch.equal(compute_calls[1][0], local_topk[2:3])
+    assert len(attention_calls) == num_prefill_tokens
+    for row, call in enumerate(attention_calls):
+        assert call["kv_cache"] is compressed_cache
+        assert call["swa_k_cache"] is swa_cache
+        assert torch.equal(call["topk_indices"], global_topk[row : row + 1])
+        assert torch.equal(call["topk_lens"], global_lens[row : row + 1])
+        assert torch.equal(call["swa_indices"], prefill_swa[row : row + 1])
+        assert torch.equal(call["swa_lens"], prefill_swa_lens[row : row + 1])
+    assert torch.count_nonzero(output) == 0
+
+
+@requires_gfx950
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize("extra_format", ["mxfp4", "nvfp4"])
+@torch.inference_mode()
+def test_v41_fp4_prefill_direct_paged_matches_reference(
+    compress_ratio: int,
+    extra_format: str,
+) -> None:
+    from vllm.models.deepseek_v41.amd import rocm as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(41 + compress_ratio)
+    block_size = 64
+    compressed_block_size = block_size // compress_ratio
+    num_queries = 2
+    num_heads = 8
+    q = (
+        torch.randn(
+            num_queries,
+            num_heads,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    main_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_kv = torch.randn(4, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=False)
+    extra_cache = (
+        _pack_mxfp4_ds_mla_cache(extra_kv, compressed_block_size)
+        if extra_format == "mxfp4"
+        else _pack_nvfp4_ds_mla_cache(extra_kv, compressed_block_size)
+    )
+
+    main_rows = [[0, 2], [1, 3, 4]]
+    extra_rows = [[0, 2], [1, 3]]
+    prefill_swa = torch.tensor(
+        [[[0, 2, -1]], [[1, 3, 4]]],
+        dtype=torch.int32,
+        device=device,
+    )
+    prefill_swa_lens = torch.tensor([2, 3], dtype=torch.int32, device=device)
+    local_topk = torch.tensor(extra_rows, dtype=torch.int32, device=device)
+    attn_sink = torch.linspace(
+        -0.25, 0.25, num_heads, dtype=torch.float32, device=device
+    )
+    output = torch.empty_like(q)
+
+    layer = SimpleNamespace(
+        compress_ratio=compress_ratio,
+        topk_indices_buffer=local_topk,
+        max_model_len=1024,
+        window_size=128,
+        max_num_batched_tokens=16,
+        PREFILL_CHUNK_SIZE=4,
+        attn_sink=attn_sink,
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+    )
+    swa_metadata = SimpleNamespace(
+        num_prefills=1,
+        num_prefill_tokens=num_queries,
+        num_decodes=0,
+        num_decode_tokens=0,
+        prefill_seq_lens=torch.tensor([5], dtype=torch.int32, device=device),
+        prefill_gather_lens=torch.tensor([5], dtype=torch.int32, device=device),
+        query_start_loc_cpu=torch.tensor([0, num_queries], dtype=torch.int32),
+        query_start_loc=torch.tensor(
+            [0, num_queries], dtype=torch.int32, device=device
+        ),
+        token_to_req_indices=torch.zeros(num_queries, dtype=torch.int32, device=device),
+        is_valid_token=torch.ones(num_queries, dtype=torch.bool, device=device),
+        prefill_swa_indices=prefill_swa,
+        prefill_swa_lens=prefill_swa_lens,
+    )
+    attn_metadata = SimpleNamespace(
+        block_size=block_size,
+        block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
+    )
+
+    mod.DeepseekV41ROCMAiterMLAAttention._forward_prefill(
+        layer,
+        q=q,
+        positions=torch.arange(num_queries, dtype=torch.int64, device=device),
+        compressed_k_cache=extra_cache,
+        swa_k_cache=main_cache,
+        output=output,
+        attn_metadata=attn_metadata,
+        swa_metadata=swa_metadata,
+    )
+
+    expected = _ref_sparse_decode_ragged(
+        q,
+        main_cache,
+        main_rows,
+        layer.scale,
+        attn_sink,
+        block_size,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
+        extra_block_size=compressed_block_size,
+    )
+    torch.testing.assert_close(output, expected, atol=5e-2, rtol=5e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
@@ -738,6 +1138,92 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
 
     assert actual.data_ptr() == out.data_ptr()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_mxfp4_ds_mla_gather_matches_insert() -> None:
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+
+    device = torch.device("cuda")
+    torch.manual_seed(37)
+    block_size = 64
+    num_tokens = 70
+    source = (
+        torch.randn(num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    )
+    cache = _pack_mxfp4_ds_mla_cache(source, block_size)
+    out = torch.empty(1, num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.arange(
+        cache.shape[0], dtype=torch.int32, device=device
+    ).unsqueeze(0)
+    dequantize_and_gather_k_cache(
+        out,
+        cache,
+        seq_lens,
+        None,
+        block_table,
+        block_size,
+        offset=0,
+    )
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    expected = _read_mxfp4_ds_mla_cache_rows(cache, slots, block_size)
+    torch.testing.assert_close(out[0].float(), expected, rtol=0, atol=0)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("extra_format", ["mxfp4", "nvfp4"])
+@torch.inference_mode()
+def test_sparse_attn_decode_ragged_fp4_extra(extra_format: str) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(41)
+    block_size = 4
+    q = torch.randn(2, 3, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=False)
+    extra_cache = (
+        _pack_mxfp4_ds_mla_cache(extra_kv, block_size)
+        if extra_format == "mxfp4"
+        else _pack_nvfp4_ds_mla_cache(extra_kv, block_size)
+    )
+    main_rows = [[0, 2], [4, 1]]
+    extra_rows = [[1], [3, 0]]
+    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
+    extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+    attn_sink = torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
+    scale = HEAD_DIM**-0.5
+
+    actual = _rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=main_rows,
+        scale=scale,
+        attn_sink=attn_sink,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
 
 
 @requires_gfx950
@@ -1065,8 +1551,12 @@ def test_sparse_attn_decode_gfx950_outer64_boundaries(
 
 
 @requires_gfx950
+@pytest.mark.parametrize("extra_format", ["fp8", "mxfp4", "nvfp4"])
 @torch.inference_mode()
-def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
+def test_sparse_attn_decode_gfx950_graph_replay(
+    monkeypatch,
+    extra_format: str,
+) -> None:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     device = torch.device("cuda")
@@ -1092,16 +1582,23 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
         block_size,
         use_fnuz=False,
     )
-    extra_cache = _pack_fp8_ds_mla_cache(
+    extra_kv = (
         torch.randn(
             num_queries * extra_per_query,
             HEAD_DIM,
             dtype=torch.bfloat16,
             device=device,
         )
-        * 0.125,
-        block_size,
-        use_fnuz=False,
+        * 0.125
+    )
+    extra_cache = (
+        _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
+        if extra_format == "fp8"
+        else (
+            _pack_mxfp4_ds_mla_cache(extra_kv, block_size)
+            if extra_format == "mxfp4"
+            else _pack_nvfp4_ds_mla_cache(extra_kv, block_size)
+        )
     )
     main_rows = [[query_idx] for query_idx in range(num_queries)]
     extra_rows = [
@@ -1140,7 +1637,7 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
             extra_indices=extra_indices,
             extra_indptr=extra_indptr,
             out=out,
-            extra_cache_nan_free=True,
+            extra_cache_nan_free=extra_format == "fp8",
             adaptive_splits=True,
         )
 
@@ -1161,7 +1658,13 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
         extra_cache=extra_cache,
         extra_rows=extra_rows,
     )
-    torch.testing.assert_close(captured_long, expected_long, atol=2e-2, rtol=2e-2)
+    tolerance = 2e-2 if extra_format == "fp8" else 5e-2
+    torch.testing.assert_close(
+        captured_long,
+        expected_long,
+        atol=tolerance,
+        rtol=tolerance,
+    )
 
     extra_indices[: short_indices.numel()].copy_(short_indices)
     extra_indptr.copy_(short_indptr)
@@ -1183,13 +1686,23 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     assert extra_indices.data_ptr() == extra_indices_ptr
     assert extra_indices.numel() == num_queries * max_extra_per_query
     assert not torch.equal(short_out, captured_long)
-    torch.testing.assert_close(short_out, expected_short, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(
+        short_out,
+        expected_short,
+        atol=tolerance,
+        rtol=tolerance,
+    )
 
     extra_indices[: long_indices.numel()].copy_(long_indices)
     extra_indptr.copy_(long_indptr)
     graph.replay()
     torch.accelerator.synchronize()
-    torch.testing.assert_close(out, expected_long, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(
+        out,
+        expected_long,
+        atol=tolerance,
+        rtol=tolerance,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "mxfp4_ds_mla",
     "nvfp4_ds_mla",
     "turboquant_k8v4",
     "turboquant_4bit_nc",
@@ -117,6 +118,7 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "mxfp4_ds_mla" uses the gfx950 DeepSeek V4.1 compressed-cache layout.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
