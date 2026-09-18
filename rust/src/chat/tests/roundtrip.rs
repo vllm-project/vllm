@@ -717,6 +717,7 @@ async fn parse_completion(
     let processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
+            tool_strict_level: vllm_chat::ToolStrictLevel::Auto,
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
@@ -805,6 +806,7 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 })),
             }
         });
@@ -816,6 +818,7 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                sampling_mask: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: vllm_text::DecodedText::unattributed(chunk.delta),

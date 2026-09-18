@@ -20,6 +20,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
@@ -116,6 +117,13 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_strict_level: ToolStrictLevelName = "auto"
+    """Server-side floor for structural-tag based tool calling, applied on top
+    of the per-tool `strict` field. `auto` follows the request's tool choice
+    and per-tool strictness; `function` constrains the
+    tool-call envelope (markup and function name) for every request with
+    tools; `parameter` additionally pins argument schemas, as if every tool
+    were `strict: true`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for

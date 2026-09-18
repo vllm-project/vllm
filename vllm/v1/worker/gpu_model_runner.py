@@ -6164,6 +6164,11 @@ class GPUModelRunner(
                     num_tokens_padded, None, False
                 )
 
+            num_tokens_unpadded = num_tokens_padded if is_profile else 0
+            is_padding = self._prepare_padding_mask(
+                num_tokens_unpadded, num_tokens_padded
+            )
+
             if ubatch_slices_padded is not None:
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
@@ -6171,8 +6176,6 @@ class GPUModelRunner(
                 num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
-
-            is_padding = self._prepare_padding_mask(0, num_tokens_padded)
 
             with (
                 self.maybe_randomize_inputs(

@@ -488,6 +488,7 @@ set(VLLM_EXT_SRC
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
+    "csrc/cpu/cpu_isa.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
@@ -546,11 +547,13 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8_w8a8.cpp"
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
@@ -571,6 +574,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -587,6 +591,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"

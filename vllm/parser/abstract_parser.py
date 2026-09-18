@@ -36,6 +36,7 @@ from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 logger = init_logger(__name__)
 
@@ -95,6 +96,8 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
+    # Server-side floor for tool-call structural tags (--tool-strict-level).
+    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
 
     def __init__(
         self,
@@ -415,6 +418,7 @@ class DelegatingParser(Parser):
         structure_tag = self._tool_parser.get_structural_tag(
             request,
             reasoning=False,
+            strict_level=self.tool_strict_level,
         )
         if structure_tag is None:
             return request

@@ -57,7 +57,9 @@ class Fp8MoeBackend(Enum):
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
+    # CPU FP8 W8A16 (BF16 activations); CPU_W8A8 needs native AMX-FP8.
     CPU = "CPU"
+    CPU_W8A8 = "CPU_W8A8"
     HPC = "HPC"
     # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
     # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
@@ -92,6 +94,7 @@ def _get_priority_backends(
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
+        Fp8MoeBackend.CPU_W8A8,
         Fp8MoeBackend.CPU,
         Fp8MoeBackend.HPC,
     ]
@@ -129,8 +132,10 @@ def _get_priority_backends(
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
 
     if current_platform.is_cpu():
-        # CPU platform uses FP8 W8A16 fused MoE kernel.
+        # W8A8 first: it falls through to the W8A16 backend whenever the
+        # hardware (AMX-FP8) or the config isn't supported.
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU)
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU_W8A8)
 
     return _AVAILABLE_BACKENDS
 
@@ -237,6 +242,13 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsFp8]
+
+    elif backend == Fp8MoeBackend.CPU_W8A8:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsFp8W8A8,
+        )
+
+        return [CPUExpertsFp8W8A8]
 
     elif backend == Fp8MoeBackend.HPC:
         from vllm.model_executor.layers.fused_moe.hpc_moe import (
@@ -652,6 +664,14 @@ def convert_to_fp8_moe_kernel_format(
         )
 
         w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.CPU_W8A8:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_fp8_w8a8_moe_layer_for_cpu,
+        )
+
+        w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
+            w13, w2, w13_scale, w2_scale
+        )
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
@@ -697,7 +717,15 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
-    # MARLIN and CPU are mixed precision W8A16 config.
+    if fp8_backend == Fp8MoeBackend.CPU_W8A8:
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            block_shape=block_shape,
+        )
+
+    # MARLIN and CPU (W8A16) are mixed precision W8A16 configs.
     if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
             w1_scale=w1_scale,

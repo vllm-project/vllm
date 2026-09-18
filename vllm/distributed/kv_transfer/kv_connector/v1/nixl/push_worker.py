@@ -365,6 +365,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
+            self.xfer_stats.record_failed_notification()
             self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
@@ -377,6 +378,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                self.xfer_stats.record_failed_notification()
+                # Earlier registrations may still trigger WRITEs into D's blocks.
+                # Keep the receive pending until those writes are finished.
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )

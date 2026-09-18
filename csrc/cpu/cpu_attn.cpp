@@ -1,16 +1,7 @@
 #include "cpu_attn_dispatch_generated.h"
 
-#if defined(__x86_64__) || defined(_M_X64)
-  #include <cpuid.h>
-// Runtime check for AMX-FP8 (Diamond Rapids): CPUID leaf 7, subleaf 1, EAX[21].
-static bool runtime_has_amx_fp8() {
-  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-  if (__get_cpuid_count(7, 1, &eax, &ebx, &ecx, &edx)) {
-    return (eax >> 21) & 1u;
-  }
-  return false;
-}
-#endif  // x86_64
+// Runtime check for AMX-FP8, implemented in cpu_isa.cpp.
+extern bool runtime_has_amx_fp8();
 
 // Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
 // "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.

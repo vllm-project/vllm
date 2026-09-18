@@ -160,6 +160,8 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  // Only present in final output when sampling-mask capture is enabled.
+  repeated TokenIds sampling_mask = 10;
 }
 
 // Prompt info, returned in the first response

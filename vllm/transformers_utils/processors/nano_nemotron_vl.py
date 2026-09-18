@@ -551,7 +551,9 @@ class DynamicResolutionImageTiler:
         )
 
     @staticmethod
-    def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
+    def stack(
+        images: list[torch.Tensor] | torch.Tensor, patch_size: int
+    ) -> torch.Tensor:
         assert len(images) > 0, "No images to stack"
 
         def rearrange_img(x):

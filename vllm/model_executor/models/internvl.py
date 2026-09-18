@@ -17,7 +17,7 @@ import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -203,19 +203,16 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -425,7 +422,7 @@ class InternVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
         if self.info.ctx_video_token:
@@ -436,9 +433,6 @@ class InternVLDummyInputsBuilder(
             )
             num_videos = mm_counts.get("video", 0)
             video_overrides = mm_options.get("video")
-            assert video_overrides is None or isinstance(
-                video_overrides, VideoDummyOptions
-            )
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,

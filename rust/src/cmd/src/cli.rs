@@ -24,6 +24,7 @@ use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
+use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
@@ -134,6 +135,10 @@ pub struct RenderArgs {
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling: `auto`,
+    /// `function`, or `parameter`.
+    #[arg(long, default_value_t)]
+    tool_strict_level: ToolStrictLevel,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -171,6 +176,7 @@ impl RenderArgs {
             port: self.port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
@@ -241,6 +247,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling, applied on
+    /// top of the per-tool `strict` field: `auto` follows the request's
+    /// tool choice and per-tool strictness,
+    /// `function` constrains the tool-call envelope for every request with
+    /// tools, `parameter` additionally pins argument schemas.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub tool_strict_level: ToolStrictLevel,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -517,6 +531,7 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -574,6 +589,7 @@ impl SharedRuntimeArgs {
             listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,

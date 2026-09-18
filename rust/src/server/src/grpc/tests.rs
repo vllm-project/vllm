@@ -244,6 +244,7 @@ impl ChatBackend for FakeTextBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -292,6 +293,7 @@ impl ChatBackend for FakeMultimodalBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }

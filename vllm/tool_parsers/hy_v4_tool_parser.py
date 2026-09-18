@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import partial_tag_overlap
 
 if TYPE_CHECKING:
@@ -994,6 +995,7 @@ class HYV4ToolParser(ToolParser):
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
@@ -1009,6 +1011,7 @@ class HYV4ToolParser(ToolParser):
         Args:
             request: The request being adjusted.
             reasoning: Whether the grammar also covers the reasoning phase.
+            strict_level: Server-side floor from ``--tool-strict-level``.
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
@@ -1041,6 +1044,7 @@ class HYV4ToolParser(ToolParser):
                 tool_choice=request.tool_choice,
                 reasoning=reasoning,
                 token_suffix=self._extractor.token_suffix,
+                strict_level=strict_level,
             )
         except Exception:
             logger.warning(

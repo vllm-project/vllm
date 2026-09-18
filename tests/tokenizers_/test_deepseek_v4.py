@@ -54,13 +54,9 @@ def _load_reference_case(case_id: int):
 
 def _render_reference_case(case_id: int, **kwargs):
     messages, tools = _load_reference_case(case_id)
-    conversation, _, _ = parse_chat_messages(
-        messages,
-        _model_config(),
-        content_format="string",
-    )
+    # Preserve content blocks for encoding without fetching fixture media.
     return _tokenizer().apply_chat_template(
-        conversation=conversation,
+        conversation=messages,
         messages=messages,
         tools=tools,
         tokenize=False,
@@ -397,6 +393,7 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
         (2, {"thinking": True, "reasoning_effort": "low"}),
         (3, {"thinking": True, "reasoning_effort": "low"}),
         (4, {"thinking": False}),
+        (5, {"thinking": False}),
     ],
 )
 def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
@@ -447,7 +444,10 @@ def test_deepseek_v4_image_blocks_become_placeholders():
         thinking=False,
     )
 
-    assert "<｜User｜>first:<｜deepseek_image｜>second:<｜deepseek_image｜>" in prompt
+    assert (
+        "<｜User｜>first:\n\n<｜deepseek_image｜>\n\n"
+        "second:\n\n<｜deepseek_image｜>" in prompt
+    )
 
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
