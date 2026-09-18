@@ -574,13 +574,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         else:
             num_local_tokens = None
 
-
         orig_num_tokens = hidden_states.shape[0]
         if num_local_tokens is None:
             valid_num_tokens = orig_num_tokens
         elif _is_uniform_full_graph_batch():
-
             batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None
             dispatch_group_size = (
                 self.moe_config.ep_size
                 if self.moe_config.use_ep
@@ -593,7 +592,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
                 orig_num_tokens,
             )
         elif _is_stream_capturing():
-
             valid_num_tokens = orig_num_tokens
         else:
             valid_num_tokens = int(num_local_tokens[0].item())
