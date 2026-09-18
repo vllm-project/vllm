@@ -61,6 +61,8 @@ class LegacyMixin(Base):
         # we should find a better way to handle this.
         self.is_roberta = "roberta" in self.text_config.model_type
         self.padding_idx = self.text_config.pad_token_id
+        # Warmup omits segment IDs. Dynamic dimensions alone would compile that
+        # None input away; graph replay also needs a stable, padded input buffer.
         self.register_buffer(
             "_token_type_ids",
             torch.zeros(

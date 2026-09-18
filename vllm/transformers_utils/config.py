@@ -1395,6 +1395,7 @@ def get_sentence_transformers_cross_encoder_config(
 
     Raises:
         ValueError: If a modular CrossEncoder uses unsupported semantics.
+
     """
     model_config = get_hf_file_to_dict(
         "config_sentence_transformers.json", model, revision, token=hf_token

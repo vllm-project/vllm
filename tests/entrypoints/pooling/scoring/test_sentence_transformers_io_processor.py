@@ -86,7 +86,10 @@ def processor(monkeypatch, tokenizer):
         enable_prompt_embeds=False,
         max_model_len=16,
         encoder_config={},
+        model=tokenizer.name_or_path,
+        tokenizer=tokenizer.name_or_path,
         revision=None,
+        tokenizer_revision=None,
         code_revision=None,
         trust_remote_code=False,
     )

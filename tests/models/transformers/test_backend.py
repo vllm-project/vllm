@@ -24,7 +24,7 @@ from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
-from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.model_executor.models.utils import StageMissingLayer, WeightsMapper
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -123,10 +123,12 @@ def test_legacy_forward_preserves_pair_segments(
         positions,
         inputs_embeds=inputs_embeds,
         token_type_ids=token_type_ids,
+        output_attentions=False,
     )
 
     assert captured["input_ids"] is input_ids
     assert captured["inputs_embeds"] is inputs_embeds
+    assert captured["output_attentions"] is False
     expected = torch.zeros(1, 5 + padding, dtype=torch.int32)
     if with_token_type_ids:
         assert token_type_ids is not None
@@ -154,9 +156,7 @@ def test_legacy_model_without_segment_vocabulary_preserves_omitted_ids(monkeypat
         self.device_config = SimpleNamespace(device=torch.device("cpu"))
         self.pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
         self._output_aux_hidden_states_kwargs = {}
-        self.hf_to_vllm_mapper = SimpleNamespace(
-            orig_to_new_prefix={}, orig_to_new_substr={}
-        )
+        self.hf_to_vllm_mapper = WeightsMapper()
 
     monkeypatch.setattr(Base, "__init__", init_base)
 
@@ -208,9 +208,7 @@ def test_legacy_segment_cross_encoder_rejects_breakable_graphs(
             model_type="bert", pad_token_id=0, type_vocab_size=type_vocab_size
         )
         self.device_config = SimpleNamespace(device=torch.device("cpu"))
-        self.hf_to_vllm_mapper = SimpleNamespace(
-            orig_to_new_prefix={}, orig_to_new_substr={}
-        )
+        self.hf_to_vllm_mapper = WeightsMapper()
 
     monkeypatch.setattr(Base, "__init__", init_base)
 

@@ -411,6 +411,7 @@ def get_hf_file_to_dict(
         file_name (str): The name of the file to download.
         model (str): The name of the model on the Hugging Face Hub.
         revision (str): The specific version of the model.
+        token: Hugging Face token or authentication setting for gated checkpoints.
 
     Returns:
     - config_dict (dict): A dictionary containing
