@@ -68,6 +68,10 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
+    # The adapter branch consumes the original activation, independently of
+    # whether the wrapped base layer can consume a pre-quantized activation.
+    requires_unquantized_input = True
+
     def __init__(self, base_layer: LinearBase):
         super().__init__()
 
@@ -89,7 +93,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         vllm_config = get_current_vllm_config()
         self._lora_stream = _get_lora_aux_cuda_stream()
         assert current_platform.is_cuda_alike()
-        self._events = [torch.Event(), torch.Event()]
+        self._events = [torch.cuda.Event(), torch.cuda.Event()]
         # lora_linear avoids prefix conflicts with the base layer
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
@@ -240,8 +244,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_async_impl(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """
-        Forward pass with base linear and LoRA on separate CUDA streams
+        """Forward pass with base linear and LoRA on separate CUDA streams
         for overlap, using maybe_execute_in_parallel.
         Base layer runs on default stream; LoRA runs on aux stream.
         """

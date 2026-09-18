@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-WARNING: This test runs in both single-node (4 GPUs) and multi-node
- (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
- important to set the distributed backend to "mp" to avoid Ray scheduling
- all workers in a node other than the head node, which can cause the test
- to fail.
+"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+(2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
+important to set the distributed backend to "mp" to avoid Ray scheduling
+all workers in a node other than the head node, which can cause the test
+to fail.
 """
 
 import json
@@ -33,6 +32,7 @@ CP_TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen3.5-0.8B",  # hybrid attention model
 ]
 
 # GSM8K eval configuration
@@ -46,6 +46,7 @@ MIN_ACCURACY = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 
@@ -149,6 +150,12 @@ else:
             ),
             CPTestSettings.detailed(
                 cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+            ),
+        ],
+        "Qwen/Qwen3.5-0.8B": [
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16,
+                attn_backend="FLASH_ATTN",
             ),
         ],
     }

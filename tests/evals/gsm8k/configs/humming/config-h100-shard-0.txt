@@ -1,0 +1,5 @@
+Qwen3.5-35B-A3B-experts-int8-humming.yaml
+Qwen3-30B-A3B-Instruct-2507-quantized.w8a8-humming.yaml
+Qwen3-30B-A3B-Fp8-v1-humming.yaml
+Qwen3-30B-A3B-NVFP4-humming.yaml
+Qwen2-1.5B-Instruct-FP8W8-humming.yaml

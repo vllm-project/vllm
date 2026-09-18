@@ -13,7 +13,7 @@ from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -37,6 +37,7 @@ from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityData,
     ModalityDataItems,
+    MultiModalDataItems,
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
@@ -46,6 +47,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    HFMultiModalInputs,
     ProcessorInputs,
 )
 from vllm.sequence import IntermediateTensors
@@ -178,7 +180,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
@@ -201,7 +203,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
     "whisper_input_features": MultiModalFieldConfig.batched("audio"),
-    "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
+    "feature_attention_mask": MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
 }
 
 
@@ -226,21 +228,17 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
 
-    def _call_hf_processor(
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Call the HuggingFace processor."""
-        # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         # Convert audio format: [(array, sr), ...] -> [array, ...]
         # KimiAudioProcessor expects raw numpy arrays
-        if audios:
+        mm_data = hf_inputs.hf_data
+        if audios := mm_data.pop("audio", []):
             audio_arrays = []
             for aud in audios:
                 if isinstance(aud, (tuple, list)) and len(aud) == 2:
@@ -252,12 +250,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
                     audio_arrays.append(aud)
             mm_data["audio"] = audio_arrays
 
-        # Use the context's call_hf_processor for proper handling
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,
@@ -380,6 +373,12 @@ class KimiAudioForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
+            # MIMO/TTS weights and any `model.` residue no rule above
+            # claimed: this model only does ASR (speech-to-text).
+            "model.": None,
+            "mimo_layers.": None,
+            "mimo_output.": None,
+            "mimo_norm.": None,
         },
         orig_to_new_substr={
             ".fc1.": ".mlp.fc1.",
@@ -573,21 +572,8 @@ class KimiAudioForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights, skipping MIMO layers (TTS-only) for ASR."""
-        # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
-        skipped_patterns = [
-            # Audio tower
-            "model.",
-            # MIMO/TTS
-            "mimo_layers.",
-            "mimo_output.",
-            "mimo_norm.",
-        ]
-
-        # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_speech_to_text_config(

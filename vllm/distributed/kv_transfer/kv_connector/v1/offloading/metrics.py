@@ -30,6 +30,14 @@ class _TransferMetricName:
     STORE_SIZE = "vllm:kv_offload_store_size"
 
 
+class _ConnectorMetricName:
+    """Connector-side metrics emitted by scheduler-side offloading code."""
+
+    LOOKUP_SYNC_DELAY = "vllm:kv_offload_lookup_sync_delay_seconds"
+    LOOKUP_ASYNC_DELAY = "vllm:kv_offload_lookup_async_delay_seconds"
+    ALLOCATION_FAILURE = "vllm:kv_offload_allocation_failure"
+
+
 class _TransferType:
     """Transfer direction labels for deprecated CPU offload metrics."""
 
@@ -73,6 +81,50 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _TransferMetricName.STORE_SIZE: OffloadingHistogramMetadata(
             documentation="Histogram of KV offload store operation size, in bytes.",
             buckets=TRANSFER_SIZE_BUCKETS,
+        ),
+        _ConnectorMetricName.LOOKUP_SYNC_DELAY: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of the time spent in a single offload lookup call, "
+                "in seconds."
+            ),
+            buckets=(
+                0.00001,
+                0.00005,
+                0.0001,
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.05,
+                0.1,
+                0.5,
+                1,
+            ),
+        ),
+        _ConnectorMetricName.LOOKUP_ASYNC_DELAY: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of time between a request's offload lookup first "
+                "deferring and the following lookup resolving, or request "
+                "finish, in seconds."
+            ),
+            buckets=(
+                0.0001,
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.05,
+                0.1,
+                0.5,
+                1,
+                5,
+                10,
+            ),
+        ),
+        _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
+            documentation=(
+                "Number of KV offload store allocation attempts that failed."
+            ),
         ),
     }
 
@@ -118,8 +170,7 @@ class _StatsKey:
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
-    """
-    Offloading connector stats use flat metric names as keys.
+    """Offloading connector stats use flat metric names as keys.
 
     The ``data`` dict is structured using ``_StatsKey`` / ``_MetricType``::
 
@@ -191,8 +242,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        """
-        Reduce the observations collected during a time interval to one or
+        """Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.
@@ -223,7 +273,7 @@ class OffloadingConnectorStats(KVConnectorStats):
     def increase_counter(
         self,
         counter_name: str,
-        counter_increase_value: int | float,
+        counter_increase_value: int | float = 1,
         labelvalues: tuple[str, ...] = (),
     ) -> None:
         """Increase a counter on the stats payload."""
@@ -269,10 +319,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
+        spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
             **spec_cls.build_metric_definitions(extra_config),
             **get_connector_metric_definitions(),

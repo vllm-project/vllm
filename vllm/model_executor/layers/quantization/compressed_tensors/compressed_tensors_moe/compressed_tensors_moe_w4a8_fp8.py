@@ -47,7 +47,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.symmetric, (
             "Only symmetric quantization is supported for W4A8 MoE"
         )
-        assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
@@ -79,7 +78,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_packed = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // self.packed_factor,
                 dtype=params_dtype,
             ),
@@ -107,7 +106,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // self.group_size,
                 dtype=layer.orig_dtype,
             ),
@@ -147,7 +146,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_chan_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=torch.float32,
             ),
             requires_grad=False,

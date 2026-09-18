@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Configuration management for Helion kernels.
+"""Configuration management for Helion kernels.
 
 This module provides centralized configuration file management for Helion custom
 operations, including naming conventions, directory resolution, and file I/O.
@@ -162,13 +161,6 @@ class ConfigSet:
             config_key,
         )
 
-    def has_config(self, platform: str, config_key: CaseKey) -> bool:
-        platform = platform.lower()
-        platform_dict = self._configs.get(platform)
-        if platform_dict is None:
-            return False
-        return config_key in platform_dict
-
 
 class ConfigManager:
     """File-level configuration management for Helion kernels (global singleton)."""
@@ -327,15 +319,3 @@ class ConfigManager:
 
         logger.info("Saved config to: %s", platform_path)
         return platform_path
-
-    def config_exists(
-        self,
-        kernel_name: str,
-        platform: str,
-        config_key: CaseKey,
-    ) -> bool:
-        platform_data = self._load_platform_file(kernel_name, platform)
-        if not platform_data:
-            return False
-        target = dict(config_key)
-        return any(entry["key"] == target for entry in platform_data)

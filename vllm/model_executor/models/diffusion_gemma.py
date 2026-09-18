@@ -32,6 +32,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -45,21 +46,27 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
     SupportsMultiModal,
-    SupportsPP,
     SupportsQuant,
 )
 
@@ -123,7 +130,7 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # fp32 before tanh for numerical stability (matches HF DiffusionGemma).
     # Compiling fuses the cast/div/tanh/mul into one elementwise kernel over
@@ -141,7 +148,6 @@ class DiffusionGemmaForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsQuant,
-    SupportsPP,
 ):
     """DiffusionGemma for vLLM.
 
@@ -158,13 +164,11 @@ class DiffusionGemmaForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "model.decoder.self_conditioning.": "self_conditioning.",
             "model.decoder.": "model.",
             "model.encoder.language_model.": "model.",
             "model.encoder.vision_tower.": "vision_tower.",
             "model.encoder.embed_vision.": "embed_vision.",
-        },
-        orig_to_new_substr={
-            ".experts.": ".moe.experts.",
         },
     )
 
@@ -194,8 +198,10 @@ class DiffusionGemmaForConditionalGeneration(
 
         # ---- Vision tower ----
         vision_config = getattr(config, "vision_config", None)
+        self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
             quant_config = vllm_config.quant_config
+            tower_quant: QuantizationConfig | None
             if quant_config and quant_config.get_name() in [
                 "bitsandbytes",
                 "torchao",
@@ -262,10 +268,6 @@ class DiffusionGemmaForConditionalGeneration(
             hidden_size=text_config.hidden_size,
             self_conditioning_size=sc_size,
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
-        )
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
         )
 
     def compute_self_conditioning(
@@ -336,114 +338,12 @@ class DiffusionGemmaForConditionalGeneration(
             logits = _softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """Load weights from checkpoint.
-
-        Checkpoint layout (HF DiffusionGemma):
-          model.encoder.vision_tower.*            → vision tower
-          model.encoder.embed_vision.*            → vision embedder
-          model.encoder.language_model.layers.*   → backbone
-          model.decoder.layers.*                  → backbone (tied)
-          model.decoder.embed_tokens.*            → embeddings
-          model.decoder.self_conditioning.*       → self-conditioning MLP
-          lm_head.*                               → LM head (tied)
-
-        We load encoder weights into our single ``Gemma4Model`` backbone,
-        skip duplicate decoder backbone weights, handle vision tower and
-        self-conditioning separately.
-        """
-
-        sc_params = dict(
-            (n, p)
-            for n, p in self.named_parameters()
-            if n.startswith("self_conditioning.")
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Some checkpoints carry a vestigial Gemma3n-style embedding table.
+        loader = AutoWeightsLoader(
+            self, ignore_unexpected_prefixes=["embed_vision.embedding."]
         )
-
-        # Collect vision tower + embedder parameters AND buffers for manual
-        # loading.  The HF vision tower registers std_bias / std_scale as
-        # buffers (not parameters) when config.standardize is True, so we
-        # must include named_buffers() to avoid "not found in model" warnings.
-        vision_params: dict[str, torch.Tensor] = {}
-        for n, p in self.named_parameters():
-            if n.startswith(("vision_tower.", "embed_vision.")):
-                vision_params[n] = p
-        for n, b in self.named_buffers():
-            if n.startswith(("vision_tower.", "embed_vision.")):
-                vision_params[n] = b
-
-        def _remap_weights():
-            # Use full weight names (including suffixes like .weight_scale,
-            # .weight_packed) for dedup instead of just the base layer name. Critical
-            # for quantized checkpoints where each weight has multiple tensors;
-            # tracking only base names skips scales as duplicates.
-            seen_weights: set[str] = set()
-            for name, weight in weights:
-                # Self-conditioning lives under model.decoder.self_conditioning.*
-                # in the checkpoint but at self_conditioning.* in our model.
-                if "self_conditioning" in name:
-                    sc_name = name.split("self_conditioning.", 1)[1]
-                    sc_name = "self_conditioning." + sc_name
-                    if sc_name in sc_params:
-                        sc_params[sc_name].data.copy_(weight)
-                    continue
-
-                # Vision tower: model.encoder.vision_tower.* → vision_tower.*
-                # In HF, the vision tower is a sibling of language_model
-                # under the encoder module.
-                if name.startswith("model.encoder.vision_tower."):
-                    vt_name = name[len("model.encoder.") :]
-                    if vt_name in vision_params:
-                        vision_params[vt_name].data.copy_(weight)
-                    else:
-                        logger.warning(
-                            "Vision tower weight %s (mapped to %s) not found in model",
-                            name,
-                            vt_name,
-                        )
-                    continue
-
-                # Vision embedder: model.encoder.embed_vision.* → embed_vision.*
-                if name.startswith("model.encoder.embed_vision."):
-                    ev_name = name[len("model.encoder.") :]
-                    if ev_name in vision_params:
-                        vision_params[ev_name].data.copy_(weight)
-                    else:
-                        logger.warning(
-                            "Embed vision weight %s (mapped to %s) not found in model",
-                            name,
-                            ev_name,
-                        )
-                    continue
-
-                # Skip vestigial embed_vision.embedding weights.
-                if "embed_vision.embedding." in name:
-                    continue
-
-                # Encoder backbone → model.*
-                if name.startswith("model.encoder.language_model."):
-                    name = name.replace("model.encoder.language_model.", "model.")
-                # Decoder backbone → model.* (skip exact duplicates)
-                elif name.startswith("model.decoder."):
-                    name = name.replace("model.decoder.", "model.")
-
-                # Skip only if we've seen the exact same weight name (including scales)
-                if name in seen_weights:
-                    continue
-                seen_weights.add(name)
-                yield name, weight
-
-        # Delegate to Gemma4ForCausalLM.load_weights for the backbone,
-        # which handles stacked params, MoE, k_eq_v, etc.
-        # Temporarily set self.config to text_config since Gemma4's
-        # load_weights expects it (e.g. tie_word_embeddings, layer_types).
-        from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
-
-        saved_config = self.config
-        self.config = self.model.config
-        try:
-            Gemma4ForCausalLM.load_weights(self, _remap_weights())
-        finally:
-            self.config = saved_config
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -454,7 +354,7 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compute_num_rejected(
     num_logits: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -466,7 +366,7 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
     logits: torch.Tensor,
@@ -515,11 +415,6 @@ def _compiled_sample_step(
     caller can compute logprobs outside the compiled region."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
-
-    # Clear outputs so prefill / non-decode slots report 0 (decode slots are
-    # overwritten below).
-    sampled.zero_()
-    num_sampled.zero_()
 
     # ---- Phase 1: Temperature schedule ----
     steps_f = step_tensor[decode_slots].float()
@@ -737,10 +632,13 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
-    def init_canvas(self, slot_indices_np: np.ndarray) -> None:
-        """Initialize canvas with random tokens for the given slots."""
-        n = slot_indices_np.shape[0]
-        self.canvas[slot_indices_np] = torch.randint(
+    def init_canvas(self, slot_indices: torch.Tensor) -> None:
+        """Initialize canvas with random tokens for the given slots.
+
+        `slot_indices` must already be on device to avoid a cpu->gpu sync.
+        """
+        n = slot_indices.shape[0]
+        self.canvas[slot_indices] = torch.randint(
             0,
             self.vocab_size,
             (n, self.canvas_length),
@@ -749,15 +647,15 @@ class DiffusionGemmaRequestStates:
         )
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
-        self.init_canvas(torch.tensor([slot_idx], device=self.device))
-        self.step[slot_idx] = 0
-        self.accepted_canvas_history_len[slot_idx] = 0
+        self.is_encoder_phase[slot_idx].fill_(True)
+        self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
+        self.step[slot_idx].fill_(0)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
-        self.accepted_canvas_history_len[slot_idx] = 0
+        self.is_encoder_phase[slot_idx].fill_(False)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
 
@@ -778,7 +676,7 @@ class DiffusionGemmaModelState(ModelState):
     ) -> None:
         super().__init__(vllm_config, model, encoder_cache, device)
 
-        # Per-step MM data produced by get_mm_embeddings and consumed by
+        # Per-step MM data produced by prepare_inputs_embeds and consumed by
         # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
         # prepare_inputs can call embed_input_ids directly into the
         # persistent _inputs_embeds_buf, avoiding the intermediate copy
@@ -800,7 +698,10 @@ class DiffusionGemmaModelState(ModelState):
             max_denoising_steps=max_denoising_steps,
             device=device,
             hidden_size=text_config.hidden_size,
-            stability_threshold=self.gen_config["stability_threshold"],
+            # In Transformers, `stability_threshold=1` (the default) means the current
+            # step must match the previous step. In vLLM, the history buffer includes
+            # the current step, so we add 1 to match the same behavior.
+            stability_threshold=self.gen_config["stability_threshold"] + 1,
         )
         self._req_id_to_index: dict[str, int] = {}
 
@@ -866,14 +767,14 @@ class DiffusionGemmaModelState(ModelState):
         self.diffusion_states.add_request(req_index)
         if not new_req_data.req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
-            self.diffusion_states.prompt_len[req_index] = prompt_len
+            self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
 
     def remove_request(self, req_id: str) -> None:
         idx = self._req_id_to_index.pop(req_id, None)
         if idx is not None:
             self.diffusion_states.remove_request(idx)
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
@@ -987,7 +888,9 @@ class DiffusionGemmaModelState(ModelState):
         attn_groups,
         kv_cache_config,
         for_capture=False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -1050,7 +953,7 @@ class DiffusionSampler:
         sampler: Any,
         diffusion_config: Any,
         vocab_size: int,
-        diffusion_states: DiffusionGemmaRequestStates | None = None,
+        diffusion_states: DiffusionGemmaRequestStates,
         *,
         confidence_threshold: float,
         t_min: float,
@@ -1065,6 +968,7 @@ class DiffusionSampler:
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
+        self.logits_mode = sampler.logprobs_mode in ("raw_logits", "processed_logits")
         # Self-conditioning soft embed = probs @ embed_weight * normalizer,
         # computed in the sampler (see _compiled_sample_step). ``embed_weight``
         # is the vocab-parallel shard; [sc_vocab_start, sc_vocab_end) is this
@@ -1153,11 +1057,15 @@ class DiffusionSampler:
         ps = input_batch.idx_mapping_np[prefill_indices_np[done_prefill_np]]
         if len(ps) == 0:
             return
-        states.init_canvas(ps)
-        self.req_states.draft_tokens[ps, : self.canvas_length] = states.canvas[ps]
-        ps_gpu = async_copy_to_gpu(
+        # Move the slot indices across once, up front: indexing a device
+        # tensor with a numpy array copies them over synchronously each time.
+        ps_gpu = async_tensor_h2d(
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
+        states.init_canvas(ps_gpu)
+        self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
+            ps_gpu
+        ]
         states.is_encoder_phase.index_fill_(0, ps_gpu, False)
 
     def _handle_prefill(
@@ -1258,24 +1166,45 @@ class DiffusionSampler:
         # was truncated near max_model_len, in which case the scheduler gave us
         # fewer than CL logits for that request.
         valid_canvas_len_np = per_req_nlogits_np[per_req_nlogits_np > 0]
-        valid_canvas_len = async_copy_to_gpu(
+        valid_canvas_len = async_tensor_h2d(
             valid_canvas_len_np.astype(np.int64), device=device
         )
+
+        # Per-request top_k/top_p, mirroring the AR sampler. Masked tokens
+        # become -inf and survive the temperature scaling in the compiled
+        # step, so Gumbel sampling, probs, and entropy all see the filtered
+        # distribution. The committed argmax (always the top-1 token) is
+        # unaffected; only the canvas exploration is constrained. Applied
+        # before canvas padding so phantom positions stay uniform.
+        if num_decode > 0:
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                decode_slots.repeat_interleave(
+                    valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
+                ),
+                decode_slots_np,
+            )
+            if top_k is not None or top_p is not None:
+                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
 
         # Pad any truncated canvas back to CL so the uniform-CL sampler math
         # holds. Phantom (padded) positions are zeroed → uniform logits → high
         # entropy (no premature convergence) and argmax 0 (stable); they are
-        # never committed (num_sampled == real length).
+        # never committed (num_sampled == real length). masked_fill (not
+        # multiply) so -inf entries from top_k/top_p filtering above don't
+        # turn phantom rows into NaN.
         if num_decode > 0 and valid_canvas_len_np.min() < CL:
             ar = torch.arange(CL, device=device)
             starts = valid_canvas_len.cumsum(0) - valid_canvas_len  # row offset per req
             valid = ar.unsqueeze(0) < valid_canvas_len.unsqueeze(1)  # [num_decode, CL]
             src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
-            logits = logits[src.reshape(-1)] * valid.reshape(-1, 1).to(logits.dtype)
+            logits = logits[src.reshape(-1)].masked_fill_(~valid.reshape(-1, 1), 0)
 
-        # Cleared inside _compiled_sample_step so prefill/non-decode slots stay 0.
+        # Clear once: the tiled loop below only scatters its own decode slots,
+        # so it must not re-clear earlier tiles' writes.
         sampled = self._sampled[:num_reqs]
         num_sampled = self._num_sampled[:num_reqs]
+        sampled.zero_()
+        num_sampled.zero_()
 
         all_slots = input_batch.idx_mapping[:num_reqs]
 
@@ -1283,94 +1212,112 @@ class DiffusionSampler:
         # since it mutates is_encoder_phase (commit→False, converge→True).
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
-        # --- Single compiled call: temp → sample → probs → post-process ---
-        scaled = _compiled_sample_step(
-            logits,
-            decode_slots,
-            decode_idx,
-            all_slots,
-            valid_canvas_len,
-            # State
-            states.canvas,
-            states.argmax_canvas,
-            states.step,
-            states.is_encoder_phase,
-            states.confident,
-            states.self_conditioning_embeds,
-            self.embed_weight,
-            self.normalizer,
-            states.accepted_canvas_history,
-            states.accepted_canvas_history_len,
-            # Output
-            sampled,
-            num_sampled,
-            self.req_states.draft_tokens,
-            # Config
-            max_denoising_steps=float(states.max_denoising_steps),
-            t_min=self.t_min,
-            t_max=self.t_max,
-            confidence_threshold=self.confidence_threshold,
-            vocab_size=self.vocab_size,
-            CL=self.canvas_length,
-            ST=states.stability_threshold,
-            entropy_bound=self.entropy_bound,
-            sc_vocab_start=self.sc_vocab_start,
-            sc_vocab_end=self.sc_vocab_end,
-            tp_size=self.tp_size,
-            tp_group_name=self.tp_group_name,
-        )
-
-        # --- Logprobs: stash on convergence, return on commit ---
         slots_np = input_batch.idx_mapping_np[:num_reqs]
-        is_decode_np = per_req_nlogits_np > 0
-
-        logprobs_tensors = None
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
-        if max_num_logprobs >= 0:
-            # Denoise steps that just converged: the compiled step flipped
-            # is_encoder_phase from False→True. Detect as slots where
-            # is_encoder_phase is now True but is_committing was False.
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            if just_converged.any():
-                flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                argmax_tokens = scaled.argmax(dim=-1)
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = local_idx.item()
-                    slot = decode_slots[local_idx]
-                    # Stash only the real canvas positions (== CL unless this
-                    # canvas was truncated near max_model_len); padded tail
-                    # positions are never emitted.
-                    k_i = int(valid_canvas_len_np[li])
-                    start = li * CL
-                    self._pending_logprobs[slot.item()] = compute_topk_logprobs(
-                        flat_logits[start : start + k_i],
-                        max_num_logprobs,
-                        argmax_tokens[local_idx][:k_i],
-                    )
 
-            # Commit steps: is_committing was True at entry. Reassemble
-            # previously stashed logprobs and attach to SamplerOutput.
-            if is_committing.any() and self._pending_logprobs:
-                parts_ids, parts_lp, parts_ranks = [], [], []
-                cu_gen: list[int] = []
-                flat_offset = 0
-                for i in range(num_reqs):
-                    cu_gen.append(flat_offset)
-                    slot = int(slots_np[i])
-                    if is_decode_np[i] and slot in self._pending_logprobs:
-                        lp = self._pending_logprobs.pop(slot)
-                        parts_ids.append(lp.logprob_token_ids)
-                        parts_lp.append(lp.logprobs)
-                        parts_ranks.append(lp.selected_token_ranks)
-                        flat_offset += lp.logprobs.shape[0]
-                if parts_ids:
-                    logprobs_tensors = LogprobsTensors(
-                        logprob_token_ids=torch.cat(parts_ids),
-                        logprobs=torch.cat(parts_lp),
-                        selected_token_ranks=torch.cat(parts_ranks),
-                        cu_num_generated_tokens=cu_gen,
-                    )
+        # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
+        # _compiled_sample_step keeps several live [group * CL, vocab] copies, so
+        # size each tile to a fraction of free memory to bound the transient at
+        # high concurrency. Tiling is bit-identical to a single pass.
+        group = max(num_decode, 1)
+        if num_decode > 0:
+            free, _ = current_platform.mem_get_info()
+            # ~10 transient fp32 copies of [group * CL, vocab] inside the step
+            # (eager peaks at ~8; pad for allocator overhead and small tensors).
+            bytes_per_req = CL * self.vocab_size * 4 * 10
+            budget = int(free * 0.5) // max(bytes_per_req, 1)
+            group = max(1, min(num_decode, budget))
+
+        for start_req in range(0, num_decode, group):
+            end_req = min(start_req + group, num_decode)
+            tile = slice(start_req, end_req)
+            tile_slots = decode_slots[tile]
+
+            scaled = _compiled_sample_step(
+                logits[start_req * CL : end_req * CL],
+                tile_slots,
+                decode_idx[tile],
+                all_slots,
+                valid_canvas_len[tile],
+                # State
+                states.canvas,
+                states.argmax_canvas,
+                states.step,
+                states.is_encoder_phase,
+                states.confident,
+                states.self_conditioning_embeds,
+                self.embed_weight,
+                self.normalizer,
+                states.accepted_canvas_history,
+                states.accepted_canvas_history_len,
+                # Output
+                sampled,
+                num_sampled,
+                self.req_states.draft_tokens,
+                # Config
+                max_denoising_steps=float(states.max_denoising_steps),
+                t_min=self.t_min,
+                t_max=self.t_max,
+                confidence_threshold=self.confidence_threshold,
+                vocab_size=self.vocab_size,
+                CL=CL,
+                ST=states.stability_threshold,
+                entropy_bound=self.entropy_bound,
+                sc_vocab_start=self.sc_vocab_start,
+                sc_vocab_end=self.sc_vocab_end,
+                tp_size=self.tp_size,
+                tp_group_name=self.tp_group_name,
+            )
+
+            # Logprobs for denoise steps that just converged (is_encoder_phase
+            # flipped False→True), stashed per tile so `scaled` is freed each tile.
+            if max_num_logprobs >= 0:
+                converged_mask = states.is_encoder_phase[tile_slots]
+                just_converged = converged_mask & ~is_committing[tile]
+                if just_converged.any():
+                    flat_logits = scaled.reshape(-1, scaled.shape[-1])
+                    argmax_tokens = scaled.argmax(dim=-1)
+                    for local_idx in just_converged.nonzero(as_tuple=True)[0]:
+                        li = local_idx.item()
+                        slot = tile_slots[local_idx]
+                        # Stash only the real canvas positions (== CL unless this
+                        # canvas was truncated near max_model_len); padded tail
+                        # positions are never emitted.
+                        k_i = int(valid_canvas_len_np[start_req + li])
+                        pos = li * CL
+                        self._pending_logprobs[slot.item()] = compute_topk_scores(
+                            flat_logits[pos : pos + k_i],
+                            max_num_logprobs,
+                            argmax_tokens[local_idx][:k_i],
+                            logits_mode=self.logits_mode,
+                        )
+
+        # Commit steps: is_committing was True at entry. Reassemble previously
+        # stashed logprobs and attach to SamplerOutput.
+        logprobs_tensors = None
+        if max_num_logprobs >= 0 and is_committing.any() and self._pending_logprobs:
+            committing_slots = set(
+                decode_slots_np[is_committing.cpu().numpy()].tolist()
+            )
+            parts_ids, parts_lp, parts_ranks = [], [], []
+            cu_gen: list[int] = []
+            flat_offset = 0
+            for i in range(num_reqs):
+                cu_gen.append(flat_offset)
+                slot = int(slots_np[i])
+                if slot in committing_slots and slot in self._pending_logprobs:
+                    lp = self._pending_logprobs.pop(slot)
+                    parts_ids.append(lp.logprob_token_ids)
+                    parts_lp.append(lp.logprobs)
+                    parts_ranks.append(lp.selected_token_ranks)
+                    flat_offset += lp.logprobs.shape[0]
+            if parts_ids:
+                logprobs_tensors = LogprobsTensors(
+                    logprob_token_ids=torch.cat(parts_ids),
+                    logprobs=torch.cat(parts_lp),
+                    selected_token_ranks=torch.cat(parts_ranks),
+                    cu_num_generated_tokens=cu_gen,
+                )
 
         return self._build_output(
             input_batch,

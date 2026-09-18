@@ -11,9 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
+import vllm.envs as envs
 from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -78,8 +77,17 @@ def _resolve_target_test_suite() -> str:
 TARGET_TEST_SUITE = _resolve_target_test_suite()
 
 
+# ROCm can occasionally retain the object until fixture teardown. Retry only
+# that assertion after cleanup; collecting cyclic garbage here would mask the
+# reference cycles this test is intended to catch.
+@pytest.mark.flaky(
+    reruns=2,
+    reruns_delay=5,
+    only_rerun="AssertionError",
+    condition=current_platform.is_rocm(),
+)
 def test_vllm_gc_ed():
-    """Verify vllm instance is GC'ed when it is deleted"""
+    """Verify vllm instance is GC'ed when it is deleted."""
     llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm
@@ -139,15 +147,6 @@ def test_models(
         if enable_prompt_embeds:
             with torch.no_grad():
                 prompt_embeds = hf_model.get_prompt_embeddings(example_prompts)
-            if model == "hmellor/tiny-random-Gemma2ForCausalLM" and (
-                Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-            ):
-                # For Gemma 1/2 models with Transformers 5.4.0+, the prompt embeddings
-                # are normalised in `get_prompt_embeddings`, like Gemma 3.
-                # For older versions, we need to manually normalise.
-                embed_scale = hf_model.config.hidden_size**0.5
-                normalizer = torch.tensor(embed_scale, dtype=prompt_embeds[0].dtype)
-                prompt_embeds = [p_e * normalizer for p_e in prompt_embeds]
 
     with VllmRunner(
         model,
@@ -276,6 +275,37 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     with vllm_runner("facebook/opt-125m", enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.llm.llm_engine, LLMEngine):
             v1_test_failed_model_execution(vllm_model)
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_raise_on_logit_nans(
+    vllm_runner, monkeypatch, use_v2_model_runner: bool
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_RAISE_ON_LOGIT_NANS", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    envs.disable_envs_cache()
+
+    try:
+        with vllm_runner("facebook/opt-125m", enforce_eager=True) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            assert model_runner.vllm_config.use_v2_model_runner is use_v2_model_runner
+            model_cls = type(model_runner.model)
+            original_compute_logits = model_cls.compute_logits
+
+            def compute_nan_logits(self, *args, **kwargs):
+                logits = original_compute_logits(self, *args, **kwargs)
+                # `logits[0, 0] = ...` copies the scalar H2D and blocks.
+                logits[0, 0].fill_(float("nan"))
+                return logits
+
+            monkeypatch.setattr(model_cls, "compute_logits", compute_nan_logits)
+
+            with pytest.raises(RuntimeError, match="NaNs detected in logits"):
+                vllm_model.generate_greedy(["Hello, my name is"], 1, use_tqdm=False)
+    finally:
+        envs.disable_envs_cache()
 
 
 def v1_test_failed_model_execution(vllm_model):

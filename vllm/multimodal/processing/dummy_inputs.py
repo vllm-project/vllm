@@ -10,8 +10,8 @@ from PIL import Image
 
 from vllm.config.multimodal import (
     AudioDummyOptions,
-    BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
@@ -26,8 +26,7 @@ logger = init_logger(__name__)
 
 
 class BaseDummyInputsBuilder(ABC, Generic[_I]):
-    """
-    Abstract base class that constructs the dummy data to profile
+    """Abstract base class that constructs the dummy data to profile
     multi-modal models.
     """
 
@@ -38,9 +37,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
     @abstractmethod
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        """
-        Build the text input corresponding to `mm_counts`.
-        """
+        """Build the text input corresponding to `mm_counts`."""
         raise NotImplementedError
 
     @abstractmethod
@@ -48,10 +45,9 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        """
-        Build the multimodal input which, after processing, results in
+        """Build the multimodal input which, after processing, results in
         the maximum possible number of placeholder tokens.
 
         Args:
@@ -61,6 +57,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                        If None, use model defaults for backward compatibility.
                        If provided, models can use these to customize dummy
                        data generation.
+
         """
         raise NotImplementedError
 
@@ -68,27 +65,36 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
-        """
-        Build the input which, after processing, results in
+        """Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
 
         Args:
             seq_len: Sequence length
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
+
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
-        tokenization_kwargs = {"truncation": False}
+        tokenizer = self.info.ctx.tokenizer
+        dummy_prompt: list[int]
+        if tokenizer is None:
+            # Tokenizer-less models (e.g. `skip_tokenizer_init=True`) only
+            # accept embeddings and have an empty dummy text, so there are no
+            # prompt tokens.
+            dummy_prompt = []
+        else:
+            from .processor import cached_encode
+
+            dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
 
         return ProcessorInputs(
-            prompt=dummy_text,
+            prompt=dummy_prompt,
             mm_data_items=dummy_mm_items,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _get_dummy_audios(
@@ -183,5 +189,5 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                         height,
                     )
                 height = min(height, overrides.height)
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video = np.full((num_frames, height, width, 3), 255, dtype=np.uint8)
         return [video] * num_videos
