@@ -491,7 +491,7 @@ def test_decode_bench_connector_skips_null_padding():
 
 
 def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
-    """DCP scales full-attention blocks but not sliding-window blocks."""
+    """DCP scales target blocks but not the replicated draft's window."""
     block_size = 16
     dcp_world_size = 2
     vllm_config = create_vllm_config(
@@ -506,6 +506,7 @@ def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
         dtype=torch.float32,
     )
     sliding_window = SlidingWindowSpec(
+        dcp_sharded=False,
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,

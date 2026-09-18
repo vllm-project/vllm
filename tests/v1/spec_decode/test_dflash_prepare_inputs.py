@@ -9,7 +9,7 @@ import torch
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-    prepare_dflash_inputs,
+    DFlashSpeculator,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -24,6 +24,7 @@ def _run_prepare(
     cp_rank: int = 0,
     cp_size: int = 1,
     cp_interleave: int = 1,
+    draft_dcp_size: int | None = None,
 ):
     device = torch.device("cuda")
     max_num_reqs = 4
@@ -40,7 +41,9 @@ def _run_prepare(
     )
     input_batch = SimpleNamespace(
         num_reqs=1,
+        num_tokens=4,
         num_scheduled_tokens=np.array([4], dtype=np.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([target_positions[-1] + 1]),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
         idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
@@ -74,36 +77,59 @@ def _run_prepare(
     next_prefill_tokens = torch.zeros_like(last_sampled)
     block_table = torch.tensor([block_table_values], dtype=torch.int32, device=device)
 
-    prepare_dflash_inputs(
-        input_buffers,
-        query_slot_mapping,
-        context_positions,
-        context_slot_mapping,
-        sample_indices,
-        sample_pos,
-        sample_idx_mapping,
-        temperature,
-        seeds,
-        input_batch,
-        torch.tensor([1], dtype=torch.int32, device=device),
-        torch.tensor([2], dtype=torch.int32, device=device),
-        last_sampled,
-        next_prefill_tokens,
-        input_temperature,
-        input_seeds,
-        block_table,
-        4,
-        cp_rank,
-        cp_size,
-        cp_interleave,
-        123,
-        num_speculative_steps,
-        num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
-        128,
+    class InputsPrepared(Exception):
+        pass
+
+    def stop_before_model(*args):
+        raise InputsPrepared
+
+    draft = SimpleNamespace(
+        input_buffers=input_buffers,
+        context_positions=context_positions,
+        _context_slot_mappings=context_slot_mapping.unsqueeze(0),
+        sample_indices=sample_indices,
+        sample_pos=sample_pos,
+        sample_idx_mapping=sample_idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        hidden_states=torch.zeros(4, 1, device=device),
+        model=SimpleNamespace(precompute_and_store_context_kv=stop_before_model),
+        pcp_manager=None,
+        draft_kv_cache_group_id=0,
+        draft_kv_cache_group_ids=[0],
+        _layer_group_idx=None,
+        block_tables=SimpleNamespace(
+            slot_mappings=query_slot_mapping.unsqueeze(0),
+            input_block_tables=[block_table],
+            kernel_block_sizes=[4],
+            cp_rank=cp_rank,
+            cp_size=cp_size,
+            cp_interleave=cp_interleave,
+        ),
+        dcp_size=cp_size if draft_dcp_size is None else draft_dcp_size,
+        parallel_drafting_token_id=123,
+        num_query_per_req=num_speculative_steps,
+        num_speculative_steps=num_speculative_steps,
+        max_num_reqs=max_num_reqs,
+        max_num_tokens=max_num_tokens,
+        max_model_len=128,
         sample_from_anchor=True,
     )
+    with pytest.raises(InputsPrepared):
+        DFlashSpeculator.propose(
+            draft,
+            input_batch,
+            {},
+            {},
+            draft.hidden_states,
+            None,
+            torch.tensor([1], dtype=torch.int32, device=device),
+            torch.tensor([2], dtype=torch.int32, device=device),
+            last_sampled,
+            next_prefill_tokens,
+            input_temperature,
+            input_seeds,
+        )
     torch.accelerator.synchronize()
     return SimpleNamespace(
         input_buffers=input_buffers,
@@ -118,12 +144,17 @@ def _run_prepare(
     )
 
 
-def test_prepare_dflash_inputs_excludes_rejected_context_suffix():
+@pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
+def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size):
     # Positions 10/11 use physical block 7. Rejected positions 12/13 would use
     # block 8, but must be PAD context rather than contaminating draft KV.
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+        cp_interleave=2,
+        draft_dcp_size=1,
     )
 
     assert out.context_positions[:4].tolist() == [10, 11, 0, 0]
