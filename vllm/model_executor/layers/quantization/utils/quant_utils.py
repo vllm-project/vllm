@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""This file is used for /tests and /benchmarks"""
+"""This file is used for /tests and /benchmarks."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -109,8 +109,7 @@ class _GroupShape(NamedTuple):
 
 
 class GroupShape(_GroupShape):
-    """
-    This class describes the quantization group shape.
+    """This class describes the quantization group shape.
     It includes static members for common shapes (per-tensor, per-token).
     """
 
@@ -139,8 +138,7 @@ GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 @dataclass(frozen=True)
 class ScaleDesc:
-    """
-    Class for describing a single quantization scaling factor.
+    """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
@@ -166,8 +164,7 @@ class ScaleDesc:
 
 @dataclass(frozen=True)
 class QuantKey:
-    """
-    Class for identifying the type of quantization.
+    """Class for identifying the type of quantization.
     dtype: quantized data type
     scale: scale descriptor
     scale2: second-level scale descriptor
@@ -378,8 +375,7 @@ def prep_scale_for_group_broadcast(
     x: torch.Tensor,
     group_shape: GroupShape | None,
 ) -> torch.Tensor:
-    """
-    Prepare the input quantization scale for group broadcasting.
+    """Prepare the input quantization scale for group broadcasting.
 
     Args:
         scale: The scale tensor (scalar or 1D).
@@ -388,6 +384,7 @@ def prep_scale_for_group_broadcast(
 
     Returns:
         scale reshaped for correct broadcasting.
+
     """
     if scale.numel() == 1:
         # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
@@ -432,13 +429,13 @@ def scaled_quantize(
     quant_dtype: torch.dtype,
     compute_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args:
-        x: Input tensor to quantize
-        group_shape: Shape of quantization groups
-        quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
-        compute_dtype: Optional dtype for intermediate computations.
-            If None, uses input dtype. Use torch.float32 for higher precision.
+    """Args:
+    x: Input tensor to quantize
+    group_shape: Shape of quantization groups
+    quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
+    compute_dtype: Optional dtype for intermediate computations.
+        If None, uses input dtype. Use torch.float32 for higher precision.
+
     """
     group_shape = _normalize_quant_group_shape(x, group_shape)
     assert quant_dtype.is_floating_point, (
@@ -506,7 +503,7 @@ def get_attribute_fallback(obj, attributes: list[str]):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
-    """Return layer's unquantized weights in [out, in] layout"""
+    """Return layer's unquantized weights in [out, in] layout."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
     from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -691,36 +688,6 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
-def permute_rows(
-    q_w: torch.Tensor,
-    w_ref: torch.Tensor,
-    group_size: int,
-    test_perm: torch.Tensor | None = None,
-):
-    assert q_w.shape == w_ref.shape
-
-    orig_device = q_w.device
-    k_size, _ = q_w.shape
-
-    g_idx = torch.zeros((k_size,), dtype=torch.int32)
-    for i in range(k_size):
-        g_idx[i] = i // group_size
-
-    # Simulate act_order by doing a random permutation on K
-    rand_perm = test_perm if test_perm is not None else torch.randperm(k_size)
-
-    g_idx = g_idx[rand_perm].contiguous()
-    q_w = q_w[rand_perm, :].contiguous()
-    w_ref = w_ref[rand_perm, :].contiguous()
-
-    return (
-        w_ref.to(device=orig_device),
-        q_w.to(device=orig_device),
-        g_idx.to(device=orig_device),
-        rand_perm.to(device=orig_device),
-    )
-
-
 def quantize_weights(
     w: torch.Tensor,
     quant_type: ScalarType,
@@ -824,8 +791,6 @@ def gptq_quantize_weights(
     w: torch.Tensor,
     quant_type: ScalarType,
     group_size: int,
-    act_order: bool,
-    test_perm: torch.Tensor | None = None,
 ):
     size_k, _ = w.shape
 
@@ -838,35 +803,7 @@ def gptq_quantize_weights(
     )
 
     w_ref, w_q, w_s, _ = quantize_weights(w, quant_type, group_size)
-
-    # Apply act_order
-    g_idx = torch.empty(0, dtype=torch.int, device=w.device)
-    rand_perm = torch.empty(0, dtype=torch.int, device=w.device)
-    if act_order:
-        assert group_size < size_k, (
-            "For act_order, groupsize = {} must be less than size_k = {}".format(
-                group_size, size_k
-            )
-        )
-
-        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size, test_perm)
-
-    return w_ref, w_q, w_s, g_idx, rand_perm
-
-
-def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
-    orig_device = q_w.device
-
-    sort_indices = torch.argsort(g_idx).to(dtype=torch.int32)  # Sort based on g_idx
-
-    g_idx = g_idx[sort_indices].contiguous()
-    q_w = q_w[sort_indices, :].contiguous()
-
-    return (
-        q_w.to(device=orig_device),
-        g_idx.to(device=orig_device),
-        sort_indices.to(device=orig_device),
-    )
+    return w_ref, w_q, w_s
 
 
 def pack_rows(
@@ -984,8 +921,7 @@ def awq_pack(
 def convert_bf16_scales_to_fp8(
     quant_fp8: Callable, scales: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
+    """Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
     expected by W4A8 GEMM kernels.
     """
     assert scales.is_contiguous(), (
@@ -1009,9 +945,7 @@ def convert_bf16_scales_to_fp8(
 
 
 def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
-    """
-    Convert int4b8 (packed to int32) to signed int4
-    """
+    """Convert int4b8 (packed to int32) to signed int4."""
     assert t.is_cuda, "tensor must be on gpu"
     assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
 
