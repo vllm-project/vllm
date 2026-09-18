@@ -15,6 +15,7 @@ from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
     flush_open_body,
+    framing_start,
     has_channel_framing,
     has_complete_channel,
     open_recipient,
@@ -29,12 +30,10 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         self._emitted_reasoning = ""
         self._emitted_content = ""
-        # Set while the unframed fallback has emitted content: the segmenter
-        # drops pre-header text once framing arrives, so the framed path
-        # resets the cursor rather than wedging on the unframed prefix. The
-        # pre-flip cursor is kept for the finish-time unframed flush, which
-        # works in whole-text coordinates.
-        self._content_unframed = False
+        # None until the framed path first runs. Set at that point to the
+        # whole-text content cursor (the segmenter drops pre-header text, so
+        # the framed path re-anchors instead of wedging on the unframed
+        # prefix); the finish-time unframed flush resumes from it.
         self._emitted_content_pre_flip: str | None = None
         self._initial_recipient: str | None = None
 
@@ -158,7 +157,6 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
-            self._content_unframed = bool(self._emitted_content)
             return DeltaMessage(content=content_delta) if content_delta else None
         content, reasoning, content_open, reasoning_open = visible_channels(
             seeded, withhold_open_untagged=True
@@ -167,13 +165,18 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             content = safe_open_body(content)
         if reasoning_open:
             reasoning = safe_open_body(reasoning)
-        if self._content_unframed:
-            # The segmenter drops pre-header text, so framed content never
-            # continues the unframed cursor (a shared prefix is coincidence):
-            # reset unconditionally, keeping the output chunking-independent.
-            self._emitted_content_pre_flip = self._emitted_content
+        flip_delta = ""
+        if self._emitted_content_pre_flip is None:
+            # First framed delta: the segmenter drops the pre-header region,
+            # so flush whatever the unframed fallback had held back of it
+            # (nothing when the stream was framed from the start), then
+            # re-anchor -- framed content never continues the unframed
+            # prefix; a shared prefix is coincidence.
+            pre = safe_unframed_tail(seeded[: framing_start(seeded)])
+            flip_delta, self._emitted_content_pre_flip = advance_emitted(
+                self._emitted_content, pre
+            )
             self._emitted_content = ""
-            self._content_unframed = False
 
         reasoning_delta, self._emitted_reasoning = advance_emitted(
             self._emitted_reasoning, reasoning
@@ -181,6 +184,8 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         content_delta, self._emitted_content = advance_emitted(
             self._emitted_content, content
         )
+        if flip_delta:
+            content_delta = flip_delta + content_delta
         if not reasoning_delta and not content_delta:
             return None
 

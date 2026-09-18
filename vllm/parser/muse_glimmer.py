@@ -116,8 +116,8 @@ class MuseGlimmerParser(DelegatingParser):
                 seed = _channel_seed(recipient)
                 if seed is not None:
                     state.previous_text = seed
+                state.prompt_reasoning_checked = True
             state.reasoning_ended = True
-            state.prompt_reasoning_checked = True
         return super().parse_delta(
             delta_text,
             delta_token_ids,

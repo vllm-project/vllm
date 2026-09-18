@@ -901,16 +901,30 @@ def test_unframed_prefix_then_open_untagged_channel_flushes(tokenizer):
         assert reasoning == ""
         assert content == "prosethe answer"
         assert tools == []
+        # Same when the prose and the framing arrive in a single delta.
+        _r, one_shot, _t = drive(tokenizer, [text], with_tool_parser=with_tool_parser)
+        assert one_shot == "prosethe answer"
 
 
 def test_unframed_framing_flip_is_chunking_independent(tokenizer):
     # A framed body whose prefix coincides with the already-emitted unframed
-    # text must stream identically under any chunking: the cursor reset at
-    # the flip is unconditional.
+    # text must stream identically under any chunking: at the flip the
+    # pre-header region is flushed and the cursor re-anchored.
     text = "the<|start|>assistant to=user<|message|>the answer<|eot|>"
     _r1, charwise, _t1 = drive_tokenwise(tokenizer, text)
     _r2, chunked, _t2 = drive(tokenizer, ["the", text[3:]])
     assert charwise == chunked == "thethe answer"
+
+
+def test_flip_delta_flushes_held_pre_header_text(tokenizer):
+    # A delta spanning pre-header text and the framing start (MTP/spec-decode
+    # batches several tokens per delta) must not lose the held-back prose.
+    text = "xy<|start|>assistant to=user<|message|>ans<|eot|>"
+    _r, charwise, _t = drive_tokenwise(tokenizer, text)
+    assert charwise == "xyans"
+    for chunks in ([text], ["x", text[1:]], ["xy", text[2:]]):
+        _r, content, _t = drive(tokenizer, chunks)
+        assert content == "xyans"
 
 
 def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):
@@ -946,6 +960,17 @@ def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
     )
     assert reasoning == "think"
     assert content == ""
+    assert tools == []
+
+
+def test_untagged_body_keeps_atem_like_words(tokenizer):
+    # Only a real invoke opener strips an untagged body: "<atem:invokeful"
+    # is ordinary text (the strip shares the boundary pattern's word edge).
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer, "<|start|>assistant<|message|>x <atem:invokeful y<|eot|>"
+    )
+    assert reasoning == ""
+    assert content == "x <atem:invokeful y"
     assert tools == []
 
 

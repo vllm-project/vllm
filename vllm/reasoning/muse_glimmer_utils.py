@@ -89,11 +89,20 @@ def current_assistant_turn(text: str) -> str:
     ``rfind`` in a loop is quadratic on a flood of quoted markers.
     """
     last: int | None = None
+    # A header spans at most the turn opener, whitespace, a `to=` recipient
+    # and <|message|>; bound the match window so a flood of quoted turn
+    # openers costs O(1) per occurrence instead of a whole-tail scan for the
+    # <|message|> literal. A header with a longer interior whitespace run is
+    # derailment: missing it just widens the scan, which lands on the same
+    # last open channel anyway.
+    max_header_span = (
+        len(ASSISTANT_TURN_OPEN) + 64 + 3 + _MAX_RECIPIENT_LEN + len("<|message|>")
+    )
     for match in re.finditer(re.escape(ASSISTANT_TURN_OPEN), text):
         index = match.start()
-        if MSG_HEADER_RE.match(text, index) is not None or index + len(
-            ASSISTANT_TURN_OPEN
-        ) == len(text):
+        if MSG_HEADER_RE.match(text, index, index + max_header_span) is not None or (
+            index + len(ASSISTANT_TURN_OPEN) == len(text)
+        ):
             last = index
     if last is None:
         return text
@@ -110,13 +119,19 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
     preceding word it is ordinary text.
     """
     pos = 0
+    end_marker_missing = False
     while pos < len(text):
         header = MSG_HEADER_RE.search(text, pos)
         if header is None:
             return
 
         body_start = header.end()
-        end = MSG_END_RE.search(text, body_start)
+        # Once an end-marker search comes back empty no later body can have
+        # one either; latching it keeps an open-channel flood (no <|eom|>
+        # anywhere) linear instead of paying a whole-tail scan per message.
+        end = None if end_marker_missing else MSG_END_RE.search(text, body_start)
+        if end is None:
+            end_marker_missing = True
         body_end = end.start() if end is not None else len(text)
         closed = end is not None
 
@@ -281,6 +296,22 @@ def flush_open_body(body: str) -> str:
             continue
 
         return body
+
+
+def framing_start(text: str) -> int:
+    """Start of the first channel framing, or ``len(text)`` when there is none.
+
+    The earliest of the first message header (whose match may include the
+    preceding whitespace run) and the first bare ``<|start|>`` (a framed
+    header still in progress). Everything before it is pre-header text the
+    segmenter will never admit into a channel.
+    """
+    header = MSG_HEADER_RE.search(text)
+    start = header.start() if header is not None else len(text)
+    bare = text.find("<|start|>")
+    if bare != -1:
+        start = min(start, bare)
+    return start
 
 
 def has_channel_framing(text: str) -> bool:

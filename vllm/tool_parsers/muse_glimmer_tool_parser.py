@@ -69,6 +69,7 @@ from vllm.reasoning.muse_glimmer_utils import (
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     flush_open_body,
+    framing_start,
     has_channel_framing,
     has_complete_channel,
     iter_messages,
@@ -124,12 +125,10 @@ class MuseGlimmerToolParser(ToolParser):
         self._emitted_content = ""
         self._emitted_reasoning = ""
         self._emitted_tool_calls: int = 0
-        # Set while the unframed fallback has emitted content: the segmenter
-        # drops pre-header text once framing arrives, so the framed path
-        # resets the cursor rather than wedging on the unframed prefix. The
-        # pre-flip cursor is kept for the finish-time unframed flush, which
-        # works in whole-text coordinates.
-        self._content_unframed = False
+        # None until the framed path first runs. Set at that point to the
+        # whole-text content cursor (the segmenter drops pre-header text, so
+        # the framed path re-anchors instead of wedging on the unframed
+        # prefix); the finish-time unframed flush resumes from it.
         self._emitted_content_pre_flip: str | None = None
 
     def adjust_request(
@@ -208,11 +207,9 @@ class MuseGlimmerToolParser(ToolParser):
         tools = getattr(request, "tools", None) if request is not None else None
         for t in tools or []:
             if isinstance(t, dict):
-                fn = t.get("function")
+                fn = t.get("function") or t
             else:
-                fn = getattr(t, "function", None)
-            if fn is None:
-                fn = t
+                fn = getattr(t, "function", None) or t
             name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
             if name:
                 names.add(name)
@@ -364,7 +361,6 @@ class MuseGlimmerToolParser(ToolParser):
             self._emitted_content = ""
             self._emitted_reasoning = ""
             self._emitted_tool_calls = 0
-            self._content_unframed = False
             self._emitted_content_pre_flip = None
 
         if not has_channel_framing(current_text):
@@ -375,7 +371,6 @@ class MuseGlimmerToolParser(ToolParser):
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
-            self._content_unframed = bool(self._emitted_content)
             return DeltaMessage(content=content_delta) if content_delta else None
 
         try:
@@ -400,18 +395,24 @@ class MuseGlimmerToolParser(ToolParser):
                 content = safe_open_body(content)
             if reasoning_open:
                 reasoning = safe_open_body(reasoning)
-            if self._content_unframed:
-                # The segmenter drops pre-header text, so framed content never
-                # continues the unframed cursor (a shared prefix is
-                # coincidence): reset unconditionally, keeping the output
-                # chunking-independent.
-                self._emitted_content_pre_flip = self._emitted_content
+            flip_delta = ""
+            if self._emitted_content_pre_flip is None:
+                # First framed delta: the segmenter drops the pre-header
+                # region, so flush whatever the unframed fallback had held
+                # back of it (nothing when the stream was framed from the
+                # start), then re-anchor -- framed content never continues
+                # the unframed prefix; a shared prefix is coincidence.
+                pre = safe_unframed_tail(current_text[: framing_start(current_text)])
+                flip_delta, self._emitted_content_pre_flip = advance_emitted(
+                    self._emitted_content, pre
+                )
                 self._emitted_content = ""
-                self._content_unframed = False
 
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
+            if flip_delta:
+                content_delta = flip_delta + content_delta
             reasoning_delta, self._emitted_reasoning = advance_emitted(
                 self._emitted_reasoning, reasoning
             )
