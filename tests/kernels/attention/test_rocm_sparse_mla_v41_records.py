@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness of the DeepSeek-V4.1 NVFP4 compressed KV record in ROCm sparse
-MLA decode, against a torch softmax over the rows the record stores."""
+"""Correctness of the DeepSeek-V4.1 KV records in ROCm sparse MLA decode, each
+against a torch softmax over the rows the record stores."""
 
 import math
 
@@ -66,6 +66,28 @@ def _pack_v4(rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tens
     return data, scales, torch.cat([stored, rope.float()], dim=1)
 
 
+def _pack_v41_mxfp8(
+    rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``[N, 512]`` to the 528 B record: every dim as fp8 e4m3, RoPE included,
+    then 16 UE8M0 scales of 32 dims each."""
+    tiles = rows.reshape(-1, 16, 32)
+    exponents = torch.ceil(torch.log2((tiles.abs().amax(-1) / 448.0).clamp_min(1e-4)))
+    # The gfx950 writer clamps the encoded exponent to 254 so no scale is NaN.
+    encoded = (exponents + 127.0).clamp(0, 254)
+    factors = torch.exp2(encoded - 127.0)
+    quantized = (tiles / factors[..., None]).clamp(-448, 448).to(torch.float8_e4m3fn)
+    stored = (quantized.float() * factors[..., None]).reshape(-1, HEAD_DIM)
+    return (
+        quantized.reshape(-1, HEAD_DIM).view(torch.uint8),
+        encoded.to(torch.uint8),
+        stored,
+    )
+
+
+_PACKERS = {288: _pack_nvfp4, 528: _pack_v41_mxfp8, 584: _pack_v4}
+
+
 def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.Tensor:
     """A page holds its whole data region ahead of its whole scale region."""
     num_blocks = data.shape[0] // block_size
@@ -80,13 +102,18 @@ def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.T
 
 
 @pytest.mark.skipif(
-    not _on_gfx950(), reason="The NVFP4 record is read by the gfx950 sparse decode"
+    not _on_gfx950(), reason="The V4.1 records are read by the gfx950 sparse decode"
 )
 @pytest.mark.parametrize("num_tokens", [1, 4])
 @pytest.mark.parametrize("num_heads", [16, 128])
-@pytest.mark.parametrize("compressed_record", [288, 584])
+# The record pairs the model actually allocates: the V4 layout, NVFP4 beside a
+# V4 sliding-window record, the V4.1 MXFP8 layout, and NVFP4 beside that one.
+@pytest.mark.parametrize(
+    ("swa_record", "compressed_record"),
+    [(584, 584), (584, 288), (528, 528), (528, 288)],
+)
 def test_compressed_record_matches_reference(
-    num_tokens: int, num_heads: int, compressed_record: int
+    num_tokens: int, num_heads: int, swa_record: int, compressed_record: int
 ) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_sparse_attn_decode
 
@@ -95,17 +122,16 @@ def test_compressed_record_matches_reference(
     block_size, num_slots = 64, 512
     num_compressed, num_swa = 64, 32
     scale = 1.0 / math.sqrt(HEAD_DIM)
-    pack = _pack_nvfp4 if compressed_record == 288 else _pack_v4
-
-    data, scales, compressed_stored = pack(
+    data, scales, compressed_stored = _PACKERS[compressed_record](
         torch.randn(num_slots, HEAD_DIM, device=device) * 0.7
     )
     compressed_cache = _paged(data, scales, block_size)
     assert compressed_cache.shape[-1] == compressed_record
-    data, scales, swa_stored = _pack_v4(
+    data, scales, swa_stored = _PACKERS[swa_record](
         torch.randn(num_slots, HEAD_DIM, device=device) * 0.7
     )
     swa_cache = _paged(data, scales, block_size)
+    assert swa_cache.shape[-1] == swa_record
 
     query = torch.randn(
         num_tokens, num_heads, HEAD_DIM, device=device, dtype=torch.bfloat16
