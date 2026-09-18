@@ -39,7 +39,18 @@ from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if current_platform.is_rocm():
+if current_platform.is_cpu():
+    from vllm.models.glm5next.cpu.kda import (
+        chunk_kda_with_fused_gate,
+        fused_recurrent_kda,
+    )
+    from vllm.models.glm5next.cpu.kda import (
+        gather_initial_states_cpu as gather_initial_states,
+    )
+    from vllm.models.glm5next.cpu.kda import (
+        scatter_states_cpu as scatter_states,
+    )
+elif current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
@@ -133,6 +144,13 @@ def _resolve_kda_prefill_backend(
     ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if current_platform.is_cpu():
+        if backend != "auto":
+            raise ValueError(
+                f"KDA prefill backend '{backend}' is not available on CPU; "
+                "use 'auto' for the PyTorch CPU backend."
+            )
+        return "cpu"
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
@@ -480,6 +498,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        if current_platform.is_cpu() and use_spec:
+            raise NotImplementedError(
+                "GLM5Next speculative decoding is not supported on CPU because "
+                "the CPU causal convolution does not implement accepted-token "
+                "rollback."
+            )
         # Safe-gate checkpoints use the bounded sigmoid variant.
         safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound

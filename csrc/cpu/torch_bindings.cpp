@@ -8,6 +8,15 @@
 // libraries use different ISAs.
 #define TORCH_EXTENSION_NAME _C
 
+#if defined(__AVX512F__)
+std::tuple<torch::Tensor, torch::Tensor> glm5next_kda_recurrent_cpu_binding(
+    const torch::Tensor& q, const torch::Tensor& k, const torch::Tensor& v,
+    const torch::Tensor& g, const torch::Tensor& beta,
+    const torch::Tensor& initial_state, double scale, bool sigmoid_beta,
+    const torch::Tensor& a_log, const torch::Tensor& g_bias, bool compute_gate,
+    double lower_bound);
+#endif
+
 void release_dnnl_matmul_handler(int64_t handler);
 
 int64_t create_onednn_scaled_mm_handler(const torch::Tensor& b,
@@ -462,6 +471,16 @@ void sample_recovered_tokens_kernel_impl(
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
+
+#if defined(__AVX512F__)
+  ops.def(
+      "glm5next_kda_recurrent(Tensor q, Tensor k, Tensor v, Tensor g, "
+      "Tensor beta, Tensor initial_state, float scale, bool sigmoid_beta, "
+      "Tensor a_log, Tensor g_bias, bool compute_gate, float lower_bound) "
+      "-> (Tensor, Tensor)");
+  ops.impl("glm5next_kda_recurrent", torch::kCPU,
+           &glm5next_kda_recurrent_cpu_binding);
+#endif
 
   ops.def(
       "dynamic_4bit_int_moe("
