@@ -7,6 +7,7 @@ import torch
 
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
+    mhc_post_tilelang,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -106,10 +107,37 @@ def mhc_shifted_post_pre(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
     capture_aux: bool = False,
+    *,
+    stream: torch.cuda.Stream | None = None,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
-    """Use Mega-mHC for carried mixing, retaining TileLang for aux capture."""
+    """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
+
+    When stream is supplied, join it before consuming the returned coefficients.
+    """
+    if stream is not None:
+        from .mhc import mhc_pre_delayed_overlap
+
+        residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
+        aux = residual.mean(dim=1) if capture_aux else x.new_empty(0, x.shape[1])
+        pre_outputs = mhc_pre_delayed_overlap(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix=pre_mix,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            stream=stream,
+        )
+        return residual, *pre_outputs, aux
+
     if (
         pre_mix is not None
         and norm_weight is not None

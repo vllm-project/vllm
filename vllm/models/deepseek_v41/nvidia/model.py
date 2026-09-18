@@ -465,50 +465,29 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=self.attn_norm.variance_epsilon,
             )
         else:
-            if mhc_stream is None:
-                # The collapse already reads the post-mapped streams, so the
-                # mean aux consumers want comes out of the same kernel.
-                residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
-                    x,
-                    residual,
-                    post_mix,
-                    res_mix,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
-                    self.rms_norm_eps,
-                    self.hc_eps,
-                    self.hc_eps,
-                    self.hc_post_alpha,
-                    self.hc_sinkhorn_iters,
-                    pre_mix=pre_mix,
-                    norm_weight=self.attn_norm.weight,
-                    norm_eps=self.attn_norm.variance_epsilon,
-                    capture_aux=capture_previous_aux,
-                )
-                if capture_previous_aux:
-                    previous_aux = aux
-            else:
-                # Shifted mHC keeps the post unfused: the input collapse runs
-                # on the caller stream while coefficient generation overlaps
-                # the sublayer on the side stream.
-                residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-                if capture_previous_aux:
-                    previous_aux = residual.mean(dim=1)
-                post_mix, res_mix, x, attn_pre = mhc_pre(
-                    residual,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
-                    self.rms_norm_eps,
-                    self.hc_eps,
-                    self.hc_eps,
-                    self.hc_post_alpha,
-                    self.hc_sinkhorn_iters,
-                    pre_mix=pre_mix,
-                    norm_weight=self.attn_norm.weight,
-                    norm_eps=self.attn_norm.variance_epsilon,
-                )
+            # The collapse already reads the post-mapped streams, so the mean
+            # aux consumers want comes out of the same kernel.
+            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+                capture_aux=capture_previous_aux,
+                stream=mhc_stream,
+            )
+            if capture_previous_aux:
+                previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -517,41 +496,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        if mhc_stream is None:
-            residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=attn_pre,
-                norm_weight=self.ffn_norm.weight,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
-        else:
+        if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)
-            residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-            post_mix, res_mix, x, ffn_pre = mhc_pre(
-                residual,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=attn_pre,
-                norm_weight=self.ffn_norm.weight,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
+        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=attn_pre,
+            norm_weight=self.ffn_norm.weight,
+            norm_eps=self.ffn_norm.variance_epsilon,
+            stream=mhc_stream,
+        )
         x = self.ffn(x, input_ids, mega_gate_metadata)
         if mhc_stream is not None:
             torch.cuda.current_stream().wait_stream(mhc_stream)

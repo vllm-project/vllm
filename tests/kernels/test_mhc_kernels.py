@@ -539,6 +539,10 @@ def test_deepseek_v41_decoder_mixes_match_torch(
             "vllm.models.deepseek_v41.nvidia.model.mhc_pre_delayed_overlap",
             unexpected_overlap,
         )
+        monkeypatch.setattr(
+            "vllm.models.deepseek_v41.nvidia.ops.mhc.mhc_pre_delayed_overlap",
+            unexpected_overlap,
+        )
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -589,7 +593,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
         return post, res, decoder.attn_norm(collapsed), pre
 
-    def fused_reference(x, residual, post_mix, res_mix, *args, capture_aux=False, **kw):
+    def fused_reference(
+        x, residual, post_mix, res_mix, *args, capture_aux=False, stream=None, **kw
+    ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
         aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
         return residual, *reference(residual, *args, **kw), aux

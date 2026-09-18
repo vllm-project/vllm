@@ -27,27 +27,8 @@ def mhc_pre_delayed_overlap(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare the input on the caller stream and coefficients on another stream.
 
-    Args:
-        residual: Contiguous BF16 residual streams, shaped [tokens, 4, 5120].
-        fn: FP32 projection weights.
-        hc_scale: Three coefficient scales.
-        hc_base: Bias for the 24 coefficients.
-        rms_eps: Projection RMS normalization epsilon.
-        hc_pre_eps: Pre-mix sigmoid epsilon.
-        hc_sinkhorn_eps: Sinkhorn normalization epsilon.
-        hc_post_mult_value: Post-mix multiplier.
-        sinkhorn_repeat: Sinkhorn iteration count.
-        pre_mix: Previous sublayer's pre-mix; None selects residual stream zero.
-        x: Optional broadcast projection input for the first layer.
-        norm_weight: BF16 RMSNorm weight for the collapsed sublayer input.
-        norm_eps: Sublayer RMSNorm epsilon.
-        stream: Dedicated coefficient stream, distinct from the caller stream.
-
-    Returns:
-        Post mix, residual mix, normalized input, and the next pre-mix. Only the
-        normalized input is ready on the caller stream: the caller must wait
-        for stream before using the other outputs or crossing a graph boundary.
-
+    Returns post mix, residual mix, normalized input, and next pre-mix. Only the
+    input is ready on the caller stream; join stream before using coefficients.
     """
     from vllm.model_executor.kernels.mhc.warmup import (
         MHC_PRE_NORM_KERNEL,
