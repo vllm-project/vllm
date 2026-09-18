@@ -307,6 +307,14 @@ class NGramPerReqLogitsProcessorV2(V2LogitsProcessor):
     @classmethod
     def validate_params(cls, params: SamplingParams) -> None:
         _validate_ngram_params(params)
+        whitelist = params.extra_args and params.extra_args.get("whitelist_token_ids")
+        if whitelist is not None:
+            n_unique = len(list(dict.fromkeys(whitelist)))
+            if n_unique > MAX_NGRAM_WHITELIST_SIZE:
+                raise ValueError(
+                    f"Too many whitelist token IDs: {n_unique}. "
+                    f"The max size is {MAX_NGRAM_WHITELIST_SIZE}."
+                )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         extra_args = sampling_params.extra_args or {}
@@ -320,13 +328,7 @@ class NGramPerReqLogitsProcessorV2(V2LogitsProcessor):
         self.window_size[req_idx] = extra_args.get("window_size", 100)
         whitelist = extra_args.get("whitelist_token_ids")
         if whitelist:
-            whitelist = list(dict.fromkeys(whitelist))
-            if len(whitelist) > MAX_NGRAM_WHITELIST_SIZE:
-                raise ValueError(
-                    f"Too many whitelist token IDs: {len(whitelist)}. "
-                    f"The max size is {MAX_NGRAM_WHITELIST_SIZE}."
-                )
-            self.whitelist_ids[req_idx] = whitelist
+            self.whitelist_ids[req_idx] = list(dict.fromkeys(whitelist))
         self.use_ngram[req_idx] = True
         return True
 
@@ -341,14 +343,9 @@ class NGramPerReqLogitsProcessorV2(V2LogitsProcessor):
                 "NGramPerReqLogitsProcessorV2 does not support draft-expanded "
                 "logits (speculative decoding)."
             )
-        if ctx.seq_lens_np is None:
-            raise ValueError(
-                "NGramPerReqLogitsProcessorV2.apply needs ctx.seq_lens_np when "
-                "any request in the batch enables the n-gram processor"
-            )
 
         slots = req_indices[active_rows]
-        total_len = ctx.seq_lens_np[active_rows].astype(np.int64)
+        total_len = ctx.seq_lens_upper_bound_np[active_rows].astype(np.int64)
         prompt_len = self.prompt_len_np[slots].astype(np.int64)
         out_len = total_len - prompt_len
         ngram = self.ngram_size[slots]
