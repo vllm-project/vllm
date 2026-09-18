@@ -2571,7 +2571,6 @@ def test_quark_override_delegates_to_quark_config(
         ):
             try:
                 mod = importlib.import_module(mod_name)
-                DeepseekV4FP8Config = mod.DeepseekV4FP8Config
                 break
             except ModuleNotFoundError:
                 continue
@@ -2579,14 +2578,12 @@ def test_quark_override_delegates_to_quark_config(
             pytest.skip("deepseek_v41 quant_config not found")
         model_type = "deepseek_v41"
     else:
-        from vllm.models.deepseek_v4.quant_config import (
-            DeepseekV4FP8Config,
-        )
-
+        mod = importlib.import_module("vllm.models.deepseek_v4.quant_config")
         model_type = "deepseek_v4"
 
+    config_cls = mod.DeepseekV4FP8Config
     hf_config = SimpleNamespace(model_type=model_type)
-    result = DeepseekV4FP8Config.override_quantization_method(
+    result = config_cls.override_quantization_method(
         hf_quant_cfg, None, hf_config=hf_config
     )
 
