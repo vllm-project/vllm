@@ -114,6 +114,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     ## for flash-late-interaction
     query_final_res_batch: list[PoolingRequestOutput] | None = None
+    late_interaction_query_keys: list[str] | None = None
 
 
 @dataclass

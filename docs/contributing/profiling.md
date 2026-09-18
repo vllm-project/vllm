@@ -84,6 +84,88 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+## Profile with Triton Proton
+
+[Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)
+is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
+Chrome trace and works through the same vLLM profiling controls as the PyTorch
+and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
+supports CUDA graph attribution.
+
+Start a server with a local output directory and graph attribution:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{
+        "profiler": "proton",
+        "proton_profiler_dir": "./proton_profile",
+        "proton_output_format": "hatchet",
+        "proton_hook": "triton",
+        "proton_graph_attribution": true
+    }'
+```
+
+Then use `/start_profile` and `/stop_profile` as shown above, or pass
+`--profile` to a vLLM benchmark. Each worker uses a topology- and
+rank-qualified output name, such as
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
+so distributed workers, restarted servers, and repeated profiling runs do not
+overwrite one another. A `profile_prefix` is included when supplied. Each
+profile is written by `/stop_profile` and is ready to inspect immediately.
+
+The Proton-specific options are:
+
+- `proton_context`: `shadow` (default) or `python`
+- `proton_data`: `tree` (default) or `trace`
+- `proton_backend`: `cupti` or automatic
+- `proton_mode`: an optional backend mode string
+- `proton_hook`: `triton` to record Triton launch metadata, or unset
+- `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
+- `proton_graph_attribution`: observe CUDA graph capture for replay attribution;
+  disabled by default and requires `proton_data: "tree"`
+
+`hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
+`chrome_trace` requires `proton_data: "trace"`.
+
+Automatic backend selection is recommended. vLLM currently supports Proton's
+`cupti` backend on NVIDIA GPUs. ROCm support is not yet available. vLLM does not
+expose Proton's experimental instrumentation backend because current upstream
+can produce profiles without timing metrics. When `proton_graph_attribution` is
+enabled, Proton observes vLLM's CUDA graph capture with the configured profiling
+session active, then deactivates that same session until profiling starts. This
+lets later profiles attribute replayed kernels without retaining model-startup
+activity. Backend-specific modes can be selected with `proton_mode`;
+`pcsampling` synchronizes the CUDA context and therefore requires
+`--enforce-eager`. When CUDA graphs are enabled (including encoder graphs),
+Proton requires `proton_graph_attribution: true` to collect replayed kernels.
+For Chrome traces, disable CUDA graphs with `--enforce-eager`.
+
+CUDA graph-attributed profiles support repeated `start_profile`/`stop_profile`
+runs. Each stop flushes and writes one tree-data phase while preserving the
+graph-aware session. Without `proton_graph_attribution`, each `stop_profile`
+instead finalizes and writes an independent Proton session.
+
+CUDA graph attribution requires Triton 3.7 or newer. It uses the phase data API
+to discard graph-capture activity and separate profiling runs. The `hatchet_msgpack`
+output format and `periodic_flushing` mode also require Triton 3.7 or newer.
+`periodic_flushing` cannot be combined with graph attribution because both
+manage the session's data phases. Ordinary Proton profiling remains available
+with Triton 3.6.
+
+Graph attribution retains capture metadata for the worker lifetime. With eager
+execution or no graphs to capture, profiling uses ordinary independent sessions.
+
+Inspect tree profiles with:
+
+```bash
+proton-viewer -m time/ns \
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet
+```
+
+Chrome traces (`proton_data: "trace"`) can be opened in
+<https://ui.perfetto.dev/>. Proton is imported lazily, so selecting another
+profiler does not require a Proton-capable Triton installation.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.

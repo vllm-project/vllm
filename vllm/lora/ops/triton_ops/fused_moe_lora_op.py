@@ -25,7 +25,7 @@ def _get_lora_id(
     top_k_num,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns lora_id"""
+    """Returns lora_id."""
     if naive_block_assignment:
         token_idx = pid_m // top_k_num
         return tl.load(token_lora_mapping_ptr + token_idx)
@@ -42,7 +42,7 @@ def _get_expert_id(
     max_loras,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns expert_id"""
+    """Returns expert_id."""
     if naive_block_assignment:
         return tl.load(expert_ids_ptr + pid_m)
     else:
@@ -62,7 +62,7 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets"""
+    """Returns token offsets."""
     if naive_block_assignment:
         return tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
@@ -852,8 +852,7 @@ def _run_fused_moe_lora_small_batch(
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_LORA_PTR_DICT` collects the required information during `profile_run`,
+    """`_LORA_PTR_DICT` collects the required information during `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
@@ -877,9 +876,7 @@ def _adjust_kernel_inputs(
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
-    """
-    helper function to adjust kernel inputs when sorted_token_ids is None
-    """
+    """Helper function to adjust kernel inputs when sorted_token_ids is None."""
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0
@@ -1662,136 +1659,23 @@ def _fused_moe_lora(
     )
 
 
-def _fused_moe_lora_fake(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    max_lora_rank: int,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    adapter_enabled: torch.Tensor,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
-    mul_routed_weight: bool = False,
-    fully_sharded: bool = False,
-    offset: int = 0,
-    add_inputs: bool = True,
-) -> None:
-    return
-
-
-def _fused_moe_lora_shrink_fake(
-    a_intermediate_cache1: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
-
-
-def _fused_moe_lora_expand_fake(
-    output: torch.Tensor,
-    a_intermediate_cache1: torch.Tensor,
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    max_lora_rank: int,
-    w1_output_dim_size: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    offset: int = 0,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="fused_moe_lora",
         op_func=_fused_moe_lora,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_shrink",
         op_func=_fused_moe_lora_shrink,
         mutates_args=["a_intermediate_cache1"],
-        fake_impl=_fused_moe_lora_shrink_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_expand",
         op_func=_fused_moe_lora_expand,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_expand_fake,
     )
 
     fused_moe_lora = torch.ops.vllm.fused_moe_lora

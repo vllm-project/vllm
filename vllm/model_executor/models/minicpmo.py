@@ -40,7 +40,7 @@ from transformers.models.whisper.modeling_whisper import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -65,13 +66,22 @@ from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
     MiniCPMV2_6,
     MiniCPMV4_5,
+    MiniCPMVBaseModel,
     MiniCPMVDummyInputsBuilder,
+    MiniCPMVImageEmbeddingInputs,
+    MiniCPMVImagePixelInputs,
     MiniCPMVMultiModalDataParser,
+    MiniCPMVMultiModalInputs,
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
     _minicpmv_field_config,
 )
-from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    cast_overflow_tensors,
+    maybe_prefix,
+)
 
 CPU_DEVICE = torch.device("cpu")
 
@@ -121,13 +131,12 @@ if os.getenv("USE_FLAGOS") == "1":
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - bns: Batch size * number of audios * number of slices
-        - bn: Batch size * number of audios
-        - c: Number of channels
-        - l: Length
-        - s: Number of slices
+    """Dimensions:
+    - bns: Batch size * number of audios * number of slices
+    - bn: Batch size * number of audios
+    - c: Number of channels
+    - l: Length
+    - s: Number of slices
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -153,8 +162,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
 
 
 class MiniCPMOAudioEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of audios
         - s: Number of slices
         - h: Hidden size (must match language model backbone)
@@ -173,6 +181,10 @@ class MiniCPMOAudioEmbeddingInputs(TensorSchema):
 MiniCPMOAudioInputs: TypeAlias = (
     MiniCPMOAudioFeatureInputs | MiniCPMOAudioEmbeddingInputs
 )
+
+
+class MiniCPMOMultiModalInputs(MiniCPMVMultiModalInputs, total=False):
+    audios: MiniCPMOAudioInputs | None
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -276,28 +288,28 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> "MiniCPMOProcessor":
         """Get vendored MiniCPMOProcessor for multimodal (image+audio) inputs.
 
-        Creates a vendored processor that reuses the HF image processor,
-        feature extractor, and tokenizer; applies the correct audio pooling
-        configuration; and converts numpy arrays in the image processor to
-        lists for serialization compatibility. The returned processor is
+        Creates a vendored processor that uses the checkpoint-specific HF image
+        processor, feature extractor, and tokenizer; applies the correct audio
+        pooling configuration; and converts numpy arrays in the image processor
+        to lists for serialization compatibility. The returned processor is
         compatible with Transformers v5.
         """
         import numpy as np
 
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+        image_processor = self._get_checkpoint_image_processor(**kwargs)
 
         from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
         # Create vendored processor with correct configuration
         vendored_processor = MiniCPMOProcessor(
-            image_processor=hf_processor.image_processor,
+            image_processor=image_processor,
             feature_extractor=hf_processor.feature_extractor,
             tokenizer=hf_processor.tokenizer,
             pool_step=self.get_default_audio_pool_step(),
         )
 
         # Convert numpy arrays in image processor to lists for serialization
-        image_processor = vendored_processor.image_processor
         for attr in ("mean", "std"):
             val = getattr(image_processor, attr, None)
             if val is not None and isinstance(val, np.ndarray):
@@ -390,21 +402,18 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
         audio_len = (
             self.info.get_max_audio_chunks_with_most_features()
             * self.info.get_default_audio_sampling_rate()
         )
 
-        audio_overrides = mm_options.get("audio")
-
         audio_mm_data = {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -431,9 +440,8 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        if (audios := mm_data.get("audios")) is None:
+        if (audios := mm_data.get("audio")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
@@ -444,11 +452,10 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
             audio_inputs = {}
         else:
-            audio_inputs = self._base_call_hf_processor(
+            audio_inputs = self._call_hf_processor_on_prompts(
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={**mm_kwargs, "chunk_input": True},
-                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -465,7 +472,8 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
                 if isinstance(lens, torch.Tensor):
                     flat_feature_lens.extend(lens.flatten().tolist())
                 else:
-                    flat_feature_lens.append(int(lens))
+                    assert isinstance(lens, int)
+                    flat_feature_lens.append(lens)
             unpadded_audio_features = [
                 feat[:, :length]
                 for feat, length in zip(
@@ -481,11 +489,10 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
-            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs),
+            **self.process_audios(mm_data, mm_kwargs),
         }
 
     def _get_prompt_updates(
@@ -500,11 +507,20 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        audio_placeholder = self.info.audio_pattern
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        audio_placeholder = cached_encode(
+            tokenizer, self.info.audio_pattern, add_special_tokens=False
+        )
+        unk_token_ids = [vocab["<unk>"]]
 
         def get_audio_replacement(item_idx: int):
             audios = mm_items.get_items(
                 "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
+            )
+            assert isinstance(
+                audios, (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
             )
 
             if isinstance(audios, MiniCPMOAudioEmbeddingItems):
@@ -515,9 +531,13 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
             else:
                 audio_len = audios.get_audio_length(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_audio_prompt_texts(audio_len),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_audio_prompt_texts(audio_len),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         return [
@@ -639,7 +659,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
             hidden_states, p=self.dropout, training=self.training
         )
 
-        encoder_states = ()
+        encoder_states: tuple[torch.Tensor, ...] = ()
 
         for idx, encoder_layer in enumerate(self.layers):
             encoder_states = encoder_states + (hidden_states,)
@@ -669,8 +689,17 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         )
 
 
-class MiniCPMOBaseModel:
+if TYPE_CHECKING:
+    _MiniCPMOBaseModelBase = MiniCPMVBaseModel
+else:
+    _MiniCPMOBaseModelBase = object
+
+
+class MiniCPMOBaseModel(_MiniCPMOBaseModelBase):
     """Base mixin class for MiniCPM-O models with audio support."""
+
+    # Unlike the vision-only MiniCPM-V models, audio weights are loaded here.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"tts": None})
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -718,8 +747,8 @@ class MiniCPMOBaseModel:
         return model
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
-        loaded = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._ensure_resampler_device()
         return loaded
 
@@ -881,8 +910,12 @@ class MiniCPMOBaseModel:
             audio_feature_lens=audio_feature_lens,
         )
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = super()._parse_and_validate_multimodal_inputs(**kwargs)
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> MiniCPMOMultiModalInputs:
+        modalities = MiniCPMOMultiModalInputs(
+            **super()._parse_and_validate_multimodal_inputs(**kwargs)
+        )
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -902,16 +935,33 @@ class MiniCPMOBaseModel:
         if audio_input["type"] == "audio_embeds":
             return audio_input["audio_embeds"]
 
+        assert isinstance(audio_input, MiniCPMOAudioFeatureInputs)
         return self.get_audio_hidden_states(audio_input)
 
-    def _process_multimodal_inputs(self, modalities: dict):
-        multimodal_embeddings = super()._process_multimodal_inputs(modalities)
+    def _process_multimodal_inputs(self, modalities: Mapping[str, object]):
+        base_modalities: MiniCPMVMultiModalInputs = {}
+        image_input = modalities.get("images")
+        video_input = modalities.get("videos")
+        assert image_input is None or isinstance(
+            image_input, (MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs)
+        )
+        assert video_input is None or isinstance(
+            video_input, (MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs)
+        )
+        if "images" in modalities:
+            base_modalities["images"] = image_input
+        if "videos" in modalities:
+            base_modalities["videos"] = video_input
+        multimodal_embeddings = super()._process_multimodal_inputs(base_modalities)
 
-        for modality in modalities:
-            if modality == "audios":
-                audio_input = modalities["audios"]
-                audio_embeddings = self._process_audio_input(audio_input)
-                multimodal_embeddings += tuple(audio_embeddings)
+        audio_input = modalities.get("audios")
+        if audio_input is not None:
+            assert isinstance(
+                audio_input,
+                (MiniCPMOAudioFeatureInputs, MiniCPMOAudioEmbeddingInputs),
+            )
+            audio_embeddings = self._process_audio_input(audio_input)
+            multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
 
@@ -952,8 +1002,7 @@ _MINICPMO_SUPPORT_VERSION = {
     dummy_inputs=MiniCPMODummyInputsBuilder,
 )
 class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
-    """
-    MiniCPM-O model with audio support.
+    """MiniCPM-O model with audio support.
     Different versions use different LLM backbones:
     - Version 2.6: Uses Qwen2
     - Version 4.5: Uses Qwen3
@@ -967,7 +1016,7 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
             try:
                 version_str = str(config.version)
                 version_parts = version_str.split(".")
-                version = tuple(int(x) for x in version_parts[:2])
+                version_values = tuple(int(x) for x in version_parts[:2])
             except (ValueError, TypeError) as e:
                 raise ValueError(
                     f"Invalid model version format in config: {config.version}. "
@@ -975,17 +1024,21 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
                 ) from e
         else:
             # Default to 2.6 for backward compatibility
-            version = (2, 6)
+            version_values = (2, 6)
 
         # Dispatch class based on version
-        instance_cls = _MINICPMO_SUPPORT_VERSION.get(version)
+        if len(version_values) == 2:
+            version_key = (version_values[0], version_values[1])
+            instance_cls = _MINICPMO_SUPPORT_VERSION.get(version_key)
+        else:
+            instance_cls = None
         if instance_cls is None:
             supported_versions = ", ".join(
                 [f"{v[0]}.{v[1]}" for v in sorted(_MINICPMO_SUPPORT_VERSION.keys())]
             )
             raise ValueError(
                 f"Currently, MiniCPMO only supports versions "
-                f"{supported_versions}. Got version: {version}"
+                f"{supported_versions}. Got version: {version_values}"
             )
 
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

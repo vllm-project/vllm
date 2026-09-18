@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the Triton DiffKV unified-attention kernel.
-"""
+"""Unit tests for the Triton DiffKV unified-attention kernel."""
 
 import pytest
 import torch
@@ -20,6 +18,8 @@ from vllm.v1.attention.backends.fa_utils import (
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 DEVICE_TYPE = current_platform.device_type
 

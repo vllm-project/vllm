@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpecKind,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
     Medium,
@@ -81,14 +82,29 @@ def _group_config(
     group_idx: int = 0,
     block_size: int = 4,
     blocks_per_chunk: int = 1,
+    tokens_per_hash: int | None = None,
     sliding_window_size_in_chunks: int | None = None,
 ) -> GroupOffloadConfig:
+    if tokens_per_hash is None:
+        tokens_per_hash = block_size
+    tokens_per_chunk = block_size * blocks_per_chunk
+    assert tokens_per_chunk % tokens_per_hash == 0
+    kv_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
+    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
-        tokens_per_chunk=block_size * blocks_per_chunk,
-        hashes_per_chunk=blocks_per_chunk,
+        tokens_per_chunk=tokens_per_chunk,
+        hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
+        kv_cache_spec=kv_spec,
+        manager_cls=manager_cls,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 
@@ -136,12 +152,16 @@ def _stored_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
+    removal_expected: bool = False,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=False,
         locality=locality,
+        ownership=ownership,
+        removal_expected=removal_expected,
     )
 
 
@@ -149,12 +169,14 @@ def _removed_event(
     keys: list[OffloadKey],
     medium: Medium = _CPU_MEDIUM,
     locality: Locality | None = None,
+    ownership: str | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
         medium=medium,
         removed=True,
         locality=locality,
+        ownership=ownership,
     )
 
 
@@ -334,6 +356,36 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.kv_cache_spec_sliding_window is None
 
 
+@pytest.mark.parametrize(
+    ("blocks_per_chunk", "expected_hash_indices"),
+    [(1, [63]), (2, [63, 127])],
+)
+def test_event_hashes_use_group_block_size(
+    blocks_per_chunk: int, expected_hash_indices: list[int]
+):
+    tokens_per_hash = 4
+    block_size = 256
+    hashes_per_block = block_size // tokens_per_hash
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=block_size,
+        blocks_per_chunk=blocks_per_chunk,
+        tokens_per_hash=tokens_per_hash,
+    )
+    req = _request(
+        block_hashes=[_hash(i) for i in range(hashes_per_block * blocks_per_chunk)],
+        token_count=block_size * blocks_per_chunk,
+    )
+    [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
+
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(i)) for i in expected_hash_indices]
+    assert event.block_size == block_size
+    assert len(event.token_ids) == block_size * blocks_per_chunk
+
+
 def test_lookup_promotion_factor_gt_1_store_and_remove():
     block_size = 4
     blocks_per_chunk = 2
@@ -475,6 +527,9 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     )
     assert tracker._pending_event_metadata[key] is confirmed_meta
 
+    list(
+        tracker.take_events([_stored_event([key], Medium.STORAGE, ownership="custom")])
+    )
     removed = list(tracker.take_events([_removed_event([key])]))
     assert len(removed) == 1
     assert removed[0].block_hashes == [
@@ -495,13 +550,36 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_secondary_stored_event_does_not_mutate_cpu_metadata():
-    tracker, _, _, key = _lookup_chunk()
-    expected_metadata = dict(tracker._pending_event_metadata)
+@pytest.mark.parametrize(
+    ("record_method", "position"),
+    [("record_store", 0), ("record_partial_store", 4)],
+)
+def test_reoffload_preserves_secondary_residency(record_method, position):
+    tracker, req, group_config, key = _lookup_chunk()
+    [stored] = tracker.take_events(
+        [
+            _stored_event(
+                [key],
+                Medium.STORAGE,
+                ownership="custom",
+                removal_expected=True,
+            )
+        ]
+    )
 
-    stored = list(tracker.take_events([_stored_event([key], Medium.STORAGE)]))
-    assert stored[0].token_ids == [1, 2, 3, 4]
-    assert tracker._pending_event_metadata == expected_metadata
+    getattr(tracker, record_method)(req, group_config, position, key)
+
+    assert tracker._pending_event_metadata[key].active_residencies == {
+        (Medium.CPU, None),
+        (Medium.STORAGE, "custom"),
+    }
+    [removed] = tracker.take_events(
+        [_removed_event([key], Medium.STORAGE, ownership="custom")]
+    )
+
+    assert stored.token_ids == [1, 2, 3, 4]
+    assert stored.ownership == removed.ownership == "custom"
+    assert key in tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():
@@ -604,3 +682,92 @@ def test_tiering_accepts_self_describing_kv_events():
     assert spec.kv_events_config.enable_kv_cache_events
     assert spec.kv_events_config.self_describing_kv_events
     assert tracker.self_describing_enabled
+
+
+def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
+    vllm_config = create_vllm_config(
+        block_size=4,
+        max_num_batched_tokens=16,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    extra_config = {
+        "spec_name": "TieringOffloadingSpec",
+        "cpu_bytes_to_use": 1 << 20,
+        "secondary_tiers": secondary_tiers,
+    }
+    if top_level_backpressure is not None:
+        extra_config["backpressure"] = top_level_backpressure
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    return TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+
+def test_partial_tier_backpressure_inherits_top_level_defaults():
+    """A partial tier override still inherits missing fields.
+
+    Field-by-field merge means an override that sets only ``high_water_s``
+    keeps ``backpressure_cls`` (and any other field) from the top-level
+    default, so the resolved dict reaching the factory is complete.
+    """
+    spec = _build_tiering_spec(
+        [{"type": "example", "backpressure": {"high_water_s": 0.1}}],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the field it sets.
+    assert resolved["high_water_s"] == 0.1
+    # Missing fields fall back to the top-level default.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+    assert resolved["low_water_s"] == 0.05
+
+
+def test_tier_override_wins_over_top_level():
+    """Precedence is tier override > top-level default, field-by-field."""
+    spec = _build_tiering_spec(
+        [
+            {
+                "type": "example",
+                "backpressure": {"high_water_s": 0.1, "low_water_s": 0.02},
+            }
+        ],
+        top_level_backpressure={
+            "backpressure_cls": "EMABackpressureDetector",
+            "high_water_s": 0.5,
+            "low_water_s": 0.05,
+        },
+    )
+
+    resolved = spec.secondary_tier_configs[0]["backpressure"]
+    # Tier override wins for the fields it sets.
+    assert resolved["high_water_s"] == 0.1
+    assert resolved["low_water_s"] == 0.02
+    # Fields only in top-level still fill in.
+    assert resolved["backpressure_cls"] == "EMABackpressureDetector"
+
+
+def test_tier_without_backpressure_stays_unconfigured():
+    spec = _build_tiering_spec([{"type": "example"}])
+    assert "backpressure" not in spec.secondary_tier_configs[0]

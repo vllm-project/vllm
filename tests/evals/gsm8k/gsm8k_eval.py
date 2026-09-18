@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Isolated GSM8K evaluation script for vLLM serve endpoint.
-"""
+"""Isolated GSM8K evaluation script for vLLM serve endpoint."""
 
 import argparse
 import ast
@@ -19,6 +17,8 @@ import numpy as np
 import regex as re
 import requests
 from tqdm.asyncio import tqdm
+
+from vllm.assets.base import VLLM_S3_BUCKET_URL
 
 INVALID = -9999999
 
@@ -43,9 +43,9 @@ def download_and_cache_file(url: str, filename: str | None = None) -> str:
 
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
-    """Load GSM8K train and test data"""
-    train_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
-    test_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+    """Load GSM8K train and test data."""
+    train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
+    test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
     train_file = download_and_cache_file(train_url)
     test_file = download_and_cache_file(test_url)
@@ -89,6 +89,7 @@ async def call_vllm_api(
 
     Returns:
         Tuple of (response_text, completion_tokens)
+
     """
     data = {
         "prompt": prompt,
@@ -219,8 +220,7 @@ def evaluate_gsm8k(
     gen_prefix: str = "",
     max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
-    """
-    Evaluate GSM8K accuracy using vLLM serve endpoint.
+    """Evaluate GSM8K accuracy using vLLM serve endpoint.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
@@ -362,6 +362,12 @@ def main() -> None:
         type=int,
         help="Maximum number of concurrent requests",
     )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=600,
+        help="Timeout for each request, including time waiting for a connection",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -375,6 +381,7 @@ def main() -> None:
         temperature=args.temperature,
         seed=args.seed,
         max_concurrency=args.max_concurrency,
+        request_timeout_seconds=args.request_timeout_seconds,
     )
 
     # Print results to terminal

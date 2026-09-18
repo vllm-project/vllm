@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Vision tower implementation for Kimi-K2.5 model.
+"""Vision tower implementation for Kimi-K2.5 model.
 
 This module provides the vision encoder components for Kimi-K2.5,
 including 3D patch embedding, RoPE position embedding, and
@@ -29,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
@@ -36,6 +36,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 
@@ -61,7 +62,11 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
-@torch.compile(dynamic=True, disable=current_platform.simple_compile_backend == "tpu")
+@torch.compile(
+    dynamic=True,
+    backend=current_platform.simple_compile_backend,
+    disable=current_platform.simple_compile_backend == "tpu",
+)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
@@ -73,29 +78,6 @@ def get_rope_shape(org, interpolation_mode, shape):
         .permute((1, 2, 0))
         .flatten(end_dim=1)
     )
-
-
-def apply_rope(
-    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Args: (The leading dimensions of all inputs should be the same)
-        xq: query, tensor of shape (..., num_heads, head_dim)
-        xk: key, tensor of shape (..., num_heads, head_dim)
-        freqs_cis: tensor of shape (..., head_dim/2), dtype=torch.complex64.
-    Returns:
-        xq_out, xk_out: tensors of shape (..., num_heads, head_dim)
-    """
-    _apply_rope_input_validation(xq, freqs_cis)
-    _apply_rope_input_validation(xk, freqs_cis)
-
-    freqs_cis = freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
-    # ..., num_heads, head_dim/2
-    xq_ = torch.view_as_complex(xq.float().view(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().view(*xq.shape[:-1], -1, 2))
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(-2)  # ..., num_heads, head_dim
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -301,12 +283,12 @@ class Rope2DPosEmbRepeated(nn.Module):
     def get_freqs_cis(
         self, grid_thws: torch.Tensor | list[list[int]], device: torch.device
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             grid_thws (torch.Tensor): grid time, height and width
 
         Returns:
             freqs_cis: tensor of shape (sum(t * height * width), dim//2)
+
         """
         if not hasattr(self, "freqs_cis"):
             self.register_buffer(
@@ -447,12 +429,17 @@ class MoonViTEncoderLayer(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            is_neox_style=False,
+            enable_fp32_compute=True,
+        )
 
     def attention_qkvpacked(
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor | None = None,
+        rope_freqs_cis: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
@@ -461,6 +448,10 @@ class MoonViTEncoderLayer(nn.Module):
         Args:
             x (torch.Tensor): (seqlen, hidden_dim)
             cu_seqlens (torch.Tensor): cumulative sequence lengths
+            rope_freqs_cis (torch.Tensor): rotary embedding frequencies
+            max_seqlen (torch.Tensor | None): longest sequence in the batch
+            sequence_lengths (torch.Tensor | None): per-sequence lengths
+
         """
         seq_length = x.size(0)
         xqkv, _ = self.wqkv(x)
@@ -474,7 +465,12 @@ class MoonViTEncoderLayer(nn.Module):
         xqkv = xqkv.view(*qkv_shape)
         xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
-        xq, xk = apply_rope(xq, xk, rope_freqs_cis)
+        _apply_rope_input_validation(xq, rope_freqs_cis)
+        _apply_rope_input_validation(xk, rope_freqs_cis)
+        rope_cos = rope_freqs_cis.real.contiguous()
+        rope_sin = rope_freqs_cis.imag.contiguous()
+        xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
+        xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
 
         if max_seqlen is None:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
@@ -498,7 +494,7 @@ class MoonViTEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rope_freqs_cis: torch.Tensor | None = None,
+        rope_freqs_cis: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
@@ -760,13 +756,13 @@ class MoonViT3dPretrainedModel(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             pixel_values (torch.Tensor): The input pixel values.
             grid_thws (torch.Tensor): Temporal, height and width.
 
         Returns:
             torch.Tensor: The output tokens.
+
         """
         if encoder_metadata is not None and "pos_embeds" in encoder_metadata:
             hidden_states = self.patch_embed(
@@ -829,9 +825,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         merge_gather_idx = build_image_merge_gather_idx(
             grid_thw_list, self.merge_kernel_size
         )
-        metadata["merge_gather_idx"] = torch.from_numpy(merge_gather_idx).to(
-            device=device, non_blocking=True
-        )
+        metadata["merge_gather_idx"] = async_tensor_h2d(merge_gather_idx, device=device)
         return metadata
 
 

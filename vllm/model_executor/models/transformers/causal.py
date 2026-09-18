@@ -27,24 +27,22 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
+from .base import Base
+
 if TYPE_CHECKING:
     import torch
 
     from vllm.config import VllmConfig
 
 
-class CausalMixin(VllmModelForTextGeneration):
+class CausalMixin(VllmModelForTextGeneration, Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForTextGeneration.__init__ and call the next class in MRO
         super(VllmModelForTextGeneration, self).__init__(
             vllm_config=vllm_config, prefix=prefix
         )
 
-        # Tell `Base.load_weights` to skip
-        # `lm_head` if the model has tied word embeddings
         tie_word_embeddings = self._get_tie_word_embeddings()
-        if tie_word_embeddings:
-            self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -59,16 +57,16 @@ class CausalMixin(VllmModelForTextGeneration):
                         self.lm_head = self.lm_head.tie_weights(module)
                         break
 
-            logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.text_config.vocab_size, scale=logit_scale
+                self.text_config.vocab_size,
+                scale=getattr(self.text_config, "logit_scale", 1.0),
+                soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
             )
         else:
             self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
-
         lm_head_bias = set()
 
         def auto_load_lm_head_bias(weights):
