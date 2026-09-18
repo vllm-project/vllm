@@ -824,6 +824,11 @@ class TestProcessChunk:
         harmony_parser.flush()
         assert phase_counts.reasoning_token_count > 0
         expected_classification = harmony_parser.classify_token_phases(token_ids)
+        assert expected_classification == TokenPhaseCounts(
+            reasoning=1,
+            content=1,
+            unclassified=len(token_ids) - 2,
+        )
         assert (
             harmony_parser.count_reasoning_tokens(token_ids)
             == phase_counts.reasoning_token_count

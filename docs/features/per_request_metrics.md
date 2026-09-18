@@ -201,7 +201,9 @@ Tokens classified as tool or control output are reported by
 `unclassified_token_count` and are not silently counted as final content.
 Reasoning-token usage remains available in
 `usage.output_tokens_details.reasoning_tokens` for Responses and
-`usage.completion_tokens_details.reasoning_tokens` for Chat Completions.
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions. These
+existing usage counts can differ from `output_token_metrics.reasoning.token_count`
+when the parser classifies tool or control tokens as unclassified.
 
 ## Relationship to Prometheus Metrics
 
