@@ -38,6 +38,22 @@ if current_platform.is_cuda_alike():
 
 logger = init_logger(__name__)
 
+
+def _use_cooperative_topk(
+    logits: torch.Tensor,
+    select_k: int,
+    num_rows: int,
+) -> bool:
+    return (
+        current_platform.is_cuda()
+        and select_k in (512, 1024, 2048)
+        and num_rows <= 64
+        and logits.stride(0) % 4 == 0
+        and current_platform.has_device_capability(90)
+        and not current_platform.is_device_capability_family(120)
+    )
+
+
 # kpool write helper: form pools from the current token batch and compress them
 # into the index K cache via the fused Triton kernel.
 
@@ -573,7 +589,12 @@ def sparse_attn_indexer_kpool(
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
-            torch.ops._C.persistent_topk(
+            topk_op = (
+                torch.ops._C.cooperative_topk
+                if _use_cooperative_topk(logits, select_k, num_rows)
+                else torch.ops._C.persistent_topk
+            )
+            topk_op(
                 logits,
                 seq_lens,
                 topk_dst,
