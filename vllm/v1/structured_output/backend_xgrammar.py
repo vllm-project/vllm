@@ -4,6 +4,7 @@
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import torch
 
@@ -242,10 +243,10 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     )
 
 
-# FIXME(arpera): The approach used here needs to be redesigned because of
-# existing bugs: https://github.com/vllm-project/vllm/issues/57550
 def _schema_types(schema: dict[str, Any]) -> set[str]:
-    """Normalize a scalar or list-valued JSON Schema type."""
+    """Return allowed JSON types; omitted type allows every type."""
+    if "type" not in schema:
+        return {"null", "boolean", "object", "array", "number", "integer", "string"}
     schema_type = schema.get("type")
     if isinstance(schema_type, str):
         return {schema_type}
@@ -256,10 +257,12 @@ def _schema_types(schema: dict[str, Any]) -> set[str]:
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
+    visited: set[int] = set()
 
-    def check_object(obj: dict[str, Any]) -> bool:
-        if not isinstance(obj, dict):
+    def check_object(obj: Any) -> bool:
+        if not isinstance(obj, dict) or id(obj) in visited:
             return False
+        visited.add(id(obj))
 
         schema_types = _schema_types(obj)
 
@@ -292,15 +295,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if "string" in schema_types and _has_pattern_and_length_bounds(obj):
             return True
 
-        # propertyNames validates names, so it is a string schema even when it
-        # omits "type", which is the form that escapes the check above.
-        if (
-            "object" in schema_types
-            and isinstance(obj.get("propertyNames"), dict)
-            and _has_pattern_and_length_bounds(obj["propertyNames"])
-        ):
-            return True
-
         # FIXME: propertyNames conflicts with properties/patternProperties/
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
@@ -325,15 +319,61 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
+        # Local references can make otherwise literal values into schemas.
+        ref = obj.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            target: Any = schema
+            try:
+                for part in unquote(ref[2:]).split("/"):
+                    part = part.replace("~1", "/").replace("~0", "~")
+                    target = (
+                        target[int(part)] if isinstance(target, list) else target[part]
+                    )
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass  # Leave invalid references to the grammar validator.
+            else:
+                if check_object(target):
                     return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
+
+        # Visit only schema-valued keywords, not literal values or annotations.
+        for key in (
+            "properties",
+            "patternProperties",
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "dependencies",
+        ):
+            value = obj.get(key)
+            if isinstance(value, dict) and any(
+                check_object(subschema) for subschema in value.values()
+            ):
+                return True
+
+        for key in (
+            "additionalProperties",
+            "unevaluatedProperties",
+            "propertyNames",
+            "contains",
+            "additionalItems",
+            "unevaluatedItems",
+            "not",
+            "if",
+            "then",
+            "else",
+            "contentSchema",
+            "items",
+            "prefixItems",
+            "allOf",
+            "anyOf",
+            "oneOf",
+        ):
+            value = obj.get(key)
+            if isinstance(value, list):
+                if any(check_object(subschema) for subschema in value):
+                    return True
+            elif check_object(value):
+                return True
 
         return False
 

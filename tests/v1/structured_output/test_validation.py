@@ -160,6 +160,21 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             },
             "guidance",
         ),
+        (
+            {
+                "type": "object",
+                "properties": {"code": {"pattern": "^[a-z]+$", "maxLength": 3}},
+                "required": ["code"],
+            },
+            "guidance",
+        ),
+        (
+            {
+                "$ref": "#/x-schema",
+                "x-schema": {"pattern": "^[a-z]+$", "maxLength": 3},
+            },
+            "guidance",
+        ),
         # patternProperties + properties is also unsupported by guidance.
         (
             {
