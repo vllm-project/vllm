@@ -64,8 +64,7 @@ def loaded_model_files():
 
 
 class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
-    """
-    Extension of TritonExperts to support emulated NVFP4 MoE experts.
+    """Extension of TritonExperts to support emulated NVFP4 MoE experts.
 
     It may be used for NVFP4 models when the device does not have
     native support for this dtype.

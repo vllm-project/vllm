@@ -83,7 +83,6 @@ def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
     """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
-
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -99,7 +98,6 @@ def _remap_qsa_cache_scale_name(
     that cache directly, so only QSA layers need the final path component
     moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
     """
-
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
         "k_proj.output_scale": "_k_scale",
@@ -176,8 +174,6 @@ class Qwen4ExpDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -210,13 +206,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
             )
-        elif layer_type == "full_attention":
+        elif layer_type == "qwen_sparse_attention":
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
             if not use_qsa:
                 self.self_attn = Qwen3NextAttention(
                     config,
-                    model_config=model_config,
-                    cache_config=cache_config,
+                    model_config=vllm_config.model_config,
+                    cache_config=vllm_config.cache_config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                 )
@@ -292,7 +288,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
-        elif self.layer_type == "full_attention":
+        elif self.layer_type == "qwen_sparse_attention":
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
@@ -383,7 +379,7 @@ class Qwen4ExpModel(nn.Module):
         self._qsa_layer_ids = frozenset(
             layer_idx
             for layer_idx, layer_type in enumerate(config.layer_types)
-            if layer_type == "full_attention"
+            if layer_type == "qwen_sparse_attention"
             and getattr(config, "indexer_n_heads", None) is not None
         )
         self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
