@@ -13,12 +13,19 @@ makes the detector skip positions that were watermarked.
 ## Updating the contract
 
 A failing golden means the output contract changed and must be investigated.
-Do not regenerate the snapshot merely to make the test pass. Regeneration is
-appropriate once the change is understood and accepted, including when a bug
-fix makes the result more correct.
+Do not regenerate the snapshot merely to make the test pass. Updating the
+existing contract is appropriate after review when a correctness fix preserves
+reliable detection of generations emitted by the previous implementation, with
+materially equivalent calibration. The size of the golden diff is useful
+evidence, but compatibility is the deciding criterion.
 
-When an intentional, reviewed protocol change or correctness fix requires a new
-contract, rebuild the snapshot from the repository root:
+If a fix prevents reliable detection of previous generations or materially
+changes their calibration, introduce it as a new version of the scheme or PRF.
+Keep the previous detector version and its goldens so those generations remain
+detectable. Continuing to generate with the previous version is not required.
+
+When a reviewed compatible change requires updating the existing contract,
+rebuild the snapshot from the repository root:
 
 ```bash
 python -m tests.watermarking.generate_goldens
