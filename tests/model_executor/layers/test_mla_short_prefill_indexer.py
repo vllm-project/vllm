@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
+import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
@@ -14,6 +15,51 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
+
+
+def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = SimpleNamespace(num_actual_tokens=1)
+
+    class BatchStateRefreshed(Exception):
+        pass
+
+    def refresh_batch_state(attn_metadata):
+        assert attn_metadata is metadata
+        raise BatchStateRefreshed
+
+    layer = SimpleNamespace(
+        indexer=None,
+        skip_topk=True,
+        layer_name=MLA_LAYER,
+        impl=SimpleNamespace(
+            prepare_for_batch=refresh_batch_state,
+            record_logical_topk_ready=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(
+        deepseek_attention,
+        "get_attention_context",
+        lambda layer_name: (metadata, None, torch.empty(1), None),
+    )
+
+    with pytest.raises(BatchStateRefreshed):
+        DeepseekV32Attention._sparse_indexer_and_attn(
+            layer,
+            torch.empty(1, dtype=torch.long),
+            torch.empty(1, 1),
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1),
+        )
 
 
 def make_indexer_metadata(
@@ -246,6 +292,10 @@ def test_deepseek_v32_dispatches_selected_mha(
         _fp8_query=fp8_query,
         _use_sparse_mha=lambda _: True,
         rotary_emb=lambda _positions, q: (q + 1, None),
+        impl=SimpleNamespace(
+            record_logical_topk_ready=lambda: None,
+            prepare_for_batch=lambda _: None,
+        ),
         forward_impl=record_forward_impl,
     )
     q_nope = torch.randn(2, 1, 2)
@@ -290,3 +340,677 @@ def test_deepseek_v32_dispatches_selected_mha(
             expected_args[1:],
         )
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_select_candidate_blocks_tolerates_empty_rows():
+    """Full-cudagraph decode pads the batch with seq_len-0 rows. The newest
+    block pin must not index -1 for them (device-side assert); they select
+    no candidate blocks and real rows still pin their newest block."""
+    block_size, topk_blocks = 8, 3
+    logits = torch.zeros(3, 64, device="cuda")
+    logits[0, 3] = 5.0  # block 0 scores highest for row 0
+    logits[2, 9] = 5.0  # block 1 scores highest for row 2
+    row_ks = torch.zeros(3, dtype=torch.int64, device="cuda")
+    row_ke = torch.tensor([40, 0, 17], device="cuda")
+    out = torch.empty(3, topk_blocks, dtype=torch.int32, device="cuda")
+
+    sparse_indexer._select_candidate_blocks(
+        logits, row_ks, row_ke, topk_blocks, block_size, out
+    )
+
+    assert out[1].tolist() == [-1, -1, -1]
+    assert out[0, 0].item() == 4 and 0 in out[0].tolist()  # newest block pinned
+    assert out[2, 0].item() == 2 and 1 in out[2].tolist()
+    assert (out[0] >= 0).all() and (out[2, :2] >= 0).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("score", [0.0, float("nan")])
+@pytest.mark.parametrize("start", [0, 3])
+def test_candidate_selection_keeps_valid_blocks_with_nan_scores(score, start):
+    """NaN warmup scores must not turn real blocks into repeated sparse padding."""
+    logits = torch.full((3, 64), score, device="cuda")
+    starts = torch.full((3,), start, device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([0, 17, 35], device="cuda", dtype=torch.int32)
+    out = torch.empty(3, 8, device="cuda", dtype=torch.int32)
+
+    sparse_indexer._select_candidate_blocks(logits, starts, starts + lengths, 8, 8, out)
+
+    for row, count in enumerate([0, 3, 5]):
+        valid = out[row][out[row] >= 0].sort().values
+        torch.testing.assert_close(
+            valid, torch.arange(count, device="cuda", dtype=torch.int32)
+        )
+        assert (out[row] == -1).sum().item() == 8 - count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "width,block_size,k,decode",
+    [
+        (73, 8, 16, False),
+        (97, 3, 7, False),
+        (32768, 8, 2048, False),
+        (32768, 8, 2048, True),
+    ],
+)
+def test_candidate_kernels_preserve_packed_bounds_and_padding(
+    width, block_size, k, decode
+):
+    """Preserve top-k ties, newest blocks, empty rows and candidate clamping."""
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        apply_candidate_mask,
+        select_candidate_blocks,
+    )
+
+    torch.manual_seed(42)
+    rows = 6
+    logits = torch.randn(rows, width * 2, device="cuda")[:, ::2]
+    logits[0, :16] = 0
+    logits[2, 5] = float("nan")
+    starts = torch.tensor([0, 5, 3, 0, 7, 1], device="cuda", dtype=torch.int32)
+    ends = torch.tensor([0, width, width - 1, 1, 11, width], device="cuda")
+    repeat = 1
+    if decode:
+        starts = None
+        ends = torch.tensor([0, 1, width], device="cuda", dtype=torch.int32)
+        repeat = 2
+    ks = torch.zeros(rows, device="cuda", dtype=torch.int64) if decode else starts
+    ke = ends.repeat_interleave(repeat)
+    cols = torch.arange(width, device="cuda")
+    valid = (cols >= ks[:, None]) & (cols < ke[:, None])
+    scores = logits.masked_fill(~valid, -torch.inf)
+    blocks = ((cols - ks[:, None]) // block_size).clamp(min=0).long()
+    nblocks = (width + block_size - 1) // block_size
+    reduced = logits.new_full((rows, nblocks), -torch.inf)
+    reduced.scatter_reduce_(1, blocks, scores, reduce="amax", include_self=True)
+    lengths = ke - ks
+    last = ((lengths - 1) // block_size).clamp(min=0).long()
+    reduced.scatter_(
+        1, last[:, None], torch.where(lengths > 0, torch.inf, -torch.inf)[:, None]
+    )
+    top = reduced.topk(min(k, nblocks), dim=-1)
+    expected = torch.full((rows, k), -1, device="cuda", dtype=torch.int32)
+    expected[:, : top.indices.shape[1]] = torch.where(
+        top.values != -torch.inf, top.indices, -1
+    ).int()
+    actual = torch.empty(rows, k * 2, device="cuda", dtype=torch.int32)[:, ::2]
+    select_candidate_blocks(logits, starts, ends, k, block_size, actual, repeat)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    candidates = actual.clone()
+    candidates[:, 0] = nblocks + 10
+    candidates[:, 1] = 0
+    candidates[:, 2] = 0
+    positions = ks[:, None, None] + candidates.long()[:, :, None] * block_size
+    positions = positions + torch.arange(block_size, device="cuda")
+    keep = torch.zeros(rows, width, device="cuda", dtype=torch.int8)
+    keep.scatter_reduce_(
+        1,
+        positions.clamp(0, width - 1).reshape(rows, -1),
+        (candidates >= 0)[:, :, None]
+        .expand(-1, -1, block_size)
+        .reshape(rows, -1)
+        .to(torch.int8),
+        reduce="amax",
+        include_self=True,
+    )
+    reference = logits.masked_fill((keep == 0) | ~valid, -torch.inf)
+    apply_candidate_mask(logits, starts, ends, candidates, block_size, repeat)
+    torch.testing.assert_close(logits, reference, rtol=0, atol=0, equal_nan=True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        apply_candidate_mask(logits, starts, ends, candidates, block_size, repeat)
+    for block in (1, -1):
+        candidates.fill_(-1)
+        candidates[:, 0] = block
+        logits.fill_(3.0)
+        graph.replay()
+        keep = valid & (block >= 0) & ((cols - ks[:, None]) // block_size == block)
+        reference = torch.where(keep, 3.0, -torch.inf)
+        torch.testing.assert_close(logits, reference, rtol=0, atol=0)
+
+
+# --- DeepGEMM sparse-MQA indexer path (V4.1 two-level candidate filtering) ---
+
+
+def _make_candidates(lens: torch.Tensor, num_candidates: int, cbk: int):
+    """Production-faithful candidates: top min(avail, K) blocks per row —
+    full coverage for lens <= K*cbk, a fixed-size subset beyond that."""
+    avail = ((lens.cpu() + cbk - 1) // cbk).tolist()
+    rows = []
+    for a in avail:
+        n = min(a, num_candidates)
+        picks = torch.randperm(a)[:n].sort().values[:num_candidates].tolist()
+        rows.append(picks + [-1] * (num_candidates - len(picks)))
+    return torch.tensor(rows, dtype=torch.int32)
+
+
+def _candidate_token_mask(
+    candidates: torch.Tensor, cbk: int, total: int, ks: torch.Tensor | None = None
+):
+    """[rows, total] bool mask of the candidate-covered token positions.
+
+    ``ks`` converts request-local candidate blocks to absolute positions
+    (prefill's packed workspace); pass None when already request-local.
+    """
+    rows = candidates.shape[0]
+    device = candidates.device
+    # Sentinel block keeps -1 padding from scattering onto real columns.
+    width = max(total, (candidates.shape[1] + 1) * cbk)
+    if ks is not None:
+        width += int(ks.max()) + cbk
+    in_cand = torch.zeros(rows, width, dtype=torch.bool, device=device)
+    block_id = torch.where(candidates >= 0, candidates.long(), candidates.shape[1])
+    tok = block_id.unsqueeze(2) * cbk + torch.arange(cbk, device=device)
+    if ks is not None:
+        tok = tok + ks.unsqueeze(1).unsqueeze(2)
+    keep = (candidates >= 0).unsqueeze(2).expand(-1, -1, cbk)
+    in_cand.scatter_(1, tok.flatten(1), keep.flatten(1))
+    return in_cand[:, :total]
+
+
+def _reference_topk(masked: torch.Tensor, topk: int) -> torch.Tensor:
+    """Plain ``torch.topk`` over -inf-masked logits; slots past a row's valid
+    count are -1 (the indexer's "no token" sentinel)."""
+    values, indices = masked.topk(topk, dim=1)
+    return torch.where(values > float("-inf"), indices.int(), -1)
+
+
+def _assert_same_selection(
+    logits: torch.Tensor,
+    got: torch.Tensor,
+    expected: torch.Tensor,
+    row_starts: torch.Tensor | None = None,
+) -> None:
+    """Both top-k index sets must pick the same multiset of logit values per
+    row (-1 padding must match too). Indices themselves may differ: the
+    top-k kernels break ties among equal values in nondeterministic order."""
+    for r in range(logits.shape[0]):
+        base = int(row_starts[r]) if row_starts is not None else 0
+        g, e = got[r][got[r] >= 0], expected[r][expected[r] >= 0]
+        assert g.numel() == e.numel(), f"row {r}: {g.numel()} vs {e.numel()} selected"
+        vg = logits[r][(base + g).long()].sort().values
+        ve = logits[r][(base + e).long()].sort().values
+        assert torch.equal(vg, ve), f"row {r}: selected values differ"
+
+
+def _sparse_scratch(rows: int, num_sparse: int, topk: int) -> dict:
+    """Caller-owned buffers the sparse path writes into (the metadata builder
+    owns these in production)."""
+    i32 = dict(dtype=torch.int32, device="cuda")
+    return dict(
+        sparse_indices=torch.zeros(rows, num_sparse, **i32),
+        end=torch.zeros(rows, **i32),
+        col_indices=torch.zeros(rows, topk, **i32),
+    )
+
+
+def _expand_candidates_reference(
+    candidates: torch.Tensor, ks: torch.Tensor, ke: torch.Tensor, cbk: int, sbk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """PyTorch reference for `candidate_blocks_to_sparse_indices`: expand
+    each candidate block into ``cbk // sbk`` sparse blocks, keep those inside
+    ``[0, ke - ks)``, sort ascending, anchor at ``ks // sbk``, pad by
+    repeating the last valid block, and count the valid sparse columns."""
+    ratio = cbk // sbk
+    rows, num_candidates = candidates.shape
+    num_sparse = num_candidates * ratio
+    big = torch.iinfo(torch.int32).max
+    offsets = torch.arange(ratio, device=candidates.device, dtype=torch.int32)
+    blocks = (candidates.unsqueeze(-1) * ratio + offsets).flatten(1)
+    max_block = ((ke - ks).clamp(min=0) + sbk - 1) // sbk
+    valid = (blocks >= 0) & (blocks < max_block.unsqueeze(1))
+    sorted_blocks, _ = torch.where(valid, blocks, big).sort(dim=1)
+    n_valid = (sorted_blocks != big).sum(dim=1, dtype=torch.int32)
+    base = (ks // sbk).unsqueeze(1)
+    kernel_blocks = torch.where(sorted_blocks != big, sorted_blocks, 0) + base
+    last_slot = (n_valid - 1).clamp(min=0).unsqueeze(1).long()
+    last_block = kernel_blocks.gather(1, last_slot)
+    pad = torch.arange(num_sparse, device=candidates.device) >= n_valid.unsqueeze(1)
+    sparse_indices = torch.where(pad, last_block, kernel_blocks)
+    last_start = last_block.squeeze(1) * sbk + ks % sbk
+    last_fill = (ke - last_start).clamp(min=1, max=sbk)
+    end = torch.where(n_valid > 0, (n_valid - 1) * sbk + last_fill, 0)
+    return sparse_indices.int(), end.int()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
+def test_candidate_blocks_to_sparse_indices_math():
+    """Candidate->sparse-block expansion: ks anchoring, range filtering,
+    repeat-last padding, and the per-row valid column count (``end``)."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+
+    # Rows cover: exactly one block, an unaligned ks with a partial tail
+    # block, an empty row, duplicates / -1 padding / out-of-range garbage
+    # (warmup runs touch uninitialized buffers), and int32-overflow junk.
+    ks = torch.tensor([64, 13, 100, 8, 0], dtype=torch.int32, device="cuda")
+    ke = torch.tensor([72, 30, 100, 40, 1000], dtype=torch.int32, device="cuda")
+    candidates = torch.tensor(
+        [
+            [0, -1, -1, -1],
+            [2, 0, -1, -1],
+            [3, -1, -1, -1],
+            [1, 1, 7, 0],
+            [2**30, -(2**30), 0, -1],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    indices, end = candidate_blocks_to_sparse_indices(
+        candidates, ks, ke, candidate_block_size=8, sparse_block_kv=8
+    )
+    assert indices.tolist() == [
+        [8, 8, 8, 8],
+        [1, 3, 3, 3],
+        [12, 12, 12, 12],
+        [1, 2, 2, 2],
+        [0, 0, 0, 0],
+    ]
+    # end: row 1's last block covers [29, 37) but ke = 30 -> one valid token;
+    # row 3 keeps the duplicated block (production candidates are unique).
+    assert end.tolist() == [8, 9, 0, 24, 8]
+
+    # Wider candidate blocks expand into multiple sparse blocks.
+    idx2, end2 = candidate_blocks_to_sparse_indices(
+        torch.tensor([[1, 0]], dtype=torch.int32, device="cuda"),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([48], dtype=torch.int32, device="cuda"),
+        candidate_block_size=16,
+        sparse_block_kv=8,
+    )
+    assert idx2.tolist() == [[0, 1, 2, 3]]
+    assert end2.tolist() == [32]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
+@pytest.mark.parametrize("cbk,sbk", [(8, 8), (16, 8), (16, 16)])
+def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int):
+    """The Triton expansion equals the PyTorch reference on production-shaped
+    random inputs, including strided (column-sliced) candidate rows and
+    strided output buffers."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+
+    torch.manual_seed(0)
+    rows, num_candidates = 41, 2048
+    ratio = cbk // sbk
+    lens = torch.randint(1, 40000, (rows,), dtype=torch.int32)
+    lens[0], lens[1] = 1, 3
+    ks = torch.zeros(rows, dtype=torch.int32)
+    ks[1:] = lens.cumsum(0)[:-1]
+    ks, ke = ks.cuda(), (ks + lens).cuda()
+    candidates = _make_candidates(lens, num_candidates, cbk).cuda()
+    # Row 2 gets out-of-range garbage past the padding, as a CUDA-graph
+    # warm-up on uninitialized buffers would.
+    candidates[2, -3:] = torch.tensor([2**30, -(2**29), 10**6], dtype=torch.int32)
+
+    ref_indices, ref_end = _expand_candidates_reference(candidates, ks, ke, cbk, sbk)
+
+    cand_buf = torch.full((rows, num_candidates + 64), -7, dtype=torch.int32).cuda()
+    cand_buf[:, :num_candidates] = candidates
+    si_buf = torch.zeros(rows, num_candidates * ratio + 32, dtype=torch.int32).cuda()
+    end_buf = torch.zeros(rows * 2, dtype=torch.int32, device="cuda")
+    ks_buf = torch.zeros(rows * 2, dtype=torch.int32, device="cuda")
+    ks_buf[::2] = ks
+    got_indices, got_end = candidate_blocks_to_sparse_indices(
+        cand_buf[:, :num_candidates],
+        ks_buf[::2],
+        ke,
+        cbk,
+        sbk,
+        out=(si_buf[:, : num_candidates * ratio], end_buf[::2]),
+    )
+    assert torch.equal(got_indices, ref_indices)
+    assert torch.equal(got_end, ref_end)
+    assert torch.equal(
+        cand_buf[:, num_candidates:], torch.full_like(cand_buf[:, num_candidates:], -7)
+    )
+    assert not si_buf[:, num_candidates * ratio :].any()
+    assert not end_buf[1::2].any()
+
+
+def _skip_unless_sm100_sparse_kernels():
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+        pytest.skip("SM100 required")
+    deep_gemm = pytest.importorskip("deep_gemm")
+    if not hasattr(deep_gemm, "fp8_fp4_sparse_mqa_logits"):
+        pytest.skip("DeepGEMM >= 2.8 required for sparse MQA logits")
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+    )
+
+    if not has_deep_select():
+        pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
+    return deep_gemm
+
+
+def _quant_fp4(x: torch.Tensor):
+    from deep_gemm.utils import per_token_cast_to_fp4
+
+    return per_token_cast_to_fp4(x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
+    """The sparse-MQA candidate path selects exactly the same logit values as
+    ``torch.topk`` over dense bf16 logits masked to the candidates (the two
+    DeepGEMM kernels agree bitwise on candidate columns), incl. under CUDA
+    graph capture, and a later layer reusing the step's expansion/schedule
+    selects the same values."""
+    deep_gemm = _skip_unless_sm100_sparse_kernels()
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        sparse_mqa_logits_prefill_chunk,
+    )
+
+    torch.manual_seed(0)
+    rows, num_heads, head_dim = 37, 32, 128
+    cbk, topk, num_candidates = 8, 512, 2048  # V4.1-Flash production values
+    lens = torch.randint(1, 30000, (rows,), dtype=torch.int32)
+    lens[0], lens[1], lens[2] = 1, 5, 2048  # single token, sub-block, long
+    ks = torch.zeros(rows, dtype=torch.int32)
+    ks[1:] = lens.cumsum(0)[:-1]
+    ks, ke, lens = ks.cuda(), (ks + lens).cuda(), lens.cuda()
+    total = int(lens.sum())
+    q_fp, q_sf = _quant_fp4(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    k_fp, k_sf = _quant_fp4(
+        torch.randn(total, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.bfloat16)
+    candidates = _make_candidates(lens, num_candidates, cbk).cuda()
+
+    # Reference: dense bf16 logits masked to the candidates, then torch.topk.
+    dense = deep_gemm.fp8_fp4_mqa_logits(
+        (
+            q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
+            q_sf.view(rows, num_heads),
+        ),
+        (k_fp.view(torch.int8), k_sf.view(total)),
+        weights,
+        ks,
+        ke,
+        clean_logits=False,
+        logits_dtype=torch.bfloat16,
+    )
+    cols = torch.arange(total, device="cuda")
+    in_range = (cols - ks.unsqueeze(1) >= 0) & (
+        cols - ks.unsqueeze(1) < lens.unsqueeze(1)
+    )
+    masked = dense.masked_fill(
+        ~(in_range & _candidate_token_mask(candidates, cbk, total, ks)),
+        float("-inf"),
+    ).float()
+    ref_abs = _reference_topk(masked, topk)  # packed-workspace positions
+    ref = torch.where(ref_abs >= 0, ref_abs - ks.unsqueeze(1), -1)
+
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+
+    def run_sparse(kernel_metadata=None):
+        return sparse_mqa_logits_prefill_chunk(
+            q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
+            q_sf.view(rows, num_heads),
+            k_fp.view(torch.int8),
+            k_sf.view(total),
+            weights,
+            ks,
+            ke,
+            candidates,
+            cbk,
+            cbk,
+            topk,
+            out,
+            kernel_metadata=kernel_metadata,
+            **scratch,
+        )
+
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run_sparse()  # warm up JIT + the DeepGEMM workspace pre-capture
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                run_sparse()
+        out.fill_(-1)
+        graph.replay()
+    else:
+        kernel_metadata = run_sparse()
+        _assert_same_selection(dense, out, ref, row_starts=ks)
+        out.fill_(-1)
+        run_sparse(kernel_metadata)
+
+    _assert_same_selection(dense, out, ref, row_starts=ks)
+
+
+def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
+    """MXFP4 paged cache in DeepGEMM's fused layout: per page, all tokens'
+    fp4 data first, then their packed UE8M0 scales."""
+    device = req_lens.device
+    pages_per = (req_lens + page_kv - 1) // page_kv
+    num_pages, max_pages = int(pages_per.sum()), int(pages_per.max())
+    kv_cache = torch.zeros(
+        num_pages, page_kv, 1, head_dim // 2 + 4, dtype=torch.uint8, device=device
+    )
+    block_table = torch.zeros(
+        len(req_lens), max_pages, dtype=torch.int32, device=device
+    )
+    page_pool = torch.randperm(num_pages, device=device)
+    offset = 0
+    for b in range(len(req_lens)):
+        n = int(pages_per[b])
+        block_table[b, :n] = page_pool[offset : offset + n].to(torch.int32)
+        offset += n
+        k_fp, k_sf = _quant_fp4(
+            torch.randn(int(req_lens[b]), head_dim, device=device, dtype=torch.bfloat16)
+        )
+        rows68 = torch.zeros(n * page_kv, 68, dtype=torch.uint8, device=device)
+        rows68[: int(req_lens[b]), : head_dim // 2] = k_fp.view(torch.uint8)
+        rows68[: int(req_lens[b]), head_dim // 2 :] = k_sf.view(torch.uint8).view(-1, 4)
+        by_page = rows68.view(n, page_kv, 68)
+        split = torch.cat(
+            [by_page[..., :64].reshape(n, -1), by_page[..., 64:].reshape(n, -1)], dim=1
+        ).view(n, page_kv, 1, head_dim // 2 + 4)
+        kv_cache[block_table[b, :n].long()] = split
+    return kv_cache, block_table
+
+
+@pytest.mark.parametrize("next_n", [1, 2])
+@pytest.mark.parametrize("capture", [False, True])
+def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool):
+    """Paged sparse-MQA decode selects exactly the values ``torch.topk`` picks
+    from the dense bf16 masked logits, incl. MTP rows (next_n > 1 flattened to
+    one query row each), CUDA graph capture/replay and schedule reuse by a
+    later layer."""
+    deep_gemm = _skip_unless_sm100_sparse_kernels()
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        sparse_mqa_logits_paged_decode,
+    )
+
+    torch.manual_seed(0)
+    batch, num_heads, head_dim, page_kv = 9, 32, 128, 128
+    cbk, topk, num_candidates = 8, 512, 2048
+    rows = batch * next_n
+    req_lens = torch.randint(1, 30000, (batch,), dtype=torch.int32, device="cuda")
+    req_lens[0], req_lens[1] = 1, 30000  # tiny row + a filtered (subset) row
+    # Row (b, j) sees L_b - next_n + j + 1 tokens (native MTP layout).
+    row_lens = (
+        (req_lens.unsqueeze(1) - next_n + torch.arange(1, next_n + 1, device="cuda"))
+        .clamp(min=0)
+        .to(torch.int32)
+    )
+    kv_cache, block_table = _build_fp4_paged_cache(req_lens, page_kv, head_dim)
+    assert kv_cache.stride(0) % 512 == 0  # the paged sparse kernel requires it
+
+    q_fp, q_sf = _quant_fp4(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    q = q_fp.view(torch.int8).view(batch, next_n, num_heads, head_dim // 2)
+    q_scale = q_sf.view(batch, next_n, num_heads)
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.bfloat16)
+    candidates = _make_candidates(row_lens.flatten(), num_candidates, cbk).cuda()
+
+    def reference_topk():
+        context_lens_2d = row_lens.view(batch, next_n)
+        sched = deep_gemm.get_paged_mqa_logits_metadata(
+            context_lens_2d, page_kv, deep_gemm.get_num_sms(), None
+        )
+        logits = deep_gemm.fp8_fp4_paged_mqa_logits(
+            (q, q_scale),
+            kv_cache,
+            weights,
+            context_lens_2d,
+            block_table,
+            sched,
+            int(req_lens.max()),
+            False,
+            torch.bfloat16,
+            None,
+        )
+        lens_flat = row_lens.flatten()
+        cols = torch.arange(logits.shape[1], device="cuda")
+        masked = logits.masked_fill(
+            ~(
+                (cols.unsqueeze(0) < lens_flat.unsqueeze(1))
+                & _candidate_token_mask(candidates, cbk, logits.shape[1])
+            ),
+            float("-inf"),
+        ).float()
+        return _reference_topk(masked, topk), logits
+
+    expected, dense_logits = reference_topk()
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+
+    # The metadata builder flattens every query to one row: per-row context
+    # lengths, an expanded block table and a row -> request map.
+    context_lens = row_lens.flatten().contiguous()
+    row_block_table = block_table.repeat_interleave(next_n, dim=0)
+    row_indices = torch.arange(batch, dtype=torch.int32, device="cuda")
+    row_indices = row_indices.repeat_interleave(next_n)
+    row_ks = torch.zeros(rows, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+
+    def run_sparse(o: torch.Tensor, kernel_metadata=None):
+        return sparse_mqa_logits_paged_decode(
+            q.view(rows, 1, num_heads, head_dim // 2),
+            q_scale.view(rows, 1, num_heads),
+            kv_cache,
+            weights,
+            context_lens,
+            row_block_table,
+            row_indices,
+            candidates,
+            cbk,
+            cbk,
+            topk,
+            o,
+            row_ks=row_ks,
+            kernel_metadata=kernel_metadata,
+            **scratch,
+        )
+
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run_sparse(out)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                run_sparse(out)
+        out.fill_(-1)
+        graph.replay()
+    else:
+        kernel_metadata = run_sparse(out)
+        _assert_same_selection(dense_logits, out, expected)
+        out.fill_(-1)
+        run_sparse(out, kernel_metadata)
+
+    _assert_same_selection(dense_logits, out, expected)
+
+
+def test_sparse_mqa_logits_accuracy_vs_torch():
+    """Sparse-kernel numerics vs a PyTorch fp32 reference on the dequantized
+    MXFP4 inputs."""
+    _skip_unless_sm100_sparse_kernels()
+    from deep_gemm.utils import cast_back_from_fp4
+
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+    from vllm.utils.deep_gemm import (
+        fp8_fp4_sparse_mqa_logits,
+        get_sparse_mqa_logits_metadata,
+    )
+
+    torch.manual_seed(0)
+    rows, num_heads, head_dim = 17, 32, 128
+    sbk, num_candidates = 8, 2048
+    lens = torch.randint(1, 1500, (rows,), dtype=torch.int32)
+    lens[0] = 1
+    ks = torch.zeros(rows, dtype=torch.int32)
+    ks[1:] = lens.cumsum(0)[:-1]
+    ks, ke, lens = ks.cuda(), (ks + lens).cuda(), lens.cuda()
+    total = int(lens.sum())
+    q_fp, q_sf = _quant_fp4(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    k_fp, k_sf = _quant_fp4(
+        torch.randn(total, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.bfloat16)
+    candidates = _make_candidates(lens, num_candidates, sbk).cuda()
+
+    sparse_idx, end = candidate_blocks_to_sparse_indices(candidates, ks, ke, sbk, sbk)
+    metadata = get_sparse_mqa_logits_metadata(
+        ks, ke, total, sparse_idx, torch.int8, sbk
+    )
+    logits = fp8_fp4_sparse_mqa_logits(
+        (
+            q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
+            q_sf.view(rows, num_heads),
+        ),
+        (k_fp.view(torch.int8), k_sf.view(total)),
+        weights,
+        metadata,
+        sparse_idx.shape[1],
+        sbk,
+    )
+
+    # PyTorch fp32 reference on the dequantized inputs.
+    q_deq = cast_back_from_fp4(q_fp, q_sf, gran_k=32, use_packed_ue8m0=True)
+    k_deq = cast_back_from_fp4(k_fp, k_sf, gran_k=32, use_packed_ue8m0=True)
+    dots = torch.einsum(
+        "rhd,td->rht",
+        q_deq.view(rows, num_heads, head_dim).float(),
+        k_deq.float(),
+    )
+    ref = (dots.relu() * weights.float().unsqueeze(-1)).sum(1)  # [rows, total]
+
+    # Compare on valid sparse columns (absolute packed-workspace positions).
+    width = sparse_idx.shape[1] * sbk
+    cols = torch.arange(width, device="cuda")
+    valid = cols.unsqueeze(0) < end.unsqueeze(1).long()
+    pos = (
+        sparse_idx.repeat_interleave(sbk, dim=1).long() * sbk
+        + (ks % sbk).unsqueeze(1)
+        + (cols % sbk).unsqueeze(0)
+    ).clamp(min=0, max=total - 1)
+    abs_err = (logits.float() - ref.gather(1, pos)).abs()[valid]
+    row_scale = ref.abs().amax(dim=1)
+    norm_err = ((logits.float() - ref.gather(1, pos)).abs() / row_scale.unsqueeze(1))[
+        valid
+    ]
+    print(
+        f"sparse vs torch fp32: max_abs={abs_err.max().item():.4f}; "
+        f"rowmax-normalized p50={norm_err.median().item():.5f} "
+        f"p99={norm_err.quantile(0.99).item():.5f} max={norm_err.max().item():.5f}"
+    )
+    # bf16-level numerics: far below the value gaps that change top-k selection.
+    assert norm_err.quantile(0.99).item() < 1e-2
+    assert norm_err.max().item() < 2e-2

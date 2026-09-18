@@ -178,8 +178,12 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        rotary_dim: Number of leading dimensions rotary is applied to.
+        mrope_interleaved: Whether the T/H/W sections are interleaved rather
+            than concatenated.
         is_neox_style: Whether rotary pairs use split-half (NeoX) or
             adjacent (GPT-J) layout.
+
     """
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
@@ -252,21 +256,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # YaRN parameters.
         *,
         scaling_factor: float | None = None,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            if attention_factor is not None:
+                self.mscale = float(attention_factor)
+            elif mscale and mscale_all_dim:
+                self.mscale = float(
+                    yarn_get_mscale(self.scaling_factor, mscale)
+                    / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                )
+            else:
+                self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
             self.mscale = 1.0
 
@@ -313,6 +324,8 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 [3, num_tokens] (T/H/W positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
