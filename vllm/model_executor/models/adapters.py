@@ -395,7 +395,7 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
                     or vllm_config.lora_config is not None
                 ):
                     raise ValueError(
-                        "The LogitScore prototype requires unquantized merged "
+                        "LogitScore requires unquantized merged "
                         "weights without runtime LoRA and TP=PP=1."
                     )
                 language_model = _get_language_model_for_seq_cls(self)

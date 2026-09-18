@@ -11,6 +11,11 @@ import torch
 from safetensors.torch import save_file
 from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
+from tests.transformers_utils.utils import (
+    update_json,
+    write_cross_encoder_metadata,
+    write_json,
+)
 from vllm.model_executor.models import adapters as adapters_module
 from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
@@ -282,55 +287,27 @@ def test_resolve_num_labels_text_only_config():
     assert _resolve_num_labels(config, config.get_text_config()) == 7
 
 
-def test_resolve_num_labels_defaults_when_undeclared():
-    config = _composite_config()
-    assert (
-        _resolve_num_labels(config, config.get_text_config())
-        == PreTrainedConfig().num_labels
-    )
-
-
-def test_resolve_num_labels_declared_on_outer_config():
-    """Multimodal checkpoints keep id2label/problem_type on the top-level config."""
-    config = _composite_config(outer_labels=20)
-    assert config.get_text_config().num_labels == PreTrainedConfig().num_labels
-    assert _resolve_num_labels(config, config.get_text_config()) == 20
-
-
-def test_resolve_num_labels_declared_on_text_config():
-    """Overrides written into text_config keep working."""
-    config = _composite_config(inner_labels=5)
-    assert _resolve_num_labels(config, config.get_text_config()) == 5
-
-
-def test_resolve_num_labels_outer_wins_when_both_declared():
-    config = _composite_config(outer_labels=20, inner_labels=5)
-    assert _resolve_num_labels(config, config.get_text_config()) == 20
+@pytest.mark.parametrize(
+    "outer,inner,expected",
+    [
+        (None, None, PreTrainedConfig().num_labels),
+        (20, None, 20),
+        (None, 5, 5),
+        (20, 5, 20),
+    ],
+)
+def test_resolve_num_labels_composite_config(outer, inner, expected):
+    config = _composite_config(outer_labels=outer, inner_labels=inner)
+    assert _resolve_num_labels(config, config.get_text_config()) == expected
 
 
 def test_load_current_sentence_transformers_dense_module(tmp_path):
+    write_cross_encoder_metadata(tmp_path, hidden_size=4)
     dense_path = tmp_path / "2_Dense"
-    dense_path.mkdir()
-    (tmp_path / "modules.json").write_text(
-        json.dumps(
-            [
-                {
-                    "path": "2_Dense",
-                    "type": "sentence_transformers.base.modules.dense.Dense",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    dense_config = {
-        "in_features": 4,
-        "out_features": 1,
-        "bias": False,
-        "activation_function": "torch.nn.modules.linear.Identity",
-    }
-    (dense_path / "config.json").write_text(
-        json.dumps(dense_config),
-        encoding="utf-8",
+    update_json(
+        dense_path / "config.json",
+        bias=False,
+        activation_function="torch.nn.modules.linear.Identity",
     )
     score_weight = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
     save_file({"linear.weight": score_weight}, dense_path / "model.safetensors")
@@ -475,7 +452,7 @@ def test_logit_score_rejects_unvalidated_loading_modes(tp, pp, quantized, lora):
         quant_config=object() if quantized else None,
         lora_config=object() if lora else None,
     )
-    with pytest.raises(ValueError, match="LogitScore prototype requires"):
+    with pytest.raises(ValueError, match="LogitScore requires unquantized merged"):
         as_seq_cls_model(ExistingEmbeddingModel)(vllm_config=config)
 
 
@@ -491,59 +468,18 @@ def test_cross_encoder_dense_head_loads_only_during_weight_loading(
     )
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    dense_config = {
-        "folder": "2_Dense",
-        "in_features": 4,
-        "out_features": 1,
-        "bias": False,
-        "activation_function": "torch.nn.modules.linear.Identity",
-        "module_output_name": "scores",
-    }
+    write_cross_encoder_metadata(tmp_path, hidden_size=4)
     modules_path = tmp_path / "modules.json"
-    dense_module = {
-        "path": dense_config["folder"],
-        "type": "sentence_transformers.base.modules.dense.Dense",
-    }
-    modules = [
-        {
-            "path": "",
-            "type": "sentence_transformers.base.modules.transformer.Transformer",
-        },
-        {
-            "path": "1_Pooling",
-            "type": (
-                "sentence_transformers.sentence_transformer.modules.pooling.Pooling"
-            ),
-        },
-        dense_module,
-    ]
-    modules_path.write_text(json.dumps(modules), encoding="utf-8")
-    (tmp_path / "config_sentence_transformers.json").write_text(
-        json.dumps(
-            {
-                "model_type": "CrossEncoder",
-                "activation_fn": "torch.nn.Sigmoid",
-            }
-        ),
-        encoding="utf-8",
+    modules = json.loads(modules_path.read_text())
+    update_json(
+        tmp_path / "config_sentence_transformers.json",
+        activation_fn="torch.nn.Sigmoid",
     )
-    (tmp_path / "sentence_bert_config.json").write_text(
-        json.dumps({"transformer_task": "feature-extraction"}),
-        encoding="utf-8",
-    )
-    pooling_path = tmp_path / "1_Pooling"
-    pooling_path.mkdir()
-    (pooling_path / "config.json").write_text(
-        json.dumps({"pooling_mode": "mean", "include_prompt": True}),
-        encoding="utf-8",
-    )
-    dense_path = tmp_path / dense_config["folder"]
-    dense_path.mkdir()
-    (dense_path / "config.json").write_text(
-        json.dumps(
-            {key: value for key, value in dense_config.items() if key != "folder"}
-        ),
-        encoding="utf-8",
+    dense_path = tmp_path / "2_Dense/config.json"
+    update_json(
+        dense_path,
+        bias=False,
+        activation_function="torch.nn.modules.linear.Identity",
     )
 
     reload_weight = torch.full((1, 4), 2.0)
@@ -609,14 +545,9 @@ def test_cross_encoder_dense_head_loads_only_during_weight_loading(
 
     record_metadata_for_reloading(model)
     reload_weight.fill_(7.0)
-    reloaded_dense_path = tmp_path / "head"
-    reloaded_dense_path.mkdir()
-    (reloaded_dense_path / "config.json").write_text(
-        (dense_path / "config.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    dense_module["path"] = "head"
-    modules_path.write_text(json.dumps(modules), encoding="utf-8")
+    write_json(tmp_path / "head/config.json", json.loads(dense_path.read_text()))
+    modules[-1]["path"] = "head"
+    write_json(modules_path, modules)
     initialize_layerwise_reload(model)
     reloaded = model.load_weights([])
     finalize_layerwise_reload(model, model_config)
@@ -629,10 +560,7 @@ def test_cross_encoder_dense_head_loads_only_during_weight_loading(
         name: parameter.detach().clone() for name, parameter in model.named_parameters()
     }
     reload_weight.fill_(11.0)
-    (pooling_path / "config.json").write_text(
-        json.dumps({"pooling_mode": "lasttoken", "include_prompt": True}),
-        encoding="utf-8",
-    )
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode="lasttoken")
     with pytest.raises(ValueError, match="incompatible .*CrossEncoder semantics"):
         model.load_weights(
             [("backbone.weight", torch.full_like(model.backbone.weight, 13.0))]

@@ -197,12 +197,13 @@ def test_structured_cross_encoder_export_preserves_truncated_scores(
     )
 
 
-def _create_logit_score_cross_encoder(
+def _create_qwen_cross_encoder(
     path: Path,
     false_id: int | None,
     tied: bool,
     *,
     multimodal: bool = False,
+    dense: bool = False,
 ) -> tuple[
     str,
     list[tuple[ScoreInput, ScoreInput]],
@@ -212,12 +213,19 @@ def _create_logit_score_cross_encoder(
 ]:
     from sentence_transformers import CrossEncoder
     from sentence_transformers.cross_encoder.modules import LogitScore, Transformer
+    from sentence_transformers.sentence_transformer.modules import Dense, Pooling
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from tokenizers.pre_tokenizers import Whitespace
     from transformers import Qwen3Config, Qwen3ForCausalLM, TokenizersBackend
 
     base_path = path / "base"
+    vision_tokens = [
+        "<|vision_start|>",
+        "<|vision_end|>",
+        "<|image_pad|>",
+        "<|video_pad|>",
+    ]
     vocab = {
         token: index
         for index, token in enumerate(
@@ -235,11 +243,8 @@ def _create_logit_score_cross_encoder(
                 ";",
                 "match",
                 "extra",
-                "<|vision_start|>",
-                "<|vision_end|>",
-                "<|image_pad|>",
-                "<|video_pad|>",
             ]
+            + vision_tokens
         )
     }
     tokenizer_backend = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
@@ -251,12 +256,7 @@ def _create_logit_score_cross_encoder(
         eos_token="[EOS]",
         model_max_length=64,
         model_input_names=["input_ids", "attention_mask"],
-        additional_special_tokens=[
-            "<|vision_start|>",
-            "<|vision_end|>",
-            "<|image_pad|>",
-            "<|video_pad|>",
-        ],
+        additional_special_tokens=vision_tokens,
         chat_template=(
             "{% for message in messages %}{{ message['role'] }}:"
             "{% for item in message['content'] %}"
@@ -266,7 +266,7 @@ def _create_logit_score_cross_encoder(
             "{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}"
         ),
     )
-    config = Qwen3Config(
+    text_kwargs = dict(
         hidden_size=128,
         intermediate_size=256,
         head_dim=32,
@@ -275,9 +275,6 @@ def _create_logit_score_cross_encoder(
         num_hidden_layers=1,
         vocab_size=len(vocab),
         max_position_embeddings=128,
-        tie_word_embeddings=tied,
-        pad_token_id=0,
-        eos_token_id=2,
     )
     torch.manual_seed(123)
     if multimodal:
@@ -285,6 +282,7 @@ def _create_logit_score_cross_encoder(
             Qwen2VLImageProcessor,
             Qwen3VLConfig,
             Qwen3VLForConditionalGeneration,
+            Qwen3VLModel,
             Qwen3VLProcessor,
             Qwen3VLTextConfig,
             Qwen3VLVideoProcessor,
@@ -292,14 +290,8 @@ def _create_logit_score_cross_encoder(
         )
 
         text_config = Qwen3VLTextConfig(
-            hidden_size=128,
-            intermediate_size=256,
-            head_dim=32,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_hidden_layers=1,
-            vocab_size=len(vocab),
-            max_position_embeddings=128,
+            **text_kwargs,
+            is_causal=not dense,
             rope_parameters={
                 "rope_type": "default",
                 "mrope_section": [6, 5, 5],
@@ -324,7 +316,8 @@ def _create_logit_score_cross_encoder(
             vision_end_token_id=vocab["<|vision_end|>"],
             tie_word_embeddings=tied,
         )
-        Qwen3VLForConditionalGeneration(vl_config).save_pretrained(base_path)
+        model_cls = Qwen3VLModel if dense else Qwen3VLForConditionalGeneration
+        model_cls(vl_config).save_pretrained(base_path)
         processor = Qwen3VLProcessor(
             tokenizer=tokenizer,
             chat_template=tokenizer.chat_template,
@@ -336,33 +329,55 @@ def _create_logit_score_cross_encoder(
         )
         processor.save_pretrained(base_path)
     else:
+        config = Qwen3Config(
+            **text_kwargs, tie_word_embeddings=tied, pad_token_id=0, eos_token_id=2
+        )
         Qwen3ForCausalLM(config).save_pretrained(base_path)
         tokenizer.save_pretrained(base_path)
+    output_name = "last_hidden_state" if dense else "logits"
     transformer = Transformer(
         str(base_path),
-        transformer_task="any-to-any" if multimodal else "text-generation",
-        module_output_name="causal_logits",
+        transformer_task=(
+            "feature-extraction"
+            if dense
+            else "any-to-any"
+            if multimodal
+            else "text-generation"
+        ),
+        module_output_name="token_embeddings" if dense else "causal_logits",
         modality_config={
-            "text": {"method": "forward", "method_output_name": "logits"},
+            "text": {"method": "forward", "method_output_name": output_name},
             **(
-                {"image": {"method": "forward", "method_output_name": "logits"}}
+                {"image": {"method": "forward", "method_output_name": output_name}}
                 if multimodal
                 else {}
             ),
             "message": {
                 "method": "forward",
-                "method_output_name": "logits",
+                "method_output_name": output_name,
                 "format": "structured",
             },
         },
-        processing_kwargs={"chat_template": {"add_generation_prompt": True}},
+        processing_kwargs={}
+        if dense
+        else {"chat_template": {"add_generation_prompt": True}},
+    )
+    head = (
+        [
+            Pooling(128, pooling_mode="mean", include_prompt=True),
+            Dense(
+                128, 1, activation_function=torch.nn.Tanh(), module_output_name="scores"
+            ),
+        ]
+        if dense
+        else [LogitScore(true_token_id=6, false_token_id=false_id)]
     )
     cross_encoder = CrossEncoder(
-        modules=[transformer, LogitScore(true_token_id=6, false_token_id=false_id)],
+        modules=[transformer, *head],
         num_labels=1,
         device="cpu",
-        prompts={"match": "match"},
-        default_prompt_name="match",
+        prompts={} if dense else {"match": "match"},
+        default_prompt_name=None if dense else "match",
     )
     export_path = path / "export"
     cross_encoder.save_pretrained(export_path)
@@ -380,7 +395,7 @@ def _create_logit_score_cross_encoder(
     raw_scores = cross_encoder.predict(
         pairs, activation_fn=torch.nn.Identity()
     ).tolist()
-    features = cross_encoder.preprocess(pairs, prompt="match")
+    features = cross_encoder.preprocess(pairs, prompt=None if dense else "match")
     token_ids = [
         ids[mask.bool()].tolist()
         for ids, mask in zip(
@@ -426,26 +441,44 @@ def test_logit_score_matches_sentence_transformers_export(
 ) -> None:
     """Score real exports through both logit modes, including tied LM heads."""
     pytest.importorskip("sentence_transformers", minversion="5.7.0")
-    from vllm import PoolingParams
-
     # Compare checkpoint semantics without Triton's default TF32 attention rounding.
     monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
-    model_path, pairs, expected, expected_raw, token_ids = (
-        _create_logit_score_cross_encoder(
-            tmp_path,
-            false_id,
-            tied,
-            multimodal=multimodal,
-        )
+    export = _create_qwen_cross_encoder(tmp_path, false_id, tied, multimodal=multimodal)
+    _check_export_scores(vllm_runner, export, multimodal=multimodal)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_multimodal_dense_matches_sentence_transformers_export(
+    vllm_runner, tmp_path: Path, monkeypatch, enforce_eager: bool
+) -> None:
+    """A bidirectional VLM + mean Pooling + Dense needs no remote model code."""
+    pytest.importorskip("sentence_transformers", minversion="5.7.0")
+    monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
+    export = _create_qwen_cross_encoder(
+        tmp_path, None, False, multimodal=True, dense=True
     )
+    _check_export_scores(
+        vllm_runner,
+        export,
+        multimodal=True,
+        model_impl="transformers",
+        enforce_eager=enforce_eager,
+    )
+
+
+def _check_export_scores(vllm_runner, export, *, multimodal, **kwargs):
+    from vllm import PoolingParams
+
+    model_path, pairs, expected, expected_raw, token_ids = export
     with vllm_runner(
         model_path,
         dtype="float32",
         trust_remote_code=False,
-        enforce_eager=True,
+        enforce_eager=kwargs.pop("enforce_eager", True),
         gpu_memory_utilization=0.1,
         max_model_len=None,
         limit_mm_per_prompt={"image": 1, "video": 0} if multimodal else None,
+        **kwargs,
     ) as model:
         results = model.llm.score(
             [pair[0] for pair in pairs], [pair[1] for pair in pairs]

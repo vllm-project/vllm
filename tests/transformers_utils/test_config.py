@@ -15,6 +15,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from transformers import BertConfig, LlamaConfig, PreTrainedConfig, Qwen3Config
 
+from tests.transformers_utils.utils import (
+    update_json,
+    write_cross_encoder_metadata,
+    write_json,
+)
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
@@ -399,101 +404,13 @@ def _write_sentence_transformers_cross_encoder(path):
         num_hidden_layers=1,
         vocab_size=32,
     ).save_pretrained(path)
-
-    (path / "config_sentence_transformers.json").write_text(
-        json.dumps(
-            {
-                "model_type": "CrossEncoder",
-                "activation_fn": "torch.nn.modules.linear.Identity",
-                "prompts": {},
-                "default_prompt_name": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (path / "sentence_bert_config.json").write_text(
-        json.dumps(
-            {
-                "transformer_task": "feature-extraction",
-                "module_output_name": "token_embeddings",
-                "modality_config": {
-                    "text": {
-                        "method": "forward",
-                        "method_output_name": "last_hidden_state",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (path / "tokenizer_config.json").write_text(
-        json.dumps({"model_max_length": 16}),
-        encoding="utf-8",
-    )
-    (path / "modules.json").write_text(
-        json.dumps(
-            [
-                {
-                    "idx": 0,
-                    "name": "0",
-                    "path": "",
-                    "type": (
-                        "sentence_transformers.base.modules.transformer.Transformer"
-                    ),
-                },
-                {
-                    "idx": 1,
-                    "name": "1",
-                    "path": "1_Pooling",
-                    "type": (
-                        "sentence_transformers.sentence_transformer.modules."
-                        "pooling.Pooling"
-                    ),
-                },
-                {
-                    "idx": 2,
-                    "name": "2",
-                    "path": "2_Dense",
-                    "type": "sentence_transformers.base.modules.dense.Dense",
-                },
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    pooling_path = path / "1_Pooling"
-    pooling_path.mkdir()
-    (pooling_path / "config.json").write_text(
-        json.dumps(
-            {
-                "embedding_dimension": 8,
-                "pooling_mode": "mean",
-                "include_prompt": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    dense_config = {
-        "in_features": 8,
-        "out_features": 1,
-        "bias": True,
-        "activation_function": "torch.nn.modules.activation.Tanh",
-        "module_input_name": "sentence_embedding",
-        "module_output_name": "scores",
-    }
-    dense_path = path / "2_Dense"
-    dense_path.mkdir()
-    (dense_path / "config.json").write_text(
-        json.dumps(dense_config),
-        encoding="utf-8",
-    )
-    return dense_config
+    write_cross_encoder_metadata(path)
 
 
 def test_current_sentence_transformers_cross_encoder_config(tmp_path):
     """Resolve metadata once and preserve it when runtime config is copied."""
-    dense_config = _write_sentence_transformers_cross_encoder(tmp_path)
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    dense_config = json.loads((tmp_path / "2_Dense/config.json").read_text())
 
     cross_encoder_config = get_sentence_transformers_cross_encoder_config(
         str(tmp_path), revision=None
@@ -556,10 +473,10 @@ def test_cross_encoder_reload_metadata_compares_effective_semantics(tmp_path):
     dense = json.loads(dense_path.read_text())
     del dense["bias"]
     dense_path.write_text(json.dumps(dense))
-    metadata_path = tmp_path / "config_sentence_transformers.json"
-    metadata = json.loads(metadata_path.read_text())
-    metadata["__version__"] = {"sentence_transformers": "future-version"}
-    metadata_path.write_text(json.dumps(metadata))
+    update_json(
+        tmp_path / "config_sentence_transformers.json",
+        __version__={"sentence_transformers": "future-version"},
+    )
 
     reloaded = get_sentence_transformers_cross_encoder_config(str(tmp_path))
     assert reloaded == original
@@ -643,9 +560,7 @@ def test_absolute_position_pooling_preserves_tokenizer_limit(tmp_path):
     BertConfig(
         architectures=["BertModel"], position_embedding_type="absolute"
     ).save_pretrained(tmp_path)
-    (tmp_path / "tokenizer_config.json").write_text(
-        json.dumps({"model_max_length": 16}), encoding="utf-8"
-    )
+    write_json(tmp_path / "tokenizer_config.json", {"model_max_length": 16})
 
     config = ModelConfig(str(tmp_path), dtype="float32")
 
@@ -654,9 +569,7 @@ def test_absolute_position_pooling_preserves_tokenizer_limit(tmp_path):
 
 def test_tokenizer_limit_supplies_unknown_architecture_max_length(tmp_path):
     _write_sentence_transformers_cross_encoder(tmp_path)
-    (tmp_path / "tokenizer_config.json").write_text(
-        json.dumps({"model_max_length": 4096}), encoding="utf-8"
-    )
+    update_json(tmp_path / "tokenizer_config.json", model_max_length=4096)
     config = ModelConfig(str(tmp_path), dtype="float32")
     config.model_arch_config.derived_max_model_len_and_key = (float("inf"), None)
 
@@ -673,10 +586,7 @@ def test_cross_encoder_supported_pooling_modes(
     expected_pooling_type,
 ):
     _write_sentence_transformers_cross_encoder(tmp_path)
-    pooling_config_path = tmp_path / "1_Pooling/config.json"
-    pooling_config = json.loads(pooling_config_path.read_text(encoding="utf-8"))
-    pooling_config["pooling_mode"] = pooling_mode
-    pooling_config_path.write_text(json.dumps(pooling_config), encoding="utf-8")
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode=pooling_mode)
 
     config = get_sentence_transformers_cross_encoder_config(
         str(tmp_path), revision=None
@@ -688,14 +598,8 @@ def test_cross_encoder_supported_pooling_modes(
 
 def test_cross_encoder_rejects_left_padded_cls_pooling(tmp_path):
     _write_sentence_transformers_cross_encoder(tmp_path)
-    pooling_config_path = tmp_path / "1_Pooling/config.json"
-    pooling_config = json.loads(pooling_config_path.read_text(encoding="utf-8"))
-    pooling_config["pooling_mode"] = "cls"
-    pooling_config_path.write_text(json.dumps(pooling_config), encoding="utf-8")
-    (tmp_path / "tokenizer_config.json").write_text(
-        json.dumps({"padding_side": "left"}),
-        encoding="utf-8",
-    )
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode="cls")
+    update_json(tmp_path / "tokenizer_config.json", padding_side="left")
 
     with pytest.raises(ValueError, match="CLS pooling.*left-padded"):
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
@@ -705,21 +609,12 @@ def test_cross_encoder_rejects_left_padded_cls_pooling(tmp_path):
 def test_traditional_cross_encoder_topology_is_not_claimed(tmp_path, module_count):
     _write_sentence_transformers_cross_encoder(tmp_path)
 
-    transformer_config_path = tmp_path / "sentence_bert_config.json"
-    transformer_config = json.loads(transformer_config_path.read_text(encoding="utf-8"))
-    transformer_config.update(
-        {
-            "transformer_task": "sequence-classification",
-            "module_output_name": "scores",
-            "modality_config": {
-                "text": {
-                    "method": "forward",
-                    "method_output_name": "logits",
-                }
-            },
-        }
+    update_json(
+        tmp_path / "sentence_bert_config.json",
+        transformer_task="sequence-classification",
+        module_output_name="scores",
+        modality_config={"text": {"method": "forward", "method_output_name": "logits"}},
     )
-    transformer_config_path.write_text(json.dumps(transformer_config), encoding="utf-8")
 
     modules_path = tmp_path / "modules.json"
     if module_count is None:
@@ -735,7 +630,6 @@ def test_traditional_cross_encoder_topology_is_not_claimed(tmp_path, module_coun
 
 
 def _write_logit_score_cross_encoder(path, *, false_id=5, task="text-generation"):
-    _write_sentence_transformers_cross_encoder(path)
     Qwen3Config(
         architectures=["Qwen3ForCausalLM"],
         hidden_size=128,
@@ -747,39 +641,9 @@ def _write_logit_score_cross_encoder(path, *, false_id=5, task="text-generation"
         vocab_size=32,
         max_position_embeddings=64,
     ).save_pretrained(path)
-    modules = json.loads((path / "modules.json").read_text())[:1]
-    modules.append(
-        {
-            "idx": 1,
-            "name": "1",
-            "path": "1_LogitScore",
-            "type": (
-                "sentence_transformers.cross_encoder.modules.logit_score.LogitScore"
-            ),
-        }
-    )
-    (path / "modules.json").write_text(json.dumps(modules))
-    (path / "sentence_bert_config.json").write_text(
-        json.dumps(
-            {
-                "transformer_task": task,
-                "module_output_name": "causal_logits",
-                "modality_config": {
-                    "text": {"method": "forward", "method_output_name": "logits"}
-                },
-            }
-        )
-    )
-    (path / "1_LogitScore").mkdir()
-    (path / "1_LogitScore/config.json").write_text(
-        json.dumps(
-            {
-                "true_token_id": 7,
-                "false_token_id": false_id,
-                "module_input_name": "causal_logits",
-            }
-        )
-    )
+    write_cross_encoder_metadata(path, head="logit")
+    update_json(path / "sentence_bert_config.json", transformer_task=task)
+    update_json(path / "1_LogitScore/config.json", false_token_id=false_id)
 
 
 @pytest.mark.parametrize("false_id", [None, 0, 5])
@@ -835,10 +699,7 @@ def test_manual_token_classifier_uses_existing_hf_scoring_path(
 
         config_kwargs["hf_overrides"] = apply_overrides
     elif config_source == "saved":
-        path = tmp_path / "config.json"
-        hf_config = json.loads(path.read_text())
-        hf_config.update(overrides)
-        path.write_text(json.dumps(hf_config))
+        update_json(tmp_path / "config.json", **overrides)
         config_kwargs = {}
     elif config_source == "convert":
         del overrides["architectures"]
@@ -886,10 +747,7 @@ def test_flat_logit_score_stays_strict_without_complete_classifier_contract(
     }
     path.write_text(json.dumps(transformer_config))
     if saved_classifier:
-        path = tmp_path / "config.json"
-        hf_config = json.loads(path.read_text())
-        hf_config["classifier_from_token"] = ["no", "yes"]
-        path.write_text(json.dumps(hf_config))
+        update_json(tmp_path / "config.json", classifier_from_token=["no", "yes"])
 
     with pytest.raises(ValueError, match="only structured"):
         ModelConfig(
@@ -907,10 +765,7 @@ def test_flat_logit_score_stays_strict_without_complete_classifier_contract(
 )
 def test_logit_score_rejects_unsupported_processing_settings(tmp_path, setting):
     _write_logit_score_cross_encoder(tmp_path)
-    path = tmp_path / "sentence_bert_config.json"
-    config = json.loads(path.read_text())
-    config["processing_kwargs"] = setting
-    path.write_text(json.dumps(config))
+    update_json(tmp_path / "sentence_bert_config.json", processing_kwargs=setting)
     with pytest.raises(ValueError, match="LogitScore supports only"):
         ModelConfig(str(tmp_path), dtype="float32")
 
@@ -927,10 +782,7 @@ def test_logit_score_rejects_unsupported_processing_settings(tmp_path, setting):
 )
 def test_logit_score_rejects_invalid_contract(tmp_path, field, value, match):
     _write_logit_score_cross_encoder(tmp_path)
-    path = tmp_path / "1_LogitScore/config.json"
-    config = json.loads(path.read_text())
-    config[field] = value
-    path.write_text(json.dumps(config))
+    update_json(tmp_path / "1_LogitScore/config.json", **{field: value})
     with pytest.raises(ValueError, match=match):
         ModelConfig(str(tmp_path), dtype="float32")
 
@@ -987,6 +839,12 @@ def test_unsupported_modular_sentence_transformers_cross_encoder_fails_closed(
             "sentence_embedding",
             "token_embeddings",
         ),
+        (
+            "2_Dense/config.json",
+            "module_output_name",
+            "sentence_embedding",
+            "must map sentence_embedding to scores",
+        ),
     ],
 )
 def test_cross_encoder_rejects_unsupported_semantics(
@@ -997,10 +855,7 @@ def test_cross_encoder_rejects_unsupported_semantics(
     match,
 ):
     _write_sentence_transformers_cross_encoder(tmp_path)
-    config_path = tmp_path / config_file
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config[field] = value
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    update_json(tmp_path / config_file, **{field: value})
 
     with pytest.raises(ValueError, match=match):
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
@@ -1059,17 +914,3 @@ def test_cross_encoder_message_modality_requires_saved_template(tmp_path):
     )
     assert config is not None
     assert config.uses_message_format
-
-
-def test_cross_encoder_dense_module_must_output_scores(tmp_path):
-    _write_sentence_transformers_cross_encoder(tmp_path)
-    dense_config_path = tmp_path / "2_Dense" / "config.json"
-    dense_config = json.loads(dense_config_path.read_text(encoding="utf-8"))
-    dense_config["module_output_name"] = "sentence_embedding"
-    dense_config_path.write_text(json.dumps(dense_config), encoding="utf-8")
-
-    with pytest.raises(
-        ValueError,
-        match="must map sentence_embedding to scores",
-    ):
-        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
