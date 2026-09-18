@@ -15,15 +15,17 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators import shm_broadcast
+from vllm.distributed.device_communicators import shm_broadcast, shm_tensor_arena
 from vllm.distributed.device_communicators.shm_broadcast import (
     MessageQueue,
     ShmRingBuffer,
-    ShmTensorArena,
-    _ArenaPickler,
     _rebuild_tensor,
     _reduce_tensor,
     check_shm_free_space,
+)
+from vllm.distributed.device_communicators.shm_tensor_arena import (
+    ShmTensorArena,
+    _ArenaPickler,
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
@@ -747,6 +749,20 @@ def test_shm_ring_buffer_creation_checks_free_space():
         ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
 
 
+def test_shm_tensor_arena_creation_checks_free_space():
+    """Like ShmRingBuffer, arena creation must fail fast with a clear error
+    on an undersized /dev/shm instead of discovering the shortfall via a
+    SIGBUS the first time a tensor is copied into pages past tmpfs capacity."""
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(1 << 20)
+        ),
+        mock.patch.object(shm_broadcast.os.path, "isdir", return_value=True),
+        pytest.raises(RuntimeError, match="Insufficient space"),
+    ):
+        ShmTensorArena(n_reader=1, slot_bytes=256 << 20, n_slots=8)
+
+
 def test_remote_subscribe_addr_unique_concurrent_writers(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -872,7 +888,10 @@ def test_arena_dtype_roundtrip(dtype):
 
 def test_arena_slot_lifecycle():
     """A slot must not be reusable until EVERY reader has released it —
-    the writer overwriting a slot a reader still consumes would corrupt data."""
+    the writer overwriting a slot a reader still consumes would corrupt data.
+    Release is tied to the returned tensor's own lifetime (`get_tensor`): a
+    reader that still holds its view keeps the slot reserved even across
+    repeated `flush_releases()` calls, not just until the "next" one."""
     writer, readers = _make_arena(n_reader=2, n_slots=3)
     t = torch.ones(1000)
     first = writer.write_tensor(t)
@@ -880,13 +899,48 @@ def test_arena_slot_lifecycle():
     # Fill the remaining slots; the arena is now exhausted.
     assert all(writer.write_tensor(t) is not None for _ in range(2))
     assert writer.write_tensor(t) is None  # exhausted -> caller falls back
-    # One of two readers releasing is NOT enough to reuse the slot.
+
+    # Flushing while both readers still hold their view releases nothing:
+    # the slot is only queued once the returned tensor is garbage-collected.
+    readers[0].flush_releases()
+    readers[1].flush_releases()
+    assert writer.write_tensor(t) is None
+
+    # Dropping one reader's view queues its release; still not enough.
+    views[0] = None
     _drain(readers[0])
     assert writer.write_tensor(t) is None
-    # Once every reader has released, the original slot is reused.
+    # Once every reader has dropped (and released) its view, it's reused.
+    views[1] = None
     _drain(readers[1])
     assert writer.write_tensor(t) == first
-    del views
+
+
+def test_arena_slot_not_released_while_tensor_retained_across_multiple_flushes():
+    """Regression test: a caller that retains the tensor `get_tensor` returned
+    across multiple `flush_releases()` calls (e.g. `dequeue`) — such as
+    `prompt_embeds` re-sliced on the CPU every step of a chunked prefill —
+    must keep its slot reserved for as long as it holds that reference, not
+    just until the reader's next flush. Before this was fixed, the fixed
+    "release at next dequeue" schedule would let the writer reclaim (and a
+    later write silently mutate) a slot the caller was still reading."""
+    writer, (reader,) = _make_arena(n_reader=1, n_slots=2)
+    t = torch.ones(1000)
+    idx = writer.write_tensor(t)
+    retained = _get_view(reader, idx, t)
+    # Several flush cycles pass while the caller still holds `retained`.
+    for _ in range(5):
+        reader.flush_releases()
+        assert reader._pending_release == []
+    # The slot is still reserved: only the arena's other slot is available...
+    assert writer.write_tensor(t) is not None
+    assert writer.write_tensor(t) is None  # ...and now the arena is exhausted.
+    # ...and the bytes the caller is reading are unchanged throughout.
+    assert torch.equal(retained, t)
+    # Only once the caller drops its reference is the slot released.
+    del retained
+    _drain(reader)
+    assert writer.write_tensor(t) == idx
 
 
 def test_arena_oversize_falls_back():
@@ -895,10 +949,13 @@ def test_arena_oversize_falls_back():
     assert writer.write_tensor(big) is None
 
 
-def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list]:
+def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list, list[int]]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does when an arena is
     attached: arena diversion first (reducer_override), then the tensor
-    dispatch table, with out-of-band buffers >= 1MiB."""
+    dispatch table, with out-of-band buffers >= 1MiB. Also returns the slot
+    indices the arena actually wrote to, in write order (release is no longer
+    observable immediately from `arena._pending_release` -- see `get_tensor`
+    -- so tests that need the index must capture it at write time)."""
     buffers = []
 
     def callback(buf: pickle.PickleBuffer) -> bool:
@@ -908,47 +965,65 @@ def _dumps_arena(obj, arena: ShmTensorArena) -> tuple[bytes, list]:
         buffers.append(raw)
         return False
 
+    written: list[int] = []
+    orig_write_tensor = arena.write_tensor
+
+    def _spy_write_tensor(t):
+        idx = orig_write_tensor(t)
+        if idx is not None:
+            written.append(idx)
+        return idx
+
     bio = io.BytesIO()
     pickler = _ArenaPickler(bio, arena, buffer_callback=callback)
     pickler.dispatch_table = {torch.Tensor: _reduce_tensor}
-    pickler.dump(obj)
-    return bio.getvalue(), buffers
+    with mock.patch.object(arena, "write_tensor", side_effect=_spy_write_tensor):
+        pickler.dump(obj)
+    return bio.getvalue(), buffers, written
 
 
 def test_arena_pickler_composes(monkeypatch):
     """Large contiguous tensors are diverted into the arena; everything the
     arena declines falls through to `_reduce_tensor` unchanged."""
     writer, (reader,) = _make_arena(n_reader=1)
-    monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
-    monkeypatch.setattr(shm_broadcast, "_TENSOR_ARENA", reader)
+    monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_tensor_arena._TENSOR_ARENAS, reader.shared_memory.name, reader
+    )
     big = torch.randn(1024, 1024)  # 4MiB -> diverted into the arena
     small = torch.randn(16, 16)  # 1KiB -> falls through to _reduce_tensor
-    data, buffers = _dumps_arena({"big": big, "small": small}, writer)
+    data, buffers, written = _dumps_arena({"big": big, "small": small}, writer)
     # The diverted tensor's bytes are in the arena, not the pickle stream.
     assert len(data) + sum(b.nbytes for b in buffers) < big.numel() * 4
     out = pickle.loads(data, buffers=buffers)
     assert torch.equal(out["big"], big)
     assert torch.equal(out["small"], small)
     # "big" is a zero-copy view of the reader's slot; "small" is not.
-    (idx,) = reader._pending_release
+    (idx,) = written
     nbytes = big.numel() * big.element_size()
     slot_ptr = torch.frombuffer(reader._slot(idx, nbytes), dtype=torch.uint8).data_ptr()
     assert out["big"].data_ptr() == slot_ptr
     assert out["small"].data_ptr() != slot_ptr
+    # Not yet queued for release: `out["big"]` is still alive (see get_tensor).
+    assert reader._pending_release == []
     del out
+    assert reader._pending_release == [idx]
     _drain(reader)
 
 
 def test_arena_pickler_noncontig_falls_through(monkeypatch):
     writer, (reader,) = _make_arena(n_reader=1)
-    monkeypatch.setattr(shm_broadcast, "_ARENA_MIN_BYTES", 1 << 20)
-    monkeypatch.setattr(shm_broadcast, "_TENSOR_ARENA", reader)
+    monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_tensor_arena._TENSOR_ARENAS, reader.shared_memory.name, reader
+    )
     nc = torch.randn(2048, 1024)[:, ::2]  # non-contiguous, above threshold
     assert not nc.is_contiguous()
-    data, buffers = _dumps_arena(nc, writer)
+    data, buffers, written = _dumps_arena(nc, writer)
     out = pickle.loads(data, buffers=buffers)
     assert torch.equal(out, nc)
     # The arena never saw it: no slot consumed on the reader.
+    assert written == []
     assert reader._pending_release == []
     del out
 
@@ -962,7 +1037,7 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     cudart.cudaHostRegister.return_value = 0
     cudart.cudaHostUnregister.return_value = 0
     monkeypatch.setattr(
-        shm_broadcast,
+        shm_tensor_arena,
         "current_platform",
         SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
     )
@@ -979,7 +1054,10 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
 def test_arena_event_gated_release():
     """On the pinned path a slot release is gated on an H2D-completion CUDA
     event: the writer must not see the reader's done flag until the async DMA
-    sourced from the slot has been retired."""
+    sourced from the slot has been retired. Release is first queued once the
+    caller drops the CPU-side view -- the realistic pattern: the view is only
+    needed as the H2D source, while the GPU tensor is what's retained for the
+    rest of the step."""
     writer, (reader,) = _make_arena(n_reader=1)
     reader._ensure_pinned()
     if not reader._pinned:
@@ -988,6 +1066,9 @@ def test_arena_event_gated_release():
     idx = writer.write_tensor(src)
     view = _get_view(reader, idx, src)
     dev = view.to("cuda", non_blocking=True)
+    # Not yet queued: this test still holds `view`.
+    assert reader._pending_release == []
+    del view
     assert reader._pending_release == [idx]
     reader.flush_releases()
     # Deferred behind the event, not applied eagerly.
@@ -1000,7 +1081,24 @@ def test_arena_event_gated_release():
     with reader._meta(idx) as meta:
         assert meta[1] == 1
     assert torch.equal(dev.cpu(), src)
-    del view, dev
+    del dev
+
+
+def test_message_queue_shutdown_drops_tensor_arena_registry_entry():
+    """`shutdown()` must drop the queue's arena from the module-level
+    `_TENSOR_ARENAS` registry so the arena (and its pinned mapping) can be
+    garbage-collected once the queue is, instead of being held for the rest
+    of the process's life."""
+    writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
+    handle = writer_mq.export_handle()
+    reader_mq = MessageQueue.create_from_handle(handle, rank=0)
+
+    name = reader_mq.tensor_arena.shared_memory.name
+    assert shm_tensor_arena._TENSOR_ARENAS[name] is reader_mq.tensor_arena
+    reader_mq.shutdown()
+    assert name not in shm_tensor_arena._TENSOR_ARENAS
+
+    writer_mq.shutdown()
 
 
 @worker_fn_wrapper
@@ -1045,15 +1143,23 @@ def worker_fn_arena_broadcast():
         received = message_queue.dequeue(timeout=30)
         assert torch.equal(received["huge"], payload["huge"])
         assert torch.equal(received["mid"], payload["mid"])
-        # The huge tensor is a zero-copy view of an arena slot.
-        arena = shm_broadcast._TENSOR_ARENA
+        # The huge tensor is a zero-copy view into the arena's shared memory
+        # (not a copy received over the transport). Its slot is not yet
+        # queued for release while `received` still holds the reference.
+        arena = message_queue.tensor_arena
         assert arena is not None
-        (idx,) = arena._pending_release
-        nbytes = received["huge"].numel() * received["huge"].element_size()
-        slot_ptr = torch.frombuffer(
-            arena._slot(idx, nbytes), dtype=torch.uint8
+        assert arena._pending_release == []
+        huge_ptr = received["huge"].data_ptr()
+        arena_base = torch.frombuffer(
+            arena.shared_memory.buf, dtype=torch.uint8
         ).data_ptr()
-        assert received["huge"].data_ptr() == slot_ptr
+        assert arena_base <= huge_ptr < arena_base + arena.total_bytes
+        # Dropping the reference queues the slot for release (get_tensor's
+        # weakref.finalize) -- this is the fix for the corruption reported
+        # in review: release now tracks the tensor's own lifetime instead of
+        # a fixed "next dequeue" schedule.
+        del received
+        assert len(arena._pending_release) == 1
 
     dist.barrier()
     print(f"arena broadcast passed the test! Rank {rank}")
