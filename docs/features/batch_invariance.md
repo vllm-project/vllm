@@ -145,6 +145,11 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+4. On CUDA devices that have tuned batch-invariant matmul configs (Ada, Hopper,
+   Blackwell), runs the model without `torch.compile` using breakable CUDA graphs
+   (`VLLM_USE_BREAKABLE_CUDAGRAPH=1`), so the matmul tile configs are selected from
+   the runtime batch size. Set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to keep the
+   `torch.compile` path.
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.

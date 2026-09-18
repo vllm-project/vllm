@@ -617,6 +617,71 @@ def test_breakable_cudagraph_platform_default(
 
 
 @pytest.mark.parametrize(
+    (
+        "batch_invariant",
+        "is_cuda",
+        "has_table",
+        "enforce_eager",
+        "explicit_env",
+        "expected",
+    ),
+    [
+        ("1", True, True, False, None, True),
+        ("0", True, True, False, None, False),
+        ("1", False, True, False, None, False),
+        ("1", True, False, False, None, False),
+        ("1", True, True, True, None, False),
+        ("1", True, True, False, "0", False),
+    ],
+)
+def test_batch_invariant_defaults_to_breakable_cudagraph(
+    monkeypatch,
+    batch_invariant,
+    is_cuda,
+    has_table,
+    enforce_eager,
+    explicit_env,
+    expected,
+):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.model_executor.determinism import batch_invariant_configs
+    from vllm.platforms import current_platform
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    if explicit_env is not None:
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", explicit_env)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(
+        batch_invariant_configs, "has_tuned_matmul_configs", lambda: has_table
+    )
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architectures=["Qwen3ForCausalLM"], enforce_eager=enforce_eager
+        ),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+    config._uses_breakable_cudagraph_for_batch_invariance = lambda: (
+        VllmConfig._uses_breakable_cudagraph_for_batch_invariance(config)
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+        else:
+            assert config.compilation_config.mode is None
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
     ("model_type", "expected_architecture"),
     [
         ("deepseek_v32", "DeepseekV32MTPModel"),

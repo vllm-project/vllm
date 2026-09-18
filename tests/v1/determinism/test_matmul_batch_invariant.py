@@ -10,14 +10,33 @@ import pytest
 import torch
 from utils import skip_unsupported
 
+from vllm.model_executor.determinism import batch_invariant_configs
 from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [(DeviceCapability(9, 0), True), (DeviceCapability(8, 0), False)],
+)
+def test_has_tuned_matmul_configs(monkeypatch, capability, expected):
+    monkeypatch.setattr(
+        batch_invariant_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", False
+    )
+    monkeypatch.setattr(
+        batch_invariant_configs, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", None
+    )
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "get_device_capability", lambda: capability)
+
+    assert batch_invariant_configs.has_tuned_matmul_configs() is expected
 
 
 @skip_unsupported

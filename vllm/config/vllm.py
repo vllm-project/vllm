@@ -772,16 +772,48 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
+        """Batch-invariant mode picks its tuned matmul tile configs from the
+        runtime M. Under torch.compile that lookup is traced once with the
+        compile-time M and frozen (vllm-project/vllm#54243); without
+        torch.compile it runs at CUDA graph capture time with the real M.
+        Only worth it on CUDA devices that actually have a tuned table."""
+        if not envs.VLLM_BATCH_INVARIANT:
+            return False
+        model_config = self.model_config
+        if model_config is None or model_config.enforce_eager:
+            return False
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            return False
+        from vllm.model_executor.determinism.batch_invariant_configs import (
+            has_tuned_matmul_configs,
+        )
+
+        return has_tuned_matmul_configs()
+
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        if (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and self._uses_breakable_cudagraph_by_default()
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
-                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
-            )
+        if "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ:
+            if self._uses_breakable_cudagraph_by_default():
+                os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+                logger.info_once(
+                    "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                    "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+                )
+            elif (
+                envs.VLLM_BATCH_INVARIANT
+                and self._uses_breakable_cudagraph_for_batch_invariance()
+            ):
+                os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT=1: auto-enabling "
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH=1 so the tuned batch-invariant "
+                    "matmul configs are selected from the runtime batch size "
+                    "instead of being frozen at torch.compile time "
+                    "(see vllm-project/vllm#54243). "
+                    "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+                )
 
         from vllm.compilation.breakable_cudagraph import (
             is_breakable_cudagraph_enabled,
