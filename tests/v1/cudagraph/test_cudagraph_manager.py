@@ -399,3 +399,53 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+@pytest.mark.parametrize("all_supported", [False, True])
+def test_dflash_captures_refresh_only_when_every_group_supports_it(
+    monkeypatch, all_supported
+):
+    from vllm.v1.worker.gpu.cudagraph_utils import AttentionState, CudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.dflash import cudagraph
+
+    calls = []
+    groups = []
+    metadata = {}
+    for i in range(2):
+        name = f"layer{i}"
+        metadata[name] = object()
+        update = lambda i=i: calls.append(i)
+        builder = SimpleNamespace(
+            build_dflash_metadata_refresh=lambda md, q, i=i, update=update: (
+                update if i == 0 or all_supported else None
+            )
+        )
+        groups.append(
+            [
+                SimpleNamespace(
+                    layer_names=[name], get_metadata_builder=lambda _, b=builder: b
+                )
+            ]
+        )
+    monkeypatch.setattr(
+        cudagraph,
+        "_prepare_dflash_inputs_to_capture",
+        lambda *a, **kw: AttentionState(metadata, {}),
+    )
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL, num_tokens=10, num_reqs=2
+    )
+
+    def capture(self, factory, progress_bar_desc):
+        factory(desc, False)(CUDAGraphMode.NONE)
+
+    monkeypatch.setattr(CudaGraphManager, "capture", capture)
+    fresh = cudagraph.DFlashCudaGraphManager.__new__(cudagraph.DFlashCudaGraphManager)
+    assert not fresh.has_metadata_refresh(desc), "must be safe before capture()"
+    manager = fresh
+    manager.dp_size = 1
+    manager.capture(
+        lambda *a: calls.append("forward"), None, None, groups, None, 128, False
+    )
+    assert calls == ([0, 1, "forward"] if all_supported else ["forward"])
+    assert manager.has_metadata_refresh(desc) == all_supported
