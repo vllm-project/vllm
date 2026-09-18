@@ -63,6 +63,21 @@ class GateLinear(ReplicatedLinear):
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
 
+        # On gfx950 the fp32 router GEMM kernel requires fp32 weights, but
+        # callers pass the router dtype as out_dtype only, leaving the weight
+        # in the model dtype (bf16) — so the kernel stays unreachable
+        # (#55351). Auto-store fp32 weights when the caller wants fp32 routing
+        # output, the gfx950 kernel covers the shape, and no explicit weight
+        # dtype was pinned.
+        if (
+            is_gfx950
+            and is_rocm_fp32_shape
+            and not bias
+            and params_dtype is None
+            and out_dtype == torch.float32
+        ):
+            force_fp32_compute = True
+
         # If fp32 compute is required and no specialized kernel is available,
         # store weights in fp32 so the fallback linear path computes in fp32.
         if force_fp32_compute and not can_use_specialized_kernels:
