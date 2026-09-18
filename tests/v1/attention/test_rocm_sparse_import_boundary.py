@@ -1,23 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""The ROCm sparse-MLA backend must not import CUDA-only sparse backends.
-
-The ``flash*_mla_sparse`` backends bind flashinfer and flash-attn kernels
-directly and are CUDA-only; a ROCm backend that reached into one would import
-successfully today and break on the first CUDA-gated addition. The
-platform-neutral modules -- ``mla_attention.py``, ``sparse_utils.py``,
-``index_group.py``, ``v1.hisparse.*`` -- are the supported dependencies.
-
-``sparse_mla_attention.py`` is deliberately *not* forbidden: both non-CUDA
-sparse backends (this one and ``xpu_mla_sparse.py``) take
-``SharedTopkIndicesBuffer`` from it, so it is shared surface in practice.
-
-This test reads source text, so it needs neither a GPU nor AITER and therefore
-runs in CUDA CI too -- which is exactly where someone would unknowingly add the
-bad import.
-"""
-
 import ast
 from pathlib import Path
 
