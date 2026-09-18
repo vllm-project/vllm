@@ -866,9 +866,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
     async def call_release():
         if use_async:
-            await AsyncLLM.release_kv_cache_memory(engine)
+            await AsyncLLM.release_kv_cache_memory(engine)  # type: ignore[arg-type]
         else:
-            LLMEngine.release_kv_cache_memory(engine)
+            LLMEngine.release_kv_cache_memory(engine)  # type: ignore[arg-type]
 
     if release_error:
         with pytest.raises(RuntimeError, match=release_error):

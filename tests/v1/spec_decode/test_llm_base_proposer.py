@@ -12,7 +12,6 @@ processes, so anything derived from iteration order must not leak into
 """
 
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
@@ -66,7 +65,7 @@ def _make_proposer(
 def _make_kv_cache_config(layer_names: set[str]) -> KVCacheConfig:
     spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE)
     group = SimpleNamespace(layer_names=list(layer_names), kv_cache_spec=spec)
-    return cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=[group]))
+    return SimpleNamespace(kv_cache_groups=[group])  # type: ignore[return-value]
 
 
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):

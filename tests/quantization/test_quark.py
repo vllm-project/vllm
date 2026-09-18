@@ -11,7 +11,6 @@ import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 import huggingface_hub
@@ -2314,7 +2313,7 @@ class TestQuarkInt4Format:
                     None,
                     quant_config.quant_config["global_quant_config"]["weight"],
                     quant_config.pack_method,
-                    cast(FusedMoEConfig, moe_config),
+                    moe_config,  # type: ignore[arg-type]
                 )
 
             layer = _FakeLayer(moe_config)
@@ -2326,7 +2325,8 @@ class TestQuarkInt4Format:
                 requires_grad=False,
             )
             loader = method.get_weight_loader(
-                cast(RoutedExperts, layer), weight_loader=None
+                layer,  # type: ignore[arg-type]
+                weight_loader=None,
             )
             loader(
                 param,

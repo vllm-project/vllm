@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Protocol, cast
+from typing import Protocol, runtime_checkable
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
 
 
+@runtime_checkable
 class _TokenizingTokenizer(Protocol):
     def tokenize(self, text: str) -> list[str]: ...
-
-
-def as_tokenizer(tokenizer: object) -> TokenizerLike:
-    return cast(TokenizerLike, tokenizer)
 
 
 class StreamingReasoningReconstructor:
@@ -113,7 +109,8 @@ def run_reasoning_extraction_streaming(
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
     previous_tokens: list[int] = []
-    tokenizer = cast(_TokenizingTokenizer, reasoning_parser.model_tokenizer)
+    tokenizer = reasoning_parser.model_tokenizer
+    assert isinstance(tokenizer, _TokenizingTokenizer)
     for delta in model_deltas:
         token_delta = [
             reasoning_parser.vocab[token]

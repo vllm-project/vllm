@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -82,7 +81,8 @@ def test_extract_reasoning_tool_section_ends_reasoning(kimi_k2_tokenizer):
 def test_streaming_reasoning_then_content(kimi_k2_tokenizer):
     """Token-by-token streaming: reasoning tokens then content after </think>."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    parser_engine = cast(KimiK2Parser, parser._parser_engine)
+    parser_engine = parser._parser_engine
+    assert isinstance(parser_engine, KimiK2Parser)
 
     think_id = parser_engine._start_token_id
     end_think_id = parser_engine._end_token_id
@@ -143,7 +143,8 @@ def test_streaming_reasoning_then_content(kimi_k2_tokenizer):
 def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     """<|tool_calls_section_begin|> in delta ends reasoning during streaming."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    parser_engine = cast(KimiK2Parser, parser._parser_engine)
+    parser_engine = parser._parser_engine
+    assert isinstance(parser_engine, KimiK2Parser)
 
     think_id = parser_engine._start_token_id
     tool_begin_id = parser_engine._tool_section_start_token_id

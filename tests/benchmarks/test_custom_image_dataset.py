@@ -4,7 +4,7 @@ import json
 from argparse import Namespace
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pybase64 as base64
 import pytest
@@ -17,7 +17,6 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     _get_chat_content,
     _get_chat_messages,
 )
-from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -94,7 +93,8 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
     )
 
     samples = get_samples(
-        _args_for_custom_image(jsonl), cast(TokenizerLike, _Tokenizer())
+        _args_for_custom_image(jsonl),
+        _Tokenizer(),  # type: ignore[arg-type]
     )
 
     assert len(samples) == 2
@@ -130,7 +130,7 @@ def test_custom_image_dataset_uses_all_image_files(tmp_path: Path) -> None:
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=cast(TokenizerLike, _Tokenizer()),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
     )
@@ -175,7 +175,7 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=cast(TokenizerLike, _Tokenizer()),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
     )
@@ -231,7 +231,7 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=cast(TokenizerLike, _Tokenizer()),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         enable_multimodal_chat=True,
@@ -297,7 +297,7 @@ def test_custom_image_dataset_encodes_image_media_when_requested(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=cast(TokenizerLike, _Tokenizer()),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         ensure_client_side_data=True,
@@ -343,7 +343,7 @@ def test_custom_image_dataset_encodes_interleaved_image_media(
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     samples = dataset.sample(
-        tokenizer=cast(TokenizerLike, _Tokenizer()),
+        tokenizer=_Tokenizer(),  # type: ignore[arg-type]
         num_requests=1,
         output_len=32,
         ensure_client_side_data=True,
@@ -375,7 +375,7 @@ def test_custom_image_dataset_rejects_invalid_image_media(
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     with pytest.raises(ValueError, match="Invalid image URL"):
         dataset.sample(
-            tokenizer=cast(TokenizerLike, _Tokenizer()),
+            tokenizer=_Tokenizer(),  # type: ignore[arg-type]
             num_requests=1,
             output_len=32,
             ensure_client_side_data=True,
@@ -392,7 +392,7 @@ def test_custom_image_dataset_rejects_invalid_content_part(
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
     with pytest.raises(ValueError, match="type 'text', 'image', or 'image_url'"):
         dataset.sample(
-            tokenizer=cast(TokenizerLike, _Tokenizer()),
+            tokenizer=_Tokenizer(),  # type: ignore[arg-type]
             num_requests=1,
             output_len=32,
         )
