@@ -610,14 +610,31 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+@pytest.mark.parametrize(
+    ("query_lengths", "prefix_lengths"),
+    [
+        pytest.param((4, 3), (0, 1024), id="short"),
+        pytest.param((0, 65, 129), (128, 127, 0), id="ragged-page-boundaries"),
+        pytest.param((17, 3), (131071, 1024), id="resumed-128k"),
+        pytest.param((3,), (1048573,), id="resumed-1m"),
+        pytest.param((2048,), (0,), id="true-prefill"),
+        pytest.param((1536,), (8193,), id="24-query-tiles"),
+        pytest.param((1537,), (8193,), id="25-query-tiles"),
+    ],
+)
+def test_prefill_index_topk_correctness(
+    query_lengths: tuple[int, ...],
+    prefix_lengths: tuple[int, ...],
+    num_idx_heads: int,
+):
+    """Check scores and selection across K splits and TP-local head counts."""
     topk = 6
     init_blocks = 0
     local_blocks = 1
-    num_idx_heads = 2
-    head_dim = 16
-    q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    head_dim = 128
+    q_lens = torch.tensor(query_lengths, device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor(prefix_lengths, device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
@@ -629,12 +646,27 @@ def test_prefill_index_topk_correctness():
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         batch, max_blocks
     )
-    idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device="cuda")
-    index_kv_cache = torch.empty(num_pages, BLOCK_SIZE, head_dim, device="cuda")
-    for req_id in range(batch):
-        for block_id in range(max_blocks):
-            page = block_table[req_id, block_id]
-            index_kv_cache[page].fill_(block_id + 1)
+    idx_q = torch.zeros(
+        q_lens.sum().item(),
+        num_idx_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    head_scale = torch.arange(1, num_idx_heads + 1, device="cuda")
+    idx_q[:, :, 0] = 128 * head_scale
+    idx_q[:, :, 1:3] = head_scale[:, None]
+    index_kv_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    # Encode distinct block scores exactly in BF16, including at 1M context.
+    blocks = torch.arange(max_blocks, device="cuda").repeat(batch)
+    pages = block_table.flatten()
+    index_kv_cache[pages, :, 0] = (blocks // 128)[:, None].to(torch.bfloat16)
+    index_kv_cache[pages, :, 1] = (blocks % 128 + 1)[:, None].to(torch.bfloat16)
+    index_kv_cache[pages, :, 2] = (
+        torch.arange(BLOCK_SIZE, device="cuda") / BLOCK_SIZE
+    ).to(torch.bfloat16)
 
     score = minimax_m3_index_score(
         idx_q,
@@ -647,6 +679,20 @@ def test_prefill_index_topk_correctness():
         max_seq_len=max_seq_len,
         num_kv_heads=num_idx_heads,
     )
+    for req_id, (q_len, prefix_len) in enumerate(zip(query_lengths, prefix_lengths)):
+        q_pos = prefix_len + torch.arange(q_len, device="cuda")
+        block_ids = torch.arange(max_blocks, device="cuda")
+        visible = block_ids[None, :] <= q_pos[:, None] // BLOCK_SIZE
+        last_pos = (q_pos[:, None] - block_ids[None, :] * BLOCK_SIZE).clamp_max(
+            BLOCK_SIZE - 1
+        )
+        expected_scores = (block_ids + 1 + last_pos / BLOCK_SIZE)[None, :, :]
+        expected_scores = expected_scores * head_scale[:, None, None]
+        req_scores = score[:, cu_seqlens[req_id] : cu_seqlens[req_id + 1], :max_blocks]
+        mask = visible.expand(num_idx_heads, -1, -1)
+        torch.testing.assert_close(
+            req_scores[mask], expected_scores[mask], rtol=0, atol=0
+        )
     actual = minimax_m3_index_topk(
         score,
         cu_seqlens,
@@ -951,17 +997,23 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     ],
 )
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
+@pytest.mark.parametrize("longest_seq_len", [1025, 8193])
 def test_decode_index_topk_correctness(
     decode_query_len: int,
     max_decode_query_len: int,
     num_padded_reqs: int,
+    longest_seq_len: int,
 ):
+    """Production BF16 inputs preserve strict oracle ranks without TF32 rounding."""
+    set_random_seed(149)
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
-    active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
+    active_seq_lens = torch.tensor(
+        (7, 129, longest_seq_len), device="cuda", dtype=torch.int32
+    )
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
     prefix_lens = active_seq_lens - decode_query_len
     active_batch = active_seq_lens.numel()
@@ -983,8 +1035,10 @@ def test_decode_index_topk_correctness(
     block_table[:active_batch] = active_block_table
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        torch.bfloat16
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
 
     actual = minimax_m3_index_decode(
         idx_q,
@@ -1013,6 +1067,149 @@ def test_decode_index_topk_correctness(
         local_blocks,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
+
+
+def _decode_topk_boundary_inputs(
+    decode_query_len: int,
+    *,
+    num_heads: int = 2,
+    max_blocks: int = 17,
+    tied: bool = False,
+    score_sign: int = 1,
+):
+    topk = 6
+    total_q = 3 * decode_query_len
+    seq_lens = torch.tensor(
+        (max_blocks * BLOCK_SIZE - 1, 129, 0), device="cuda", dtype=torch.int32
+    )
+    idx_q = torch.zeros(total_q, num_heads, 16, device="cuda")
+    idx_q[..., 0] = 1
+    scores = torch.arange(max_blocks, device="cuda", dtype=torch.float32)
+    if tied:
+        scores = scores // 5
+    cache = torch.zeros(3, max_blocks, BLOCK_SIZE, 16, device="cuda")
+    cache[..., 0] = score_sign * scores[None, :, None]
+    cache[:, -3, :, 0] = float("nan")
+    output_storage = torch.full(
+        (total_q + 2, num_heads, 2 * topk), -2, device="cuda", dtype=torch.int32
+    )
+    score_storage = torch.full(
+        (max_blocks + 7, total_q, num_heads), float("nan"), device="cuda"
+    )
+    return dict(
+        idx_q=idx_q,
+        index_kv_cache=cache.reshape(-1, BLOCK_SIZE, 16),
+        block_table=torch.arange(
+            3 * max_blocks, device="cuda", dtype=torch.int32
+        ).reshape(3, max_blocks),
+        seq_lens=seq_lens,
+        max_seq_len=max_blocks * BLOCK_SIZE - 1,
+        topk=topk,
+        init_blocks=2,
+        local_blocks=2,
+        num_kv_heads=num_heads,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=4,
+        out=output_storage[..., ::2].transpose(0, 1),
+        score_out=score_storage.permute(2, 1, 0),
+    ), output_storage
+
+
+@pytest.mark.parametrize("decode_query_len", [1, 4])
+@pytest.mark.parametrize("num_heads", [1, 2, 4])
+@pytest.mark.parametrize("max_blocks", [17, 33])
+def test_decode_index_topk_nan_forced_blocks_and_strides(
+    decode_query_len: int, num_heads: int, max_blocks: int, monkeypatch
+):
+    """Preserve strided token-major storage with one or many selector producers."""
+    from vllm.models.minimax_m3.common.ops import index_topk
+
+    score = index_topk.minimax_m3_index_decode_score
+    counters = []
+
+    def score_with_poisoned_counter(*args, **kwargs):
+        counter = kwargs["_topk_counter"]
+        counter.fill_(123)
+        counters.append(counter)
+        return score(*args, **kwargs)
+
+    monkeypatch.setattr(
+        index_topk, "minimax_m3_index_decode_score", score_with_poisoned_counter
+    )
+    kwargs, output_storage = _decode_topk_boundary_inputs(
+        decode_query_len, num_heads=num_heads, max_blocks=max_blocks
+    )
+    actual = minimax_m3_index_decode(**kwargs)
+    expected = torch.full_like(actual, -1)
+    expected[:, :decode_query_len] = torch.tensor(
+        (0, 1, max_blocks - 5, max_blocks - 4, max_blocks - 2, max_blocks - 1),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    for offset in range(decode_query_len):
+        num_blocks = (129 - decode_query_len + offset + BLOCK_SIZE) // BLOCK_SIZE
+        expected[:, decode_query_len + offset, :num_blocks] = torch.arange(
+            num_blocks, device="cuda", dtype=torch.int32
+        )
+    assert torch.equal(actual.sort(dim=-1).values, expected.sort(dim=-1).values)
+    assert torch.all(output_storage[..., 1::2] == -2)
+    assert torch.all(output_storage[-2:, :, ::2] == -2)
+    assert torch.isnan(kwargs["score_out"][..., max_blocks:]).all()
+    assert len(counters) == 1
+    assert torch.count_nonzero(counters[0]) == 0
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "max_blocks,tied_ids", [(17, (10, 11, 12, 13)), (33, (25, 26, 27, 28, 29))]
+)
+def test_decode_index_topk_concurrent_calls_and_replay(
+    use_graph: bool, max_blocks: int, tied_ids: tuple[int, ...]
+):
+    """Calls preserve valid tied-cutoff selections and ordering across streams."""
+    inputs = [
+        _decode_topk_boundary_inputs(
+            4, max_blocks=max_blocks, tied=True, score_sign=sign
+        )[0]
+        for sign in (1, -1)
+    ]
+    expected = [minimax_m3_index_decode(**kwargs).clone() for kwargs in inputs]
+    for actual, allowed_tied_ids in zip(expected, (tied_ids, (2, 3, 4))):
+        full = actual[:, :4]
+        allowed = torch.tensor(
+            (0, 1, *allowed_tied_ids, max_blocks - 2, max_blocks - 1),
+            dtype=full.dtype,
+            device=full.device,
+        )
+        assert torch.isin(full, allowed).all()
+        assert (full.sort(dim=-1).values.diff(dim=-1) > 0).all()
+        for forced in (0, 1, max_blocks - 2, max_blocks - 1):
+            assert (full == forced).any(dim=-1).all()
+    torch.accelerator.synchronize()
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    graphs = []
+    outputs = []
+    if use_graph:
+        for stream, kwargs in zip(streams, inputs):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                output = minimax_m3_index_decode(**kwargs)
+            graphs.append(graph)
+            outputs.append(output)
+
+    observed = []
+    for _ in range(16):
+        for i, (stream, kwargs) in enumerate(zip(streams, inputs)):
+            with torch.cuda.stream(stream):
+                if use_graph:
+                    graphs[i].replay()
+                    output = outputs[i]
+                else:
+                    output = minimax_m3_index_decode(**kwargs)
+                observed.append((i, output.clone()))
+    torch.accelerator.synchronize()
+    for i, actual in observed:
+        assert torch.equal(actual, expected[i])
 
 
 @pytest.mark.parametrize(
@@ -1370,19 +1567,20 @@ def test_amd_decode_index_topk_end_to_end(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+    not (current_platform.is_cuda() and current_platform.supports_fp8()),
+    reason="FP8 E4M3 Triton indexer requires CUDA with FP8 support.",
 )
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
-def test_decode_index_topk_fp8(num_idx_heads: int):
-    """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values."""
+@pytest.mark.parametrize("query_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("stage", ["decode", "prefill"])
+def test_index_topk_fp8(num_idx_heads: int, query_dtype, query_len: int, stage: str):
+    """FP8 Q/K and mixed Q/K must select the reference's causal blocks."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
-    decode_query_len = 1
     active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
-    q_lens = torch.full_like(active_seq_lens, decode_query_len)
-    prefix_lens = active_seq_lens - decode_query_len
+    q_lens = torch.full_like(active_seq_lens, query_len)
+    prefix_lens = active_seq_lens - query_len
     batch = active_seq_lens.numel()
     max_seq_len = int(active_seq_lens.max())
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -1390,29 +1588,46 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         batch, max_blocks
     )
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
-    ).to(torch.float8_e4m3fn)
+    idx_q = torch.randn(batch * query_len, num_idx_heads, head_dim, device="cuda").to(
+        query_dtype
+    )
     index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
         torch.float8_e4m3fn
     )
 
-    actual = minimax_m3_index_decode(
-        idx_q,
-        index_kv_cache,
-        block_table,
-        active_seq_lens,
-        max_seq_len=max_seq_len,
-        topk=topk,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-        num_kv_heads=num_idx_heads,
-        decode_query_len=decode_query_len,
-        max_decode_query_len=decode_query_len,
-    )
-    # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
-    # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the
-    # same e4m3 values).
+    if stage == "decode":
+        actual = minimax_m3_index_decode(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            active_seq_lens,
+            max_seq_len=max_seq_len,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            num_kv_heads=num_idx_heads,
+            decode_query_len=query_len,
+            max_decode_query_len=query_len,
+        )
+    else:
+        cu_seqlens_q = torch.arange(
+            0, (batch + 1) * query_len, query_len, device="cuda", dtype=torch.int32
+        )
+        score = minimax_m3_index_score(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            cu_seqlens_q,
+            active_seq_lens,
+            prefix_lens,
+            query_len,
+            max_seq_len,
+            num_idx_heads,
+        )
+        actual = minimax_m3_index_topk(
+            score, cu_seqlens_q, prefix_lens, query_len, topk, init_blocks, local_blocks
+        )
+    # Compare against the stored values, separately from quantization error.
     expected = _reference_index_topk(
         idx_q.float(),
         index_kv_cache.float(),
@@ -1425,6 +1640,81 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
         local_blocks,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.supports_fp8()),
+    reason="FP8 E4M3 Triton indexer requires CUDA with FP8 support.",
+)
+@pytest.mark.parametrize("stage", ["decode", "prefill"])
+@torch.inference_mode()
+def test_index_topk_fp8_quantization_preserves_bf16_selection(stage: str):
+    """Quantization preserves prominent blocks and separated BF16 selections."""
+    torch.manual_seed(3)
+    topk, num_pages, num_idx_heads = 16, 100, 1
+    seq_len = 96 * BLOCK_SIZE + 37
+    planted_blocks = {7, 40, 88}
+    keys = torch.randn(
+        num_pages * BLOCK_SIZE, HEAD_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+    keys = keys * keys.float().pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt().to(
+        torch.bfloat16
+    )
+    query = torch.randn(1, num_idx_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    for block in planted_blocks:
+        keys[block * BLOCK_SIZE + 5] = query[0, 0] * 3
+    bf16_scores = keys.double() @ query[0, 0].double()
+    bf16_scores[seq_len:] = -float("inf")
+    bf16_blocks = bf16_scores.view(num_pages, BLOCK_SIZE).amax(dim=-1)
+    discarded_blocks = torch.ones(num_pages, dtype=torch.bool, device="cuda")
+    discarded_blocks[bf16_blocks.topk(topk).indices] = False
+    flip_keys = discarded_blocks.repeat_interleave(BLOCK_SIZE) & (bf16_scores > 0)
+    keys[flip_keys] = -keys[flip_keys]
+    block_table = torch.arange(num_pages, dtype=torch.int32, device="cuda").unsqueeze(0)
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+
+    def select(cache: torch.Tensor) -> set[int]:
+        index_query = query.to(cache.dtype)
+        index_cache = cache.view(num_pages, BLOCK_SIZE, HEAD_DIM).contiguous()
+        if stage == "decode":
+            indices = minimax_m3_index_decode(
+                index_query,
+                index_cache,
+                block_table,
+                seq_lens,
+                max_seq_len=seq_len,
+                topk=topk,
+                init_blocks=0,
+                local_blocks=0,
+                num_kv_heads=num_idx_heads,
+                decode_query_len=1,
+                max_decode_query_len=1,
+            )
+        else:
+            cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+            prefix_lens = torch.tensor([seq_len - 1], dtype=torch.int32, device="cuda")
+            score = minimax_m3_index_score(
+                index_query,
+                index_cache,
+                block_table,
+                cu_seqlens_q,
+                seq_lens,
+                prefix_lens,
+                1,
+                seq_len,
+                num_idx_heads,
+            )
+            indices = minimax_m3_index_topk(
+                score, cu_seqlens_q, prefix_lens, 1, topk, 0, 0
+            )
+        return {int(block) for block in indices[0, 0].tolist() if block >= 0}
+
+    selected_bf16 = select(keys)
+    selected_fp8 = select(keys.to(torch.float8_e4m3fn))
+    assert len(selected_bf16) == len(selected_fp8) == topk
+    assert planted_blocks <= selected_bf16
+    assert planted_blocks <= selected_fp8
+    assert len(selected_bf16 & selected_fp8) >= topk - 2
 
 
 @pytest.mark.skipif(
