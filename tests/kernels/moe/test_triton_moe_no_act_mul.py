@@ -161,19 +161,6 @@ def test_triton_experts_no_mul_activation(
         activation=activation,
     )
 
-    # Verify workspace shapes are correct for no_mul activation
-    # workspace1 should handle activation_out_dim = N (not N//2)
-    assert ws1_shape == (m, topk, max(n, k)), (
-        f"workspace1 shape mismatch: expected {(m, topk, max(n, k))}, got {ws1_shape}"
-    )
-    # workspace2 should handle max(N, K) for intermediate_cache1/cache3
-    assert ws2_shape == (m, topk, max(n, k)), (
-        f"workspace2 shape mismatch: expected {(m, topk, max(n, k))}, got {ws2_shape}"
-    )
-    assert out_shape == (m, k), (
-        f"output shape mismatch: expected {(m, k)}, got {out_shape}"
-    )
-
     workspace1 = torch.empty(
         ws1_shape[0] * ws1_shape[1] * ws1_shape[2],
         dtype=hidden_states.dtype,
@@ -185,7 +172,9 @@ def test_triton_experts_no_mul_activation(
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
-    output = torch.zeros(m, k, dtype=hidden_states.dtype, device=hidden_states.device)
+    output = torch.zeros(
+        out_shape, dtype=hidden_states.dtype, device=hidden_states.device
+    )
 
     experts.apply(
         output=output,
@@ -217,9 +206,6 @@ def test_triton_experts_no_mul_activation(
 
 @torch.inference_mode()
 def test_workspace_shapes_no_mul_vs_gated():
-    """Test that workspace shapes differ correctly between gated and non-gated."""
-    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-
     M, N, K, topk = 64, 256, 128, 2
 
     experts = TritonExperts(
@@ -227,36 +213,22 @@ def test_workspace_shapes_no_mul_vs_gated():
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 
-    ws1_no_mul, _, out_no_mul = experts.workspace_shapes(
+    ws1_no_mul, ws2_no_mul, out_no_mul = experts.workspace_shapes(
         M, N, K, topk, 8, 8, None, MoEActivation.SILU_NO_MUL
     )
 
-    ws1_gated, _, out_gated = experts.workspace_shapes(
+    ws1_gated, ws2_gated, out_gated = experts.workspace_shapes(
         M, N, K, topk, 8, 8, None, MoEActivation.SILU
     )
 
-    # For no_mul: activation_out_dim = N
-    # For gated: activation_out_dim = N // 2
-    # workspace1 should use max(activation_out_dim, K)
-    activation_out_dim_no_mul = N
-    activation_out_dim_gated = N // 2
-
-    assert ws1_no_mul[2] == max(activation_out_dim_no_mul, K), (
-        f"no_mul workspace1 last dim should be max({activation_out_dim_no_mul}, {K})"
-    )
-    assert ws1_gated[2] == max(activation_out_dim_gated, K), (
-        f"gated workspace1 last dim should be max({activation_out_dim_gated}, {K})"
-    )
-
-    # Output shapes should be the same
+    assert ws1_no_mul == (M, topk, max(N, K))
+    assert ws1_gated == (M, topk, max(N // 2, K))
+    assert ws2_no_mul == ws2_gated == (M, topk, max(N, K))
     assert out_no_mul == out_gated == (M, K)
 
 
 @torch.inference_mode()
 def test_adjust_n_for_activation():
-    """Test the adjust_N_for_activation method."""
-    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -264,11 +236,9 @@ def test_adjust_n_for_activation():
 
     N = 256
 
-    # Gated activations should return N // 2
     assert experts.adjust_N_for_activation(N, MoEActivation.SILU) == N // 2
     assert experts.adjust_N_for_activation(N, MoEActivation.GELU) == N // 2
 
-    # Non-gated activations should return N
     assert experts.adjust_N_for_activation(N, MoEActivation.SILU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.GELU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.RELU2_NO_MUL) == N
