@@ -6,7 +6,7 @@ from typing import Any
 import msgspec
 
 
-class KvHintAction(msgspec.Struct, frozen=True):
+class KvHintAction(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """A versioned orchestrator-provided KV hint action."""
 
     action_id: str
@@ -17,7 +17,7 @@ class KvHintAction(msgspec.Struct, frozen=True):
     payload: dict[str, Any]
 
 
-class KvHintsEnvelope(msgspec.Struct, frozen=True):
+class KvHintsEnvelope(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """Orchestrator-provided KV hints optionally attached to one inference request.
     A KV hint envelope is a collection of KV hint action(s)."""
 
