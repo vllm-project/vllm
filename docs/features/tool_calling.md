@@ -109,14 +109,18 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 
 ## Constrained Decoding Behavior
 
-Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode, the per-tool `strict` field, and the server-side `--tool-strict-level`:
+Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
 
-| `tool_choice` value | Schema-constrained decoding | Behavior |
+| `tool_choice` value | Call obligation | Structural-tag activation |
 | --- | --- | --- |
-| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. With a structural-tag parser, the call is always constrained but the argument schema is pinned only for tools with `strict: true` (or `--tool-strict-level parameter`). |
-| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | Only when `strict: true` is set on at least one tool, or the server raises the floor via `--tool-strict-level` | Structural-tag parsers constrain the call envelope, and pin the argument schema of each tool that opts in with `strict: true`. Without either, the model generates freely and tool calls are extracted from raw text. |
-| `"none"` | N/A | No tool calls are produced. |
+| Named function | Call the selected function | Always |
+| `"required"` | Produce at least one tool call | Always |
+| `"auto"` | Tool calls are optional | When at least one tool sets `strict: true`, or `--tool-strict-level` is `function` or `parameter` |
+| `"none"` | Tool calling is disabled | Disabled |
+
+When a structural tag applies, each tool's declared parameter schema is enforced only when that tool sets `strict: true` or the server uses `--tool-strict-level parameter`. Tools with omitted or false `strict` receive broad argument-syntax constraints at levels `off` and `function`, including for required and named calls.
+
+For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
 ### Strict Mode
 
@@ -178,8 +182,8 @@ All Nous Research Hermes-series models newer than Hermes 2 Pro should be support
 * `NousResearch/Hermes-2-Theta-*`
 * `NousResearch/Hermes-3-*`
 
-_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
-step in their creation_.
+*Note that the Hermes 2 **Theta** models are known to have degraded tool call quality and capabilities due to the merge
+step in their creation*.
 
 Flags: `--tool-call-parser hermes`
 
