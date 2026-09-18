@@ -309,7 +309,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         """
         image_processor = getattr(self.get_hf_processor(), "image_processor", None)
         sizes = self._get_size_candidates(image_processor, (1,))
-        # arbitrary very large size
+        # Arbitrary large fallback, last so a processor candidate wins any tie
         sizes.append(ImageSize(width=10_000, height=10_000))
 
         num_tokens = [self._get_num_image_tokens(size) for size in sizes]
@@ -405,6 +405,9 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         `video_needs_metadata` (see `get_data_parser`) makes the parser require
         a metadata dict on every item, and `do_sample_frames=False`
         plus `frames_indices=range(T)` has the frames consumed verbatim.
+
+        A parser that does not require it discards it, so only the processors
+        that ask for metadata pay for building it.
         """
         videos = super()._get_dummy_videos(
             width=width,
@@ -413,6 +416,8 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             num_videos=num_videos,
             overrides=overrides,
         )
+        if not self.info._video_needs_metadata:
+            return list(videos)
         videos = [v.copy() for v in videos]
 
         video_processor = self.info.get_hf_processor().video_processor
