@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the per_token_group_fp8_quant helion kernel
+"""Tests for the per_token_group_fp8_quant helion kernel.
 
 Run `pytest tests/kernels/helion/test_per_token_group_fp8_quant.py`.
 """

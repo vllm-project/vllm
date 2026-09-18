@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     """Share when the draft has no own copy, or its copy matches the target."""
-
     if not getattr(eagle, flag, False) or draft is None:
         return True
     if target is None:
