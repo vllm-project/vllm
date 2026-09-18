@@ -43,6 +43,7 @@ THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
+FENCE = "```"
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
@@ -109,6 +110,7 @@ def qwen3_config(
             # Tool call terminals
             "TOOL_START": tool_start,
             "TOOL_END": tool_end,
+            "FENCE": FENCE,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
             "PARAM_START": PARAM_START,
@@ -136,6 +138,15 @@ def qwen3_config(
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+            ),
+            # A fenced code block is content, its markup must never promote.
+            (ParserState.CONTENT, "FENCE"): Transition(
+                ParserState.FENCED,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.FENCED, "FENCE"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
             ),
             # Tool call directly from reasoning (implicit end)
             (ParserState.REASONING, "TOOL_START"): Transition(
