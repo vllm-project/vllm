@@ -173,8 +173,8 @@ from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
+    compact_conditional_output,
     maybe_build_ubatch_runner,
-    restore_staged_inputs,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
@@ -1896,13 +1896,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 **connector_kwargs, attn_metadata=attn_metadata
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
-            if ubatch_state is not None and ubatch_state.staged_rows is not None:
+            if ubatch_state is not None and ubatch_state.real_split is not None:
                 assert isinstance(model_output, torch.Tensor)
-                staged_rows = ubatch_state.staged_rows
-                model_output[: staged_rows.numel()] = model_output[staged_rows]
-                assert block_tables is not None and slot_mappings is not None
-                restore_staged_inputs(
-                    input_batch, block_tables, slot_mappings, staged_rows
+                model_output = compact_conditional_output(
+                    model_output,
+                    ubatch_state.real_split,
+                    batch_desc.num_tokens // batch_desc.num_ubatches,
                 )
         else:
             # For piecewise and eager mode, just call model().
