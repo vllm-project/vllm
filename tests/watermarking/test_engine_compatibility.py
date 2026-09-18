@@ -153,9 +153,7 @@ def test_watermark_with_structured_output(
 
 
 def test_watermark_with_wide_grammar_is_deterministic(watermarked_llm: LLM):
-    # The choice/grammar cases above constrain the output to "A" or "B", which
-    # any sampler satisfies. A wider grammar leaves enough freedom that only
-    # watermarked sampling reproduces the same unseeded draw twice.
+    # A wider grammar makes deterministic watermarking observable.
     params = SamplingParams(
         temperature=0.8,
         max_tokens=8,
