@@ -6292,9 +6292,12 @@ class GPUModelRunner(
                     is_graph_capturing=is_graph_capturing,
                     slot_mappings=slot_mappings,
                 )
-            elif isinstance(self.drafter, SuffixProposerGPU) and (
-                get_pp_group().is_last_rank
+            elif (
+                self.speculative_config
+                and self.speculative_config.use_suffix_gpu()
+                and get_pp_group().is_last_rank
             ):
+                assert isinstance(self.drafter, SuffixProposerGPU)
                 use_cudagraphs = (
                     cudagraph_runtime_mode != CUDAGraphMode.NONE
                     and not self.speculative_config.enforce_eager
