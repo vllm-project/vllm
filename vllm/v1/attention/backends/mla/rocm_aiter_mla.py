@@ -309,16 +309,6 @@ def _ab_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
         return False
     if dcp_world_size <= 1 or cp_interleave != 1:
         return False
-    if _ab_dcp_verify_mode() == "gluon":
-        # Stage A on Gluon needs the flattened one-row-per-query-token view,
-        # which is not wired up yet. Refuse rather than quietly serving the
-        # mask0 shape, so an A/B measurement cannot compare a mode against
-        # itself.
-        logger.warning(
-            "VLLM_ROCM_AITER_DCP_AB_VERIFY=gluon is not implemented yet; "
-            "falling back to the single-range DCP verify paths."
-        )
-        return False
     return _gluon_mla_decode_supported() and _gluon_mla_decode_lse_supported()
 
 
@@ -497,6 +487,13 @@ class AiterMLAABVerifyMetadata:
     # Rows stage A hands the kernel. Equal to num_reqs when the verify block
     # stays whole, and num_reqs * qlen once it is flattened.
     num_stage_a_rows: int
+    # Flattened stage A only. One row per query token, holding the prefix page
+    # list its request owns; every row of a request repeats that list because
+    # they all read the same prefix. Shape [num_reqs * qlen, max_local_pages].
+    row_page_table: torch.Tensor | None = None
+    # Flattened stage A only. Per-row prefix length, the ``cache_seqlens`` the
+    # 2-D Gluon view takes in place of an indptr.
+    row_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -804,6 +801,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._graph_seq_lens: torch.Tensor | None = None
         self._graph_dcp_global_kv_indptr: torch.Tensor | None = None
         self._graph_ab_combine_seq_lens: torch.Tensor | None = None
+        self._graph_ab_row_page_table: torch.Tensor | None = None
+        self._graph_ab_row_lens: torch.Tensor | None = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
@@ -832,6 +831,25 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self._graph_ab_combine_seq_lens = torch.zeros(
                     max_num_reqs, dtype=torch.int32, device=device
                 )
+                if self._ab_dcp_verify_mode == "gluon":
+                    # The flattened variant needs a row per query token, and
+                    # graph capture needs that table at a fixed address and a
+                    # fixed width. A DCP rank's shard of the longest sequence
+                    # bounds it, the same bound the segmented path uses.
+                    ab_max_local_kv = (
+                        cdiv(
+                            vllm_config.model_config.max_model_len,
+                            self.dcp_world_size * self.cp_kv_cache_interleave_size,
+                        )
+                        * self.cp_kv_cache_interleave_size
+                    )
+                    ab_rows = max_num_reqs * self._mtp_decode_qlen
+                    self._graph_ab_row_page_table = torch.zeros(
+                        (ab_rows, ab_max_local_kv), dtype=torch.int32, device=device
+                    )
+                    self._graph_ab_row_lens = torch.zeros(
+                        ab_rows, dtype=torch.int32, device=device
+                    )
 
             if self._supports_segmented_dcp_verify and self._mtp_decode_qlen > 1:
                 # A DCP rank's shard of the longest sequence bounds every verify
@@ -1181,6 +1199,49 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             per_req_page_table.unsqueeze(1)
         )
 
+    def _build_ab_flat_stage_a(
+        self,
+        block_table_tensor: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        qlen: int,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Flatten stage A to one row per query token, SGLang's shape.
+
+        This is the comparison arm. Because the split already made the prefix
+        uniform across a request's rows, the page list is built once per
+        request and broadcast, and the row lengths are a repeat rather than a
+        per-row computation -- that is what the split bought. What it does not
+        buy back is the ``qlen``-fold re-read of a prefix the rows share, which
+        is the cost this arm exists to measure against the whole-block variant.
+        """
+        device = block_table_tensor.device
+        num_rows = num_reqs * qlen
+        table = self._graph_ab_row_page_table
+        if table is not None:
+            max_cols = table.shape[1]
+            row_page_table = table[:num_rows]
+            row_lens_buf = self._graph_ab_row_lens
+            assert row_lens_buf is not None
+            row_lens = row_lens_buf[:num_rows]
+        else:
+            max_cols = max(1, int(prefix_lens.max().item()))
+            row_page_table = torch.empty(
+                (num_rows, max_cols), dtype=torch.int32, device=device
+            )
+            row_lens = torch.empty(num_rows, dtype=torch.int32, device=device)
+
+        # Gluon reads the pool at token granularity, so expand each block-table
+        # entry into the kernel_block_size tokens it covers.
+        cols = torch.arange(max_cols, dtype=torch.int32, device=device)
+        block_slot = cols // self.kernel_block_size
+        per_req = block_table_tensor[:num_reqs, block_slot] * self.kernel_block_size + (
+            cols % self.kernel_block_size
+        )
+        row_page_table.view(num_reqs, qlen, max_cols).copy_(per_req.unsqueeze(1))
+        row_lens.view(num_reqs, qlen).copy_(prefix_lens.unsqueeze(1))
+        return row_page_table, row_lens
+
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
@@ -1215,6 +1276,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             and dcp_tot_seq_lens_device is not None
         )
         stage_a_causal = causal and not use_ab_verify
+        # The flattened arm carries its own 2-D row table and per-row lengths,
+        # so the flat per-token view and the asm schedule are both dead work.
+        use_ab_flat_stage_a = use_ab_verify and self._ab_dcp_verify_mode == "gluon"
 
         seq_lens_for_kernel = seq_lens_device
         if use_ab_verify:
@@ -1324,7 +1388,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # hand the metadata None, so a future reader cannot pick up whatever
         # the previous batch left behind.
         paged_kv_indices = None
-        if not use_segmented_dcp_verify:
+        if not use_segmented_dcp_verify and not use_ab_flat_stage_a:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.paged_kv_indices.fill_(-1)
 
@@ -1388,6 +1452,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not use_gluon_decode
             and not use_gluon_verify
             and not use_segmented_dcp_verify
+            and not use_ab_flat_stage_a
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
@@ -1481,11 +1546,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         ab_verify = None
         seq_lens_for_combine = seq_lens_for_kernel
         if use_ab_verify:
+            ab_row_page_table = None
+            ab_row_lens = None
+            if use_ab_flat_stage_a:
+                ab_row_page_table, ab_row_lens = self._build_ab_flat_stage_a(
+                    block_table_tensor,
+                    seq_lens_for_kernel,
+                    int(max_qo_len),
+                    num_kernel_reqs,
+                )
             ab_verify = AiterMLAABVerifyMetadata(
                 qlen=int(max_qo_len),
                 stage_a_mode=self._ab_dcp_verify_mode,
                 prefix_lens=seq_lens_for_kernel,
-                num_stage_a_rows=num_kernel_reqs,
+                num_stage_a_rows=(
+                    num_kernel_reqs * int(max_qo_len)
+                    if use_ab_flat_stage_a
+                    else num_kernel_reqs
+                ),
+                row_page_table=ab_row_page_table,
+                row_lens=ab_row_lens,
             )
             # Only rank 0 attends the window, so only its partial grows.
             if self.dcp_rank == 0:
@@ -2236,6 +2316,108 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         return o, lse.view(num_rows, q_nope.shape[1])
 
+    def _gluon_kv_scale(self, layer: AttentionLayer) -> float:
+        """Gluon takes its KV descale as a Python float, not a tensor.
+
+        Resolved once and memoized: the scale is fixed after weight load, and
+        reading it per step would put a device-to-host sync on the decode path
+        and abort graph capture.
+        """
+        cached = getattr(self, "_gluon_kv_scale_cached", None)
+        if cached is None:
+            cached = (
+                float(layer._k_scale.item())
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                else 1.0
+            )
+            self._gluon_kv_scale_cached = cached
+        return cached
+
+    def _forward_ab_stage_a_flat(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        ab: AiterMLAABVerifyMetadata,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        layer: AttentionLayer,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stage A, flattened: one single-query row per verify token.
+
+        Every row of a request carries that request's whole prefix shard, so
+        the kernel sees ``qlen`` rows asking for very nearly the same KV. That
+        duplication is the point of the arm.
+        """
+        assert ab.row_page_table is not None
+        assert ab.row_lens is not None
+        num_rows = q_nope.shape[0]
+        o = torch.empty(
+            num_rows,
+            q_nope.shape[1],
+            self.kv_lora_rank,
+            dtype=out_dtype,
+            device=q_nope.device,
+        )
+        _, lse = _get_mla_gluon()(
+            q_nope=q_nope,
+            q_pe=q_pe,
+            kv_c=kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1]),
+            o=o,
+            page_table=ab.row_page_table,
+            seq_info=ab.row_lens,
+            sm_scale=self.scale,
+            k_pe=None,
+            kv_pe_offset=self.kv_lora_rank,
+            # The 2-D view takes one cache_seqlens per row instead of an
+            # indptr, which is what lets the rows share a page list.
+            use_2d_view=True,
+            kv_scale=self._gluon_kv_scale(layer),
+            # Pinned so the split count cannot be baked from a length that a
+            # later replay exceeds.
+            min_kv_seq_len=1,
+            return_lse=True,
+        )
+        return o, lse.view(num_rows, q_nope.shape[1])
+
+    def _ab_stage_q(
+        self, q: torch.Tensor, layer: AttentionLayer
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the fused query and put it in the dtype Gluon expects."""
+        q_nope, q_pe = torch.split(
+            q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and q_nope.dtype != torch.bfloat16
+        ):
+            q_nope = q_nope.to(torch.bfloat16) * layer._q_scale
+            q_pe = q_pe.to(torch.bfloat16) * layer._q_scale
+        return q_nope, q_pe
+
+    def _finish_ab_verify(
+        self,
+        prefix_out: torch.Tensor,
+        prefix_lse: torch.Tensor,
+        q: torch.Tensor,
+        verify_window: torch.Tensor,
+        ab: AiterMLAABVerifyMetadata,
+        layer: AttentionLayer,
+        out_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Add stage B on rank 0 and merge it into the prefix partial.
+
+        The window is identical on every rank, so exactly one rank may attend
+        it; the others hand back their prefix partial untouched and the
+        cross-rank merge completes the causal block.
+        """
+        if self.dcp_rank != 0:
+            return prefix_out, prefix_lse
+        q_nope, q_pe = self._ab_stage_q(q, layer)
+        window_out, window_lse = self._forward_ab_verify_window(
+            q_nope, q_pe, verify_window, ab, out_dtype
+        )
+        return _merge_two_partials(prefix_out, prefix_lse, window_out, window_lse)
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -2386,6 +2568,27 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "layer did not hand one down."
             )
 
+        if ab is not None and ab.stage_a_mode == "gluon":
+            q_flat = torch.cat(q, dim=-1) if type(q) is tuple else q
+            stage_a_nope, stage_a_pe = self._ab_stage_q(q_flat, layer)
+            prefix_out, prefix_lse = self._forward_ab_stage_a_flat(
+                stage_a_nope,
+                stage_a_pe,
+                ab,
+                kv_c_and_k_pe_cache,
+                layer,
+                decode.attn_out_dtype,
+            )
+            return self._finish_ab_verify(
+                prefix_out,
+                prefix_lse,
+                q_flat,
+                verify_window,
+                ab,
+                layer,
+                decode.attn_out_dtype,
+            )
+
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
@@ -2482,30 +2685,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if lse is not None:
             lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
 
-        if ab is not None and self.dcp_rank == 0:
-            # The window is identical on every rank, so exactly one rank may
-            # attend it; the others hand back their prefix partial untouched
-            # and the cross-rank merge completes the causal block.
+        if ab is not None:
             assert lse is not None
             assert verify_window is not None
-            # q was concatenated above, and it still carries the unpadded head
+            # q was concatenated above and still carries the unpadded head
             # count the window stage wants.
-            q_nope, q_pe = torch.split(
-                q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-            if (
-                is_quantized_kv_cache(self.kv_cache_dtype)
-                and q_nope.dtype != torch.bfloat16
-            ):
-                q_nope = q_nope.to(torch.bfloat16) * layer._q_scale
-                q_pe = q_pe.to(torch.bfloat16) * layer._q_scale
-            window_out, window_lse = self._forward_ab_verify_window(
-                q_nope,
-                q_pe,
+            output, lse = self._finish_ab_verify(
+                output,
+                lse,
+                q,
                 verify_window,
                 ab,
+                layer,
                 decode.attn_out_dtype,
             )
-            output, lse = _merge_two_partials(output, lse, window_out, window_lse)
 
         return output, lse

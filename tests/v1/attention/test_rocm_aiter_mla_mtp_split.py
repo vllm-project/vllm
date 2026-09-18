@@ -111,6 +111,8 @@ def _builder(
         _graph_seq_lens=None,
         _graph_dcp_global_kv_indptr=None,
         _graph_ab_combine_seq_lens=None,
+        _graph_ab_row_page_table=None,
+        _graph_ab_row_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
@@ -142,6 +144,9 @@ def _builder(
     # part of what _build_decode is being tested for.
     stub._build_dcp_verify_row_view = (
         AiterMLAMetadataBuilder._build_dcp_verify_row_view.__get__(stub)
+    )
+    stub._build_ab_flat_stage_a = (
+        AiterMLAMetadataBuilder._build_ab_flat_stage_a.__get__(stub)
     )
     stub._fill_dcp_verify_page_table = (
         AiterMLAMetadataBuilder._fill_dcp_verify_page_table.__get__(stub)
@@ -457,6 +462,72 @@ def test_ab_verify_replaces_the_single_range_routes(monkeypatch):
     assert metadata.use_gluon_verify is False
     # Stage A reads a whole shard per row, so the schedule is built non-causal.
     assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+@pytest.mark.parametrize("kernel_block_size", [1, 2])
+def test_ab_flat_stage_a_repeats_one_prefix_per_request(monkeypatch, kernel_block_size):
+    """The flattened arm's rows must be copies, not per-row computations.
+
+    Uniform prefix lengths are what the split bought: each request's page list
+    is built once and broadcast across its verify rows, and the row lengths are
+    a repeat. Rows of a request must therefore be byte-identical, and the
+    duplication must be visible -- it is the cost this arm measures.
+    """
+    qlen = 3
+    builder = _ab_builder(
+        qlen=qlen,
+        dcp_world_size=4,
+        dcp_rank=1,
+        kernel_block_size=kernel_block_size,
+    )
+    builder._ab_dcp_verify_mode = "gluon"
+    metadata = _build_ab_decode(
+        monkeypatch,
+        builder,
+        qlen=qlen,
+        tot_seq_lens=[23, 31],
+        local_seq_lens=[8, 8],
+    )
+
+    ab = metadata.ab_verify
+    assert ab is not None
+    assert ab.stage_a_mode == "gluon"
+    assert ab.num_stage_a_rows == 2 * qlen
+    assert ab.row_page_table is not None and ab.row_lens is not None
+    assert ab.row_page_table.shape[0] == 2 * qlen
+
+    rows = ab.row_page_table.view(2, qlen, -1)
+    for req in range(2):
+        for row in range(1, qlen):
+            assert torch.equal(rows[req, row], rows[req, 0])
+    assert ab.row_lens.view(2, qlen).tolist() == [
+        [int(ab.prefix_lens[0])] * qlen,
+        [int(ab.prefix_lens[1])] * qlen,
+    ]
+    # The flat per-token view and the asm schedule are dead work for this arm.
+    assert metadata.paged_kv_indices is None
+    assert metadata.has_persistent_metadata is False
+
+
+def test_ab_flat_stage_a_expands_blocks_to_tokens():
+    """Gluon reads the pool at token granularity, so blocks must expand."""
+    qlen = 2
+    builder = _ab_builder(qlen=qlen, dcp_world_size=2, dcp_rank=0, kernel_block_size=4)
+    builder._ab_dcp_verify_mode = "gluon"
+    block_table = torch.tensor([[5, 9]], dtype=torch.int32)
+
+    table, lens = AiterMLAMetadataBuilder._build_ab_flat_stage_a(
+        builder,
+        block_table_tensor=block_table,
+        prefix_lens=torch.tensor([6], dtype=torch.int32),
+        qlen=qlen,
+        num_reqs=1,
+    )
+
+    # Block 5 covers tokens 20..23, block 9 covers 36..39; only the first six
+    # are inside the prefix, but the table is built to its full width.
+    assert table[0, :6].tolist() == [20, 21, 22, 23, 36, 37]
+    assert lens.tolist() == [6, 6]
 
 
 def _reference_attend(q_rows, k_rows, mask):
