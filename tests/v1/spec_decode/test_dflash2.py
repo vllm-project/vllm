@@ -395,3 +395,56 @@ def test_conv_projection_loads_packed_weights_with_draft_quant_config(
         if quantized
         else []
     )
+
+
+def test_context_kv_uses_quantized_projection_methods(monkeypatch):
+    from torch import nn
+
+    from vllm.model_executor.models import qwen3_dflash
+
+    class Projection(nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self.register_buffer("weight", weight)
+            self.output_sizes = [2, 2, 2]
+
+        def forward(self, hidden_states):
+            return torch.nn.functional.linear(hidden_states, self.weight), None
+
+    monkeypatch.setattr(
+        qwen3_dflash.ops,
+        "rms_norm",
+        lambda output, hidden_states, weight, eps: output.copy_(hidden_states),
+    )
+    context_states = torch.arange(12, dtype=torch.float32).view(3, 4)
+    projections = [
+        Projection(torch.arange(24, dtype=torch.float32).view(6, 4)),
+        Projection(torch.arange(24, 48, dtype=torch.float32).view(6, 4)),
+    ]
+    model = SimpleNamespace(
+        _hidden_norm_weight=torch.ones(4),
+        _rms_norm_eps=1e-6,
+        _fused_kv_weight=None,
+        _fused_kv_bias=None,
+        _context_qkv_projs=projections,
+        _context_q_sizes=[2, 2],
+    )
+
+    actual_k, actual_v = qwen3_dflash.DFlashQwen3Model._project_context_kv(
+        model,
+        context_states,
+        num_ctx=3,
+        num_layers=2,
+        num_kv_heads=1,
+        head_dim=2,
+    )
+    expected = torch.stack(
+        [
+            projection(context_states)[0][:, 2:].view(3, 2, 1, 2)
+            for projection in projections
+        ],
+        dim=1,
+    ).permute(2, 1, 0, 3, 4)
+
+    torch.testing.assert_close(actual_k, expected[0])
+    torch.testing.assert_close(actual_v, expected[1])
