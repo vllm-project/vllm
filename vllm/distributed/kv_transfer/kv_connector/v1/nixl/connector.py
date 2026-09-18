@@ -411,8 +411,8 @@ class NixlPushConnector(NixlBaseConnector):
         **kwargs,
     ) -> None:
         """Per-layer producer hook. No-op unless layer-wise push is enabled
-        (``NIXL_LAYERWISE_PUSH=1``), in which case each layer's KV is pushed
-        to D as it becomes ready, overlapped with the tail of prefill."""
+        (``VLLM_NIXL_LAYERWISE_PUSH=1``), in which case each layer's KV is
+        pushed to D as it becomes ready, overlapped with the tail of prefill."""
         if self.connector_worker is None:
             return
         if not isinstance(self._connector_metadata, NixlConnectorMetadata):
@@ -425,10 +425,9 @@ class NixlPushConnector(NixlBaseConnector):
         """After the forward: run the base host-buffer save (if any), then
         seal the per-layer WRITE counts so completion can be detected."""
         super().wait_for_save()
-        if self.connector_worker is None:
-            return
-        if isinstance(self._connector_metadata, NixlConnectorMetadata):
-            self.connector_worker.seal_layer_writes_push(self._connector_metadata)
+        assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.seal_layer_writes_push(self._connector_metadata)
 
 
 # Backward compatibility: NixlConnector is the pull-based connector.

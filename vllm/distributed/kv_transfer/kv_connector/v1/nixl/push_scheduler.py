@@ -24,10 +24,10 @@ been registered but not fulfilled within a configurable timeout.
 
 from __future__ import annotations
 
-import os
 import time
 from typing import TYPE_CHECKING, Any
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -50,9 +50,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-# Opt-in: prefill-side per-layer overlapped WRITE-push (see push_worker).
-_LAYERWISE_PUSH = os.environ.get("NIXL_LAYERWISE_PUSH", "0") == "1"
 
 
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
@@ -99,18 +96,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # accumulate their block ids in ``_lw_pending_save`` until the last
         # chunk, at which point the full block list is emitted into
         # ``reqs_to_save`` for the worker's ``save_kv_layer`` hook.
-        self._layerwise = _LAYERWISE_PUSH
-        self._lw_need_save: dict[ReqId, tuple[Any, Any]] = {}
-        self._lw_pending_save: dict[ReqId, tuple[Any, Any]] = {}
+        self._layerwise = envs.VLLM_NIXL_LAYERWISE_PUSH
+        self._lw_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._lw_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
         self._lw_emitted: set[ReqId] = set()
-        self._lw_emit_log_budget: int = 64
-
-        # Budget for logging the (rare) abort/reject recv-seed path so a
-        # single crash-worthy event is visible without flooding benches.
-        self._recv_seed_log_budget: int = 32
-        # Budget for D-side alloc-path diagnostics (staged recv vs early
-        # return) to make the remote-prefill decision visible on probes.
-        self._dp_dbg_budget: int = 32
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -194,14 +183,12 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # registration to stage. Flip ``do_remote_prefill`` off so the
             # terminal ``request_finished`` does NOT take the abort branch and
             # enqueue an unseeded recv (which used to KeyError the engine).
-            if self._dp_dbg_budget > 0:
-                self._dp_dbg_budget -= 1
-                logger.info(
-                    "NixlPushConnector D alloc: req %s num_external_tokens=%d "
-                    "<=0 (no remote recv staged; prefix-hit/defer)",
-                    request.request_id,
-                    num_external_tokens,
-                )
+            logger.debug(
+                "NixlPushConnector D alloc: req %s num_external_tokens=%d "
+                "<=0 (no remote recv staged; prefix-hit/defer)",
+                request.request_id,
+                num_external_tokens,
+            )
             params["do_remote_prefill"] = False
             return
 
@@ -250,16 +237,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             (),
             False,
         )
-        if self._dp_dbg_budget > 0:
-            self._dp_dbg_budget -= 1
-            logger.info(
-                "NixlPushConnector D alloc: req %s staged recv "
-                "num_external_tokens=%d local_blocks=%d remote_eng=%s",
-                request.request_id,
-                num_external_tokens,
-                sum(len(g) for g in local_block_ids) if local_block_ids else 0,
-                params.get("remote_engine_id"),
-            )
+        logger.debug(
+            "NixlPushConnector D alloc: req %s staged recv "
+            "num_external_tokens=%d local_blocks=%d remote_eng=%s",
+            request.request_id,
+            num_external_tokens,
+            sum(len(g) for g in local_block_ids) if local_block_ids else 0,
+            params.get("remote_engine_id"),
+        )
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -380,23 +365,22 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # reaped later by the registration watchdog + KV lease instead of
         # crashing the engine. Normal registrations already carry every key
         # (setdefault is a no-op for them).
-        for _rid, (_req, _bids, _cached, _awaiting) in self._reqs_need_recv.items():
-            p = _req.kv_transfer_params
-            if p is None:
+        for req_id, (req, _, _, _) in self._reqs_need_recv.items():
+            params = req.kv_transfer_params
+            if params is None:
                 continue
-            if "remote_block_ids" not in p and self._recv_seed_log_budget > 0:
-                self._recv_seed_log_budget -= 1
-                logger.info(
+            if "remote_block_ids" not in params:
+                logger.debug(
                     "NixlPushConnector: seeding missing remote_* for recv "
                     "req %s (abort/reject path; do_remote_prefill=%s)",
-                    _rid,
-                    p.get("do_remote_prefill"),
+                    req_id,
+                    params.get("do_remote_prefill"),
                 )
-            p.setdefault("remote_block_ids", ())
-            p.setdefault("remote_engine_id", "")
-            p.setdefault("remote_request_id", _rid)
-            p.setdefault("remote_host", "")
-            p.setdefault("remote_port", 0)
+            params.setdefault("remote_block_ids", ())
+            params.setdefault("remote_engine_id", "")
+            params.setdefault("remote_request_id", req_id)
+            params.setdefault("remote_host", "")
+            params.setdefault("remote_port", 0)
 
         meta = super().build_connector_meta(scheduler_output)
         assert isinstance(meta, NixlConnectorMetadata)
@@ -448,35 +432,32 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         return meta
 
-    def _lw_tokens(self, grouped: Any) -> int:
+    def _lw_tokens(self, grouped: BlockIds) -> int:
         if not grouped:
             return 0
-        return max((len(list(g)) for g in grouped), default=0) * self.block_size
+        return max((len(g) for g in grouped), default=0) * self.block_size
 
     @staticmethod
-    def _lw_concat(a: Any, b: Any) -> tuple:
+    def _lw_concat(a: BlockIds, b: BlockIds) -> BlockIds:
+        """Concatenate two grouped block-id lists group-by-group."""
         if not a:
             return tuple(list(g) for g in b)
-        out = []
-        for i in range(max(len(a), len(b))):
-            ga = list(a[i]) if i < len(a) else []
-            gb = list(b[i]) if i < len(b) else []
-            out.append(ga + gb)
-        return tuple(out)
+        return tuple(
+            (list(a[i]) if i < len(a) else []) + (list(b[i]) if i < len(b) else [])
+            for i in range(max(len(a), len(b)))
+        )
 
     def _lw_emit(
-        self, req_id: ReqId, req: Any, blocks: Any, meta: NixlConnectorMetadata
+        self, req_id: ReqId, req: Request, blocks: BlockIds, meta: NixlConnectorMetadata
     ) -> None:
-        blocks = self.get_exchange_clipped_blocks(tuple(list(g) for g in blocks))
-        meta.add_new_req_to_save(req_id, blocks, req.kv_transfer_params or {})
+        clipped = self.get_exchange_clipped_blocks(tuple(list(g) for g in blocks))
+        meta.add_new_req_to_save(req_id, clipped, req.kv_transfer_params or {})
         self._lw_emitted.add(req_id)
-        if self._lw_emit_log_budget > 0:
-            self._lw_emit_log_budget -= 1
-            logger.info(
-                "NIXL lw[P-sched] emit reqs_to_save req=%s blocks=%d",
-                req_id,
-                self._lw_tokens(blocks) // max(self.block_size, 1),
-            )
+        logger.debug(
+            "NIXL lw[P-sched] emit reqs_to_save req=%s blocks=%d",
+            req_id,
+            self._lw_tokens(clipped) // max(self.block_size, 1),
+        )
 
     def _lw_build_reqs_to_save(
         self, scheduler_output: SchedulerOutput, meta: NixlConnectorMetadata
@@ -494,16 +475,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         # 2. Chunked continuations: accumulate new block ids until the last
         # chunk, then emit the full block list.
-        cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
-        if cached is None:
-            return
-        req_ids = getattr(cached, "req_ids", [])
-        new_block_ids_list = getattr(cached, "new_block_ids", [])
-        for i, req_id in enumerate(req_ids):
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id, new_blocks in zip(
+            cached_reqs.req_ids, cached_reqs.new_block_ids, strict=True
+        ):
             if req_id not in self._lw_pending_save:
                 continue
             req, acc = self._lw_pending_save[req_id]
-            new_blocks = new_block_ids_list[i] if i < len(new_block_ids_list) else None
             if new_blocks is not None:
                 acc = self._lw_concat(acc, new_blocks)
                 self._lw_pending_save[req_id] = (req, acc)

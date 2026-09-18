@@ -32,18 +32,19 @@ the writer drops any leftover ``_push_finished_blocks`` /
 """
 
 import contextlib
-import os
 import queue
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-import numpy as np
 import torch
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
@@ -67,9 +68,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_req
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -80,20 +80,37 @@ logger = init_logger(__name__)
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
-# Opt-in: prefill-side per-layer overlapped WRITE-push (MoRI-IO-style).
-# When 0 (default) the push connector behaves byte-identically to stock
-# (single monolithic WRITE fired from request_finished). When 1, the
-# producer posts one WRITE per layer as each layer's KV becomes ready
-# (gated on a per-layer CUDA event), overlapping the transfer with the
-# tail of prefill compute, then sends a single completion notif once all
-# layers have landed. The union of per-layer descriptor slices is
-# byte-identical to the monolithic descriptor list (region-major layout),
-# so KV correctness is preserved as long as every layer is written and
-# the consumer waits for the single completion notif.
-_LAYERWISE_PUSH = os.environ.get("NIXL_LAYERWISE_PUSH", "0") == "1"
-# Seconds a per-layer write task may wait for the D registration / handshake
-# before the request is failed (blocks freed via lease; D watchdog fails it).
-_LW_DEFER_TIMEOUT_S = float(os.environ.get("NIXL_LAYERWISE_DEFER_TIMEOUT", "60"))
+# Per-layer write task handed from the forward thread to the writer:
+# (req_id, layer_idx, cuda_event, enqueue_time). ``cuda_event`` is ``None``
+# for completeness-sweep tasks, which are enqueued post-forward when all KV
+# is already resident and therefore need no gating.
+LayerWriteTask = tuple[ReqId, int, torch.cuda.Event | None, float]
+
+
+@dataclass
+class _LayerPushPlan:
+    """Cached per-request WRITE geometry for the layer-wise push path.
+
+    The descriptor lists cover every region of every layer in region-major
+    order, so layer ``i``'s slice is ``[i * span, (i + 1) * span)`` with
+    ``span = regions_per_layer * num_blocks``.
+    """
+
+    local_xfer_handle: int
+    remote_xfer_handle: int
+    local_descs: list[int]
+    remote_descs: list[int]
+    num_blocks: int
+    regions_per_layer: int
+    decode_engine_id: str
+    notif_id: bytes
+
+
+class _PlanFallback(Enum):
+    """Sentinel for a transfer shape the layer-wise path cannot serve; the
+    request is failed and its blocks are freed by the KV lease."""
+
+    UNSUPPORTED = auto()
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -153,42 +170,46 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_thread: threading.Thread | None = None
 
         # --- Layer-wise overlapped WRITE-push state (opt-in) ------------- #
-        self._layerwise = _LAYERWISE_PUSH
+        # When disabled (the default) the push connector behaves
+        # byte-identically to a single monolithic WRITE fired from
+        # ``request_finished``. When enabled, the producer posts one WRITE per
+        # layer as each layer's KV becomes ready (gated on a per-layer CUDA
+        # event), overlapping the transfer with the tail of prefill compute,
+        # then sends a single completion notif once all layers have landed.
+        # The union of per-layer descriptor slices is byte-identical to the
+        # monolithic descriptor list (region-major layout), so KV correctness
+        # is preserved as long as every layer is written and the consumer
+        # waits for the single completion notif.
+        self._layerwise = envs.VLLM_NIXL_LAYERWISE_PUSH
+        # Seconds a per-layer write task may wait for the D registration /
+        # handshake before the request is failed (blocks freed via lease; the
+        # D watchdog fails it).
+        self._lw_defer_timeout = envs.VLLM_NIXL_LAYERWISE_DEFER_TIMEOUT
         # Ordered layer names as registered (index == region group order).
         self._lw_layer_names: list[str] = []
         self._lw_layer_index: dict[str, int] = {}
-        # Forward-thread -> writer: per-layer write tasks
-        # (req_id, layer_idx, cuda_event, enqueue_time).
-        self._lw_task_q: queue.Queue[tuple[str, int, Any, float]] = queue.Queue()
+        # Forward-thread -> writer: per-layer write tasks.
+        self._lw_task_q: queue.Queue[LayerWriteTask] = queue.Queue()
         # Writer-owned: tasks awaiting a D registration / handshake.
-        self._lw_deferred: list[tuple[str, int, Any, float]] = []
+        self._lw_deferred: list[LayerWriteTask] = []
         # Per-req cached matched registration + built transfer plan.
-        self._lw_reg: dict[str, dict[str, Any]] = {}
-        self._lw_plan: dict[str, dict[str, Any] | str] = {}
+        self._lw_reg: dict[ReqId, dict[str, Any]] = {}
+        self._lw_plan: dict[ReqId, _LayerPushPlan | _PlanFallback] = {}
         # Guards the accounting dicts shared between forward + writer + main.
         self._lw_lock = threading.Lock()
         # Logical local (prefill) block ids per req (grouped).
-        self._lw_local_blocks: dict[str, Any] = {}
+        self._lw_local_blocks: dict[ReqId, BlockIds] = {}
         # Layers scheduled (by forward thread) per req.
-        self._lw_scheduled_layers: dict[str, set[int]] = defaultdict(set)
+        self._lw_scheduled_layers: dict[ReqId, set[int]] = defaultdict(set)
         # In-flight WRITE handles per req (appended by writer, drained by main).
-        self._lw_handles: dict[str, list[int]] = defaultdict(list)
+        self._lw_handles: dict[ReqId, list[TransferHandle]] = defaultdict(list)
         # Completed WRITE count per req (incremented by main on DONE).
-        self._lw_done: dict[str, int] = defaultdict(int)
+        self._lw_done: dict[ReqId, int] = defaultdict(int)
         # Expected WRITE count per req, sealed after the forward pass.
-        self._lw_expected: dict[str, int] = {}
-        self._lw_sealed: set[str] = set()
-        self._lw_notified: set[str] = set()
-        self._lw_failed: set[str] = set()
-        # Budgeted INFO diagnostics for the layer-wise push path (stage-by-
-        # stage: PUSH_REG recv -> plan build -> writes posted -> writes done
-        # -> completion notif -> D recv). Bounded so benches don't flood.
-        self._lw_dbg_budget: int = 600
-
-    def _lwdbg(self, fmt: str, *args: Any) -> None:
-        if self._lw_dbg_budget > 0:
-            self._lw_dbg_budget -= 1
-            logger.info(fmt, *args)
+        self._lw_expected: dict[ReqId, int] = {}
+        self._lw_sealed: set[ReqId] = set()
+        self._lw_notified: set[ReqId] = set()
+        self._lw_failed: set[ReqId] = set()
 
     # --- Lifecycle ----------------------------------------------------- #
 
@@ -370,7 +391,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("PUSH_REG notif missing request_id; dropping")
             return
 
-        self._lwdbg(
+        logger.debug(
             "NIXL lw[P] PUSH_REG recv rid=%s layerwise=%s deferred=%d sched_reqs=%d",
             rid,
             self._layerwise,
@@ -815,8 +836,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self,
         metadata: NixlConnectorMetadata,
         layer_name: str,
-        kv_layer: "torch.Tensor",
-        attn_metadata: Any,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
     ) -> None:
         """Forward-thread hook: schedule one WRITE per (req, layer).
 
@@ -868,25 +889,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # enqueue the missing region indices with event=None (no gating). This
         # guarantees byte-complete KV; covered layers still overlap during the
         # forward. If coverage is already full, missing is empty (no-op).
-        ntotal = len(self._lw_layer_names)
+        num_layers = len(self._lw_layer_names)
         now = time.perf_counter()
         with self._lw_lock:
             for req_id in metadata.reqs_to_save:
                 if req_id in self._lw_failed:
                     continue
                 covered = set(self._lw_scheduled_layers[req_id])
-                missing = [i for i in range(ntotal) if i not in covered]
+                missing = [i for i in range(num_layers) if i not in covered]
                 for idx in missing:
                     self._lw_scheduled_layers[req_id].add(idx)
                     self._lw_task_q.put((req_id, idx, None, now))
                 self._lw_expected[req_id] = len(self._lw_scheduled_layers[req_id])
                 self._lw_sealed.add(req_id)
-                logger.info(
+                logger.debug(
                     "NIXL layerwise seal: req %s covered=%d swept=%d total=%d",
                     req_id,
                     len(covered),
                     len(missing),
-                    ntotal,
+                    num_layers,
                 )
         self._push_writer_wake.set()
 
@@ -902,17 +923,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if not self._lw_deferred:
             return
         now = time.perf_counter()
-        still: list[tuple[str, int, Any, float]] = []
+        still: list[LayerWriteTask] = []
         for task in self._lw_deferred:
             req_id, _, _, enqueue_time = task
             if req_id in self._lw_failed:
                 continue
-            if now - enqueue_time > _LW_DEFER_TIMEOUT_S:
+            if now - enqueue_time > self._lw_defer_timeout:
                 logger.error(
                     "NIXL layer-wise push: req %s deferred >%.0fs waiting for "
                     "D registration; failing (blocks freed via lease).",
                     req_id,
-                    _LW_DEFER_TIMEOUT_S,
+                    self._lw_defer_timeout,
                 )
                 self._lw_mark_failed(req_id)
                 continue
@@ -920,15 +941,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 still.append(task)
         self._lw_deferred = still
 
-    def _lw_run_task(
-        self, task: tuple[str, int, Any, float], allow_defer: bool = True
-    ) -> bool:
+    def _lw_run_task(self, task: LayerWriteTask, allow_defer: bool = True) -> bool:
         """Execute (or defer) a single per-layer write task on the writer.
 
         Returns True if the task was handled (executed or the req is
         failed/terminal), False if it must remain deferred.
         """
-        req_id, layer_idx, event, enqueue_time = task
+        req_id, layer_idx, event, _ = task
         if req_id in self._lw_failed:
             return True
 
@@ -950,13 +969,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._lw_deferred.append(task)
                 return False
             self._lw_plan[req_id] = plan
-            self._lwdbg(
-                "NIXL lw[P] plan ready req=%s type=%s",
+            logger.debug(
+                "NIXL lw[P] plan ready req=%s unsupported=%s",
                 req_id,
-                "FALLBACK" if plan == "FALLBACK" else "OK",
+                plan is _PlanFallback.UNSUPPORTED,
             )
 
-        if isinstance(plan, str):  # sentinel "FALLBACK"
+        if plan is _PlanFallback.UNSUPPORTED:
             logger.error(
                 "NIXL layer-wise push: unsupported transfer shape for req %s; "
                 "failing (blocks freed via lease).",
@@ -978,11 +997,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def _lw_build_plan(
         self, req_id: str, registration_data: dict[str, Any]
-    ) -> dict[str, Any] | str | None:
+    ) -> _LayerPushPlan | _PlanFallback | None:
         """Build a cached per-request transfer plan (simple TP/MLA case).
 
-        Returns a plan dict, the string ``"FALLBACK"`` if the transfer shape
-        is not supported by the layer-wise path, or ``None`` if the P->D
+        Returns a plan, ``_PlanFallback.UNSUPPORTED`` if the transfer shape is
+        not supported by the layer-wise path, or ``None`` if the P->D
         handshake is not ready yet (retry later)."""
         decode_engine_id = registration_data["decode_engine_id"]
         logical_local = self._as_grouped_block_ids(
@@ -992,14 +1011,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["local_block_ids"]
         )
         if not logical_local or not remote_logical:
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan FALLBACK req=%s reason=empty_blocks "
                 "local=%s remote=%s",
                 req_id,
                 bool(logical_local),
                 bool(remote_logical),
             )
-            return "FALLBACK"
+            return _PlanFallback.UNSUPPORTED
 
         # ``_ensure_handshake`` returns ``None`` once the P->D handshake has
         # completed (transfer descriptors ready) and a ``Future`` while it is
@@ -1016,7 +1035,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["decode_tp_size"],
         )
         if fut is not None:
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan DEFER req=%s reason=handshake_not_ready "
                 "dec_eng=%s",
                 req_id,
@@ -1028,7 +1047,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             or decode_engine_id not in self.tp_mappings
             or decode_engine_id not in self.dst_xfer_side_handles
         ):
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan DEFER req=%s reason=topo_not_ready "
                 "topo=%s in_tpmap=%s in_dstxfer=%s",
                 req_id,
@@ -1049,7 +1068,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             or tp_ratio < 1
             or len(plan_map.all_source_ranks) != 1
         ):
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan FALLBACK req=%s reason=shape "
                 "n_local=%d n_remote=%d tp_ratio=%s src_ranks=%d",
                 req_id,
@@ -1058,16 +1077,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 tp_ratio,
                 len(plan_map.all_source_ranks),
             )
-            return "FALLBACK"
+            return _PlanFallback.UNSUPPORTED
         remote_block_size = remote_info.remote_block_size
         block_size_ratio = self.transfer_topo.block_size_ratio(remote_block_size)
         if block_size_ratio != 1:
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan FALLBACK req=%s reason=block_size_ratio=%s",
                 req_id,
                 block_size_ratio,
             )
-            return "FALLBACK"
+            return _PlanFallback.UNSUPPORTED
 
         # Expand logical block ids to kernel (physical) ids using the same
         # helper the stock WRITE path uses (``_do_start_push_kv`` /
@@ -1083,7 +1102,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote0 = list(remote_physical[0])
         n = min(len(local0), len(remote0))
         if n == 0:
-            return "FALLBACK"
+            return _PlanFallback.UNSUPPORTED
         local0 = local0[:n]
         remote0 = remote0[:n]
 
@@ -1098,62 +1117,65 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
+        ).tolist()
         remote_descs = self._compute_desc_ids(
             block_ids=[remote0],
             dst_num_blocks=self.dst_num_blocks[decode_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-        )
-        local_descs = np.asarray(local_descs).tolist()
-        remote_descs = np.asarray(remote_descs).tolist()
+        ).tolist()
         num_regions = self.num_regions
-        nb = len(local0)
+        num_blocks = len(local0)
         num_layers = len(self._lw_layer_names)
         if (
             len(local_descs) != len(remote_descs)
             or num_regions == 0
             or num_layers == 0
             or num_regions % num_layers != 0
-            or len(local_descs) != num_regions * nb
+            or len(local_descs) != num_regions * num_blocks
         ):
-            self._lwdbg(
+            logger.debug(
                 "NIXL lw[P] build_plan FALLBACK req=%s reason=desc_geometry "
                 "n_local_descs=%d n_remote_descs=%d num_regions=%d num_layers=%d "
-                "nb=%d",
+                "num_blocks=%d",
                 req_id,
                 len(local_descs),
                 len(remote_descs),
                 num_regions,
                 num_layers,
-                nb,
+                num_blocks,
             )
-            return "FALLBACK"
-        rpl = num_regions // num_layers
-        self._lwdbg(
-            "NIXL lw[P] build_plan OK req=%s num_regions=%d num_layers=%d nb=%d "
-            "rpl=%d n_descs=%d",
+            return _PlanFallback.UNSUPPORTED
+        regions_per_layer = num_regions // num_layers
+        logger.debug(
+            "NIXL lw[P] build_plan OK req=%s num_regions=%d num_layers=%d "
+            "num_blocks=%d regions_per_layer=%d n_descs=%d",
             req_id,
             num_regions,
             num_layers,
-            nb,
-            rpl,
+            num_blocks,
+            regions_per_layer,
             len(local_descs),
         )
 
-        return {
-            "local_h": local_xfer_side_handle,
-            "remote_h": remote_xfer_side_handle,
-            "local_descs": local_descs,
-            "remote_descs": remote_descs,
-            "nb": nb,
-            "rpl": rpl,
-            "decode_engine_id": decode_engine_id,
-            "notif_id": f"{registration_data['request_id']}:{self.world_size}".encode(),
-        }
+        decode_request_id = registration_data["request_id"]
+        return _LayerPushPlan(
+            local_xfer_handle=local_xfer_side_handle,
+            remote_xfer_handle=remote_xfer_side_handle,
+            local_descs=local_descs,
+            remote_descs=remote_descs,
+            num_blocks=num_blocks,
+            regions_per_layer=regions_per_layer,
+            decode_engine_id=decode_engine_id,
+            notif_id=f"{decode_request_id}:{self.world_size}".encode(),
+        )
 
     def _lw_write_layer(
-        self, req_id: str, plan: dict[str, Any], layer_idx: int, event: Any
+        self,
+        req_id: str,
+        plan: _LayerPushPlan,
+        layer_idx: int,
+        event: torch.cuda.Event | None,
     ) -> None:
         """Post one WRITE for a single layer's region slice (no notif).
 
@@ -1163,19 +1185,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         post-forward when all KV is already resident, so no gating is needed."""
         if event is not None:
             event.synchronize()
-        span = plan["rpl"] * plan["nb"]
+        span = plan.regions_per_layer * plan.num_blocks
         start = layer_idx * span
         end = start + span
-        ldescs = plan["local_descs"][start:end]
-        rdescs = plan["remote_descs"][start:end]
-        if not ldescs:
+        local_descs = plan.local_descs[start:end]
+        remote_descs = plan.remote_descs[start:end]
+        if not local_descs:
             return
         handle = self.nixl_wrapper.make_prepped_xfer(
             "WRITE",
-            plan["local_h"],
-            ldescs,
-            plan["remote_h"],
-            rdescs,
+            plan.local_xfer_handle,
+            local_descs,
+            plan.remote_xfer_handle,
+            remote_descs,
             notif_msg=b"",
         )
         self.nixl_wrapper.transfer(handle)
@@ -1214,7 +1236,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 continue
             with self._lw_lock:
                 handles = self._lw_handles.get(req_id, [])
-            still: list[int] = []
+            still: list[TransferHandle] = []
             failed = False
             for handle in handles:
                 try:
@@ -1223,11 +1245,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     failed = True
                     continue
                 if state == "DONE":
-                    try:
+                    with contextlib.suppress(Exception):
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
-                    except Exception:
-                        pass
                     self.nixl_wrapper.release_xfer_handle(handle)
                     with self._lw_lock:
                         self._lw_done[req_id] += 1
@@ -1250,7 +1270,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._lw_mark_failed(req_id)
                 continue
             if sealed and expected is not None and done >= expected and not still:
-                self._lwdbg(
+                logger.debug(
                     "NIXL lw[P] all writes DONE req=%s done=%d expected=%d "
                     "-> completion",
                     req_id,
@@ -1262,7 +1282,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 done_sending.add(req_id)
                 self._lw_cleanup(req_id)
             elif sealed and expected is not None and (handles or done):
-                self._lwdbg(
+                logger.debug(
                     "NIXL lw[P] writes progress req=%s done=%d expected=%d inflight=%d",
                     req_id,
                     done,
@@ -1273,12 +1293,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _lw_send_completion(self, req_id: str) -> None:
         reg = self._lw_reg.get(req_id)
         plan = self._lw_plan.get(req_id)
-        if reg is None or not isinstance(plan, dict):
+        if reg is None or not isinstance(plan, _LayerPushPlan):
             return
-        engine_id = plan["decode_engine_id"]
-        notif_id = plan["notif_id"]
+        engine_id = plan.decode_engine_id
+        notif_id = plan.notif_id
         agents = self._remote_agents.get(engine_id, {})
-        self._lwdbg(
+        logger.debug(
             "NIXL lw[P] send_completion req=%s engine=%s agents=%d notif=%s",
             req_id,
             engine_id,
@@ -1289,11 +1309,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
-                logger.error(
-                    "NIXL layer-wise push: failed to send completion notif "
-                    "for req %s: %s",
-                    req_id,
-                    e,
+                self._log_failure(
+                    failure_type="layerwise_completion_notif_failed",
+                    req_id=req_id,
+                    error=e,
+                    dst_engine_id=engine_id,
                 )
 
     # --- Notification handling on engine main thread ------------------ #
@@ -1336,7 +1356,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     # P drove the transfer (we own no NIXL handle), so
                     # materialise an empty ``_recving_transfers`` entry for
                     # ``_pop_done_transfers`` to report done.
-                    self._lwdbg(
+                    logger.debug(
                         "NIXL lw[D] completion notif recv req=%s -> mark recving done",
                         req_id,
                     )

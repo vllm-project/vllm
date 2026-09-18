@@ -391,10 +391,10 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Layer-wise overlapped WRITE-push state (opt-in; disabled here so the
         # default monolithic push path is exercised). Set by
         # NixlPushConnectorWorker.__init__, which ``fresh`` bypasses. Some are
-        # read eagerly as ``_lwdbg`` args (e.g. len(_lw_deferred)) even when
-        # the feature is off, so they must exist.
+        # read eagerly as ``logger.debug`` args (e.g. len(_lw_deferred)) even
+        # when the feature is off, so they must exist.
         w._layerwise = False
-        w._lw_dbg_budget = 0
+        w._lw_defer_timeout = 60.0
         w._lw_layer_names = []
         w._lw_layer_index = {}
         w._lw_task_q = queue.Queue()
