@@ -302,15 +302,13 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             return True
 
         # FIXME: propertyNames conflicts with properties/patternProperties/
-        # additionalProperties/unevaluatedProperties under xgrammar.
-        # https://github.com/mlc-ai/xgrammar/issues/826
+        # unevaluatedProperties under xgrammar.
         if (
             "object" in schema_types
             and "propertyNames" in obj
             and (
                 "properties" in obj
                 or "patternProperties" in obj
-                or isinstance(obj.get("additionalProperties"), dict)
                 or obj.get("unevaluatedProperties", True) is not True
             )
         ):

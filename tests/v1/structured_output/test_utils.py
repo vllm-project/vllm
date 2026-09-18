@@ -70,13 +70,6 @@ def unsupported_property_names_combinations():
             "patternProperties": {"^grade_[0-9]+$": {"type": "integer"}},
             "propertyNames": {"pattern": "^grade_[0-9]$"},  # does NOT match "grade_12"
         },
-        # propertyNames makes xgrammar discard the sibling additionalProperties
-        # value schema: https://github.com/mlc-ai/xgrammar/issues/826
-        {
-            "type": "object",
-            "propertyNames": {"pattern": "^[a-z]+$"},
-            "additionalProperties": {"type": "integer"},
-        },
         # propertyNames is a string schema that conventionally omits "type", so
         # it escapes the string check while xgrammar drops its length bound all
         # the same: https://github.com/mlc-ai/xgrammar/issues/749
@@ -183,6 +176,15 @@ def property_names_schema():
 
 
 @pytest.fixture
+def property_names_with_additional_properties_schema():
+    return {
+        "type": "object",
+        "propertyNames": {"pattern": "^[a-z_]+$"},
+        "additionalProperties": {"type": "integer"},
+    }
+
+
+@pytest.fixture
 def pattern_properties_schema():
     return {
         "type": "object",
@@ -215,6 +217,7 @@ class TestHasXGrammarUnsupportedJsonFeatures:
             "supported_frankenstein_schema",
             "pattern_properties_schema",
             "property_names_schema",
+            "property_names_with_additional_properties_schema",
         ],
     )
     def test_supported_json_features(self, schema_type, request):
@@ -275,6 +278,14 @@ class TestIsGrammarAcceptString:
             assert grammar_accepts(property_names_schema, '{"score": "seven"}')
             assert not grammar_accepts(property_names_schema, '{"Score": 5}')
             assert not grammar_accepts(property_names_schema, '{"score_1": 5}')
+
+        def test_property_names_keeps_additional_properties_value_schema(
+            self, property_names_with_additional_properties_schema
+        ):
+            schema = property_names_with_additional_properties_schema
+            assert grammar_accepts(schema, '{"score": 5}')
+            assert not grammar_accepts(schema, '{"Score": 5}')
+            assert not grammar_accepts(schema, '{"score": "seven"}')
 
         def test_pattern_properties_constrains_keys_and_values(
             self, pattern_properties_schema
