@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -94,15 +95,57 @@ def register_vllm_structural_tag(
     return decorator
 
 
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
+
+
+def _with_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": strict})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": strict})}
+        )
+    return tool
+
+
+def _resolve_tool_strictness(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+    strict_level: ToolStrictLevel,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
+    """Decide whether a structural tag applies and pin each tool's ``strict``.
+
+    A tool without an explicit ``strict`` is treated as non-strict: its call
+    envelope is still constrained, but its arguments stay free unless the
+    server level is PARAMETER. ``None`` means no structural tag.
+    """
+    if (
+        tool_choice == "auto"
+        and strict_level == ToolStrictLevel.AUTO
+        and not _any_tool_strict(tools)
+    ):
+        return None
+    return [
+        _with_tool_strict(
+            tool, strict_level >= ToolStrictLevel.PARAMETER or _tool_is_strict(tool)
+        )
+        for tool in tools
+    ]
 
 
 def get_model_structural_tag(
@@ -111,13 +154,14 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
-
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
+    if tools is None:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
@@ -158,7 +202,6 @@ def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
-
     if isinstance(tool, FunctionTool):
         function: dict[str, Any] = {"name": tool.name}
         if tool.description is not None:
@@ -178,7 +221,6 @@ def _dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
-
     if tool_choice is None:
         return None
 
@@ -783,6 +825,7 @@ def get_hy_v4_structural_tag(
             leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
             tokenizer vocab and passes it to ``get_model_structural_tag``.
+
     """
     del builtin_tools
 

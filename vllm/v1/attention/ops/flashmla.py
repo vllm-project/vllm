@@ -52,9 +52,7 @@ def _is_flashmla_available() -> tuple[bool, str | None]:
 
 
 def is_flashmla_dense_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     is_available, maybe_reason = _is_flashmla_available()
     if not is_available:
         return False, maybe_reason
@@ -98,9 +96,7 @@ def _use_triton_sparse_mla() -> bool:
 
 
 def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
+    """Return: is_supported_flag, unsupported_reason (optional)."""
     if _use_triton_sparse_mla():
         return True, None
     is_available, maybe_reason = _is_flashmla_available()
