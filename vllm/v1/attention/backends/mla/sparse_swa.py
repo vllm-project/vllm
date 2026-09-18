@@ -112,7 +112,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode
         # kernel's TMA stride; contiguous bf16/fp8 cache uses the natural
         # element-size page.
-        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
+        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        )
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -202,6 +205,8 @@ class DeepseekSparseSWAMetadata:
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
     max_decode_query_len: int = 1
+    flashinfer_decode_topk_lens: torch.Tensor | None = None
+    flashinfer_decode_seq_lens: torch.Tensor | None = None
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
@@ -449,13 +454,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
 
-        # Vision variant: image spans (up to vision_max_n_token tokens) are
+        # V4 vision variant: image spans (up to vision_max_n_token tokens) are
         # visible bidirectionally, so prefill index rows widen from
-        # window_size to window_size + max_image_tokens. Text-only models keep
-        # max_image_tokens == 0 and take the original code paths everywhere.
+        # window_size to window_size + max_image_tokens. The V4 config sets
+        # mm_prefix_clamp_sliding_window exactly for these in-kernel-widened
+        # ranges; V4.1 image tokens use the plain causal window, and text-only
+        # models keep max_image_tokens == 0 everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "vision_n_layers", 0) > 0
+            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
