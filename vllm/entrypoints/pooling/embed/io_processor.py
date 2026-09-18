@@ -58,6 +58,7 @@ class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0
     num_chunks: int = 0
+    all_chunks_l2_normalized: bool = True
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -205,7 +206,17 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
             weight = len(result.prompt_token_ids)
             embedding_data = result.outputs.data
-            weighted_embedding = embedding_data.to(dtype=torch.float32) * weight
+            float_embedding = embedding_data.to(dtype=torch.float32)
+            if ctx.pooling_params.use_activation:
+                # Custom activations need not L2-normalize; allow BF16 rounding.
+                embedding_norm = torch.linalg.vector_norm(float_embedding)
+                aggregator.all_chunks_l2_normalized &= torch.allclose(
+                    embedding_norm,
+                    torch.ones_like(embedding_norm),
+                    rtol=1e-2,
+                    atol=1e-5,
+                )
+            weighted_embedding = float_embedding * weight
 
             if aggregator.weighted_sum is None:
                 # First chunk
@@ -241,7 +252,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 ):
                     # Compute final mean embedding
                     final_embedding = weighted_sum / total_weight
-                    if ctx.pooling_params.use_activation and aggregator.num_chunks > 1:
+                    if (
+                        ctx.pooling_params.use_activation
+                        and aggregator.num_chunks > 1
+                        and aggregator.all_chunks_l2_normalized
+                    ):
                         final_embedding = torch.nn.functional.normalize(
                             final_embedding, dim=-1
                         )
