@@ -26,8 +26,8 @@ from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_i
 from vllm.models.deepseek_v41.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(

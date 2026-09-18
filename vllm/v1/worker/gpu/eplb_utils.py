@@ -77,11 +77,10 @@ class EPLBController:
         )
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
-        if (
-            getattr(speculative_config, "method", None) == "dspark"
-            and not dspark_draft_supports_eplb(
-                speculative_config.draft_model_config
-            )
+        if getattr(
+            speculative_config, "method", None
+        ) == "dspark" and not dspark_draft_supports_eplb(
+            speculative_config.draft_model_config
         ):
             return False
         assert self.state is not None

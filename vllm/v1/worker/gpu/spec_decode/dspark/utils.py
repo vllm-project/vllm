@@ -46,8 +46,8 @@ def _get_dspark_parallel_config(
     tensor_parallel_size: int,
     draft_model_config: ModelConfig,
 ) -> ParallelConfig:
-    enable_draft_eplb = (
-        parallel_config.enable_eplb and dspark_draft_supports_eplb(draft_model_config)
+    enable_draft_eplb = parallel_config.enable_eplb and dspark_draft_supports_eplb(
+        draft_model_config
     )
     if parallel_config.enable_eplb and not enable_draft_eplb:
         logger.warning_once(
