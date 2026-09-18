@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Encoder-only ViT cudagraph capture, replay and output-ownership checks."""
+"""Encoder-only ViT cudagraph capture, replay and output-ownership checks.
+
+This file is deliberately outside ``vit_cudagraph/``. It monkeypatches
+``VLLM_USE_V2_MODEL_RUNNER`` and ``VLLM_ALLOW_INSECURE_SERIALIZATION`` and builds an
+encoder-only runner, and any ViT case that runs after it in the same pytest process
+segfaults in CPU tensor allocation. Keeping it out of the hash-sharded directory
+gives it its own process via its own Buildkite job.
+"""
 
 from functools import partial
 
@@ -9,7 +16,7 @@ import pytest
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
-from ._vit_cudagraph import MODEL_CONFIGS, params_with_marks
+from .vit_cudagraph._vit_cudagraph import MODEL_CONFIGS, params_with_marks
 
 
 def _check_eonly_encoder_outputs(worker, batches):

@@ -2182,6 +2182,18 @@ steps:
   commands:
   - pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
+- label: ":amd: (MI300) Multimodal Models (Standard) 4: ViT CUDAGraph Encoder-Only" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pytest -v -s models/multimodal/standard/test_vit_cudagraph_eonly.py
+
 - label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -4253,6 +4265,19 @@ steps:
   parallelism: 3
   commands:
   - pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: ":amd: (MI355) Multimodal Models (Standard) 4: ViT CUDAGraph Encoder-Only" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pytest -v -s models/multimodal/standard/test_vit_cudagraph_eonly.py
 
 - label: ":amd: (MI355) Multimodal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 45

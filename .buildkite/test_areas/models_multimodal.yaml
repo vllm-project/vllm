@@ -82,6 +82,27 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: ViT CUDAGraph Encoder-Only"
+  device: h200_35gb
+  key: multi-modal-models-standard-4-vit-cudagraph-eonly
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/multimodal
+  commands:
+    # Runs apart from the sharded ViT directory: it monkeypatches the V2 runner and
+    # insecure serialization, and ViT cases sharing its process segfault afterwards.
+    - pytest -v -s models/multimodal/standard/test_vit_cudagraph_eonly.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Multimodal Models (Standard) 4: ViT CUDAGraph Encoder-Only"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
