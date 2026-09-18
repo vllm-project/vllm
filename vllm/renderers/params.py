@@ -425,8 +425,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TextPrompt,
     ) -> TextPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run before tokenization occurs.
@@ -538,8 +537,7 @@ class TokenizeParams:
         tokenizer: TokenizerLike | None,
         prompt: TokensPrompt | EmbedsPrompt,
     ) -> TokensPrompt | EmbedsPrompt:
-        """
-        Ensure that the prompt meets the requirements set out by this config.
+        """Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run after tokenization occurs.
