@@ -26,11 +26,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Headroom left after sizing from measured memory, beyond the measured transient
-# peak, for allocations that only happen after warmup. Such transients scale
-# with the model's working set rather than the device, so the margin is a share
-# of the measured peak with an absolute floor.
-KV_CACHE_MARGIN_FLOOR_BYTES = 256 * (1 << 20)
-KV_CACHE_MARGIN_FRACTION = 0.25
+# peak, for what the allocated peak does not show: the caching allocator's
+# rounding and fragmentation around it, real steps combining shapes warmup
+# exercises separately (a prompt-logprobs chunk alongside a live decode, the
+# rejection sampler over a full spec-decode batch), and inputs profiling only
+# approximates (a multimodal encoder batch of a modality other than the one
+# with the largest feature size). The share scales with the model's working
+# set; the floor covers small models whose measured peak is a few hundred MiB
+# while their encoder or sampler transients are not. Measured on GB200: the
+# first prefill of an 8B model needed over 25% beyond its allocated peak before
+# the allocator could serve it, and adversarial workloads reached up to 45%.
+KV_CACHE_MARGIN_FLOOR_BYTES = 1 << 30
+KV_CACHE_MARGIN_FRACTION = 0.75
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
