@@ -574,7 +574,7 @@ class TestImplicitReasoningEnd:
         # the text lexer.
         assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
         assert thinking_parser.find_reasoning_end_offset([7, _THINK_END_ID, 8]) == 1
-        assert thinking_parser.find_reasoning_end_offset([7, 8]) is None
+        assert thinking_parser.find_reasoning_end_offset([7, 8]) == 2
 
     def test_streaming_reasoning_implicit_end(self, thinking_parser):
         chunks = [
