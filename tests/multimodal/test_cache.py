@@ -4,6 +4,7 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -782,8 +783,11 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.llm_engine import LLMEngine
 
-    model_config = SimpleNamespace(
-        get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
+        ),
     )
     sender = MultiModalProcessorSenderCache(model_config)
     receiver = MultiModalReceiverCache(model_config)
@@ -794,7 +798,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     assert sender.get_and_update_item(None, mm_hash)[0] is None
 
     renderer = SimpleNamespace(mm_processor_cache=sender, _mm_cache_stats=None)
-    renderer.clear_mm_cache = partial(BaseRenderer.clear_mm_cache, renderer)
+    renderer.clear_mm_cache = partial(
+        BaseRenderer.clear_mm_cache, cast(BaseRenderer, renderer)
+    )
 
     def release():
         if release_error:
@@ -806,7 +812,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
             renderer.clear_mm_cache, executor=executor
         )
         renderer.clear_mm_cache_async = partial(
-            BaseRenderer.clear_mm_cache_async, renderer
+            BaseRenderer.clear_mm_cache_async, cast(BaseRenderer, renderer)
         )
         engine = SimpleNamespace(
             renderer=renderer,
@@ -819,9 +825,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
         async def call_release():
             if use_async:
-                await AsyncLLM.release_kv_cache_memory(engine)
+                await AsyncLLM.release_kv_cache_memory(cast(AsyncLLM, engine))
             else:
-                LLMEngine.release_kv_cache_memory(engine)
+                LLMEngine.release_kv_cache_memory(cast(LLMEngine, engine))
 
         if release_error:
             with pytest.raises(RuntimeError, match=release_error):
