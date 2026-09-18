@@ -29,7 +29,6 @@ from packaging.version import Version
 from transformers.utils.generic import ModelOutput
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
-from vllm.config.multimodal import AudioDummyOptions, VideoDummyOptions
 from vllm.config.utils import getattr_iter
 from vllm.inputs import (
     MultiModalDataBuiltins,
@@ -78,7 +77,7 @@ if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
 
     from vllm.config import VllmConfig
-    from vllm.config.multimodal import BaseDummyOptions
+    from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
     from vllm.multimodal.inputs import VideoItem
 
 logger = init_logger(__name__)
@@ -346,7 +345,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, "BaseDummyOptions"],
+        mm_options: "MultiModalDummyOptions",
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
@@ -355,21 +354,16 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
             if chunk_length is None:
                 chunk_length = 30
-            audio_len = int(chunk_length * sampling_rate)
-            audio_overrides = mm_options.get("audio")
-            assert audio_overrides is None or isinstance(
-                audio_overrides, AudioDummyOptions
-            )
             data["audio"] = self._get_dummy_audios(
-                length=audio_len,
+                length=int(chunk_length * sampling_rate),
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio"),
             )
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
-            target_width, target_height = self.info.get_image_size_with_most_features()
+            width, height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=width,
+                height=height,
                 num_images=num_images,
                 overrides=mm_options.get("image"),
             )
@@ -378,16 +372,12 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             target_width, target_height = self.info.get_video_size_with_most_features(
                 num_frames
             )
-            video_overrides = mm_options.get("video")
-            assert video_overrides is None or isinstance(
-                video_overrides, VideoDummyOptions
-            )
             data["video"] = self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=num_frames,
                 num_videos=num_videos,
-                overrides=video_overrides,
+                overrides=mm_options.get("video"),
             )
         return data
 
@@ -398,7 +388,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         height: int,
         num_frames: int,
         num_videos: int,
-        overrides: VideoDummyOptions | None = None,
+        overrides: "VideoDummyOptions | None" = None,
     ) -> list["VideoItem"]:
         """Attach the metadata the parser requires to each dummy video.
 
