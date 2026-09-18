@@ -13,6 +13,8 @@ from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningPar
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
+    flush_open_body,
+    has_complete_channel,
     open_recipient,
     visible_channels,
 )
@@ -177,9 +179,15 @@ class MuseGlimmerParser(DelegatingParser):
         if not isinstance(tool_parser, MuseGlimmerToolParser):
             return delta_message
 
-        content, reasoning, _content_open, _reasoning_open = visible_channels(
-            state.previous_text, flush_growing=True
-        )
+        if not has_complete_channel(state.previous_text):
+            # The streaming fallback held these tails back; flush them now.
+            # This also recovers text the streaming side held while a stray
+            # marker (e.g. a quoted `<|start|>`) never completed a header.
+            content, reasoning = flush_open_body(state.previous_text), ""
+        else:
+            content, reasoning, _content_open, _reasoning_open = visible_channels(
+                state.previous_text, flush_growing=True
+            )
         content_remainder, emitted_content = advance_emitted(
             tool_parser._emitted_content, content
         )

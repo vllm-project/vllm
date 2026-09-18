@@ -184,6 +184,22 @@ def safe_open_body(body: str) -> str:
         body = trimmed
 
 
+def safe_unframed_tail(text: str) -> str:
+    """Trailing holdback for text with no channel framing yet.
+
+    Never emit a tail that could still grow into a bare header: a trailing
+    whitespace run may precede `to=…`, and the first header of a turn needs
+    no preceding whitespace, so a whole-buffer `to=…` fragment is held too.
+    """
+    body = safe_open_body(text)
+    tail = re.search(r"\s+$", body)
+    if tail is not None:
+        body = body[: tail.start()]
+    if re.fullmatch(rf"(?:t|to|to={_RECIPIENT_PARTIAL})", body) is not None:
+        return ""
+    return body
+
+
 def flush_open_body(body: str) -> str:
     """Trim trailing framing from a finished body.
 
@@ -206,13 +222,17 @@ def flush_open_body(body: str) -> str:
 
 
 def has_channel_framing(text: str) -> bool:
-    """Whether the text contains channel framing or a possible start of it."""
-    return (
-        MSG_HEADER_RE.search(text) is not None
-        or "<|start|>" in text
-        or FUNCTION_CALLS_OPEN in text
-        or "<atem:invoke" in text
-    )
+    """Whether the text contains channel framing or a possible start of it.
+
+    ATEM markup alone does not count: a bare ``<atem:…`` block with no header
+    is quoted text (the parser never scans headerless markup).
+    """
+    return MSG_HEADER_RE.search(text) is not None or "<|start|>" in text
+
+
+def has_complete_channel(text: str) -> bool:
+    """Whether the text contains at least one complete channel header."""
+    return next(iter_messages(text), None) is not None
 
 
 def visible_channels(

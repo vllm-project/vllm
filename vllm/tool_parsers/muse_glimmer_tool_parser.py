@@ -75,6 +75,7 @@ from vllm.reasoning.muse_glimmer_utils import (
     has_channel_framing,
     iter_messages,
     safe_open_body,
+    safe_unframed_tail,
     visible_channels,
 )
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -357,9 +358,7 @@ class MuseGlimmerToolParser(ToolParser):
             # No channel framing anywhere (e.g. a grammar-constrained answer
             # that never opened a channel): stream the text as plain content,
             # mirroring the non-streaming unframed fallback.
-            content = safe_open_body(current_text)
-            # A trailing whitespace run may still precede a `to=…` header.
-            content = content.rstrip()
+            content = safe_unframed_tail(current_text)
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )

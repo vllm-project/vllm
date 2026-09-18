@@ -791,6 +791,41 @@ def test_muse_kimi_mixed_pairing_rejected(tokenizer):
         )(tokenizer)
 
 
+def test_unframed_to_framed_transition_loses_nothing(tokenizer):
+    # A header arriving in pieces (no leading space, so the first delta is a
+    # bare `to`) must not wedge the content cursor: once framing completes,
+    # the answer streams normally.
+    reasoning, content, tools = drive_tokenwise(
+        tokenizer,
+        "to=self<|message|>think<|eom|>to=user<|message|>the answer<|eot|>",
+    )
+    assert reasoning == "think"
+    assert content == "the answer"
+    assert tools == []
+
+
+def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):
+    # Quoted framing in unframed (e.g. grammar-shaped JSON) text stalls the
+    # stream while it might be a header, then flushes whole at finish.
+    text = '{"doc": "use <|start|>assistant to begin", "ok": true}'
+    for with_tool_parser in (True, False):
+        reasoning, content, tools = drive_tokenwise(
+            tokenizer, text, with_tool_parser=with_tool_parser
+        )
+        assert reasoning == ""
+        assert content == text
+        assert tools == []
+
+
+def test_unframed_stream_flushes_held_tails_at_finish(tokenizer):
+    # The unframed fallback holds back ` to=…` fragments and trailing
+    # whitespace; they flush at finish.
+    reasoning, content, tools = drive_tokenwise(tokenizer, "The answer is 42. to=")
+    assert reasoning == ""
+    assert content == "The answer is 42. to="
+    assert tools == []
+
+
 def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,

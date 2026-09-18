@@ -120,13 +120,22 @@ class ParserManager:
             return HarmonyParser
 
         # MuseGlimmer first: the composite validates its parser pairing, so a
-        # muse_glimmer-involving mix must never reach the other composites.
-        if (
-            reasoning_parser_name == "muse_glimmer"
-            or tool_parser_name == "muse_glimmer"
-        ):
-            from vllm.parser.muse_glimmer import MuseGlimmerParser
+        # muse-involving mix must never reach the other composites. Test the
+        # resolved classes, not the names: with auto tools off the tool parser
+        # resolves to None and there is nothing to pair.
+        from vllm.parser.muse_glimmer import MuseGlimmerParser
+        from vllm.reasoning.muse_glimmer_reasoning_parser import (
+            MuseGlimmerReasoningParser,
+        )
+        from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
+        if (
+            reasoning_parser_cls is not None
+            and issubclass(reasoning_parser_cls, MuseGlimmerReasoningParser)
+        ) or (
+            tool_parser_cls is not None
+            and issubclass(tool_parser_cls, MuseGlimmerToolParser)
+        ):
             r_cls = reasoning_parser_cls
             t_cls = tool_parser_cls
 

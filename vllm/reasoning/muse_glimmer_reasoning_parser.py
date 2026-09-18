@@ -13,9 +13,12 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
+    flush_open_body,
     has_channel_framing,
+    has_complete_channel,
     open_recipient,
     safe_open_body,
+    safe_unframed_tail,
     visible_channels,
 )
 
@@ -83,8 +86,18 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> str | None:
         """Promote any unstreamed answer body when generation is truncated."""
+        seeded = self._seeded_text(previous_text)
+        if not has_complete_channel(seeded):
+            # The streaming fallback held these tails back; flush them now.
+            # This also recovers text the streaming side held while a stray
+            # marker (e.g. a quoted `<|start|>`) never completed a header.
+            content = flush_open_body(seeded)
+            remainder, self._emitted_content = advance_emitted(
+                self._emitted_content, content
+            )
+            return remainder or None
         content, _reasoning, _content_open, _reasoning_open = visible_channels(
-            self._seeded_text(previous_text), flush_growing=True
+            seeded, flush_growing=True
         )
         remainder, self._emitted_content = advance_emitted(
             self._emitted_content, content
@@ -129,9 +142,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             # No channel framing anywhere (e.g. a grammar-constrained answer
             # that never opened a channel): stream the text as plain content,
             # mirroring the non-streaming unframed fallback.
-            content = safe_open_body(seeded)
-            # A trailing whitespace run may still precede a `to=…` header.
-            content = content.rstrip()
+            content = safe_unframed_tail(seeded)
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
             )
