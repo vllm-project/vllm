@@ -934,6 +934,22 @@ class ROCMAiterMLASparseImpl(
                 )
             )
 
+        # HiSparse points attention at a view over the whole multi-layer KV
+        # slab, so its row indices scale with the total block count. AITER's ASM
+        # sparse decode kernel addresses KV with a 32-bit byte offset from the
+        # cache base and wraps silently past 4 GiB, answering with near-zero
+        # attention rather than failing; the Triton ragged kernel indexes rows
+        # in int64. HiSparse therefore always takes the Triton path, which is
+        # what lets the GPU pool be sized by memory rather than by int32.
+        self.use_hisparse_triton_attn = isinstance(
+            self.index_group, HiSparseMLAIndexGroup
+        )
+        if self.use_hisparse_triton_attn:
+            logger.info_once(
+                "HiSparse: routing sparse MLA attention through the int64-safe "
+                "Triton ragged kernel."
+            )
+
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -984,14 +1000,18 @@ class ROCMAiterMLASparseImpl(
             )
         )
 
-        if triton_sink_fallback or _use_rocm_sparse_triton(
-            kv_cache_dtype=self.kv_cache_dtype,
-            head_size=q.shape[-1],
-            kv_lora_rank=self.kv_lora_rank,
-            num_prefills=source.num_prefills,
-            num_decodes=source.num_decodes,
-            num_decode_tokens=source.num_decode_tokens,
-            max_query_len=source.max_query_len,
+        if (
+            self.use_hisparse_triton_attn
+            or triton_sink_fallback
+            or _use_rocm_sparse_triton(
+                kv_cache_dtype=self.kv_cache_dtype,
+                head_size=q.shape[-1],
+                kv_lora_rank=self.kv_lora_rank,
+                num_prefills=source.num_prefills,
+                num_decodes=source.num_decodes,
+                num_decode_tokens=source.num_decode_tokens,
+                max_query_len=source.max_query_len,
+            )
         ):
             output = torch.empty(
                 [num_tokens, q.shape[1], self.kv_lora_rank],
@@ -1018,6 +1038,7 @@ class ROCMAiterMLASparseImpl(
                 output=output,
                 ragged_indices=source.paged_kv_indices,
                 ragged_indptr=source.paged_kv_indptr,
+                allow_aiter_opus=not self.use_hisparse_triton_attn,
             )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
