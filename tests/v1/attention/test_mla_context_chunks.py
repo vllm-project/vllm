@@ -353,3 +353,67 @@ def test_chunked_context_metadata_owns_context_lengths():
     context_lens.zero_()
     assert metadata is not None
     assert metadata.context_lens.tolist() == [16, 32]
+
+
+def test_cached_context_lora_uses_chunk_request_offset(monkeypatch):
+    from vllm.model_executor.layers.attention import mla_attention
+
+    metadata = build_chunked_context([0, 2, 2, 2], [1, 1, 1, 1], 4, block_size=1)
+    assert metadata is not None
+    assert [chunk.request_slice for chunk in metadata.chunks] == [
+        slice(1, 3),
+        slice(3, 4),
+    ]
+    observed_mappings = []
+
+    def gather_context(**kwargs):
+        kwargs["dst"].fill_(1)
+
+    def apply_lora(inputs, output, mapping):
+        observed_mappings.append(mapping.tolist())
+        scales = torch.tensor([10.0, 20.0])[mapping.clamp_min(0)]
+        scales = torch.where(mapping >= 0, scales, 0)
+        output.add_(inputs.view(-1, 1, 1) * scales.view(-1, 1, 1))
+
+    def run_context(chunk, q, k, v):
+        torch.testing.assert_close(k, v)
+        return v[chunk.cu_seq_lens[:-1].long()], torch.zeros(1, q.shape[0])
+
+    monkeypatch.setattr(mla_attention.current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        mla_attention.ops, "gather_mla_context_cache_cpu", gather_context
+    )
+
+    class Projection(torch.nn.Linear):
+        def forward(self, inputs):
+            return super().forward(inputs), None
+
+    projection = Projection(1, 2, bias=False)
+    torch.nn.init.ones_(projection.weight)
+    impl = SimpleNamespace(
+        kv_b_proj=projection,
+        kv_cache_dtype="auto",
+        kv_lora_rank=1,
+        num_heads=1,
+        qk_nope_head_dim=1,
+        v_head_dim=1,
+        _concat_k_nope_k_pe=lambda k, pe: k,
+    )
+    prefill = SimpleNamespace(
+        q_data_type=torch.float32,
+        chunked_context=metadata,
+        block_table=torch.zeros(4, 1, dtype=torch.int32),
+        prefill_backend=SimpleNamespace(run_prefill_context_chunk=run_context),
+    )
+    output, _ = mla_attention.MLACommonBaseImpl._compute_prefill_context(
+        impl,
+        torch.ones(4, 1, 1),
+        torch.empty(0),
+        SimpleNamespace(prefill=prefill),
+        torch.tensor(1.0),
+        SimpleNamespace(apply_mla_kv_b_lora_linear=apply_lora),
+        torch.tensor([1, 0, 1, -1]),
+    )
+
+    assert observed_mappings == [[0, 0, 1, 1], [-1, -1]]
+    torch.testing.assert_close(output[:, 0, 0], torch.tensor([0.0, 11.0, 21.0, 1.0]))
