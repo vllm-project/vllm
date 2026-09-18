@@ -16,7 +16,6 @@ from tests.watermarking.golden_candidates import (
     GOLDEN_FLOAT_RTOL,
     MAX_HISTORY_TWINS,
     PROMPT_TWINS,
-    REGENERATE_COMMAND,
     SKIP_PARTIAL_TWINS,
     WATERMARK_CONFIG_SPECS,
     WATERMARKING_CANDIDATES,
@@ -55,7 +54,7 @@ def test_goldens_cover_every_candidate(
     candidate_ids = set(CANDIDATES_BY_ID)
 
     assert len(candidate_ids) == len(WATERMARKING_CANDIDATES)
-    assert set(goldens) == candidate_ids, f"Run `{REGENERATE_COMMAND}`"
+    assert set(goldens) == candidate_ids, "golden contract does not match candidates"
     candidate_combinations = {
         (candidate.scheme, candidate.prf) for candidate in WATERMARKING_CANDIDATES
     }
@@ -104,7 +103,6 @@ def test_watermarking_candidate_golden(
             f"{candidate.id}: golden drift "
             f"(tolerance {GOLDEN_FLOAT_RTOL:g} on score and p_value)",
             *differences,
-            f"Regenerate with `{REGENERATE_COMMAND}`",
         ]
     )
 
@@ -196,7 +194,6 @@ def test_loader_rejects_bad_payloads(raw_payload, corrupt, expected):
         load_goldens(payload, source="goldens")
 
     message = str(error.value)
-    assert REGENERATE_COMMAND in message
     for fragment in expected:
         assert fragment in message
     if corrupt not in (_set_schema_version, _schema_1_payload):
@@ -218,4 +215,3 @@ def test_loader_rejects_duplicate_keys(tmp_path):
     assert str(path) in message
     assert "schema_version" in message
     assert "more than once" in message
-    assert REGENERATE_COMMAND in message

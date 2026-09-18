@@ -10,16 +10,22 @@ the detector skips it too; one skipped because its context is still partial is a
 stand-in the detector does score; and a generation-side `max_history` limit
 makes the detector skip positions that were watermarked.
 
-## Regenerating
+## Updating the contract
+
+A failing golden is a backwards-compatibility break to investigate. Do not
+regenerate the snapshot merely to make the test pass.
+
+When an intentional, reviewed protocol change requires a new contract, rebuild
+the snapshot from the repository root:
 
 ```bash
 python -m tests.watermarking.generate_goldens
 ```
 
-Run it from the repository root. `--check` regenerates in memory, prints every
-differing field and exits 1 without writing; `--candidate ID` regenerates only
-the named ids. Never hand-edit the JSON. The `environment` block records Python,
-torch, platform and CPU capability, and is never compared.
+`--check` evaluates the current implementation in memory, prints every differing
+field and exits 1 without writing; `--candidate ID` updates only the named ids.
+Never hand-edit the JSON. The `environment` block records Python, torch, platform
+and CPU capability, and is never compared.
 
 ## Comparison policy
 
@@ -51,10 +57,21 @@ two near-threshold rows, near means 0.5 to 0.9 of the row's own
 `p_value_threshold`, the knob they set, since it cannot move the p-value. Prompt
 tokens only enter the deduplication history, never a context.
 
-## Not covered
+## Integration boundary
 
-The speculative-decoding draft and target schedule, deferred to the watermarking
-hardening tracker (#56105), and GPU kernels, covered by the parity tests.
+The goldens exercise the real `WatermarkConfig`, watermarker and PRF factories,
+CPU watermarker implementations, CPU repeated-context mask, and detector math.
+They supply deterministic logits, contexts, ordinary samples and dual-key routing
+directly. For independent drift attribution, pytest scores the stored token ids
+rather than feeding a newly generated sequence into the detector.
+
+They do not instantiate the model runner or `GPUWatermarkSampler`, and therefore
+do not cover model logits, top-k/top-p and temperature processing, request/batch
+state, tokenizer or text round trips, CUDA kernels, distributed execution, or the
+fresh-generation-to-detection coupling and speculative-decoding
+draft/accept/recovery/bonus schedule. Those boundaries need sampler/kernel parity
+tests and engine-level smoke or evaluation coverage; they should not be folded
+into exact model-output goldens.
 
 ## Files
 

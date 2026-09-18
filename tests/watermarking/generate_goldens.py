@@ -98,7 +98,6 @@ def _check() -> int:
 
     if differences:
         print("\n".join(differences))
-        print(f"Regenerate with `{REGENERATE_COMMAND}`")
         return 1
     print(f"{len(stored)} candidates reproduce {GOLDENS_PATH}")
     return 0
