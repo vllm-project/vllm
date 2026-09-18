@@ -189,18 +189,16 @@ def test_workspace_shapes_no_mul_vs_gated():
         quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 
-    ws1_no_mul, ws2_no_mul, out_no_mul = experts.workspace_shapes(
-        M, N, K, topk, 8, 8, None, MoEActivation.SILU_NO_MUL
-    )
-
-    ws1_gated, ws2_gated, out_gated = experts.workspace_shapes(
-        M, N, K, topk, 8, 8, None, MoEActivation.SILU
-    )
-
-    assert ws1_no_mul == (M, topk, max(N, K))
-    assert ws1_gated == (M, topk, max(N // 2, K))
-    assert ws2_no_mul == ws2_gated == (M, topk, max(N, K))
-    assert out_no_mul == out_gated == (M, K)
+    for activation, width in (
+        (MoEActivation.SILU_NO_MUL, N),
+        (MoEActivation.SILU, N // 2),
+    ):
+        ws1, ws2, output = experts.workspace_shapes(
+            M, N, K, topk, 8, 8, None, activation
+        )
+        assert ws1 == (M, topk, max(width, K))
+        assert ws2 == (M, topk, max(N, K))
+        assert output == (M, K)
 
 
 @torch.inference_mode()
