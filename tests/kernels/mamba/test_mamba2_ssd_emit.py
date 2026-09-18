@@ -210,10 +210,10 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
     """
     from vllm.model_executor.layers.mamba.exact_replay import (
         ExactReplayBuffers,
+        build_exact_replay_metadata,
         exact_replay_emit,
         exact_replay_ssd,
     )
-    from vllm.v1.attention.backends.mamba2_attn import build_exact_replay_metadata
 
     torch.manual_seed(seed)
     device = torch.device(DEVICE)

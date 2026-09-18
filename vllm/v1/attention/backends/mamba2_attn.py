@@ -146,6 +146,20 @@ class Mamba2AttentionBackend(AttentionBackend):
             raise ValueError(f"{prefix} does not support KV connectors")
 
 
+def exact_replay_decode_positions(
+    seq_lens: torch.Tensor, chunk_size: int, out: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Position of each decode row's token inside its partial chunk.
+
+    A decode row has one token, so its computed token count is the sequence
+    length minus one (exact without speculative decoding, which batch-invariant
+    mode rejects). CUDA graph padding rows have sequence length 0 and get
+    position 0 so that they never look like a completed chunk.
+    """
+    pos = torch.remainder(seq_lens - 1, chunk_size, out=out)
+    return pos.masked_fill_(seq_lens <= 0, 0)
+
+
 @dataclass
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     prep_initial_states: bool = False

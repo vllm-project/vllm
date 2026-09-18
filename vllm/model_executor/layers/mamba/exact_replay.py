@@ -342,8 +342,13 @@ def exact_replay_emit(
     a CUDA graph and padded rows are harmless.
 
     Args:
-        x, dt, B, C: ``(num_rows, ...)`` inputs of this step's tokens.
-        A, D, dt_bias: per-head parameters as in :func:`exact_replay_ssd`.
+        x: ``(num_rows, nheads, head_dim)`` inputs of this step's tokens.
+        dt: ``(num_rows, nheads)`` raw dt of this step's tokens.
+        B: ``(num_rows, ngroups, dstate)`` of this step's tokens.
+        C: ``(num_rows, ngroups, dstate)`` of this step's tokens.
+        A: per-head parameter as in :func:`exact_replay_ssd`.
+        D: per-head parameter as in :func:`exact_replay_ssd`.
+        dt_bias: per-head parameter as in :func:`exact_replay_ssd`.
         out: ``(num_rows, nheads, head_dim)`` preallocated output.
         ssm_state: the fp32 SSM cache.
         slots: ``(num_rows,)`` int32 state slot of each row.
@@ -351,6 +356,7 @@ def exact_replay_emit(
             partial chunk, i.e. its computed token count modulo ``chunk_size``.
         chunk_size: the model's SSD chunk size.
         buffers: the partial-chunk input buffers.
+
     """
     num_rows, nheads, _ = x.shape
     ngroups = B.shape[1]
