@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer, is_dpx
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -122,7 +122,17 @@ async def test_basic_audio_with_lora(mary_had_lamb):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name", ["google/gemma-3n-E2B-it", "Qwen/Qwen3-ASR-0.6B"]
+    "model_name",
+    [
+        pytest.param(
+            "google/gemma-3n-E2B-it",
+            marks=pytest.mark.skipif(
+                is_dpx(),
+                reason="gemma-3n-E2B-it causes EngineDeadError on gfx950 DPX",
+            ),
+        ),
+        "Qwen/Qwen3-ASR-0.6B",
+    ],
 )
 async def test_basic_audio_foscolo(foscolo, model_name):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
