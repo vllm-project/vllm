@@ -12,6 +12,7 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -192,6 +193,56 @@ class GemmaRMSNorm(CustomOp):
             out, x, self.weight.data, self.variance_epsilon
         )
         return out
+
+
+def rms_norm_add_rms_norm(
+    post_norm: RMSNorm | GemmaRMSNorm,
+    pre_norm: RMSNorm | GemmaRMSNorm,
+    x: torch.Tensor,
+    residual: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Residual boundary of post-norm architectures as one op.
+
+    Equivalent to::
+
+        x = post_norm(x)
+        return pre_norm(x, residual)  # (pre_norm(x + residual), x + residual)
+
+    but issued as the single IR op `rms_norm_add_rms_norm`, whose fused
+    implementations save a launch and a memory round trip per boundary.
+    Falls back to the two-module sequence whenever the modules use features
+    the fused op does not model (variance-size override, weightless norms,
+    batch-invariant mode) or when the platform routes the norms through
+    out-of-tree implementations.
+    """
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        or not current_platform.is_cuda_alike()
+        or post_norm.variance_epsilon != pre_norm.variance_epsilon
+        or not _fusable_norm(post_norm)
+        or not _fusable_norm(pre_norm)
+    ):
+        x = post_norm(x)
+        return pre_norm(x, residual)
+    return ir.ops.rms_norm_add_rms_norm(
+        x,
+        residual,
+        _ir_norm_weight(post_norm),
+        _ir_norm_weight(pre_norm),
+        post_norm.variance_epsilon,
+    )
+
+
+def _fusable_norm(norm: RMSNorm | GemmaRMSNorm) -> bool:
+    if isinstance(norm, GemmaRMSNorm):
+        return True
+    return isinstance(norm, RMSNorm) and norm.variance_size_override is None
+
+
+def _ir_norm_weight(norm: RMSNorm | GemmaRMSNorm) -> torch.Tensor | None:
+    if isinstance(norm, GemmaRMSNorm):
+        return norm.weight.float() + 1.0
+    return norm.weight.data if norm.has_weight else None
 
 
 # --8<-- [start:rms_norm_gated]

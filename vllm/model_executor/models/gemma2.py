@@ -29,7 +29,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, rms_norm_add_rms_norm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -236,10 +236,11 @@ class Gemma2DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-
-        hidden_states, residual = self.pre_feedforward_layernorm(
-            hidden_states, residual
+        hidden_states, residual = rms_norm_add_rms_norm(
+            self.post_attention_layernorm,
+            self.pre_feedforward_layernorm,
+            hidden_states,
+            residual,
         )
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
