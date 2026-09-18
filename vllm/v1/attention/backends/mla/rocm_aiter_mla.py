@@ -162,6 +162,22 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _asm_persistent_mla_heads16_qlen8_supported() -> bool:
+    """Whether persistent bf16 MLA decode serves (gqa>=16, qlen>4).
+
+    The persistent bf16 manifest stops at qSeqLen 4 for gqa 16; qlen 8 is only
+    reachable through the q-row fold onto the (gqa 32, qseqlen 4) kernel,
+    which gfx950 ships and gfx942 does not. On gfx942 the non-persistent
+    (gqa 16, qseqlen 8) entry exists and covers the case instead (#55609).
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    return on_gfx950()
+
+
+@functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
@@ -1144,9 +1160,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # not have, and the schedule is the only thing carrying its mask.
             and (
                 not causal
-                or self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
                 or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
+                or (
+                    self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+                    and _asm_persistent_mla_heads16_qlen8_supported()
+                )
             )
             and max_qo_len >= 1
             and max_qo_len <= self._mtp_decode_qlen
