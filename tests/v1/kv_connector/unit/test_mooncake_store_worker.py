@@ -1327,15 +1327,17 @@ def test_eagle_swa_boundary_uses_physical_block_margin(
     completed_token_len: int, writes_swa_proof: bool
 ):
     store = MagicMock()
+    # Keep boundary and normal puts observable when their keys overlap.
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_eagle_swa_boundary_send_thread(store)
-    thread._saved_offset["req-a"] = 32
+    # Leave one normal block before B so both cases exercise the normal save.
+    thread._saved_offset["req-a"] = 16
 
     hs = [bytes([i + 1]) * 4 for i in range(12)]
     req = ReqMeta(
         req_id="req-a",
-        token_len_chunk=0,
+        token_len_chunk=completed_token_len,
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
@@ -1343,18 +1345,29 @@ def test_eagle_swa_boundary_uses_physical_block_margin(
         completed_token_len=completed_token_len,
         boundary_state_offloads=[(1, 7, 32)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    _run_store_req(thread, req)
 
-    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     db_swa, db_mamba = thread.token_databases
     mamba_put = (db_mamba.key_for(BlockHash(hs[7])), [0x2000 + 7 * 256])
+    put_calls = store.batch_put_from_multi_buffers.call_args_list
+    assert len(put_calls) == 2
+    boundary_keys, boundary_addrs, _sizes, _ = put_calls[0].args
     if writes_swa_proof:
-        assert list(zip(keys, addrs, strict=True)) == [
+        assert list(zip(boundary_keys, boundary_addrs, strict=True)) == [
+            (db_swa.key_for(BlockHash(hs[7])), [0x1000 + 2 * 256]),
             (db_swa.key_for(BlockHash(hs[11])), [0x1000 + 3 * 256]),
             mamba_put,
         ]
     else:
-        assert list(zip(keys, addrs, strict=True)) == [mamba_put]
+        assert list(zip(boundary_keys, boundary_addrs, strict=True)) == [mamba_put]
+
+    normal_keys, normal_addrs, _sizes, _ = put_calls[1].args
+    expected_normal_puts = [(db_swa.key_for(BlockHash(hs[7])), [0x1000 + 2 * 256])]
+    if writes_swa_proof:
+        expected_normal_puts.append(
+            (db_swa.key_for(BlockHash(hs[11])), [0x1000 + 3 * 256])
+        )
+    assert list(zip(normal_keys, normal_addrs, strict=True)) == expected_normal_puts
 
 
 def test_multiple_eagle_boundaries_deduplicate_attention_puts():
