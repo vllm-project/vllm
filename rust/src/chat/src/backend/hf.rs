@@ -134,6 +134,7 @@ impl ChatBackend for HfChatBackend {
             self.tokenizer.clone(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -343,6 +344,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
+                tool_strict_level: crate::ToolStrictLevel::Auto,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },
