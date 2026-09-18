@@ -209,6 +209,7 @@ def candidate_blocks_to_sparse_indices(
             ``i * sparse_block_kv + ks % sparse_block_kv``.
         end: [rows] int32 count of valid sparse-token columns; valid columns
             always form a prefix because the block ids are sorted.
+
     """
     rows, num_candidates = candidate_blocks.shape
     ratio = candidate_block_size // sparse_block_kv
@@ -273,8 +274,17 @@ def sparse_topk_remap(
     count come back as -1.
 
     Args:
+        logits: [rows, width] bf16 sparse logits, as produced by the sparse
+            kernels.
+        sparse_indices: [rows, S] int32 sparse block ids backing ``logits``.
+        end: [rows] int32 per-row count of valid logit columns.
+        row_ks: [rows] int32 per-row K range start.
+        sparse_block_kv: Positions per sparse block (8 or 16).
+        topk_tokens: Number of tokens to keep per row.
+        topk_indices: [rows, topk_tokens] int32 output buffer.
         col_indices: [rows, topk_tokens] int32 scratch for the sparse-column
             top-k result (row stride 32B-aligned for DeepSelect).
+
     """
     rows, width = logits.shape
     assert logits.dtype == torch.bfloat16 and width >= topk_tokens
@@ -329,6 +339,9 @@ def sparse_mqa_logits_prefill_chunk(
         cu_seqlen_ke: [rows] int32 per-token K end bounds in the packed
             workspace.
         candidate_blocks: [rows, K] int32 request-local candidate block ids.
+        candidate_block_size: Positions per candidate block.
+        sparse_block_kv: Positions per sparse block (8 or 16).
+        topk_tokens: Number of tokens to keep per row.
         topk_indices: [rows, topk_tokens] output buffer.
         sparse_indices: Caller-owned scratch, see
             `candidate_blocks_to_sparse_indices`.
@@ -341,6 +354,7 @@ def sparse_mqa_logits_prefill_chunk(
 
     Returns:
         The DeepGEMM schedule metadata used, for reuse by later layers.
+
     """
     assert weights.dtype == torch.bfloat16, weights.dtype
     if kernel_metadata is None:
@@ -417,6 +431,9 @@ def sparse_mqa_logits_paged_decode(
         row_indices: [rows] int32 row -> request map (pairing only affects
             scheduling).
         candidate_blocks: [rows, K] int32 candidate block ids.
+        candidate_block_size: Positions per candidate block.
+        sparse_block_kv: Positions per sparse block (8 or 16).
+        topk_tokens: Number of tokens to keep per row.
         topk_indices: [rows, topk_tokens] output buffer.
         row_ks: [rows] int32 zeros (paged blocks are context-relative).
         sparse_indices: Caller-owned scratch.
@@ -426,6 +443,7 @@ def sparse_mqa_logits_paged_decode(
 
     Returns:
         The DeepGEMM schedule metadata used, for reuse by later layers.
+
     """
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]

@@ -15,11 +15,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -46,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
 from vllm.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
@@ -275,14 +272,14 @@ class MiMoVisionAttention(nn.Module):
         max_seqlen: torch.Tensor,
         full_attn: bool = True,
     ) -> torch.Tensor:
-        """
-        Args:
-            x: [seq_len, batch=1, embed_dim]  (seq-first convention)
-            cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
-            rotary_pos_emb_cos: [seq_len, qk_channels // 2]
-            rotary_pos_emb_sin: [seq_len, qk_channels // 2]
-            max_seqlen: maximum sequence length
-            full_attn: if True, full attention; if False, window attention
+        """Args:
+        x: [seq_len, batch=1, embed_dim]  (seq-first convention)
+        cu_seqlens: cumulative sequence lengths [num_seqs+1], int32
+        rotary_pos_emb_cos: [seq_len, qk_channels // 2]
+        rotary_pos_emb_sin: [seq_len, qk_channels // 2]
+        max_seqlen: maximum sequence length
+        full_attn: if True, full attention; if False, window attention
+
         """
         # [seq_len, 1, embed_dim] -> QKV projection
         qkv, _ = self.qkv(x)  # [seq_len, 1, q_size + kv_size + kv_size]
@@ -531,6 +528,7 @@ class MiMoVisionTransformer(nn.Module):
         Returns:
             cos: [total_tokens, qk_channels // 2]
             sin: [total_tokens, qk_channels // 2]
+
         """
         cos_list, sin_list = [], []
         for i in range(grid_thw.size(0)):
@@ -576,12 +574,12 @@ class MiMoVisionTransformer(nn.Module):
         return torch.cat(cos_list, dim=0), torch.cat(sin_list, dim=0)
 
     def forward(self, x: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x: [total_tokens, C] pre-flattened patches
             grid_thw: [num_images, 3] tensor of (t, h, w) for each image/video
         Returns:
             [merged_tokens, out_hidden_size]
+
         """
         # Ensure grid_thw is a tensor
         if not isinstance(grid_thw, torch.Tensor):
@@ -929,27 +927,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
-        Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
-        the singular form.
-        """
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        # Remap audios → audio (MiMoOmniProcessor uses singular param name)
-        if "audios" in mm_data:
-            mm_data = {**mm_data, "audio": mm_data["audios"]}
-            mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        mm_data = hf_inputs.hf_data
 
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
@@ -991,7 +976,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                             audio=va_item.audio,
                         )
                     )
-            mm_data = {**mm_data, "video_audio": va_converted}
+            mm_data["video_audio"] = va_converted
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -1025,15 +1010,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
                     converted.append((frames, timestamps))
 
-            mm_data = {**mm_data, "videos": converted}
+            mm_data["videos"] = converted
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            hf_processor_mm_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs
 
     def _get_prompt_updates(
         self,
@@ -1201,33 +1180,26 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1556,8 +1528,10 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-        """
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 

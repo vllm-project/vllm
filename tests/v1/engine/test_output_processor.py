@@ -73,6 +73,7 @@ def _ref_convert_id_to_token(
 
     Returns:
       String representation of input token id
+
     """
     return tokenizer.decode([token_id]) or ""
 
@@ -176,7 +177,8 @@ def test_incremental_detokenization(
 def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
-    which sees the KVs pulled from the remote prefill as a ~100% hit."""
+    which sees the KVs pulled from the remote prefill as a ~100% hit.
+    """
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -792,6 +794,7 @@ def test_stop_token(
         stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
+
     """
     model_id = dummy_test_vectors.tokenizer.name_or_path
     if model_id != "meta-llama/Llama-3.2-1B":

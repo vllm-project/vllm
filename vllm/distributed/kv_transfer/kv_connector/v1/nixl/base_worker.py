@@ -1147,8 +1147,7 @@ class NixlBaseConnectorWorker:
         return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """
-        Initialize transfer buffer in CPU mem for accelerators
+        """Initialize transfer buffer in CPU mem for accelerators
         NOT directly supported by NIXL (e.g., tpu)
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
@@ -1262,8 +1261,7 @@ class NixlBaseConnectorWorker:
         pp_size: int = 1,
         notif_agents_only: bool = False,
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
-        """
-        Ensure a handshake is in-flight (or already done) for *engine_id*.
+        """Ensure a handshake is in-flight (or already done) for *engine_id*.
 
         Returns the ``Future`` if a handshake is pending (or was just
         started), or ``None`` if the handshake already completed
@@ -1308,6 +1306,8 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        # Count once per handshake, regardless of waiting requests.
+                        self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
             return fut
@@ -1348,7 +1348,6 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
         self.transfer_topo = TransferTopology(
             tp_rank=self.transfer_tp_rank,
             tp_size=self.transfer_tp_size,
@@ -2034,8 +2033,7 @@ class NixlBaseConnectorWorker:
         self,
         block_size: int,
     ) -> tuple[int, np.ndarray]:
-        """
-        Function used for register local xfer handler with local block_size or
+        """Function used for register local xfer handler with local block_size or
         Remote block_size.
 
         When local block_size is same as remote block_size, we use local block_size
@@ -2124,8 +2122,7 @@ class NixlBaseConnectorWorker:
         remote_tp_size: int = 1,
         remote_dcp_size: int = 1,
     ) -> str:
-        """
-        Add the remote NIXL agent and prepare the descriptors for reading cache
+        """Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
 
         In particular, handle both homogeneous and heterogeneous TP. The former
@@ -2395,8 +2392,7 @@ class NixlBaseConnectorWorker:
         remote_tp_size: int,
         remote_dcp_size: int = 1,
     ):
-        """
-        Validate the remote agent handshake metadata ensuring the
+        """Validate the remote agent handshake metadata ensuring the
         invariants hold true.
         """
         remote_engine_id = nixl_agent_meta.engine_id
@@ -2607,7 +2603,7 @@ class NixlBaseConnectorWorker:
             assert len(nixl_agent_meta.region_mem_types) == num_remote_regions
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
-        """copy recved kv from host buffer to device."""
+        """Copy recved kv from host buffer to device."""
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
@@ -2632,7 +2628,7 @@ class NixlBaseConnectorWorker:
             )
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
-        """copy kv from device to host buffer."""
+        """Copy kv from device to host buffer."""
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
@@ -2681,8 +2677,7 @@ class NixlBaseConnectorWorker:
         block_ids_list: list[tuple[list[int], int]],
         convert: bool = True,
     ):
-        """
-        Post process device kv cache after receiving from remote.
+        """Post process device kv cache after receiving from remote.
 
         3 types of conversion supported (``convert``):
             * kv_cache_postprocess_layout => convert from HND to NHD
@@ -2771,8 +2766,7 @@ class NixlBaseConnectorWorker:
     def post_process_device_kv_on_receive_heterogeneous_attn(
         self, block_ids: list[int]
     ):
-        """
-        Post process device kv cache after receiving from remote
+        """Post process device kv cache after receiving from remote
         for heterogeneous attention.
         """
         assert self.enable_heterogeneous_attn_post_process
@@ -2785,9 +2779,27 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
+    def _zero_region_blocks(self, block_ids: BlockIds) -> None:
+        """Clear clipped physical pages in their owning region only."""
+        if not any(block_ids):
+            return
+        bases = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+        for region, blocks in enumerate(block_ids):
+            if not blocks:
+                continue
+            cache = self.device_kv_caches[self.region_names[region]]
+            storage = cache.untyped_storage()
+            pages = torch.empty(0, dtype=torch.uint8, device=cache.device).set_(
+                storage,
+                bases[region] - storage.data_ptr(),
+                (self.region_num_blocks[region], self.block_len_per_layer[region]),
+                (self.block_stride_per_layer[region], 1),
+            )
+            for block in blocks:
+                pages[block].zero_()
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
-        """
-        Get transfers that completed on this specific worker.
+        """Get transfers that completed on this specific worker.
 
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
@@ -2801,13 +2813,17 @@ class NixlBaseConnectorWorker:
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
 
-        # Process receive failures reported by background threads.
+        # Process receive failures reported by background threads. Each
+        # producer already recorded a specific metric (handshake or
+        # notification), so only the failure bookkeeping runs here.
         while not self._failed_recv_reqs.empty():
             try:
                 req_id = self._failed_recv_reqs.get_nowait()
             except queue.Empty:
                 break
-            self._handle_failed_transfer(req_id, None, self._recv_failures)
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
 
         failed_recv_reqs: set[ReqId] = set()
         if self._recv_failures:
@@ -2856,6 +2872,12 @@ class NixlBaseConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             direct_device_recving.add(req_id)
+
+            if meta.region_blocks_to_zero is not None:
+                # P/D group positions differ. Use the actual region read plan,
+                # including any local allocation padding the read did not cover.
+                self._zero_region_blocks(meta.region_blocks_to_zero)
+                continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -2959,6 +2981,7 @@ class NixlBaseConnectorWorker:
         Args:
             payload: comma-separated P-side request IDs, e.g.
                      "req_abc,req_def".
+
         """
         new_expiry = time.perf_counter() + self._lease_extension
         for req_id in payload.split(","):
@@ -2985,6 +3008,7 @@ class NixlBaseConnectorWorker:
         Returns:
             Requests with no outstanding handles and requests with observed
             failures. Failed requests may still have outstanding handles.
+
         """
         done_req_ids: set[str] = set()
         failed_req_ids: set[str] = set()
@@ -3041,10 +3065,27 @@ class NixlBaseConnectorWorker:
         return True
 
     def _handle_failed_transfer(
-        self, req_id: str, handle: int | None, failed_req_ids: set[str] | None = None
+        self,
+        req_id: str,
+        handle: int | None,
+        failed_req_ids: set[str] | None = None,
+        record_failed_transfer: bool = True,
     ) -> bool:
-        """Record a failure and release its handle, returning False to retain it."""
-        self.xfer_stats.record_failed_transfer()
+        """Record a failure and release its handle, returning False to retain it.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+            failed_req_ids: Requests observed as failed; each stays listed
+                until it has no outstanding handles.
+            record_failed_transfer: Whether to count the failure toward the
+                transport-failure metric. Callers that already recorded a more
+                specific metric (eg KV expiry, reported separately from
+                transport failures) pass False.
+
+        """
+        if record_failed_transfer:
+            self.xfer_stats.record_failed_transfer()
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
@@ -3066,9 +3107,7 @@ class NixlBaseConnectorWorker:
                 self.xfer_stats.record_failed_notification()
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
-        """
-        Send heartbeat notifications to remote engines, extending lease on KV blocks.
-        """
+        """Send heartbeats to remote engines, extending the lease on KV blocks."""
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
@@ -3101,8 +3140,7 @@ class NixlBaseConnectorWorker:
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
     ) -> np.ndarray:
-        """
-          Calculates the new set of block IDs by mapping every element
+        """Calculates the new set of block IDs by mapping every element
           in the (potentially sparse) input array.
           Example: block_ids=[0, 2], block_size_ratio=2
         get_mapped_blocks    0     1     [2     3]     4     5
@@ -3159,8 +3197,7 @@ class NixlBaseConnectorWorker:
         return mapped_local, mapped_remote
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds, ratio: int) -> BlockIds:
-        """
-        Convert block ids to kernel physical block ids.
+        """Convert block ids to kernel physical block ids.
         This is required when the logical block size (the one set by the user)
         does not match the one required by the attn backend.
         `ratio` is the number of physical blocks per logical block.
@@ -3214,6 +3251,7 @@ class NixlBaseConnectorWorker:
 
         An empty result (rank 0 above) takes the notification-only path, allowing the
         remote to release its blocks without performing a transfer.
+
         """
         local_size, remote_size = local_dcp_size, remote_dcp_size
 
@@ -3254,12 +3292,32 @@ class NixlBaseConnectorWorker:
 
     @staticmethod
     def _apply_prefix_caching_by_region(
-        decode_block_ids: BlockIds, prefill_block_ids: BlockIds
+        decode_block_ids: BlockIds,
+        prefill_block_ids: BlockIds,
+        *,
+        num_computed_blocks: list[int] | None = None,
+        num_remote_blocks: int | None = None,
     ) -> tuple[BlockIds, BlockIds]:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
+
+        if num_computed_blocks is not None:
+            assert num_remote_blocks is not None
+            matched_decode, matched_prefill = [], []
+            for decode_region, prefill_region, start in zip(
+                decode_block_ids, prefill_block_ids, num_computed_blocks, strict=True
+            ):
+                count = min(len(decode_region), max(num_remote_blocks - start, 0))
+                if start + count > len(prefill_region):
+                    raise ValueError("Remote KV pages do not cover the requested range")
+                # An extra producer page can be allocation padding, not a
+                # cached prefix. Select by token position instead of list length.
+                matched_decode.append(list(decode_region[:count]))
+                matched_prefill.append(list(prefill_region[start : start + count]))
+            return matched_decode, matched_prefill
 
         trimmed_prefill: list[list[int]] = []
         for decode_region, prefill_region in zip(
@@ -3373,17 +3431,14 @@ class NixlBaseConnectorWorker:
         return decode_block_ids, prefill_block_ids
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        """
-        Get the KV transfer stats for the connector.
-        """
+        """Get the KV transfer stats for the connector."""
         # Clear stats for next iteration
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
         return None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Return and clear the set of block IDs that failed to load.
+        """Return and clear the set of block IDs that failed to load.
 
         This is called by the scheduler to identify blocks that need
         to be retried after a NIXL transfer failure.
