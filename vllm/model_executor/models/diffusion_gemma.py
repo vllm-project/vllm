@@ -703,7 +703,8 @@ class DiffusionGemmaRequestStates:
         self.single_step_slots.discard(slot_idx)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
-        """``ids`` covers the slot's canvas width; positions past it are never scheduled."""
+        """``ids`` covers the slot's canvas width; positions past it are never
+        scheduled."""
         self.seed_canvas[slot_idx, : len(ids)] = async_tensor_h2d(
             ids, dtype=torch.int64, device=self.device
         )
@@ -1107,13 +1108,16 @@ class DiffusionSampler:
                 states.single_step_slots.add(req_idx)
         width = extra.get("diffusion_canvas_length")
         if width:
-            states.canvas_width_np[req_idx] = max(1, min(int(width), self.canvas_length))
+            states.canvas_width_np[req_idx] = max(
+                1, min(int(width), self.canvas_length)
+            )
         width = int(states.canvas_width_np[req_idx])
         seed = extra.get("diffusion_seed_canvas")
         if seed is not None:
             if len(seed) != width:
                 raise ValueError(
-                    f"diffusion_seed_canvas must hold exactly {width} ids, got {len(seed)}"
+                    f"diffusion_seed_canvas must hold exactly {width} ids, "
+                    f"got {len(seed)}"
                 )
             states.set_seed_canvas(req_idx, seed)
         if extra.get("diffusion_read_only"):
@@ -1284,7 +1288,9 @@ class DiffusionSampler:
 
         # Where each decode request's rows start in the flat logits. Tiles
         # below gather and pad a request to the tile's width.
-        row_starts_np = np.concatenate(([0], np.cumsum(valid_canvas_len_np)[:-1])).astype(np.int64)
+        row_starts_np = np.concatenate(
+            ([0], np.cumsum(valid_canvas_len_np)[:-1])
+        ).astype(np.int64)
         row_starts = async_tensor_h2d(row_starts_np, device=device)
 
         # Clear once: the tiled loop below only scatters its own decode slots,
@@ -1424,11 +1430,15 @@ class DiffusionSampler:
                                 num_logprobs,
                                 argmax_tokens[local_idx][:k_i],
                                 logprob_token_ids_state=(
-                                    self.logprob_token_ids_state if per_req_ids else None
+                                    self.logprob_token_ids_state
+                                    if per_req_ids
+                                    else None
                                 ),
                                 # every row of this stash belongs to one slot
                                 expanded_idx_mapping=(
-                                    torch.full((k_i,), slot, dtype=torch.int32, device=device)
+                                    torch.full(
+                                        (k_i,), slot, dtype=torch.int32, device=device
+                                    )
                                     if per_req_ids
                                     else None
                                 ),
@@ -1445,9 +1455,9 @@ class DiffusionSampler:
         ):
             # Read-only slots never enter the encoder phase, so the flag here
             # means converged this step.
-            ro_mask = states.read_only[decode_slots] & states.is_encoder_phase[
-                decode_slots
-            ]
+            ro_mask = (
+                states.read_only[decode_slots] & states.is_encoder_phase[decode_slots]
+            )
             if bool(ro_mask.any()):
                 ro_idx = decode_idx[ro_mask]
                 ro_slots = decode_slots[ro_mask]
@@ -1464,9 +1474,9 @@ class DiffusionSampler:
             and (emit_now or bool(is_committing.any()))
             and self._pending_logprobs
         ):
-            committing_slots = set(
-                decode_slots_np[is_committing.cpu().numpy()].tolist()
-            ) | emit_now
+            committing_slots = (
+                set(decode_slots_np[is_committing.cpu().numpy()].tolist()) | emit_now
+            )
             parts_ids, parts_lp, parts_ranks = [], [], []
             cu_gen: list[int] = []
             flat_offset = 0
