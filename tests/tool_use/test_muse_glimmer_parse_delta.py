@@ -339,6 +339,24 @@ def test_continued_user_channel_surfaces_clean_content_reasoning_only(tokenizer)
     assert tools == []
 
 
+def test_engine_seed_boundary_is_the_bare_reasoners(tokenizer):
+    # serving.py seeds the engine-side grammar from the BARE reasoner: its
+    # boundary (any non-self channel, incl. to=user) is wider than the
+    # composite's stream-ownership rule (tool-parser handoff only).
+    bare = MuseGlimmerReasoningParser(tokenizer)
+    composite = ParserManager.get_parser(
+        reasoning_parser_name="muse_glimmer",
+        tool_parser_name="muse_glimmer",
+        enable_auto_tools=True,
+    )(tokenizer)
+    mid_reasoning = encode(tokenizer, " to=self<|message|>thinking")
+    mid_answer = encode(tokenizer, " to=user<|message|>the answer")
+    assert not bare.is_reasoning_end(mid_reasoning)
+    assert bare.is_reasoning_end(mid_answer)
+    assert composite.is_reasoning_end(mid_reasoning)
+    assert composite.is_reasoning_end(mid_answer)
+
+
 def test_nonstreaming_answer_with_tools_auto_is_clean(tokenizer):
     # Non-streaming parse(): tools registered + tool_choice="auto", but the model
     # answers without calling a tool. The final content must be the clean answer,

@@ -201,7 +201,9 @@ class MuseGlimmerToolParser(ToolParser):
     # ---------------- tool name binding ----------------
 
     @staticmethod
-    def _registered_names(request: ChatCompletionRequest | None) -> set[str]:
+    def _registered_names(
+        request: ChatCompletionRequest | ResponsesRequest | None,
+    ) -> set[str]:
         """Names of the tools the client registered on this request."""
         names: set[str] = set()
         tools = getattr(request, "tools", None) if request is not None else None

@@ -319,6 +319,21 @@ def test_exact_match_kept():
     assert out.tool_calls[0].function.name == "get_weather"
 
 
+def test_registered_names_accept_dict_shapes():
+    # Duck-typed/dict requests (tests, proxies) resolve names from both the
+    # nested OpenAI shape and a top-level fallback.
+    request = SimpleNamespace(
+        tools=[
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"function": {}, "name": "fallback.name"},
+        ]
+    )
+    assert MuseGlimmerToolParser._registered_names(request) == {
+        "get_weather",
+        "fallback.name",
+    }
+
+
 # ----------------------------------------------------------- misc utilities
 
 
