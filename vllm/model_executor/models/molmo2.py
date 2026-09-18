@@ -1981,7 +1981,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             assert isinstance(videos, Sequence)
             videos_metadata = hf_data.pop("video_metadata", [])
             assert isinstance(videos_metadata, Sequence)
-            assert len(videos_metadata) == len(videos)
             bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
             pixel_values_videos_lst = []

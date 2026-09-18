@@ -428,12 +428,8 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         if not any(isinstance(item, tuple) for item in items):
             return {"videos": items}
 
-        videos = list[Any]()
-        metadata = list[Any]()
-        for item in items:
-            frames, item_metadata = item if isinstance(item, tuple) else (item, None)
-            videos.append(frames)
-            metadata.append(item_metadata)
+        pairs = [item if isinstance(item, tuple) else (item, None) for item in items]
+        videos, metadata = map(list, zip(*pairs))
 
         return {"videos": videos, "video_metadata": metadata}
 

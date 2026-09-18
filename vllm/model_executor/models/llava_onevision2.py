@@ -322,43 +322,19 @@ def prepare_codec_video_input(video_path: str) -> tuple:
     return (dummy, {_CODEC_VIDEO_MARKER: str(video_path)})
 
 
-def _extract_codec_video_paths(videos: Any, metadata: Any = None) -> list[str] | None:
-    # vLLM's parser splits tuple inputs into `videos` and a parallel
-    # `video_metadata` list. Raw tuples still arrive in pre-parser cases.
-    def _path_from_metadata(item):
-        if isinstance(item, dict) and _CODEC_VIDEO_MARKER in item:
-            return item[_CODEC_VIDEO_MARKER]
+def _extract_codec_video_paths(metadata: Any) -> list[str] | None:
+    # The parser splits tuple inputs into `videos` and a parallel
+    # `video_metadata` list, so the marker arrives in the latter.
+    if not isinstance(metadata, list) or not metadata:
         return None
 
-    if isinstance(metadata, list) and metadata:
-        meta_paths: list[str] = []
-        for item in metadata:
-            p = _path_from_metadata(item)
-            if p is None:
-                return None
-            meta_paths.append(p)
-        return meta_paths or None
+    paths: list[str] = []
+    for item in metadata:
+        if not (isinstance(item, dict) and _CODEC_VIDEO_MARKER in item):
+            return None
+        paths.append(item[_CODEC_VIDEO_MARKER])
 
-    def _path_from(item):
-        if (
-            isinstance(item, tuple)
-            and len(item) == 2
-            and isinstance(item[1], dict)
-            and _CODEC_VIDEO_MARKER in item[1]
-        ):
-            return item[1][_CODEC_VIDEO_MARKER]
-        return None
-
-    if isinstance(videos, list):
-        paths: list[str] = []
-        for item in videos:
-            p = _path_from(item)
-            if p is None:
-                return None
-            paths.append(p)
-        return paths if paths else None
-    p = _path_from(videos)
-    return [p] if p is not None else None
+    return paths
 
 
 _CODEC_FPS_CACHE: dict[str, float] = {}
@@ -1616,7 +1592,7 @@ class LlavaOnevision2MultiModalProcessor(
         videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
-            _extract_codec_video_paths(hf_data["videos"], hf_data.get("video_metadata"))
+            _extract_codec_video_paths(hf_data.get("video_metadata"))
             if videos_present
             else None
         )
