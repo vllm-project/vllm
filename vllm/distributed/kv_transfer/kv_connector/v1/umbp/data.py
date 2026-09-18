@@ -767,6 +767,7 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
     lookup_states: dict[str, LookupState] = field(default_factory=dict)
     preempted_block_ids: set[int] = field(default_factory=set)
     preempted_request_ids: set[str] = field(default_factory=set)
+    store_event: int = -1
 
 
 @dataclass
@@ -783,6 +784,8 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     failed_store_counts: dict[str, int] = field(default_factory=dict)
     completed_store_tokens: dict[tuple[str, int], int] = field(default_factory=dict)
     failed_store_tokens: dict[tuple[str, int], int] = field(default_factory=dict)
+    completed_store_events: dict[int, int] = field(default_factory=dict)
+    failed_store_events: dict[int, int] = field(default_factory=dict)
     failed_block_ids: set[int] = field(default_factory=set)
 
     def aggregate(
@@ -809,6 +812,14 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         for token, count in other.failed_store_tokens.items():
             self.failed_store_tokens[token] = (
                 self.failed_store_tokens.get(token, 0) + count
+            )
+        for event, count in other.completed_store_events.items():
+            self.completed_store_events[event] = (
+                self.completed_store_events.get(event, 0) + count
+            )
+        for event, count in other.failed_store_events.items():
+            self.failed_store_events[event] = (
+                self.failed_store_events.get(event, 0) + count
             )
         self.failed_block_ids.update(other.failed_block_ids)
         return self
