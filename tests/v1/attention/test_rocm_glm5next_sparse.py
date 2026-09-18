@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -13,10 +14,13 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
 )
+from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse_ops
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _can_use_aiter_sparse_mla_fwd,
     _sparse_kv_row_offset,
     _validate_dsv4_sparse_dims,
     _validate_sparse_dims,
+    rocm_sparse_attn_prefill,
 )
 
 
@@ -167,6 +171,89 @@ def test_dsv4_sparse_attention_keeps_layout_constraint():
     _validate_dsv4_sparse_dims(512, 448, 64, "test")
     with pytest.raises(AssertionError, match="expects 448 NoPE dims"):
         _validate_dsv4_sparse_dims(512, 512, 0, "test")
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize(
+    ("q_dtype", "kv_dtype", "rope_head_dim", "on_gfx950", "expected"),
+    [
+        (torch.bfloat16, torch.bfloat16, 0, True, True),
+        (torch.bfloat16, torch.bfloat16, 64, True, False),
+        (torch.bfloat16, torch.bfloat16, 0, False, False),
+        (torch.float16, torch.float16, 0, True, False),
+    ],
+)
+def test_aiter_gluon_sparse_mla_gate(
+    q_dtype, kv_dtype, rope_head_dim, on_gfx950, expected
+):
+    head_dim = 512 + rope_head_dim
+    q = torch.zeros(4, 16, head_dim, dtype=q_dtype, device="cuda")
+    kv = torch.zeros(32, head_dim, dtype=kv_dtype, device="cuda")
+    output = torch.zeros(4, 16, head_dim, dtype=q_dtype, device="cuda")
+
+    assert (
+        _can_use_aiter_sparse_mla_fwd(q, kv, output, rope_head_dim, on_gfx950)
+        is expected
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize("rope_head_dim", [0, 64])
+def test_sparse_prefill_hands_rope_free_work_to_aiter_gluon(monkeypatch, rope_head_dim):
+    captured: dict[str, Any] = {}
+
+    def fake_sparse_mla_fwd(q, kv_buffer, kv_indptr, kv_indices, softmax_scale, **kw):
+        captured.update(
+            kv_lora_rank=kw["kv_lora_rank"],
+            qk_rope_head_dim=kw["qk_rope_head_dim"],
+            has_invalid=kw["has_invalid"],
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+        )
+        kw["out"].fill_(1.0)
+        return kw["out"], None
+
+    gate = sparse_ops._can_use_aiter_sparse_mla_fwd
+    monkeypatch.setattr(
+        sparse_ops,
+        "_can_use_aiter_sparse_mla_fwd",
+        lambda *args: gate(*args, on_gfx950=True),
+    )
+    monkeypatch.setattr(
+        sparse_ops, "_get_aiter_sparse_mla_fwd", lambda: fake_sparse_mla_fwd
+    )
+
+    head_dim = 512 + rope_head_dim
+    q = torch.zeros(3, 16, head_dim, dtype=torch.bfloat16, device="cuda")
+    kv = torch.zeros(8, 1, head_dim, dtype=torch.bfloat16, device="cuda")
+    output = torch.zeros(3, 16, 512, dtype=torch.bfloat16, device="cuda")
+    ragged_indices = torch.tensor([0, 1, -1, 2, 3], dtype=torch.int32, device="cuda")
+    ragged_indptr = torch.tensor([0, 1, 3, 5], dtype=torch.int32, device="cuda")
+
+    rocm_sparse_attn_prefill(
+        q=q,
+        kv=kv,
+        indices=None,
+        topk_length=None,
+        scale=head_dim**-0.5,
+        head_dim=head_dim,
+        nope_head_dim=512,
+        rope_head_dim=rope_head_dim,
+        attn_sink=None,
+        output=output,
+        ragged_indices=ragged_indices,
+        ragged_indptr=ragged_indptr,
+    )
+
+    if rope_head_dim:
+        assert not captured
+        return
+    assert captured["kv_lora_rank"] == head_dim
+    assert captured["qk_rope_head_dim"] == 0
+    assert captured["has_invalid"]
+    torch.testing.assert_close(captured["kv_indices"], ragged_indices)
+    torch.testing.assert_close(captured["kv_indptr"], ragged_indptr)
+    assert output.eq(1).all()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
