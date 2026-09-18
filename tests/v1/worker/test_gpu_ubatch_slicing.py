@@ -44,10 +44,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
-    compact_conditional_output,
     create_ubatch_slices,
+    restore_staged_inputs,
     slice_model_inputs,
-    stage_conditional_decode,
+    stage_decode_tokens,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -287,6 +287,8 @@ def _sync_dp(
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
     num_reqs_per_rank: list[int] | None = None,
+    num_ubatches: int = 2,
+    dp_rank: int = 0,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -313,21 +315,22 @@ def _sync_dp(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
-                num_tokens=num_tokens_per_rank[0],
+                num_tokens=num_tokens_per_rank[dp_rank],
                 num_reqs=8,
             ),
-            num_tokens=num_tokens_per_rank[0],
+            num_tokens=num_tokens_per_rank[dp_rank],
             num_reqs=8,
-            uniform_token_count=uniform_token_counts[0] or None,
+            uniform_token_count=uniform_token_counts[dp_rank] or None,
             dp_size=dp_size,
-            dp_rank=0,
+            dp_rank=dp_rank,
             parallel_config=ParallelConfig(
-                enable_dbo=True,
+                enable_dbo=num_ubatches == 2,
+                ubatch_size=num_ubatches,
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
                 dbo_prefill_token_threshold=PREFILL_THRESHOLD,
             ),
             allow_ubatching=allow_ubatching,
-            uniform_decode=uniform_token_counts[0] == DECODE_QUERY_LEN,
+            uniform_decode=uniform_token_counts[dp_rank] == DECODE_QUERY_LEN,
         )
 
 
@@ -525,6 +528,343 @@ def _make_dbo_config() -> VllmConfig:
         parallel_config=ParallelConfig(
             enable_dbo=True, all2all_backend="deepep_low_latency"
         ),
+    )
+
+
+@pytest.mark.parametrize("graph_size", [127, 128, 129])
+@pytest.mark.parametrize("num_ubatches", [2, 3, 4])
+@torch.inference_mode()
+def test_flash_attention_staging_multistep_graph(
+    graph_size, num_ubatches, tmp_path, monkeypatch
+):
+    """Real FA3 metadata/replay preserves outputs and every KV slot across layouts.
+
+    This isolates attention from MoE communication. Production capability must
+    enable the real FA3 builder; the test does not establish DP support.
+    """
+    from transformers import OPTConfig
+
+    from tests.kernels.attention.test_flash_attn import ref_paged_attn
+    from vllm.config import AttentionConfig, SchedulerConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionBackend,
+        FlashAttentionImpl,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+    from vllm.v1.worker.utils import AttentionGroup
+    from vllm.vllm_flash_attn import is_fa_version_supported
+
+    if not torch.cuda.is_available() or not is_fa_version_supported(3):
+        pytest.skip("This staging integration test requires CUDA and FA3")
+    device = torch.device("cuda:0")
+    torch.manual_seed(57184)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    OPTConfig(
+        hidden_size=256,
+        word_embed_proj_dim=256,
+        num_attention_heads=4,
+        num_hidden_layers=1,
+        ffn_dim=512,
+        vocab_size=256,
+        max_position_embeddings=64,
+        architectures=["OPTForCausalLM"],
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), dtype="bfloat16", seed=0),
+        parallel_config=ParallelConfig(
+            ubatch_size=num_ubatches, all2all_backend="nixl_ep"
+        ),
+        attention_config=AttentionConfig(flash_attn_version=3),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=64,
+            max_num_seqs=graph_size,
+            max_num_batched_tokens=graph_size,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            cudagraph_capture_sizes=[graph_size],
+            max_cudagraph_capture_size=graph_size,
+        ),
+    )
+    block_size, blocks_per_req, heads, kv_heads, dim = 16, 4, 4, 2, 64
+    num_blocks = graph_size * blocks_per_req + 2
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=kv_heads,
+        head_size=dim,
+        dtype=torch.bfloat16,
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["attn"], spec)],
+    )
+    with set_current_vllm_config(config):
+        impl = FlashAttentionImpl(heads, dim, dim**-0.5, kv_heads, None, None, "auto")
+        group = AttentionGroup(FlashAttentionBackend, ["attn"], spec, 0)
+        group.create_metadata_builders(
+            config, device, num_metadata_builders=num_ubatches
+        )
+        ref_group = AttentionGroup(FlashAttentionBackend, ["attn"], spec, 0)
+        ref_group.create_metadata_builders(config, device)
+        model_state = DefaultModelState(config, torch.nn.Identity(), None, device)
+        runner = UBatchRunner(
+            config, device, model_state, [[group]], cache_config, graph_size
+        )
+    assert impl.vllm_flash_attn_version == 3, "Test must exercise real FA3 scheduling"
+    assert all(
+        b.aot_schedule and b.use_full_cuda_graph for b in group.metadata_builders
+    )
+    assert runner.stage_real_tokens, runner._real_token_staging_unsupported_reason()
+    # DPMetadata.make requires a distributed group; this test runs attention only.
+    # Keep the real prepare/build path and omit just the distributed wrappers.
+    monkeypatch.setattr(
+        runner,
+        "_make_forward_contexts",
+        lambda slices, metadata, mappings, padding: [
+            SimpleNamespace(attn_metadata=m) for m in metadata
+        ],
+    )
+    layer = torch.nn.Module()
+    layer._q_scale = layer._k_scale = layer._v_scale = torch.ones((), device=device)
+    buffers = InputBuffers(graph_size, graph_size, device)
+    ref_buffers = InputBuffers(graph_size, graph_size, device)
+    block_table = torch.zeros(
+        (graph_size, blocks_per_req), dtype=torch.int32, device=device
+    )
+    slots = torch.full((1, graph_size), -1, dtype=torch.int64, device=device)
+    # Disjoint, shuffled blocks plus two guard blocks; no accidental prefix mapping.
+    request_blocks = (
+        (torch.randperm(graph_size * blocks_per_req, device=device) + 1)
+        .reshape(graph_size, blocks_per_req)
+        .int()
+    )
+    lengths = np.arange(graph_size) % 27 + 7
+    cache = torch.randn(
+        num_blocks,
+        kv_heads,
+        block_size,
+        2 * dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    reference_cache = cache.clone()
+    expected_cache = cache.clone()
+    q_bank = torch.randn(graph_size + 1, heads, dim, dtype=cache.dtype, device=device)
+    k_bank = torch.randn(
+        graph_size + 1, kv_heads, dim, dtype=cache.dtype, device=device
+    )
+    v_bank = torch.randn_like(k_bank)
+    output = torch.empty_like(q_bank[:graph_size])
+
+    def prepare(n, step, *, capture=False):
+        # Flip request order, not just counts, to expose stale per-request metadata.
+        reqs = np.arange(graph_size)[:: -1 if step % 2 else 1][:n].copy()
+        req_gpu = torch.tensor(reqs, device=device)
+        lens = lengths[reqs] + 1
+        batch = _make_input_batch(
+            [1] * n, lens.tolist(), buffers, graph_size, graph_size
+        )
+        buffers.input_ids.zero_()
+        buffers.input_ids[:n] = req_gpu + 1
+        buffers.positions.zero_()
+        buffers.positions[:n] = torch.tensor(lens - 1, device=device)
+        buffers.is_padding.fill_(True)
+        buffers.is_padding[:n] = False
+        block_table.zero_()
+        block_table[:n] = request_blocks[req_gpu]
+        slot_positions = buffers.positions[:n]
+        logical_slots = (
+            block_table[
+                torch.arange(n, device=device), slot_positions // block_size
+            ].long()
+            * block_size
+            + slot_positions % block_size
+        )
+        slots.fill_(-1)
+        slots[0, :n] = logical_slots
+        logical_blocks = block_table[:n].clone()
+        state = runner.prepare(
+            batch, (block_table,), slots, CUDAGraphMode.FULL, for_capture=capture
+        )
+        return batch, state, reqs, req_gpu, lens, logical_slots, logical_blocks
+
+    batch, captured, *_ = prepare(graph_size, 0, capture=True)
+
+    def run_attention():
+        # Model projections would consume staged input rows in this same order.
+        q, key, value = (bank[buffers.input_ids] for bank in (q_bank, k_bank, v_bank))
+        for region, context in zip(captured.slices, captured.forward_contexts):
+            s = region.token_slice
+            metadata = context.attn_metadata["attn"]
+            impl.do_kv_cache_update(layer, key[s], value[s], cache, slots[0, s])
+            impl.forward(layer, q[s], key[s], value[s], cache, metadata, output[s])
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run_attention()
+        run_attention()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        run_attention()
+    torch.cuda.current_stream().wait_stream(stream)
+    cache.copy_(reference_cache)  # Discard warmup/capture writes only.
+    last_start = captured.slices[-1].token_slice.start
+
+    def metadata_pointers(state):
+        return [
+            tuple(
+                getattr(ctx.attn_metadata["attn"], name).data_ptr()
+                for name in (
+                    "query_start_loc",
+                    "seq_lens",
+                    "block_table",
+                    "scheduler_metadata",
+                )
+            )
+            for ctx in state.forward_contexts
+        ]
+
+    pointers = metadata_pointers(captured)
+    input_pointers = [
+        x.data_ptr()
+        for x in (
+            buffers.input_ids,
+            buffers.positions,
+            buffers.is_padding,
+            block_table,
+            slots,
+        )
+    ]
+    # Alternating staged/ordinary FULL steps, including equality and odd capacities.
+    counts = [
+        num_ubatches,
+        last_start + 1,
+        last_start,
+        graph_size,
+        last_start - 1,
+        num_ubatches + 1,
+        graph_size,
+        last_start,
+    ]
+    max_error = 0.0
+    max_oracle_error = 0.0
+    staged_steps = 0
+    for step, n in enumerate(counts):
+        batch, state, reqs, req_gpu, lens, logical_slots, logical_blocks = prepare(
+            n, step
+        )
+        staged_rows = state.staged_rows
+        assert (staged_rows is not None) == (n <= last_start)
+        assert metadata_pointers(state) == pointers, "Captured metadata address changed"
+        if staged_rows is not None:
+            staged_steps += 1
+            expected_rows = [
+                row
+                for i, region in enumerate(captured.slices)
+                for row in range(
+                    region.token_slice.start,
+                    region.token_slice.start
+                    + n // num_ubatches
+                    + (i < n % num_ubatches),
+                )
+            ]
+            assert staged_rows.tolist() == expected_rows
+            logical_start = 0
+            for i, (region, ctx) in enumerate(
+                zip(state.slices, state.forward_contexts)
+            ):
+                count = n // num_ubatches + (i < n % num_ubatches)
+                capacity = region.num_tokens
+                meta = ctx.attn_metadata["attn"]
+                assert meta.query_start_loc.tolist() == [
+                    min(j, count) for j in range(capacity + 1)
+                ], f"query offsets: step={step}, ubatch={i}"
+                assert meta.seq_lens.tolist() == (
+                    lens[logical_start : logical_start + count].tolist()
+                    + [0] * (capacity - count)
+                ), f"sequence lengths: step={step}, ubatch={i}"
+                logical_start += count
+        q, key, value = (bank[req_gpu + 1] for bank in (q_bank, k_bank, v_bank))
+        ref_batch = _make_input_batch([1] * n, lens.tolist(), ref_buffers)
+        ref_metadata = model_state.prepare_attn(
+            ref_batch,
+            CUDAGraphMode.NONE,
+            (logical_blocks,),
+            logical_slots[None],
+            [[ref_group]],
+            cache_config,
+        )["attn"]
+        ref_output = torch.empty_like(q)
+        impl.do_kv_cache_update(layer, key, value, reference_cache, logical_slots)
+        impl.forward(layer, q, key, value, reference_cache, ref_metadata, ref_output)
+        # An independent cache oracle catches shared mistakes in both kernel paths.
+        expected_cache[
+            logical_slots // block_size, :, logical_slots % block_size, :dim
+        ] = key
+        expected_cache[
+            logical_slots // block_size, :, logical_slots % block_size, dim:
+        ] = value
+        graph.replay()
+        torch.accelerator.synchronize()
+        if staged_rows is not None:
+            output[:n] = output[staged_rows]
+            restore_staged_inputs(batch, (block_table,), slots, staged_rows)
+        label = f"N={graph_size}, k={num_ubatches}, step={step}, n={n}"
+        torch.testing.assert_close(
+            output[:n], ref_output, atol=1.5e-2, rtol=1e-2, msg=label
+        )
+        oracle_k, oracle_v = expected_cache.transpose(1, 2).split(dim, dim=-1)
+        with torch.device(device):
+            oracle_output = ref_paged_attn(
+                q.clone(),
+                oracle_k.contiguous(),
+                oracle_v.contiguous(),
+                [1] * n,
+                lens.tolist(),
+                logical_blocks,
+                dim**-0.5,
+            )
+        torch.testing.assert_close(
+            output[:n], oracle_output, atol=1.5e-2, rtol=1e-2, msg=label
+        )
+        torch.testing.assert_close(
+            reference_cache, expected_cache, atol=0, rtol=0, msg=label
+        )
+        torch.testing.assert_close(cache, expected_cache, atol=0, rtol=0, msg=label)
+        assert buffers.input_ids[:n].tolist() == (req_gpu + 1).tolist()
+        assert buffers.positions[:n].tolist() == (lens - 1).tolist()
+        assert not buffers.is_padding[:n].any()
+        assert torch.equal(block_table[:n], logical_blocks)
+        assert torch.equal(slots[0, :n], logical_slots)
+        assert not block_table[n:].count_nonzero()
+        assert torch.all(slots[:, n:] == -1)
+        assert not buffers.input_ids[n:].count_nonzero()
+        assert not buffers.positions[n:].count_nonzero()
+        assert buffers.is_padding[n:].all()
+        assert [
+            x.data_ptr()
+            for x in (
+                buffers.input_ids,
+                buffers.positions,
+                buffers.is_padding,
+                block_table,
+                slots,
+            )
+        ] == input_pointers
+        max_error = max(max_error, (output[:n] - ref_output).abs().max().item())
+        max_oracle_error = max(
+            max_oracle_error, (output[:n] - oracle_output).abs().max().item()
+        )
+        lengths[reqs] += 1
+    print(
+        f"FA3 N={graph_size} k={num_ubatches}: captures=1 replays={len(counts)} "
+        f"staged={staged_steps} max_abs_vs_compact={max_error} "
+        f"max_abs_vs_torch={max_oracle_error} full_KV_exact=True"
     )
 
 
@@ -824,8 +1164,18 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_capturable_run_replays_as_a_cudagraph():
+def test_capturable_run_replays_as_a_cudagraph(monkeypatch):
     """Microbatched graph replay reads updated persistent input buffers."""
+
+    def unexpected_staging(*args, **kwargs):
+        raise AssertionError("ordinary graph execution must not stage or restore")
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.ubatch_utils.stage_decode_tokens", unexpected_staging
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.ubatch_utils.restore_staged_inputs", unexpected_staging
+    )
     vllm_config = VllmConfig(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
         parallel_config=ParallelConfig(
@@ -862,7 +1212,15 @@ def test_capturable_run_replays_as_a_cudagraph():
 
     input_ids.fill_(3)
     positions.fill_(5)
-    graph.replay()
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=num_tokens,
+        num_reqs=8,
+        num_ubatches=2,
+    )
+    manager = object.__new__(CudaGraphManager)
+    manager.graphs = {desc: graph}
+    manager.run_fullgraph(desc)
     torch.accelerator.synchronize()
 
     expected = torch.full(
@@ -920,7 +1278,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
             decode_query_len=1,
-            ubatch_runner=cast(UBatchRunner, object()),
+            ubatch_runner=cast(UBatchRunner, SimpleNamespace(stage_real_tokens=False)),
         )
     manager._graphs_captured = True
     return manager
@@ -969,59 +1327,708 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
 
 
 @pytest.mark.parametrize(
-    "capacity,n",
-    [(32, 2), (32, 3), (32, 31), (32, 32), (64, 63), (64, 64), (128, 127), (128, 128)],
+    "padded,k,n",
+    [
+        (64, 2, 2),
+        (64, 2, 3),
+        (64, 2, 31),
+        (64, 2, 32),
+        (128, 2, 63),
+        (128, 2, 64),
+        (256, 2, 127),
+        (256, 2, 128),
+        (127, 2, 63),
+        (129, 2, 64),
+        (11, 3, 5),
+        (11, 3, 6),
+        (17, 4, 12),
+        (19, 5, 12),
+    ],
 )
-def test_conditional_decode_preserves_token_position_and_kv_mapping(capacity, n):
-    """Inserting padding must preserve every real row and isolate KV writes."""
-    buffers = InputBuffers(2 * capacity, 2 * capacity, torch.device("cpu"))
+def test_conditional_decode_preserves_token_position_and_kv_mapping(padded, k, n):
+    """Scatter preserves source order even when k > 2 makes rows overlap."""
+    buffers = InputBuffers(padded, padded, torch.device("cpu"))
     batch = _make_input_batch(
-        [1] * n, [100 + i for i in range(n)], buffers, 2 * capacity, 2 * capacity
+        [1] * n, [100 + i for i in range(n)], buffers, padded, padded
     )
-    batch.input_ids.copy_(torch.arange(2 * capacity))
-    batch.positions.copy_(torch.arange(2 * capacity) + 100)
-    blocks = torch.arange(2 * capacity * 4).reshape(2 * capacity, 4)
-    slots = torch.arange(2 * capacity).reshape(1, 2 * capacity) + 1000
+    batch.input_ids.copy_(torch.arange(padded))
+    batch.positions.copy_(torch.arange(padded) + 100)
+    blocks = torch.arange(padded * 4).reshape(padded, 4)
+    slots = torch.arange(padded * 2).reshape(2, padded) + 1000
     expected_blocks = blocks[:n].clone()
     expected_slots = slots[:, :n].clone()
     ptrs = [x.data_ptr() for x in (batch.input_ids, batch.positions, blocks, slots)]
-    first, second = stage_conditional_decode(batch, (blocks,), slots)
-    indices = torch.cat(
-        (torch.arange(first), torch.arange(capacity, capacity + second))
-    )
+    slices = create_ubatch_slices(batch, k)
+    indices = stage_decode_tokens(batch, (blocks,), slots, slices)
+    expected_indices = [
+        row
+        for i in range(k)
+        for row in range(i * (padded // k), i * (padded // k) + n // k + (i < n % k))
+    ]
+    assert indices.tolist() == expected_indices
     torch.testing.assert_close(batch.input_ids[indices], torch.arange(n).int())
     torch.testing.assert_close(batch.positions[indices], torch.arange(n) + 100)
     torch.testing.assert_close(blocks[indices], expected_blocks)
     torch.testing.assert_close(slots[:, indices], expected_slots)
     assert not batch.is_padding[indices].any()
-    assert batch.is_padding.sum() == 2 * capacity - n
+    assert batch.is_padding.sum() == padded - n
     assert (slots[:, batch.is_padding] == -1).all()
+    assert (blocks[batch.is_padding] == 0).all()
     assert ptrs == [
         x.data_ptr() for x in (batch.input_ids, batch.positions, blocks, slots)
     ]
     output = batch.input_ids[:, None].clone()
-    compact_conditional_output(output, (first, second), capacity)
+    output[: indices.numel()] = output[indices]
     torch.testing.assert_close(output[:n, 0], torch.arange(n).int())
+    restore_staged_inputs(batch, (blocks,), slots, indices)
+    # The sampler still indexes these buffers by the original logits indices.
+    torch.testing.assert_close(batch.input_ids[:n], torch.arange(n).int())
+    torch.testing.assert_close(batch.positions[:n], torch.arange(n) + 100)
+    torch.testing.assert_close(blocks[:n], expected_blocks)
+    torch.testing.assert_close(slots[:, :n], expected_slots)
+    assert not batch.is_padding[:n].any()
+    assert batch.is_padding[n:].all()
+    assert (slots[:, n:] == -1).all()
+    for values in (batch.input_ids, batch.positions, blocks):
+        assert (values[n:padded] == 0).all()
 
 
 @pytest.mark.parametrize("n", [0, 1, 65, 80])
 def test_conditional_staging_rejects_ineligible_counts(n):
     batch = SimpleNamespace(num_tokens=n, num_tokens_after_padding=128)
+    slices = [
+        UBatchSlice(slice(0, 64), slice(0, 64)),
+        UBatchSlice(slice(64, 128), slice(64, 128)),
+    ]
     with pytest.raises(AssertionError):
-        stage_conditional_decode(batch, (), torch.empty(1, 128))
+        stage_decode_tokens(batch, (), torch.empty(1, 128), slices)
+
+
+@pytest.mark.parametrize(
+    "padded,k,counts", [(11, 3, [5, 11, 6, 3]), (17, 4, [12, 17, 4, 7])]
+)
+def test_staged_prepare_matches_captured_regions_across_steps(padded, k, counts):
+    """Unequal physical regions keep stable buffers and clear stale metadata."""
+    runner = object.__new__(UBatchRunner)
+    runner.num_ubatches = k
+    runner.stage_real_tokens = True
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.ubatch_query_start_loc = [
+        torch.zeros(padded + 1, dtype=torch.int32) for _ in range(k)
+    ]
+    runner.ubatch_seq_lens = [torch.zeros(padded, dtype=torch.int32) for _ in range(k)]
+    runner.ubatch_dcp_local_seq_lens = [None] * k
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    seen = []
+
+    def prepare_attn(batch, *args, **kwargs):
+        seen.append(batch)
+        return {}
+
+    runner.model_state = SimpleNamespace(prepare_attn=prepare_attn)
+    runner._make_forward_contexts = lambda *args: []
+    buffers = InputBuffers(padded, padded, torch.device("cpu"))
+    captured = create_ubatch_slices(InputBatch.make_dummy(padded, padded, buffers), k)
+    for n in counts:
+        seen.clear()
+        batch = _make_input_batch(
+            [1] * n, list(range(100, 100 + n)), buffers, padded, padded
+        )
+        batch.input_ids.copy_(torch.arange(padded))
+        # Ordinary FULL preparation must never invoke the staging helper.
+        guard = (
+            patch(
+                "vllm.v1.worker.gpu.ubatch_utils.stage_decode_tokens",
+                side_effect=AssertionError("normal FULL must not stage"),
+            )
+            if n == padded
+            else nullcontext()
+        )
+        with guard:
+            state = runner.prepare(
+                batch, (), torch.zeros(0, padded), CUDAGraphMode.FULL
+            )
+        assert state.slices == captured
+        assert (state.staged_rows is not None) == (n != padded)
+        offset = 0
+        for i, ubatch in enumerate(seen):
+            capacity = captured[i].num_tokens
+            count = capacity if n == padded else n // k + (i < n % k)
+            assert ubatch.num_tokens == ubatch.num_reqs == count
+            assert (
+                ubatch.num_tokens_after_padding
+                == ubatch.num_reqs_after_padding
+                == capacity
+            )
+            assert ubatch.req_ids == [f"req_{j}" for j in range(offset, offset + count)]
+            expected_seq = torch.zeros(capacity, dtype=torch.int32)
+            expected_seq[:count] = torch.arange(100 + offset, 100 + offset + count)
+            torch.testing.assert_close(ubatch.seq_lens, expected_seq)
+            torch.testing.assert_close(ubatch.seq_lens_cpu_upper_bound, expected_seq)
+            np.testing.assert_array_equal(
+                ubatch.query_start_loc_np, np.minimum(np.arange(capacity + 1), count)
+            )
+            torch.testing.assert_close(
+                ubatch.query_start_loc, torch.from_numpy(ubatch.query_start_loc_np)
+            )
+            assert (
+                ubatch.query_start_loc.data_ptr()
+                == runner.ubatch_query_start_loc[i].data_ptr()
+            )
+            torch.testing.assert_close(
+                ubatch.input_ids[:count], torch.arange(offset, offset + count).int()
+            )
+            offset += count
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
 @pytest.mark.parametrize("loads", [[63, 97], [63, 127], [63, 64], [32, 96], [64, 97]])
 def test_conditional_graph_guard_requires_supported_single_token_layout(loads):
     manager = _make_cudagraph_manager([128])
-    manager.ubatch_runner = SimpleNamespace(conditional_real_split=True)
+    manager.ubatch_runner = SimpleNamespace(stage_real_tokens=True)
     desc, sync = _sync_dp(
         loads, [1, 1], cudagraph_manager=manager, num_reqs_per_rank=loads
     )
     assert desc.cg_mode == CUDAGraphMode.FULL
     assert desc.num_tokens == 128 and desc.num_ubatches == 2
     assert sync is not None and not sync.eager
-    # A different request/token layout cannot use this staging implementation.
-    desc, _ = _sync_dp(loads, [1, 1], cudagraph_manager=manager)
+
+
+@pytest.mark.parametrize("padded,k", [(129, 2), (131, 3), (133, 4)])
+@pytest.mark.parametrize("delta,capable", [(0, True), (0, False), (1, False)])
+def test_staging_gate_uses_last_region_start(padded, k, delta, capable):
+    """An empty last region needs staging; one real row there does not."""
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=padded,
+        num_reqs=padded,
+        num_ubatches=k,
+    )
+    manager = SimpleNamespace(
+        ubatch_runner=SimpleNamespace(stage_real_tokens=capable),
+        dispatch=lambda *args, **kwargs: desc,
+    )
+    n = padded // k * (k - 1) + delta
+    loads = [n, padded, padded - 1, padded - 2]
+    result, sync = _sync_dp(
+        loads,
+        [1] * 4,
+        cudagraph_manager=manager,
+        num_reqs_per_rank=loads,
+        num_ubatches=k,
+    )
+    expected = CUDAGraphMode.FULL if capable or delta else CUDAGraphMode.NONE
+    assert result.cg_mode == expected
+    assert result.num_ubatches == k
+    assert sync is not None and sync.eager == (expected == CUDAGraphMode.NONE)
+
+
+@pytest.mark.parametrize("uniform,n", [(1, 2), (2, 32)])
+def test_staging_gate_rejects_too_few_rows_or_multitoken_decode(uniform, n):
+    k = 3
+    manager = SimpleNamespace(
+        ubatch_runner=SimpleNamespace(stage_real_tokens=True),
+        dispatch=lambda *args, **kwargs: BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=131,
+            num_reqs=131,
+            num_ubatches=k,
+        ),
+    )
+    loads = [n, 100, 100, 100]
+    with patch.object(dp_utils, "check_ubatch_thresholds", return_value=True):
+        desc, _ = _sync_dp(
+            loads,
+            [uniform] * 4,
+            cudagraph_manager=manager,
+            num_reqs_per_rank=loads,
+            num_ubatches=k,
+        )
     assert desc.cg_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.parametrize("padded", [127, 128, 129])
+@pytest.mark.parametrize("k", [2, 3, 4])
+def test_decode_staging_boundary_matrix(padded, k):
+    """The DP contract requires nonempty regions and only repairs an empty tail."""
+    last_start = padded // k * (k - 1)
+    for n in sorted({k - 1, k, last_start - 1, last_start, last_start + 1, padded}):
+        loads = [n, padded]
+        manager = SimpleNamespace(
+            ubatch_runner=SimpleNamespace(stage_real_tokens=True),
+            dispatch=lambda *args, **kwargs: BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=padded,
+                num_reqs=padded,
+                num_ubatches=k,
+            ),
+        )
+        with patch.object(dp_utils, "check_ubatch_thresholds", return_value=True):
+            desc, _ = _sync_dp(
+                loads,
+                [1, 1],
+                cudagraph_manager=manager,
+                num_reqs_per_rank=loads,
+                num_ubatches=k,
+            )
+        assert desc.cg_mode == (CUDAGraphMode.NONE if n < k else CUDAGraphMode.FULL)
+        if not k <= n <= last_start:
+            continue
+        buffers = InputBuffers(padded, padded, torch.device("cpu"))
+        batch = _make_input_batch([1] * n, [100] * n, buffers, padded, padded)
+        batch.input_ids.copy_(torch.arange(padded))
+        slices = create_ubatch_slices(batch, k)
+        rows = stage_decode_tokens(batch, (), torch.zeros(1, padded), slices)
+        expected = [
+            s.token_slice.start + j
+            for i, s in enumerate(slices)
+            for j in range(n // k + (i < n % k))
+        ]
+        assert rows.tolist() == expected
+        assert len(set(expected)) == n and max(expected) < padded
+        torch.testing.assert_close(batch.input_ids[rows], torch.arange(n).int())
+
+
+@pytest.mark.parametrize(
+    "loads,padded",
+    [
+        ([63, 97], 128),
+        ([80] * 4, 128),
+        ([63, 97, 80, 80], 128),
+        ([32, 32, 32, 224], 256),
+    ],
+)
+def test_decode_staging_dp_distributions(loads, padded):
+    manager = SimpleNamespace(
+        ubatch_runner=SimpleNamespace(stage_real_tokens=True),
+        dispatch=lambda *args, **kwargs: BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=padded,
+            num_reqs=padded,
+            num_ubatches=2,
+        ),
+    )
+    for rank in range(len(loads)):
+        desc, sync = _sync_dp(
+            loads,
+            [1] * len(loads),
+            cudagraph_manager=manager,
+            num_reqs_per_rank=loads,
+            dp_rank=rank,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert sync is not None
+        assert sync.num_tokens_across_dp.tolist() == [padded] * len(loads)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph replay")
+@pytest.mark.parametrize("padded,k", [(127, 2), (128, 3), (129, 4)])
+def test_staged_cuda_graph_preserves_outputs_and_mla_cache(padded, k):
+    """Real replay and the MLA cache kernel preserve all slots over changing loads.
+
+    This tests staging/kernel integration, not an end-to-end MoE model.
+    """
+    from vllm import _custom_ops as ops
+
+    device = torch.device("cuda:0")
+    ids = torch.zeros(padded, dtype=torch.int32, device=device)
+    positions = torch.zeros(padded, dtype=torch.int64, device=device)
+    padding = torch.ones(padded, dtype=torch.bool, device=device)
+    slots = torch.full((1, padded), -1, dtype=torch.int64, device=device)
+    blocks = torch.zeros(padded, 4, dtype=torch.int32, device=device)
+    cache = torch.zeros(32, 16, 576, dtype=torch.bfloat16, device=device)
+    reference_cache = torch.zeros_like(cache)
+    scale = torch.tensor(1.0, device=device)
+    slices = create_ubatch_slices(
+        _make_input_batch(
+            [1] * padded,
+            [1] * padded,
+            InputBuffers(padded, padded, torch.device("cpu")),
+        ),
+        k,
+    )
+
+    def forward():
+        outputs = []
+        for s in slices:
+            region = s.token_slice
+            kv = (
+                (ids[region, None].float() / 32)
+                .to(torch.bfloat16)
+                .expand(-1, 512)
+                .contiguous()
+            )
+            pe = positions[region, None].to(torch.bfloat16).expand(-1, 64).contiguous()
+            ops.concat_and_cache_mla(kv, pe, cache, slots[0, region], "auto", scale)
+            outputs.append(ids[region].float() * 2 + positions[region].float())
+        return torch.cat(outputs)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        forward()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = forward()
+    for step, n in enumerate([k, padded // k * (k - 1), k + 1]):
+        ids.copy_(torch.arange(padded, device=device) + step * 10)
+        positions.fill_(step + 1)
+        original = ids[:n].clone()
+        slots.fill_(-1)
+        logical_slots = torch.arange(n, device=device) * 2 + step
+        slots[0, :n] = logical_slots
+        batch = SimpleNamespace(
+            num_tokens=n,
+            num_reqs=n,
+            has_prefill=False,
+            num_draft_tokens=0,
+            num_scheduled_tokens=np.ones(n, dtype=np.int32),
+            num_tokens_after_padding=padded,
+            input_ids=ids,
+            positions=positions,
+            is_padding=padding,
+        )
+        rows = stage_decode_tokens(batch, (blocks,), slots, slices)
+        graph.replay()
+        output[:n] = output[rows]
+        torch.testing.assert_close(output[:n], original.float() * 2 + step + 1)
+        expected = torch.cat(
+            (
+                (original[:, None].float() / 32).to(torch.bfloat16).expand(-1, 512),
+                torch.full((n, 64), step + 1, dtype=torch.bfloat16, device=device),
+            ),
+            dim=1,
+        )
+        reference_cache.view(-1, 576)[logical_slots] = expected
+        torch.testing.assert_close(cache, reference_cache, rtol=0, atol=0)
+        restore_staged_inputs(batch, (blocks,), slots, rows)
+        torch.testing.assert_close(ids[:n], original)
+        torch.testing.assert_close(
+            positions[:n], torch.full_like(positions[:n], step + 1)
+        )
+        torch.testing.assert_close(slots[0, :n], logical_slots)
+        for values in (ids, positions, blocks):
+            assert (values[n:padded] == 0).all()
+        assert (slots[:, n:padded] == -1).all()
+        assert padding[n:padded].all()
+
+
+def _make_staging_capability_runner(model_config, excluded=None):
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+    runner = object.__new__(UBatchRunner)
+    state = object.__new__(DefaultModelState)
+    state.supports_mm_inputs = excluded == "multimodal"
+    state.rope_state = object() if excluded == "rope" else None
+    runner.model_state = object() if excluded == "model_state" else state
+    runner.parallel_config = SimpleNamespace(
+        tensor_parallel_size=2 if excluded == "tp" else 1,
+        pipeline_parallel_size=2 if excluded == "pp" else 1,
+        prefill_context_parallel_size=2 if excluded == "pcp" else 1,
+        enable_eplb=excluded == "eplb",
+        all2all_backend="deepep_low_latency"
+        if excluded == "communication"
+        else "nixl_ep",
+    )
+    runner.dcp_size = 2 if excluded == "dcp" else 1
+    runner.num_ubatches = {"k0": 0, "k3": 3, "k4": 4}.get(excluded, 2)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=SimpleNamespace(
+                    get_name=lambda: "TRITON_ATTN"
+                    if excluded == "backend"
+                    else "FLASH_ATTN_MLA"
+                )
+            )
+        ]
+    ]
+    runner.vllm_config = SimpleNamespace(
+        model_config=model_config,
+        lora_config=object() if excluded == "lora" else None,
+        speculative_config=object() if excluded == "spec" else None,
+        kv_transfer_config=object() if excluded == "kv_transfer" else None,
+    )
+    model_config.enable_prompt_embeds = excluded == "prompt_embeds"
+    model_config.enable_return_routed_experts = excluded == "routing"
+    runner.stage_real_tokens = (
+        runner._supports_real_token_staging()
+        and runner._backend_supports_staging_layout()
+    )
+    return runner
+
+
+def test_random_staging_layouts_match_independent_reference():
+    """A fixed random corpus checks arbitrary remainders and overlapping copies."""
+    rng = np.random.default_rng(57184)
+    for _ in range(300):
+        k = int(rng.integers(2, 13))
+        padded = int(rng.integers(2 * k, 514))
+        n = int(rng.integers(k, padded // k * (k - 1) + 1))
+        buffers = InputBuffers(padded, padded, torch.device("cpu"))
+        batch = _make_input_batch([1] * n, [100] * n, buffers, padded, padded)
+        batch.input_ids.copy_(torch.arange(padded) + 1)
+        regions = create_ubatch_slices(batch, k)
+        counts = [0] * k
+        for token in range(n):
+            counts[token % k] += 1
+        expected = []
+        for region, count in zip(regions, counts):
+            assert 0 < count <= region.num_tokens
+            expected.extend(
+                list(range(region.token_slice.start, region.token_slice.stop))[:count]
+            )
+        slots = torch.arange(2 * padded).reshape(2, padded)
+        original_slots = slots[:, :n].clone()
+        rows = stage_decode_tokens(batch, (), slots, regions)
+        assert rows.tolist() == expected
+        assert rows.unique().numel() == n
+        torch.testing.assert_close(batch.input_ids[rows], torch.arange(n).int() + 1)
+        assert (slots[:, batch.is_padding] == -1).all()
+        restore_staged_inputs(batch, (), slots, rows)
+        torch.testing.assert_close(batch.input_ids[:n], torch.arange(n).int() + 1)
+        torch.testing.assert_close(slots[:, :n], original_slots)
+
+
+@pytest.fixture
+def staging_model_config(tmp_path):
+    from transformers import DeepseekV2Config
+
+    DeepseekV2Config(architectures=["DeepseekV2ForCausalLM"]).save_pretrained(tmp_path)
+    return ModelConfig(model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True)
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    [
+        None,
+        "multimodal",
+        "rope",
+        "model_state",
+        "prompt_embeds",
+        "tp",
+        "pp",
+        "pcp",
+        "dcp",
+        "lora",
+        "spec",
+        "kv_transfer",
+        "eplb",
+        "routing",
+        "backend",
+        "communication",
+        "k0",
+        "k3",
+        "k4",
+    ],
+)
+def test_staging_capability_checks_data_contract(excluded, staging_model_config):
+    runner = _make_staging_capability_runner(staging_model_config, excluded)
+    assert runner._supports_real_token_staging() == (
+        excluded in (None, "k0", "k3", "k4", "communication")
+    )
+    assert runner._backend_supports_staging_layout() == (
+        excluded not in ("k0", "communication")
+    )
+    assert runner.stage_real_tokens == (excluded in (None, "k3", "k4"))
+
+
+@pytest.mark.parametrize("excluded", [None, "backend", "routing", "k3", "k4"])
+def test_dp_gate_uses_real_staging_capability(staging_model_config, excluded):
+    runner = _make_staging_capability_runner(staging_model_config, excluded)
+    k = runner.num_ubatches
+    manager = SimpleNamespace(
+        ubatch_runner=runner,
+        dispatch=lambda *args, **kwargs: BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=128,
+            num_reqs=128,
+            num_ubatches=k,
+        ),
+    )
+    desc, _ = _sync_dp(
+        [63, 97],
+        [1, 1],
+        cudagraph_manager=manager,
+        num_reqs_per_rank=[63, 97],
+        num_ubatches=k,
+    )
+    expected = (
+        CUDAGraphMode.FULL if excluded in (None, "k3", "k4") else CUDAGraphMode.NONE
+    )
+    assert desc.cg_mode == expected
+
+
+@pytest.mark.parametrize(
+    "invalid", ["prefill", "draft", "requests", "queries", "region"]
+)
+def test_staging_rejects_invalid_local_contract_before_mutation(invalid):
+    buffers = InputBuffers(128, 128, torch.device("cpu"))
+    batch = _make_input_batch([1] * 63, [100] * 63, buffers, 128, 128)
+    slices = create_ubatch_slices(batch, 2)
+    if invalid == "prefill":
+        batch.has_prefill = True
+    elif invalid == "draft":
+        batch.num_draft_tokens = 1
+    elif invalid == "requests":
+        batch.num_reqs = 62
+    elif invalid == "queries":
+        batch.num_scheduled_tokens[:2] = [0, 2]
+    else:
+        slices[0] = UBatchSlice(slice(0, 10), slice(0, 10))
+        slices[1] = UBatchSlice(slice(10, 128), slice(10, 128))
+        # Keep the empty-final-region premise, but overflow an earlier region.
+        slices.insert(1, UBatchSlice(slice(10, 64), slice(10, 64)))
+        slices[-1] = UBatchSlice(slice(64, 128), slice(64, 128))
+    original = batch.input_ids.clone()
+    with pytest.raises(AssertionError):
+        stage_decode_tokens(batch, (), torch.zeros(1, 128), slices)
+    torch.testing.assert_close(batch.input_ids, original)
+
+
+@pytest.mark.parametrize(
+    "excluded, expected",
+    [
+        ("backend", "TRITON_ATTN"),
+        ("routing", "enable_return_routed_experts"),
+        ("k0", "at least one microbatch"),
+        ("communication", "deepep_low_latency"),
+    ],
+)
+def test_staging_rejection_identifies_incompatible_contract(
+    staging_model_config, excluded, expected
+):
+    runner = _make_staging_capability_runner(staging_model_config, excluded)
+    reason = (
+        runner._real_token_staging_unsupported_reason()
+        or runner._staging_layout_unsupported_reason()
+    )
+    assert not runner.stage_real_tokens
+    assert expected in reason
+
+
+def test_empty_attention_groups_cannot_enable_staging(staging_model_config):
+    runner = _make_staging_capability_runner(staging_model_config)
+    runner.attn_groups = [[]]
+    assert not runner._supports_real_token_staging()
+    assert (
+        "attention groups are empty" in runner._real_token_staging_unsupported_reason()
+    )
+
+
+@pytest.mark.parametrize("family", ["qwen3_moe", "mixtral"])
+@pytest.mark.parametrize(
+    "incompatible",
+    [
+        None,
+        "fa_version",
+        "graph",
+        "dtype",
+        "window",
+        "chunk",
+        "non_causal",
+        "builders",
+        "weights",
+        "quantization",
+        "spec",
+        "builder_type",
+        "builder_count",
+    ],
+)
+def test_staging_fa3_capability_depends_on_data_contract(
+    tmp_path, family, incompatible
+):
+    """Family names do not decide eligibility; unverified FA layouts stay closed."""
+    from transformers import MixtralConfig, Qwen3MoeConfig
+
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+
+    cls, architecture = {
+        "qwen3_moe": (Qwen3MoeConfig, "Qwen3MoeForCausalLM"),
+        "mixtral": (MixtralConfig, "MixtralForCausalLM"),
+    }[family]
+    cls(architectures=[architecture]).save_pretrained(tmp_path)
+    model = ModelConfig(model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True)
+    if incompatible == "weights":
+        model.dtype = torch.float16
+    if incompatible == "quantization":
+        model.quantization = "fp8"
+    runner = _make_staging_capability_runner(model)
+    # This CPU test supplies builder state; the single-layer GPU test constructs
+    # the actual builder and exercises its captured scheduler buffers.
+    builder = object.__new__(FlashAttentionMetadataBuilder)
+    builder.aot_schedule = incompatible != "fa_version"
+    builder.use_full_cuda_graph = incompatible != "graph"
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float16 if incompatible == "dtype" else torch.bfloat16,
+        sliding_window=32 if incompatible == "window" else None,
+        attention_chunk_size=32 if incompatible == "chunk" else None,
+        non_causal=incompatible == "non_causal",
+    )
+    if incompatible == "spec":
+        spec = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=32,
+        )
+    builders = [builder, builder]
+    if incompatible == "builders":
+        builders = []
+    elif incompatible == "builder_type":
+        builders = [object(), object()]
+    elif incompatible == "builder_count":
+        builders = [builder]
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=SimpleNamespace(get_name=lambda: "FLASH_ATTN"),
+                kv_cache_spec=spec,
+                metadata_builders=builders,
+            )
+        ]
+    ]
+    reason = runner._real_token_staging_unsupported_reason()
+    assert (reason is None) == (incompatible is None), reason
+    if reason is not None:
+        assert "FLASH_ATTN" in reason
+        assert "model_type" not in reason
+
+
+def test_fa3_staging_rejects_batch_invariant_scheduler(
+    staging_model_config, monkeypatch
+):
+    """Batch invariance disables AOT even when the builder flag remains true."""
+    from vllm import envs
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    runner = _make_staging_capability_runner(staging_model_config)
+    builder = object.__new__(FlashAttentionMetadataBuilder)
+    builder.aot_schedule = builder.use_full_cuda_graph = True
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=SimpleNamespace(get_name=lambda: "FLASH_ATTN"),
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=128,
+                    dtype=torch.bfloat16,
+                ),
+                metadata_builders=[builder, builder],
+            )
+        ]
+    ]
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    reason = runner._real_token_staging_unsupported_reason()
+    assert reason is not None and "VLLM_BATCH_INVARIANT" in reason

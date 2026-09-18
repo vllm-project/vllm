@@ -428,6 +428,7 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+            num_ubatches=max(1, get_current_vllm_config().parallel_config.num_ubatches),
         )
 
     return prepare_finalize

@@ -78,6 +78,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        num_ubatches: int = 1,
     ):
         super().__init__()
 
@@ -87,7 +88,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[tuple | None] = [None, None]
+        if num_ubatches < 1:
+            raise ValueError("NIXL EP requires at least one microbatch")
+        self.handles: list[tuple | None] = [None] * num_ubatches
         self.num_dispatchers_ = num_dispatchers
         self.expert_capacity = expert_capacity
 
@@ -260,6 +263,34 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             async_finish=False,
             return_recv_hook=True,
         )
+        if len(self.handles) > 2 and dbo_enabled():
+            # NIXL reuses two receive buffers. Save their contents in the recv
+            # hook, before the next microbatch dispatch can overwrite them.
+            copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+            def snapshot(src: torch.Tensor) -> torch.Tensor:
+                dst = torch.empty_like(src)
+                copies.append((dst, src))
+                return dst
+
+            expert_x = (
+                tuple(snapshot(x) for x in expert_x)
+                if isinstance(expert_x, tuple)
+                else snapshot(expert_x)
+            )
+            expert_num_tokens = snapshot(expert_num_tokens)
+            handle = tuple(
+                snapshot(value) if isinstance(value, torch.Tensor) else value
+                for value in handle
+            )
+            recv_hook = hook
+
+            def snapshot_recv_hook():
+                recv_hook()
+                for dst, src in copies:
+                    dst.copy_(src)
+
+            hook = snapshot_recv_hook
         self.handles[a2a_idx] = handle
 
         return (
