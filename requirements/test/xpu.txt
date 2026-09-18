@@ -1081,7 +1081,7 @@ tqdm==4.70.0
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==5.16.1
+transformers==5.17.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1197,7 +1197,7 @@ werkzeug==3.1.8
     # via schemathesis
 word2number==1.1
     # via lm-eval
-xgrammar==0.2.3
+xgrammar==0.2.7
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

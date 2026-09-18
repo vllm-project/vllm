@@ -129,8 +129,7 @@ class UBatchWrapper:
         return self.runnable
 
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
-        """
-        Capture a cudagraph for a microbatched run.
+        """Capture a cudagraph for a microbatched run.
 
         The logic here is somewhat complicated because we need to make sure that
         each of the ubatch threads initialize the cuda context before we start
@@ -274,6 +273,7 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        is_padding,
         lookback_inputs: list[torch.Tensor | None] | None = None,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
@@ -290,6 +290,11 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
+                    is_padding=(
+                        is_padding[ubatch_slice.token_slice]
+                        if is_padding is not None
+                        else None
+                    ),
                 )
             )
 
@@ -391,6 +396,7 @@ class UBatchWrapper:
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
+        is_padding = forward_context.is_padding
         num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
@@ -450,6 +456,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                is_padding=is_padding,
                 lookback_inputs=lookback_inputs,
             )
             with self.sm_control:
@@ -481,6 +488,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                is_padding=is_padding,
                 lookback_inputs=lookback_inputs,
             )
             with self.sm_control:
