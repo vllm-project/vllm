@@ -33,6 +33,39 @@ vllm serve Qwen/Qwen3.6-27B --port 8000 --tensor-parallel-size 8 --max-model-len
 
 For other models, you'll need to enable tool calling explicitly with `--enable-auto-tool-choice` and the right `--tool-call-parser`. Refer to the [Tool Calling documentation](../../features/tool_calling.md) for the correct flags for your model.
 
+### Qwen system-message ordering
+
+Qwen3.6 and Qwen3.8 deployments whose tokenizer template enforces
+system-first ordering require `system` messages to appear in a single leading
+block. A request with a second `system` message after the first one can fail
+with HTTP 400 and `System message must be at the beginning.` This is a model
+chat-template constraint surfaced by vLLM, not an engine or CUDA failure. See
+[vLLM issue #41114](https://github.com/vllm-project/vllm/issues/41114) for a
+representative multi-turn request.
+
+Prefer merging all system instructions in the client or proxy before sending
+the request. Preserve their order and content, and emit one text `system`
+message at the beginning of the conversation.
+
+If the client cannot do that, create a copy of the exact `chat_template.jinja`
+shipped with the model and modify the copy to concatenate all text-only system
+messages into the first system block. Keep the rest of the model template
+unchanged, especially its tool-call and reasoning sections. Do not only remove
+the template's exception: that can silently discard later system instructions.
+Start vLLM with the patched copy:
+
+```bash
+vllm serve Qwen/Qwen3.6-27B \
+  --chat-template ./qwen3-system-merge.jinja \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder
+```
+
+Use the matching Qwen3.8 model name and the template shipped with that model
+when serving Qwen3.8. A custom template is model-specific and should be
+validated with normal multi-turn messages, tool calls, reasoning, and any
+multimodal inputs before being used in production.
+
 ## Configuring Codex
 
 Codex is configured via a TOML file located at `~/.codex/config.toml`. Create or edit this file to point Codex at your vLLM server:
