@@ -122,8 +122,9 @@ the pickler is an `_ArenaPickler` whose `reducer_override` *additionally* divert
 ```python
 class _ArenaPickler(pickle.Pickler):
     def reducer_override(self, obj):
-        if (isinstance(obj, torch.Tensor) and obj.device.type == "cpu"
+        if (type(obj) is torch.Tensor and obj.device.type == "cpu"
                 and obj.layout is torch.strided and obj.is_contiguous()
+                and not obj.requires_grad
                 and obj.numel() * obj.element_size() >= MIN_BYTES):
             idx = self.arena.write_tensor(obj)        # ONE memcpy into a free slot
             if idx is not None:
@@ -131,6 +132,13 @@ class _ArenaPickler(pickle.Pickler):
                         (self.arena.shared_memory.name, idx, nbytes, dtype_str, shape))
         return NotImplemented   # fall through to dispatch_table → _reduce_tensor
 ```
+
+Note the `type(obj) is torch.Tensor` exact-type check (not `isinstance`): the
+`dispatch_table` this falls through to is itself keyed by exact type, so a
+`Tensor` subclass (e.g. `torch.nn.Parameter`) must decline here too, or it
+would be diverted into the arena and rebuilt as a plain `Tensor`, silently
+losing its subclass identity — a divergence from the no-arena behavior that
+an `isinstance` check would have introduced.
 
 `reducer_override` is consulted before an object's normal reduction, and
 returning `NotImplemented` falls through to the `dispatch_table` — so a diverted
@@ -157,12 +165,19 @@ def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
     # get_tensor: torch.frombuffer over the mapped slot — zero bytes copied
 ```
 
-The registry is keyed by arena shm name (`_TENSOR_ARENAS: dict[str,
-ShmTensorArena]`) rather than a single per-process slot, since nothing
-guarantees a process only ever attaches to one arena-bearing queue — only
-that this happens to be true today. `MessageQueue.shutdown()` drops a
-queue's entry from the registry so the arena (and its pinned mapping) can be
-garbage-collected instead of being held for the rest of the process's life.
+The registry is keyed by arena shm name (`_TENSOR_ARENAS:
+weakref.WeakValueDictionary[str, ShmTensorArena]`) rather than a single
+per-process slot, since nothing guarantees a process only ever attaches to
+one arena-bearing queue — only that this happens to be true today. It holds
+only a *weak* reference: the registry must not be the thing keeping an
+arena alive, or it holds the arena (and its pinned mapping) for the life of
+the process even after the owning `MessageQueue` is gone. That also means
+nothing needs to (or safely can) proactively remove an entry —
+`MessageQueue.shutdown()` does not touch the registry, since it can run on
+a different thread than an in-flight `dequeue()` still reconstructing a
+tensor from that same arena (e.g. the multiproc executor's death-pipe
+monitor thread). An entry simply disappears once nothing else references
+that arena anymore.
 
 The rebuilt tensor *is* the shared memory — no transport copy and no deserialize
 on any rank.

@@ -403,16 +403,18 @@ class _ArenaPickler(pickle.Pickler):
     """Pickler that diverts large contiguous CPU tensors into the arena.
 
     `reducer_override` is consulted before an object's normal reduction.
-    For a tensor that qualifies (CPU, strided, contiguous, not
-    `requires_grad` — the same criteria as `_reduce_tensor`, plus the
+    For a tensor that qualifies (exact type `torch.Tensor` — not a
+    subclass, matching how the `dispatch_table` it falls through to is
+    itself keyed by exact type — CPU, strided, contiguous, not
+    `requires_grad`: the same criteria as `_reduce_tensor`, plus the
     divert-size threshold), it does ONE memcpy into a free arena slot and
     returns a tiny `(arena_name, slot, nbytes, dtype, shape)` rebuild stub.
-    Everything it declines — too small, non-contiguous, `requires_grad`,
-    exotic (e.g. conjugate-bit) tensors `write_tensor` can't alias, or the
-    arena is full — returns `NotImplemented`, which falls through to the
-    pickler's `dispatch_table` (i.e. `_reduce_tensor`'s out-of-band
-    `PickleBuffer` path, which applies the identical exclusions), exactly
-    as if no arena were attached.
+    Everything it declines — a `Tensor` subclass, too small, non-contiguous,
+    `requires_grad`, exotic (e.g. conjugate-bit) tensors `write_tensor`
+    can't alias, or the arena is full — returns `NotImplemented`, which
+    falls through to the pickler's `dispatch_table` (i.e. `_reduce_tensor`'s
+    out-of-band `PickleBuffer` path, which applies the identical
+    exclusions), exactly as if no arena were attached.
     """
 
     def __init__(self, file, arena: ShmTensorArena, buffer_callback=None):
@@ -425,7 +427,14 @@ class _ArenaPickler(pickle.Pickler):
 
     def reducer_override(self, obj):
         if (
-            isinstance(obj, torch.Tensor)
+            # Exact type, NOT isinstance: the dispatch_table this falls
+            # through to is itself keyed by exact type (pickle looks up
+            # `type(obj)`, not its MRO), so a Tensor subclass (e.g.
+            # `torch.nn.Parameter`) must decline here too -- an isinstance
+            # check would divert it into the arena and rebuild it as a
+            # plain Tensor, silently losing its subclass identity, unlike
+            # the no-arena path where it falls through to its own reducer.
+            type(obj) is torch.Tensor
             and obj.device.type == "cpu"
             and obj.layout == torch.strided
             and obj.is_contiguous()

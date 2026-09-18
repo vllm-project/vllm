@@ -1094,6 +1094,35 @@ def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
     assert out.requires_grad == tensor.requires_grad
 
 
+def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
+    """`reducer_override` must use an exact-type check, not `isinstance`:
+    the `dispatch_table` it falls through to is itself keyed by exact type
+    (pickle looks up `type(obj)`, not its MRO), so a `Tensor` subclass like
+    `torch.nn.Parameter` must decline here too, or it gets diverted into
+    the arena and rebuilt as a plain `Tensor` -- silently losing its
+    subclass identity, unlike the no-arena path (where it falls through to
+    its own `__reduce_ex__` and keeps its type, as
+    test_tensor_pickle_roundtrip["param"] verifies for the non-arena path)."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_tensor_arena._TENSOR_ARENAS, reader.shared_memory.name, reader
+    )
+    # requires_grad=False to isolate the subclass check from the (already
+    # separately tested) requires_grad exclusion.
+    param = torch.nn.Parameter(torch.randn(1024, 1024), requires_grad=False)
+    assert type(param) is not torch.Tensor
+    assert param.is_contiguous()
+    assert param.numel() * param.element_size() >= shm_tensor_arena._ARENA_MIN_BYTES
+
+    data, buffers, written = _dumps_arena(param, writer)
+    # Declined by the arena -- no slot consumed.
+    assert written == []
+    out = pickle.loads(data, buffers=buffers)
+    assert torch.equal(out, param)
+    assert isinstance(out, torch.nn.Parameter)
+
+
 def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     """A reader that cudaHostRegister-ed its mapping must cudaHostUnregister
     the same pointer before the mapping is closed; an unpinned arena must not
