@@ -703,20 +703,22 @@ class FusedInputNorm(nn.Module):
 
     def forward(
         self,
-        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
         visual_dtype: torch.dtype,
     ) -> torch.Tensor:
         if self.is_identity:
-            return pixel_values.to(visual_dtype)
+            return grid_thw.to(visual_dtype)
 
-        if pixel_values.ndim == 3:
-            assert pixel_values.shape[0] == self.channel
-            x = pixel_values.to(self.dtype)
+        # Pixtral passes unpadded CHW images, which may be non-contiguous.
+        # Normalize them directly to avoid a copy from flattening to the 2D path.
+        if grid_thw.ndim == 3:
+            assert grid_thw.shape[0] == self.channel
+            x = grid_thw.to(self.dtype)
             x = x * self.weight[:, None, None] + self.bias[:, None, None]
             return x.to(visual_dtype)
 
-        assert pixel_values.ndim == 2
-        patches, size = pixel_values.shape
+        assert grid_thw.ndim == 2
+        patches, size = grid_thw.shape
         patch_size = size // self.channel
 
         # On XPU, fuse the whole rescale + normalize into a single custom
@@ -726,11 +728,11 @@ class FusedInputNorm(nn.Module):
         # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         if (
             current_platform.is_xpu()
-            and pixel_values.dtype == torch.uint8
+            and grid_thw.dtype == torch.uint8
             and self.weight.dtype == torch.float32
         ):
             return torch.ops.vllm.xpu_fused_input_norm(
-                pixel_values, self.weight, self.bias, visual_dtype
+                grid_thw, self.weight, self.bias, visual_dtype
             )
 
         # Apply the per-channel affine transform directly instead of via
@@ -741,7 +743,7 @@ class FusedInputNorm(nn.Module):
         # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
         # broadcasted multiply-add is numerically identical and has no such
         # limit.
-        x = pixel_values.to(self.dtype).view(patches, self.channel, patch_size)
+        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
