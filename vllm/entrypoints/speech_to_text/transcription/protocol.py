@@ -156,7 +156,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_LONG_INFO.max)
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: float | None = None
