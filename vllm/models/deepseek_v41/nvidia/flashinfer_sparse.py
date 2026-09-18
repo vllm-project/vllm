@@ -26,7 +26,11 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
-from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
@@ -182,6 +186,39 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
     """SWA metadata for the FlashInfer sparse decode path (varlen decode)."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Graphs retain these addresses while each build refreshes their contents.
+        self._decode_topk_lens = torch.empty(
+            self._max_tokens, dtype=torch.int32, device=self.device
+        )
+        self._decode_seq_lens = torch.empty_like(self._decode_topk_lens)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> "DeepseekSparseSWAMetadata":
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        num_tokens = metadata.num_decode_tokens
+        if not common_attn_metadata.causal and num_tokens > 0:
+            assert metadata.decode_swa_lens is not None
+            assert metadata.seq_lens is not None
+            assert metadata.token_to_req_indices is not None
+            topk_lens = self._decode_topk_lens[:num_tokens]
+            seq_lens = self._decode_seq_lens[:num_tokens]
+            torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
+            torch.index_select(
+                metadata.seq_lens,
+                0,
+                metadata.token_to_req_indices[:num_tokens],
+                out=seq_lens,
+            )
+            metadata.flashinfer_decode_topk_lens = topk_lens
+            metadata.flashinfer_decode_seq_lens = seq_lens
+        return metadata
 
 
 class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
@@ -495,21 +532,40 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # Keep the TRTLLM-gen decode/prefill split: the launcher is tuned for
         # uniform-q batches, and this avoids flattening mixed batches into one call.
         if num_decode_tokens > 0:
+            decode_query = query[:num_decode_tokens]
+            decode_output = output[:num_decode_tokens]
             decode_cu = query_start_loc[: num_decodes + 1]
+            decode_seq_lens = seq_lens[:num_decodes]
+            decode_topk_lens = sparse_topk_lens[:num_decode_tokens]
+            max_decode_query_len = swa_metadata.max_decode_query_len
+            if swa_metadata.decode_swa_width > self.window_size:
+                # DSpark's non-causal window extends past the fixed 128 SWA
+                # columns into the aliased compressed pool. Exclude padding,
+                # and expose the full block to each query instead of letting
+                # TRTLLM derive a causal SWA length from its query position.
+                assert swa_only
+                assert swa_metadata.flashinfer_decode_topk_lens is not None
+                assert swa_metadata.flashinfer_decode_seq_lens is not None
+                decode_topk_lens = swa_metadata.flashinfer_decode_topk_lens
+                decode_seq_lens = swa_metadata.flashinfer_decode_seq_lens
+                decode_query = decode_query.unsqueeze(1)
+                decode_output = decode_output.unsqueeze(1)
+                decode_cu = None
+                max_decode_query_len = 1
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
-                query=query[:num_decode_tokens],
+                query=decode_query,
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[:num_decode_tokens],
                 compressed_kv_cache=compressed_kv_cache,
-                sparse_topk_lens=sparse_topk_lens[:num_decode_tokens],
-                seq_lens=seq_lens[:num_decodes],
-                out=output[:num_decode_tokens],
+                sparse_topk_lens=decode_topk_lens,
+                seq_lens=decode_seq_lens,
+                out=decode_output,
                 bmm1_scale=bmm1_scale,
                 bmm2_scale=bmm2_scale,
                 sinks=self.attn_sink,
                 cum_seq_lens_q=decode_cu,
-                max_q_len=swa_metadata.max_decode_query_len,
+                max_q_len=max_decode_query_len,
             )
 
         if num_prefill_tokens > 0:

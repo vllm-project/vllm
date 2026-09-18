@@ -213,6 +213,8 @@ class DeepseekSparseSWAMetadata:
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
     max_decode_query_len: int = 1
+    flashinfer_decode_topk_lens: torch.Tensor | None = None
+    flashinfer_decode_seq_lens: torch.Tensor | None = None
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
