@@ -71,7 +71,7 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
         "original_max_position_embeddings": 32768,
     }
     PretrainedConfig.validate_rope(
-        SimpleNamespace(rope_parameters=nested_rope_parameters)
+        SimpleNamespace(model_type="laguna", rope_parameters=nested_rope_parameters)
     )
     assert nested_rope_parameters == {"full_attention": {"rope_type": "default"}}
 
@@ -89,6 +89,36 @@ def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch
         "rope_theta": 500000.0,
     }
     assert len(calls) == 2
+
+
+def test_nested_rope_validation_patch_is_scoped_to_allowlisted_model_types(
+    monkeypatch,
+):
+    """The patch stays installed for the process; only allowlisted model types
+    get their shared entries dropped, every other config reaches transformers'
+    validation untouched."""
+    calls = []
+
+    def original_validate_rope(config, *args, **kwargs):
+        calls.append(config)
+
+    from transformers import PretrainedConfig
+
+    monkeypatch.setattr(PretrainedConfig, "validate_rope", original_validate_rope)
+    _patch_hf_transformers_nested_rope_validation()
+
+    nested_rope_parameters = {
+        "full_attention": {"rope_type": "default"},
+        "rope_theta": 10000.0,
+    }
+    PretrainedConfig.validate_rope(
+        SimpleNamespace(model_type="llama", rope_parameters=nested_rope_parameters)
+    )
+    assert nested_rope_parameters == {
+        "full_attention": {"rope_type": "default"},
+        "rope_theta": 10000.0,
+    }
+    assert len(calls) == 1
 
 
 def _write_json(path: Path, value: object) -> None:
