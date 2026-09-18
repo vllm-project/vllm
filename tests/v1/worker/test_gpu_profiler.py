@@ -121,7 +121,7 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
 
 @pytest.mark.parametrize(
     "activities",
-    [[], ["CPU", "CPU"]],
+    [[], ["CPU", "CPU"], ["INVALID"]],
 )
 def test_torch_profiler_activities_reject_invalid_values(activities):
     with pytest.raises(ValueError, match="torch_profiler_activities"):
