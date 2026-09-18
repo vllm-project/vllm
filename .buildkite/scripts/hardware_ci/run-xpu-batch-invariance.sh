@@ -15,10 +15,26 @@ export VLLM_MOE_SKIP_PADDING=0
 cd "$repo_root"
 
 cleanup_server() {
+    local attempt
+
     if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
-        kill "$server_pid"
-        wait "$server_pid" || true
+        kill "$server_pid" 2>/dev/null || true
+
+        for ((attempt = 0; attempt < 30; attempt++)); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+
+        if kill -0 "$server_pid" 2>/dev/null; then
+            echo "vLLM did not stop after 30 seconds; sending SIGKILL" >&2
+            kill -KILL "$server_pid" 2>/dev/null || true
+        fi
+
+        wait "$server_pid" 2>/dev/null || true
     fi
+
     server_pid=
 }
 
