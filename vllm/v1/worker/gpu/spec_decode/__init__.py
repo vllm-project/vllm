@@ -48,6 +48,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
         return MTPSpeculator(vllm_config, device)
+    elif speculative_config.method == "pard2":
+        # Must precede use_eagle(), which is True for pard2: PARD-2 drafts all
+        # K tokens in one pass, so the autoregressive speculator is wrong for it.
+        from vllm.v1.worker.gpu.spec_decode.pard2.speculator import Pard2Speculator
+
+        return Pard2Speculator(vllm_config, device)
     elif speculative_config.use_eagle():
         from vllm.v1.worker.gpu.spec_decode.eagle.speculator import (
             EagleSpeculator,
