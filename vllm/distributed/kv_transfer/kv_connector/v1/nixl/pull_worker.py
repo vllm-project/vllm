@@ -64,8 +64,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
-            # always store metadata for failure recovery
-            self._recving_metadata[req_id] = meta
+            # Full local hits and aborted cleanup only notify P; no recv is awaited.
+            # On a full local hit:
+            # - Notification failure must not fail the request: its KV is local.
+            # - Receive completion must not be reported: num_external_tokens == 0,
+            #   so the scheduler never entered WAITING_FOR_REMOTE_KVS to begin with.
+            # Aborted cleanup requests have already been removed from the scheduler.
+            if meta.awaiting_kvs or any(meta.local_block_ids):
+                self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
