@@ -479,7 +479,6 @@ class SwigluOAIAndMul(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-
         gate, up = x[..., ::2], x[..., 1::2]
         gate = gate.clamp(min=None, max=self.limit)
         up = up.clamp(min=-self.limit, max=self.limit)
@@ -647,9 +646,7 @@ class QuickGELU(CustomOp):
 # --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
-    """
-    Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
-    """
+    """Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2."""
 
     # --8<-- [end:relu2]
 
@@ -676,8 +673,7 @@ class ReLUSquaredActivation(CustomOp):
 # --8<-- [start:xielu]
 @CustomOp.register("xielu")
 class XIELU(CustomOp):
-    """
-    Applies the xIELU activation function introduced in https://arxiv.org/abs/2411.13010
+    """Applies the xIELU activation function introduced in https://arxiv.org/abs/2411.13010
     If the user has installed the nickjbrowning/XIELU, we import xIELU CUDA
     Otherwise, we emit a single warning and use xIELU Python
     """
@@ -747,7 +743,7 @@ class XIELU(CustomOp):
         )
 
     def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        """Firewall function to prevent torch.compile from seeing .item()"""
+        """Firewall function to prevent torch.compile from seeing .item()."""
         assert self._xielu_cuda_obj is not None, "XIELU CUDA object must not be None"
         original_shape = x.shape
         # CUDA kernel expects 3D tensors, reshape if needed

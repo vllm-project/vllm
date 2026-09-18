@@ -352,7 +352,6 @@ class DiffusionGemmaForConditionalGeneration(
         skip duplicate decoder backbone weights, handle vision tower and
         self-conditioning separately.
         """
-
         sc_params = dict(
             (n, p)
             for n, p in self.named_parameters()
@@ -1313,7 +1312,6 @@ class DiffusionSampler:
         is_committing = states.is_encoder_phase[decode_slots].clone()
 
         slots_np = input_batch.idx_mapping_np[:num_reqs]
-        is_decode_np = per_req_nlogits_np > 0
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
 
         # Sample over the [num_decode * CL, vocab] logits. The fp32 pipeline in
@@ -1397,13 +1395,16 @@ class DiffusionSampler:
         # stashed logprobs and attach to SamplerOutput.
         logprobs_tensors = None
         if max_num_logprobs >= 0 and is_committing.any() and self._pending_logprobs:
+            committing_slots = set(
+                decode_slots_np[is_committing.cpu().numpy()].tolist()
+            )
             parts_ids, parts_lp, parts_ranks = [], [], []
             cu_gen: list[int] = []
             flat_offset = 0
             for i in range(num_reqs):
                 cu_gen.append(flat_offset)
                 slot = int(slots_np[i])
-                if is_decode_np[i] and slot in self._pending_logprobs:
+                if slot in committing_slots and slot in self._pending_logprobs:
                     lp = self._pending_logprobs.pop(slot)
                     parts_ids.append(lp.logprob_token_ids)
                     parts_lp.append(lp.logprobs)
