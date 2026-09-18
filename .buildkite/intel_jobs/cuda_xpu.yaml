@@ -34,7 +34,7 @@ steps:
     pytest -v -s cuda/test_cuda_context.py || true &&
     pytest -v -s cuda/test_platform_no_cuda_init.py || true &&
     pytest -v -s cuda/test_cuda_compatibility_path.py || true'
-- label: ':nvidia: (H200 MIG 35GB) CUDAGraph'
+- label: ':nvidia: (H200 MIG 18GB) CUDAGraph'
   key: cudagraph
   device: intel_gpu
   timeout_in_minutes: 30

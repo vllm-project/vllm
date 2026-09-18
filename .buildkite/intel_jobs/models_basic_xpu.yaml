@@ -58,7 +58,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Basic Models (Other)'
   key: basic-models-tests-other
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 38
   working_dir: .
   no_plugin: true
   env:
@@ -70,18 +70,19 @@ steps:
     gpu: 1+
     mem: 24+
   _raw_old_commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/models/test_terratorch.py
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
+  - tests/models/test_deepseek_v4_vl_rocm.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py || true'
+    pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py || true'
 - label: ':nvidia: (B200) Inkling'
   key: inkling-unit-tests-b200
   device: intel_gpu
