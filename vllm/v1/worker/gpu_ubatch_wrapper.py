@@ -261,7 +261,6 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
-        is_padding,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
@@ -277,11 +276,6 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
-                    is_padding=(
-                        is_padding[ubatch_slice.token_slice]
-                        if is_padding is not None
-                        else None
-                    ),
                 )
             )
 
@@ -379,7 +373,6 @@ class UBatchWrapper:
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
-        is_padding = forward_context.is_padding
         num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
@@ -421,7 +414,6 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                is_padding=is_padding,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.runnable)
@@ -448,7 +440,6 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                is_padding=is_padding,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.runnable)
