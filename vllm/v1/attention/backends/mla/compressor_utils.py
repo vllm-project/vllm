@@ -42,6 +42,8 @@ class CompressedSlotMappingKernel(
     @triton.jit(do_not_specialize=["block_table_stride"])
     def kernel(
         # [num_tokens]
+        compressed_slot_mapping_ptr,
+        # [num_tokens] the tokens' own slots
         slot_mapping_ptr,
         # [num_reqs + 1]
         query_start_loc_ptr,
@@ -69,7 +71,12 @@ class CompressedSlotMappingKernel(
             mask = offset < query_len
 
             pos = start_pos + i + tl.arange(0, TRITON_BLOCK_SIZE)
-            is_valid = (pos + 1) % COMPRESS_RATIO == 0
+            # A replayed token has a PAD slot (SWA bounded replay: its KV is
+            # cached already); its compressed KV is cached too, so PAD here.
+            slot = tl.load(
+                slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
+            )
+            is_valid = ((pos + 1) % COMPRESS_RATIO == 0) & (slot != PAD_ID)
             pos_after_compress = pos // COMPRESS_RATIO
 
             block_ids = pos_after_compress // block_size
@@ -81,7 +88,9 @@ class CompressedSlotMappingKernel(
 
             # NOTE
             slot_ids = tl.where(is_valid, slot_ids, PAD_ID)
-            tl.store(slot_mapping_ptr + query_start + offset, slot_ids, mask=mask)
+            tl.store(
+                compressed_slot_mapping_ptr + query_start + offset, slot_ids, mask=mask
+            )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -121,6 +130,7 @@ class CompressedSlotMappingKernel(
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
         return dict(
+            compressed_slot_mapping=TritonWarmupTensor(torch.int64),
             slot_mapping=TritonWarmupTensor(torch.int64),
             query_start_loc=int32_ptr,
             seq_lens=int32_ptr,
@@ -132,6 +142,7 @@ class CompressedSlotMappingKernel(
     @kernel_launcher
     def __call__(
         self,
+        compressed_slot_mapping: torch.Tensor,
         slot_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
@@ -149,6 +160,7 @@ class CompressedSlotMappingKernel(
 
 def get_compressed_slot_mapping(
     num_tokens: int,
+    slot_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     block_table: torch.Tensor,
@@ -156,19 +168,28 @@ def get_compressed_slot_mapping(
     compress_ratio: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Slot mapping for writing the compressed states of ``num_tokens`` tokens.
+
+    Every ``compress_ratio`` tokens share one compressed state, written by the
+    last of them: that token maps to the state's slot, the others to PAD. A
+    token whose own ``slot_mapping`` entry is PAD maps to PAD too: SWA bounded
+    replay recomputes tokens whose KV is cached already, and their compressed
+    states must not be rewritten either.
+    """
     if out is not None:
         # Guard: for padded / invalid sequences.
         # Negative positions produce bogus block indices that lead to illegal memory
         # accesses inside the block_table load.
         # NOTE: Fill -1 to the whole tensor, not just the first `num_tokens`.
         out.fill_(-1)
-        slot_mapping = out[:num_tokens]
+        compressed_slot_mapping = out[:num_tokens]
     else:
-        slot_mapping = torch.full(
+        compressed_slot_mapping = torch.full(
             (num_tokens,), -1, dtype=torch.int64, device=query_start_loc.device
         )
 
     _COMPRESSED_SLOT_MAPPING_KERNEL(
+        compressed_slot_mapping,
         slot_mapping,
         query_start_loc,
         seq_lens,
@@ -176,7 +197,7 @@ def get_compressed_slot_mapping(
         block_size,
         compress_ratio,
     )
-    return slot_mapping
+    return compressed_slot_mapping
 
 
 _COMPRESSED_SLOT_MAPPING_KERNEL = CompressedSlotMappingKernel()

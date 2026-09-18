@@ -14,6 +14,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
+    get_compressed_slot_mapping,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
@@ -233,6 +234,28 @@ def test_compressed_slot_mapping_warmup_includes_index_kpool():
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
     assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_slot_mapping_inherits_padded_token_slots():
+    """A token whose own slot is padded (SWA bounded replay) closes no
+    compressed state either."""
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor([0, 8], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([8], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[3]], dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(8, dtype=torch.int64, device=device)
+    slot_mapping[:4] = -1
+    compressed = get_compressed_slot_mapping(
+        8,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size=4,
+        compress_ratio=2,
+    )
+    assert compressed.tolist() == [-1, -1, -1, -1, -1, 3 * 4 + 2, -1, 3 * 4 + 3]
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

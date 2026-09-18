@@ -495,11 +495,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
+            replay_start=replay_start,
         )
 
         ragged_indices = None
