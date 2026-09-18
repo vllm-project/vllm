@@ -422,7 +422,8 @@ class OnlineAcceptanceEstimator:
             self.predictions.stride(0),
             self.counts,
             num_reqs,
-            BLOCK_R=triton.next_power_of_2(max(num_reqs, 1)),
+            BLOCK_R=max(256, triton.next_power_of_2(num_reqs)),
+            num_warps=1 if num_reqs <= 256 else 4,
         )
 
         self._steps_since_refit += 1
