@@ -372,6 +372,29 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
+def _concat_logprob_stashes(
+    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
+) -> LogprobsTensors:
+    """Join the logprobs stashed for the requests committing this step.
+
+    Each stash is as wide as the widest logprobs request in the batch at the
+    step that request converged, so stashes from different steps can differ
+    in width. Pad the narrow ones the way compute_topk_scores pads a mixed
+    batch: token id 0 at -inf, which the output processor never reports.
+    """
+    width = max(p.logprob_token_ids.shape[1] for p in parts)
+
+    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
+        return F.pad(t, (0, width - t.shape[1]), value=value)
+
+    return LogprobsTensors(
+        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
+        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
+        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
 # Tiles specialize the graph on batch size 1, on a tile as wide as the canvas,
 # on compute_sc and on sizes that coincide with the state buffers. That set
 # is small but passes Dynamo's default of 8, after which every step would run
@@ -1519,7 +1542,7 @@ class DiffusionSampler:
             committing_slots = (
                 set(decode_slots_np[is_committing.cpu().numpy()].tolist()) | emit_now
             )
-            parts_ids, parts_lp, parts_ranks = [], [], []
+            parts: list[LogprobsTensors] = []
             cu_gen: list[int] = []
             flat_offset = 0
             for i in range(num_reqs):
@@ -1527,17 +1550,10 @@ class DiffusionSampler:
                 slot = int(slots_np[i])
                 if slot in committing_slots and slot in self._pending_logprobs:
                     lp = self._pending_logprobs.pop(slot)
-                    parts_ids.append(lp.logprob_token_ids)
-                    parts_lp.append(lp.logprobs)
-                    parts_ranks.append(lp.selected_token_ranks)
+                    parts.append(lp)
                     flat_offset += lp.logprobs.shape[0]
-            if parts_ids:
-                logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=torch.cat(parts_ids),
-                    logprobs=torch.cat(parts_lp),
-                    selected_token_ranks=torch.cat(parts_ranks),
-                    cu_num_generated_tokens=cu_gen,
-                )
+            if parts:
+                logprobs_tensors = _concat_logprob_stashes(parts, cu_gen)
 
         return self._build_output(
             input_batch,

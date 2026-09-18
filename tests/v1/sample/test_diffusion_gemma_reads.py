@@ -10,8 +10,10 @@ import torch
 from vllm.model_executor.models.diffusion_gemma import (
     DiffusionGemmaRequestStates,
     _compiled_sample_step,
+    _concat_logprob_stashes,
 )
 from vllm.platforms import current_platform
+from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
@@ -263,3 +265,29 @@ def test_step_cap_is_per_slot():
     # Slot 0 hit its cap and moves to commit. Slot 1 keeps denoising.
     assert states.is_encoder_phase[:2].tolist() == [True, False]
     assert states.step[:2].tolist() == [1, 1]
+
+
+def _stash(rows: int, width: int, first_id: int) -> LogprobsTensors:
+    ids = torch.arange(first_id, first_id + rows * width).reshape(rows, width)
+    return LogprobsTensors(
+        logprob_token_ids=ids,
+        logprobs=-ids.float(),
+        selected_token_ranks=torch.zeros(rows, dtype=torch.int64),
+    )
+
+
+def test_stashes_of_different_widths_join():
+    # A read that asked for 10 label ids and a generation that asked for 2
+    # logprobs converged in different steps, so their stashes differ in width.
+    wide, narrow = _stash(2, 11, 100), _stash(3, 3, 0)
+
+    out = _concat_logprob_stashes([narrow, wide], [0, 3])
+
+    assert out.logprob_token_ids.shape == (5, 11)
+    assert out.logprobs.shape == (5, 11)
+    assert out.cu_num_generated_tokens == [0, 3]
+    # The narrow rows keep their values and pad with id 0 at -inf.
+    assert torch.equal(out.logprob_token_ids[:3, :3], narrow.logprob_token_ids)
+    assert not out.logprob_token_ids[:3, 3:].any()
+    assert torch.isneginf(out.logprobs[:3, 3:]).all()
+    assert torch.equal(out.logprobs[3:], wide.logprobs)
