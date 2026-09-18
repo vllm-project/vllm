@@ -142,6 +142,20 @@ def test_loads_v2_processors(monkeypatch: pytest.MonkeyPatch, source: ProcSource
             "no.such.module:Nope",
             id="missing-module",
         ),
+        pytest.param(
+            ["no_colon_here"],
+            None,
+            ValueError,
+            "Expected format",
+            id="fqcn-missing-colon",
+        ),
+        pytest.param(
+            ["too:many:colons"],
+            None,
+            ValueError,
+            "Expected format",
+            id="fqcn-extra-colons",
+        ),
     ],
 )
 def test_rejects_invalid(
