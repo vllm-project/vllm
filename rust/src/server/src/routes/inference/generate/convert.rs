@@ -30,6 +30,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether the caller requested final prompt token metadata.
+    pub return_token_ids: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -56,6 +58,7 @@ pub(super) fn prepare_generate_request(
             .unwrap_or(false);
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -93,6 +96,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            return_token_ids,
         },
     })
 }
@@ -162,6 +166,30 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let mut body = json!({
+                "token_ids": [11, 22],
+                "sampling_params": {}
+            });
+            if let Some(watermarking) = watermarking {
+                body["sampling_params"]["watermarking"] = json!(watermarking);
+            }
+            let prepared = prepare_generate_request(
+                serde_json::from_value(body).expect("parse request"),
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request");
+            assert_eq!(
+                prepared.text_request.sampling_params.watermarking,
+                watermarking.unwrap_or(true)
+            );
+        }
     }
 
     #[test]

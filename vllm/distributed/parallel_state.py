@@ -32,6 +32,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
+from math import gcd
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import patch
@@ -140,9 +141,11 @@ _group_name_counter: dict[str, int] = {}
 
 def _get_unique_name(name: str) -> str:
     """Get a unique name for the group.
+
     Example:
     _get_unique_name("tp") -> "tp:0"
     _get_unique_name("tp") -> "tp:1"
+
     """
     if name not in _group_name_counter:
         _group_name_counter[name] = 0
@@ -419,8 +422,7 @@ direct_register_custom_op(
 
 
 class GroupCoordinator:
-    """
-    PyTorch ProcessGroup wrapper for a group of processes.
+    """PyTorch ProcessGroup wrapper for a group of processes.
     PyTorch ProcessGroup is bound to one specific communication backend,
         e.g. NCCL, Gloo, MPI, etc.
     GroupCoordinator takes charge of all the communication operations among
@@ -633,34 +635,34 @@ class GroupCoordinator:
 
     @property
     def first_rank(self):
-        """Return the global rank of the first process in the group"""
+        """Return the global rank of the first process in the group."""
         return self.ranks[0]
 
     @property
     def last_rank(self):
-        """Return the global rank of the last process in the group"""
+        """Return the global rank of the last process in the group."""
         return self.ranks[-1]
 
     @property
     def is_first_rank(self):
-        """Return whether the caller is the first process in the group"""
+        """Return whether the caller is the first process in the group."""
         return self.rank == self.first_rank
 
     @property
     def is_last_rank(self):
-        """Return whether the caller is the last process in the group"""
+        """Return whether the caller is the last process in the group."""
         return self.rank == self.last_rank
 
     @property
     def next_rank(self):
-        """Return the global rank of the process that follows the caller"""
+        """Return the global rank of the process that follows the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group + 1) % world_size]
 
     @property
     def prev_rank(self):
-        """Return the global rank of the process that precedes the caller"""
+        """Return the global rank of the process that precedes the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group - 1) % world_size]
@@ -718,8 +720,7 @@ class GroupCoordinator:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        """
-        User-facing all-reduce function before we actually call the
+        """User-facing all-reduce function before we actually call the
         all-reduce operation.
 
         We need this because Dynamo does not support passing an arbitrary
@@ -808,8 +809,7 @@ class GroupCoordinator:
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -1362,7 +1362,7 @@ class GroupCoordinator:
         torch.distributed.barrier(group=self.cpu_group)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -1558,6 +1558,23 @@ def get_etp_group() -> GroupCoordinator:
     return _ETP
 
 
+_ENGRAM_DP: GroupCoordinator | None = None
+
+
+def get_engram_dp_group() -> GroupCoordinator | None:
+    """Return the DP replicas that share one engram embedding table.
+
+    None when every replica holds a full (TP-sharded) copy, which is the case
+    for models without engram layers and for replicas that span nodes.
+    """
+    return _ENGRAM_DP
+
+
+def get_engram_dp_size() -> int:
+    """Number of DP replicas one engram embedding table is sharded over."""
+    return _ENGRAM_DP.world_size if _ENGRAM_DP is not None else 1
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1615,12 +1632,8 @@ def get_pcp_group() -> GroupCoordinator:
 
 
 @contextmanager
-def graph_capture(
-    device: torch.device,
-    graph_capture_context: GraphCaptureContext | None = None,
-):
-    """
-    `graph_capture` is a context manager which should surround the code that
+def graph_capture(device: torch.device):
+    """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
     is replayed. It returns a `GraphCaptureContext` object which contains the
@@ -1631,13 +1644,8 @@ def graph_capture(
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
-
-    A caller may pass an explicit ``graph_capture_context`` to control the
-    stream used (e.g. to capture on the default stream).
     """
-    context = graph_capture_context or GraphCaptureContext(
-        torch.cuda.Stream(device=device)
-    )
+    context = GraphCaptureContext(torch.cuda.Stream(device=device))
     with (
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
@@ -1919,6 +1927,43 @@ def init_distributed_environment(
             _INNER_DP_WORLD = _WORLD
 
 
+def _elastic_join_warmup_ctx() -> AbstractContextManager[Any]:
+    """Defer communicator warm-up when joining a live elastic-EP cluster on ROCm.
+
+    The existing ranks defer their matching warm-up in create_standby_groups(),
+    so a joining worker must too or the warm-up collective has no peers. Both
+    sides warm up at commit.
+    """
+    from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_rocm
+
+    if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        return defer_comm_warmup_on_rocm()
+    return nullcontext()
+
+
+def _engram_dp_shard_size(
+    world_size: int,
+    data_parallel_size: int,
+    replica_size: int,
+) -> int:
+    """Size of DP shards aligned with complete replicas and node boundaries."""
+    node_count = get_node_count()
+    replicas_per_node, remainder = divmod(world_size, node_count * replica_size)
+    if remainder:
+        return 1
+    # Shards must divide both the DP group and each node's replica count.
+    shard_size = gcd(data_parallel_size, replicas_per_node)
+    if shard_size == 1 or node_count == 1:
+        return shard_size
+    ranks_per_node = replicas_per_node * replica_size
+    for start in range(0, world_size, ranks_per_node):
+        same_node = in_the_same_node_as(get_world_group().cpu_group, start)
+        node_ranks = [rank for rank, local in enumerate(same_node) if local]
+        if node_ranks != list(range(start, start + ranks_per_node)):
+            return 1
+    return shard_size
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -1926,14 +1971,17 @@ def initialize_model_parallel(
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
-    """
-    Initialize model parallel groups.
+    """Initialize model parallel groups.
 
     Arguments:
         tensor_model_parallel_size: number of GPUs used for tensor model
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        prefill_context_model_parallel_size: number of GPUs used for context
+            parallelism during prefill.
+        decode_context_model_parallel_size: number of GPUs used for context
+            parallelism during decode.
         backend: name of torch distributed communication backend.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
@@ -1948,6 +1996,7 @@ def initialize_model_parallel(
     are on the same DGX box. For example if we are using 2 DGX-1 boxes
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
+
     """
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
@@ -2041,6 +2090,40 @@ def initialize_model_parallel(
             group_name="etp",
         )
 
+    # Build the node-local DP group used to shard or share an Engram table.
+    global _ENGRAM_DP
+    assert _ENGRAM_DP is None, "engram data parallel group is already initialized"
+    engram_dp_size = 1
+    engram_config = config.engram_config
+    if (
+        engram_config is not None
+        and config.model_config is not None
+        and config.model_config.architecture == "DeepseekV41ForCausalLM"
+        and not enable_elastic_ep
+    ):
+        engram_dp_size = _engram_dp_shard_size(
+            world_size,
+            data_parallel_size,
+            tensor_model_parallel_size
+            * pipeline_model_parallel_size
+            * prefill_context_model_parallel_size,
+        )
+    if engram_dp_size > 1:
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
+        )
+        _ENGRAM_DP = init_model_parallel_group(
+            [x.tolist() for x in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="edp",
+        )
+        logger.info_once(
+            "Engram node-local DP group size: %d (TP=%d)",
+            engram_dp_size,
+            tensor_model_parallel_size,
+        )
+
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
@@ -2101,13 +2184,14 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        _DP = _init_stateless_group(
-            group_ranks,
-            "dp",
-            parallel_config.data_parallel_master_ip,
-            backend,
-            coord_store=coord_store,
-        )
+        with _elastic_join_warmup_ctx():
+            _DP = _init_stateless_group(
+                group_ranks,
+                "dp",
+                parallel_config.data_parallel_master_ip,
+                backend,
+                coord_store=coord_store,
+            )
     else:
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
@@ -2130,14 +2214,15 @@ def initialize_model_parallel(
         group_ranks = [x.tolist() for x in group_ranks]
         use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
-            _EP = _init_stateless_group(
-                group_ranks,
-                "ep",
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
-                use_all2all=use_all2all,
-            )
+            with _elastic_join_warmup_ctx():
+                _EP = _init_stateless_group(
+                    group_ranks,
+                    "ep",
+                    parallel_config.data_parallel_master_ip,
+                    backend,
+                    coord_store=coord_store,
+                    use_all2all=use_all2all,
+                )
         else:
             _EP = init_model_parallel_group(
                 group_ranks,
@@ -2155,13 +2240,14 @@ def initialize_model_parallel(
         assert _EPLB is None, "EPLB group is already initialized"
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
-                _EPLB = _init_stateless_group(
-                    group_ranks,
-                    "eplb",
-                    parallel_config.data_parallel_master_ip,
-                    backend,
-                    coord_store=coord_store,
-                )
+                with _elastic_join_warmup_ctx():
+                    _EPLB = _init_stateless_group(
+                        group_ranks,
+                        "eplb",
+                        parallel_config.data_parallel_master_ip,
+                        backend,
+                        coord_store=coord_store,
+                    )
             else:
                 _EPLB = init_model_parallel_group(
                     group_ranks,
@@ -2287,6 +2373,11 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
+    global _ENGRAM_DP
+    if _ENGRAM_DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
+
     global _DCP
     if _DCP:
         _DCP.destroy()
@@ -2379,8 +2470,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 def in_the_same_node_as(
     pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0
 ) -> list[bool]:
-    """
-    This is a collective operation that returns if each rank is in the same node
+    """This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
@@ -2471,8 +2561,7 @@ def in_the_same_node_as(
 
 
 def is_global_first_rank() -> bool:
-    """
-    Check if the current process is the first rank globally across all
+    """Check if the current process is the first rank globally across all
     parallelism strategies (PP, TP, DP, EP, etc.).
 
     Unlike group-specific checks like `get_tensor_model_parallel_rank() == 0`
@@ -2482,6 +2571,7 @@ def is_global_first_rank() -> bool:
     Returns:
         bool: True if this is the global first rank (rank 0), False otherwise.
               Returns True if distributed is not initialized (single process).
+
     """
     try:
         # If world group is available, use it for the most accurate check
@@ -2502,9 +2592,7 @@ def is_global_first_rank() -> bool:
 
 
 def is_local_first_rank() -> bool:
-    """
-    Check if the current process is the first local rank (rank 0 on its node).
-    """
+    """Check if the current process is the first local rank (rank 0 on its node)."""
     try:
         # prefer the initialized world group if available
         global _WORLD
@@ -2525,14 +2613,14 @@ def is_local_first_rank() -> bool:
 
 
 def _node_count(pg: ProcessGroup | StatelessProcessGroup) -> int:
-    """
-    Returns the total number of nodes in the process group.
+    """Returns the total number of nodes in the process group.
 
     Args:
         pg: The process group to analyze
 
     Returns:
         int: The total number of nodes
+
     """
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)
