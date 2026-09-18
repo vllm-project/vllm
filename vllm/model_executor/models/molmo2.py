@@ -22,6 +22,7 @@ from transformers import (
 )
 from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
+from typing_extensions import TypedDict
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -104,15 +105,14 @@ _MAX_VIDEO_FPS = 8
 
 
 class Molmo2ImageInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: The total number of crops (dynamic)
-        - np: The total number of patches per crop
-        - cps: Number of channels * patch_size * patch_size
-        - npp: Number of pooled patches (dynamic)
-        - pp: pooling_size * pooling_size
-        - ni: Number of images
-        - nt: Number of image tokens (dynamic)
+    """Dimensions:
+    - nc: The total number of crops (dynamic)
+    - np: The total number of patches per crop
+    - cps: Number of channels * patch_size * patch_size
+    - npp: Number of pooled patches (dynamic)
+    - pp: pooling_size * pooling_size
+    - ni: Number of images
+    - nt: Number of image tokens (dynamic)
     """
 
     pixel_values: Annotated[torch.Tensor, TensorShape("nc", "np", "cps")]
@@ -131,15 +131,14 @@ class Molmo2ImageInputs(TensorSchema):
 
 
 class Molmo2VideoInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: The total number of frames (dynamic)
-        - np: The total number of patches per frame
-        - cps: Number of channels * patch_size * patch_size
-        - npp: Number of pooled patches (dynamic)
-        - pp: pooling_size * pooling_size
-        - nv: Number of videos
-        - nt: Number of video tokens (dynamic)
+    """Dimensions:
+    - nc: The total number of frames (dynamic)
+    - np: The total number of patches per frame
+    - cps: Number of channels * patch_size * patch_size
+    - npp: Number of pooled patches (dynamic)
+    - pp: pooling_size * pooling_size
+    - nv: Number of videos
+    - nt: Number of video tokens (dynamic)
     """
 
     pixel_values_videos: Annotated[torch.Tensor, TensorShape("nc", "np", "cps")]
@@ -157,9 +156,14 @@ class Molmo2VideoInputs(TensorSchema):
     num_video_tokens: Annotated[torch.Tensor, TensorShape("nv")]
 
 
+class Molmo2MultiModalInputs(TypedDict, total=False):
+    images: Molmo2ImageInputs | None
+    videos: Molmo2VideoInputs | None
+
+
 @dataclass
 class VitConfig:
-    """Config for a vision transformer"""
+    """Config for a vision transformer."""
 
     hidden_size: int = 1152
     intermediate_size: int = 4304
@@ -184,7 +188,7 @@ class VitConfig:
 
 @dataclass
 class AdapterConfig:
-    """Config for a vit-llm adapter"""
+    """Config for a vit-llm adapter."""
 
     vit_layers: tuple[int, int] = (-3, -9)
     pooling_attention_mask: bool = False
@@ -199,7 +203,7 @@ class AdapterConfig:
 
 @dataclass
 class TextConfig:
-    """Configuration for a text model transformer"""
+    """Configuration for a text model transformer."""
 
     hidden_size: int = 3584
     """
@@ -474,7 +478,7 @@ class Molmo2VisionTransformer(nn.Module):
         super().__init__()
         scale = config.hidden_size**-0.5
         self.num_prefix_tokens: int = 0  # no class embeddings
-        self.patch_num = config.image_num_patch
+        self.patch_num: tuple[int, int] = config.image_num_patch
         self.positional_embedding = nn.Parameter(
             torch.randn(config.image_num_pos, config.hidden_size) * scale,
         )
@@ -490,7 +494,7 @@ class Molmo2VisionTransformer(nn.Module):
             prefix=maybe_prefix(prefix, "transformer"),
         )
 
-    def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
+    def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:
         pos_emb = self.positional_embedding
 
         pos_emb = pos_emb.reshape(
@@ -522,11 +526,9 @@ class Molmo2VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        patch_num: int | None = None,
+        patch_num: tuple[int, int] | None = None,
     ) -> list[torch.Tensor]:
-        """
-        : param x: (batch_size, num_patch, n_pixels)
-        """
+        """: param x: (batch_size, num_patch, n_pixels)."""
         if patch_num is None:
             patch_num = self.patch_num
 
@@ -539,7 +541,7 @@ class Molmo2VisionTransformer(nn.Module):
 
 
 class ImagePoolingAttention(nn.Module):
-    """Multi-head attention used for image pooling"""
+    """Multi-head attention used for image pooling."""
 
     def __init__(
         self,
@@ -652,6 +654,7 @@ class ImagePoolingAttention(nn.Module):
         if self.use_pytorch_sdpa:
             output = self.forward_sdpa(xq, xk, xv, attn_mask)
         else:
+            assert self.attn is not None
             output = self.attn(xq, xk, xv)
 
         output, _ = self.o_proj(output)
@@ -660,7 +663,7 @@ class ImagePoolingAttention(nn.Module):
 
 
 class ImageProjectorMLP(nn.Module):
-    """MLP used for the image projector"""
+    """MLP used for the image projector."""
 
     def __init__(
         self,
@@ -779,9 +782,7 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        : param images: (batch_size, num_crops, num_patch, n_pixels)
-        """
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)."""
         B, T, N, D = images.shape
         images = images.view(B * T, N, D)
         image_features = self.image_vit(images)
@@ -954,12 +955,15 @@ class Molmo2Attention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.q_norm is not None
+        assert self.k_norm is not None
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
         q = self.q_norm(q)
         k = self.k_norm(k)
         if self.tp_size > 1:
+            assert self.tp_rank is not None
             splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
@@ -1434,8 +1438,7 @@ def get_candidate_target_fps(
     sampling_fps: int | float,
     max_fps: int | float = _MAX_VIDEO_FPS,
 ) -> list[float]:
-    """
-    Return the subset of `video_fps` factors that remain multiples
+    """Return the subset of `video_fps` factors that remain multiples
     of `sampling_fps`.
 
     Examples:
@@ -1450,6 +1453,7 @@ def get_candidate_target_fps(
             ...
         ValueError: sampling_fps=2 must divide video_fps=5 to produce
             consistent frame steps.
+
     """
     video_fps = int(video_fps)
     sampling_fps = int(sampling_fps)
@@ -1484,9 +1488,7 @@ def get_target_fps(
     frame_sample_mode: str,
     candidate_target_fps: list[float],
 ) -> float | None:
-    """
-    Get the target fps that best spans the video and has the most frames sampled
-    """
+    """Get the target fps that best spans the video and has the most frames sampled."""
     num_frames_sampled = 0
     selected_target_fps = None
     for target_fps in candidate_target_fps:
@@ -1911,10 +1913,10 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         )
         videos = [v.copy() for v in videos]
 
-        video_items = []
+        video_items: list[VideoItem] = []
         for video in videos:
             video_num_frames = video.shape[0]
-            video_metadata = {
+            video_metadata: dict[str, int | float | str | bool | list[int]] = {
                 "fps": 2.0,
                 "duration": video_num_frames / 2.0,
                 "total_num_frames": video_num_frames,
@@ -1930,6 +1932,9 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
         tokenizer = processor.tokenizer
@@ -1944,19 +1949,20 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_counts = mm_items.get_all_counts()
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
 
-        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
-
-        mm_data = dict(processor_data)
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
 
         def patched_call(text=None, images=None, videos=None, **kwargs) -> BatchFeature:
             res = hf_processor(text=text, images=images, videos=videos, **kwargs)
@@ -1971,7 +1977,8 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         tokenizer = hf_processor.tokenizer
         image_processor = hf_processor.image_processor
 
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
+            assert isinstance(videos, Sequence)
             bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
             pixel_values_videos_lst = []
@@ -1983,21 +1990,23 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             num_video_tokens_lst = []
 
             for item in videos:
+                assert isinstance(item, tuple) and len(item) == 2
                 video_array, metadata = item
+                assert isinstance(metadata, Mapping)
 
                 # NOTE: metadata.frames_indices indicates
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
-                # do_sample_frames in hf_processor_mm_kwargs is false for
+                # do_sample_frames in hf_kwargs is false for
                 # presampled videos.
 
-                # NOTE: a copy of hf_processor_mm_kwargs is created to update
+                # NOTE: a copy of hf_kwargs is created to update
                 # do_sample_frames, otherwise mm_hash for the object will be
                 # incorrect.
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 if "do_sample_frames" not in video_mm_kwargs:
                     # molmo_utils already has "do_sample_frames" in
-                    # hf_processor_mm_kwargs, don't overwrite it.
+                    # hf_kwargs, don't overwrite it.
                     video_mm_kwargs["do_sample_frames"] = metadata.get(
                         "do_sample_frames", False
                     )
@@ -2062,11 +2071,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
 
         processed_data = self.info.ctx.call_hf_processor(
             patched_call,
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
 
-        if (images := mm_data.get("images")) is not None:
+        if (images := hf_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
@@ -2108,10 +2117,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             )
 
         processed_data.update(all_video_outputs)
-        processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -2240,6 +2250,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         def get_video_replacement_molmo2(item_idx: int):
             video, metadata = mm_items["video"][item_idx]
             do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
+            assert do_sample_frames is None or isinstance(do_sample_frames, bool)
 
             timestamps = self.info._get_video_second_idx(metadata, do_sample_frames)
             ncols, nrows = self.info.get_base_grid_size(video_processor)
@@ -2408,10 +2419,17 @@ class Molmo2ForConditionalGeneration(
         image_tokens = kwargs.pop("image_tokens", None)
         num_image_tokens = kwargs.pop("num_image_tokens", None)
 
+        assert isinstance(token_pooling, torch.Tensor)
+        assert isinstance(num_pooled_patches, torch.Tensor)
+        assert isinstance(num_patches, torch.Tensor)
+        assert isinstance(image_tokens, torch.Tensor)
+        assert isinstance(num_image_tokens, torch.Tensor)
+
         accum_patches = [0] + num_patches.cumsum(dim=0)[:-1].tolist()
         patch_offset = 0
         new_token_pooling = token_pooling.clone()
-        for i, n in enumerate(num_pooled_patches):
+        for i, n_tensor in enumerate(num_pooled_patches):
+            n = int(n_tensor)
             cur_slice = token_pooling[patch_offset : patch_offset + n]
             index_offset = int(accum_patches[i])
             new_token_pooling[patch_offset : patch_offset + n] = torch.where(
@@ -2443,10 +2461,17 @@ class Molmo2ForConditionalGeneration(
         video_tokens = kwargs.pop("video_tokens", None)
         num_video_tokens = kwargs.pop("num_video_tokens", None)
 
+        assert isinstance(token_pooling, torch.Tensor)
+        assert isinstance(num_pooled_patches, torch.Tensor)
+        assert isinstance(num_patches, torch.Tensor)
+        assert isinstance(video_tokens, torch.Tensor)
+        assert isinstance(num_video_tokens, torch.Tensor)
+
         accum_patches = [0] + num_patches.cumsum(dim=0)[:-1].tolist()
         patch_offset = 0
         new_token_pooling = token_pooling.clone()
-        for i, n in enumerate(num_pooled_patches):
+        for i, n_tensor in enumerate(num_pooled_patches):
+            n = int(n_tensor)
             cur_slice = token_pooling[patch_offset : patch_offset + n]
             index_offset = int(accum_patches[i])
             new_token_pooling[patch_offset : patch_offset + n] = torch.where(
@@ -2464,8 +2489,10 @@ class Molmo2ForConditionalGeneration(
             num_video_tokens=num_video_tokens,
         )
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> Molmo2MultiModalInputs:
+        modalities: Molmo2MultiModalInputs = {}
 
         for input_key in kwargs:
             if input_key in ("pixel_values",) and "images" not in modalities:
@@ -2544,10 +2571,12 @@ class Molmo2ForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
+                assert image_input is not None
                 image_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings += image_embeddings
             if modality == "videos":
                 video_input = modalities["videos"]
+                assert video_input is not None
                 video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings += video_embeddings
 
@@ -2614,9 +2643,7 @@ class Molmo2ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector="vision_backbone.image_projector",

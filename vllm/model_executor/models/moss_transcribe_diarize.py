@@ -20,7 +20,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
@@ -66,7 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.multimodal.processing.processor import ProcessorInputs
+from vllm.multimodal.processing.processor import HFMultiModalInputs, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -89,12 +89,11 @@ _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - c: Audio chunks
-        - m: Mel bins
-        - f: Mel frames
-        - n: Number of audio items
+    """Dimensions:
+    - c: Audio chunks
+    - m: Mel bins
+    - f: Mel frames
+    - n: Number of audio items
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -114,11 +113,10 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
 
 
 class MossTranscribeDiarizeEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of audio items
-        - t: Number of audio tokens
-        - h: Hidden size
+    """Dimensions:
+    - n: Number of audio items
+    - t: Number of audio tokens
+    - h: Hidden size
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -299,8 +297,9 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_feature_lengths: torch.Tensor,
+        audio_feature_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert audio_feature_lengths is not None
         if input_features.numel() == 0:
             return input_features.new_empty((1, 0, self.conv1.out_channels))
         device = self.conv1.weight.device
@@ -431,11 +430,13 @@ class MossTranscribeDiarizeDummyInputsBuilder(
             return {}
 
         feature_extractor = self.info.get_feature_extractor()
+        audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=_get_max_audio_samples(feature_extractor),
                 num_audios=num_audios,
-                overrides=mm_options.get("audio"),
+                overrides=audio_overrides,
             )
         }
 
@@ -464,17 +465,19 @@ class MossTranscribeDiarizeDummyInputsBuilder(
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        audios = _get_audios_from_mm_data(mm_data)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if hf_inputs.hf_data:
+            hf_inputs.hf_data["audio"] = _get_audios_from_mm_data(hf_inputs.hf_data)
 
-        return dict(audio=audios), hf_processor_mm_kwargs
+        return hf_inputs
 
     def _postprocess_hf_mm_data(
         self,

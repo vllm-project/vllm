@@ -34,6 +34,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    MoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -87,8 +88,7 @@ def _normalize_expert_bias(
 
 
 class Param2MoEAttention(nn.Module):
-    """
-    Grouped-Query Attention (GQA) for Param2MoE.
+    """Grouped-Query Attention (GQA) for Param2MoE.
 
     Notable differences from a vanilla GQA layer:
       * The checkpoint fuses Q, K, V into a single ``query_key_value`` weight.
@@ -251,8 +251,7 @@ class Param2MoEMLP(nn.Module):
 
 
 class Param2MoEMoEBlock(nn.Module):
-    """
-    Mixture-of-Experts block for Param2MoE.
+    """Mixture-of-Experts block for Param2MoE.
 
     Routing:
       * Sigmoid scoring  (config.score_function = "sigmoid")
@@ -344,7 +343,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoEFactory:
+    def maybe_get_fused_moe(self) -> MoERunner:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -370,8 +369,7 @@ class Param2MoEMoEBlock(nn.Module):
 
 
 class Param2MoEDecoderLayer(nn.Module):
-    """
-    Single transformer decoder block.
+    """Single transformer decoder block.
 
     Dense for the first ``first_k_dense_replace`` layers; MoE thereafter.
     """
@@ -560,6 +558,8 @@ class Param2MoEModel(nn.Module):
 class Param2MoEMixtureOfExperts(MixtureOfExperts):
     """Implements the vLLM MixtureOfExperts protocol for Param2MoE."""
 
+    moe_mlp_layers: list[Param2MoEMoEBlock]
+
     def extract_moe_parameters(self, example_moe: Param2MoEMoEBlock | None) -> None:
         if example_moe is None:
             raise RuntimeError(
@@ -602,8 +602,7 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
 class Param2MoEForCausalLM(
     nn.Module, SupportsPP, SupportsLoRA, Param2MoEMixtureOfExperts
 ):
-    """
-    vLLM-native Param2MoE CausalLM.
+    """vLLM-native Param2MoE CausalLM.
 
     Uses Grouped-Query Attention (GQA) with a Sigmoid-scored,
     grouped-topk Mixture-of-Experts MLP.

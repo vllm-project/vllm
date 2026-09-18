@@ -186,8 +186,10 @@ class Sampler:
 
         sampling_mask_tensors = None
         if self.return_sampling_mask:
+            # Size by the validated top_k batch max; wider supports use the bitmask.
+            max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
-                processed_logits, num_sampled
+                processed_logits, num_sampled, max_num_kept
             )
 
         # These are GPU tensors.
@@ -305,7 +307,26 @@ class Sampler:
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
 
-        # Sample the next token.
+        return self._sample_random(
+            processed_logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            pos,
+            top_k,
+            top_p,
+            use_flashinfer,
+        )
+
+    def _sample_random(
+        self,
+        processed_logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        top_k: torch.Tensor | None,
+        top_p: torch.Tensor | None,
+        use_flashinfer: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
         else:
@@ -317,6 +338,7 @@ class Sampler:
                 self.sampling_states.seeds.gpu,
                 pos,
                 apply_temperature=False,
+                is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
             )
         return sampled, processed_logits
