@@ -17,10 +17,10 @@ use serde_json_fmt::JsonFormat;
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
 use super::MediaPartSource;
+use crate::EffortValue;
 use crate::error::{Error, Result};
-use crate::request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ReasoningEffort,
-};
+use crate::reasoning::ReasoningControl;
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
@@ -87,21 +87,26 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Result<String> {
-    render_request_with_media_order(request, dialect).map(|(prompt, _)| prompt)
+pub(super) fn render_request(
+    request: &ChatRequest,
+    dialect: DsDialect,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    render_request_with_media_order(request, dialect, reasoning).map(|(prompt, _)| prompt)
 }
 
 /// Render one chat request and record media in placeholder order.
 pub(super) fn render_request_with_media_order(
     request: &ChatRequest,
     dialect: DsDialect,
+    reasoning: &ReasoningControl,
 ) -> Result<(String, Vec<MediaPartSource>)> {
-    let (thinking_mode, reasoning_effort_prompt) = match dialect {
-        DsDialect::V4 => {
-            resolve_thinking_options(request).map(|(mode, prompt)| (mode, Cow::Borrowed(prompt)))?
-        }
-        DsDialect::V41 => resolve_v41_thinking_options(request)?,
+    let thinking_mode = if reasoning.is_enabled() {
+        ThinkingMode::Thinking
+    } else {
+        ThinkingMode::Chat
     };
+    let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
@@ -254,76 +259,63 @@ pub(super) fn render_request_with_media_order(
     Ok((out, media_order))
 }
 
-/// Resolve DeepSeek V4's thinking controls. Unlike the Python tokenizer
-/// wrapper, the Rust renderer only consumes the typed top-level
-/// `reasoning_effort`; the generic template-kwargs map is left for HF
-/// templates.
-fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
-        true => ThinkingMode::Thinking,
-        false => ThinkingMode::Chat,
-    };
-    let mut reasoning_effort_prompt = REASONING_EFFORT_HIGH;
-
-    match request.chat_options.reasoning_effort {
-        Some(ReasoningEffort::None) => thinking_mode = ThinkingMode::Chat,
-        Some(ReasoningEffort::Max) => {
-            reasoning_effort_prompt = REASONING_EFFORT_MAX;
-        }
-        Some(ReasoningEffort::XHigh | ReasoningEffort::High) => {
-            reasoning_effort_prompt = REASONING_EFFORT_HIGH;
-        }
-        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
-            reasoning_effort_prompt = "";
-        }
-        None => {}
+/// Map the shared reasoning decision to the selected DeepSeek effort dialect.
+pub(super) fn resolve_reasoning(
+    control: ReasoningControl,
+    dialect: DsDialect,
+) -> Result<ReasoningControl> {
+    let control = control.fallback(ReasoningControl::enabled("high"));
+    if !control.is_enabled() {
+        return Ok(control);
     }
-
-    Ok((thinking_mode, reasoning_effort_prompt))
+    let effort = control.effort().expect("enabled DeepSeek reasoning has a default effort");
+    let effort = match dialect {
+        DsDialect::V4 => {
+            let effort = match effort.as_str() {
+                Some("minimal" | "medium" | "low") => "low",
+                Some("high" | "xhigh") => "high",
+                Some("max") => "max",
+                _ => {
+                    return Err(Error::InvalidReasoningEffort(format!(
+                        "DeepSeek V4 reasoning_effort must be minimal, low, medium, high, xhigh, or max, got {effort}"
+                    )));
+                }
+            };
+            EffortValue::from(effort)
+        }
+        DsDialect::V41 => {
+            let budget = match effort {
+                EffortValue::String(effort) => match effort.as_str() {
+                    "low" => 25,
+                    "high" => 50,
+                    "xhigh" => 75,
+                    "max" => 100,
+                    _ => return Err(invalid_v41_reasoning_effort()),
+                },
+                EffortValue::Number(budget) => budget
+                    .as_u64()
+                    .filter(|budget| (1..=100).contains(budget))
+                    .ok_or_else(invalid_v41_reasoning_effort)?,
+            };
+            EffortValue::Number(budget.into())
+        }
+    };
+    Ok(ReasoningControl::enabled(effort))
 }
 
-/// Resolve V4.1's numeric reasoning effort using the top-level value before template kwargs.
-fn resolve_v41_thinking_options(
-    request: &ChatRequest,
-) -> Result<(ThinkingMode, Cow<'static, str>)> {
-    let mut thinking = request.enable_thinking()?.unwrap_or(true);
-    let budget = match request.chat_options.reasoning_effort {
-        Some(ReasoningEffort::None) => {
-            thinking = false;
-            50
-        }
-        Some(ReasoningEffort::Low) => 25,
-        Some(ReasoningEffort::High) => 50,
-        Some(ReasoningEffort::XHigh) => 75,
-        Some(ReasoningEffort::Max) => 100,
-        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium) => {
-            return Err(invalid_v41_reasoning_effort());
-        }
-        None => match request.chat_options.template_kwargs.get("reasoning_effort") {
-            None | Some(Value::Null) => 50,
-            Some(Value::String(effort)) => match effort.as_str() {
-                "low" => 25,
-                "high" => 50,
-                "xhigh" => 75,
-                "max" => 100,
-                _ => return Err(invalid_v41_reasoning_effort()),
-            },
-            Some(Value::Number(budget)) => budget
-                .as_u64()
-                .filter(|budget| (1..=100).contains(budget))
-                .ok_or_else(invalid_v41_reasoning_effort)?,
-            Some(_) => return Err(invalid_v41_reasoning_effort()),
-        },
+fn reasoning_prompt(control: &ReasoningControl, dialect: DsDialect) -> Cow<'static, str> {
+    let Some(effort) = control.effort() else {
+        return Cow::Borrowed("");
     };
-    if thinking {
-        Ok((
-            ThinkingMode::Thinking,
-            Cow::Owned(format!(
-                "Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
-            )),
-        ))
-    } else {
-        Ok((ThinkingMode::Chat, Cow::Borrowed("")))
+    match dialect {
+        DsDialect::V4 => Cow::Borrowed(match effort.as_str() {
+            Some("high") => REASONING_EFFORT_HIGH,
+            Some("max") => REASONING_EFFORT_MAX,
+            _ => "",
+        }),
+        DsDialect::V41 => Cow::Owned(format!(
+            "Reasoning Effort: {effort} (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+        )),
     }
 }
 
