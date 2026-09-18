@@ -1,10 +1,78 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
 
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.model_executor.models.bert import BertPooler
+from vllm.model_executor.models.modernbert import ModernBertPooler
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingParams
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
+
+
+def _pooling_metadata(*use_activation: bool) -> PoolingMetadata:
+    num_prompts = len(use_activation)
+    return PoolingMetadata(
+        prompt_lens=torch.ones(num_prompts, dtype=torch.long),
+        prompt_token_ids=None,
+        prompt_token_ids_cpu=None,
+        pooling_params=[
+            PoolingParams(task="classify", use_activation=flag)
+            for flag in use_activation
+        ],
+        pooling_states=[PoolingStates() for _ in range(num_prompts)],
+    )
+
+
+@pytest.mark.parametrize("architecture", ["bert", "modernbert"])
+def test_classifier_architecture_pooler_is_unconditional(architecture: str) -> None:
+    if architecture == "bert":
+        hf_config = SimpleNamespace(hidden_size=4)
+        pooler_cls = BertPooler
+    else:
+        hf_config = SimpleNamespace(
+            hidden_size=4,
+            classifier_bias=True,
+            classifier_pooling="cls",
+            norm_eps=1e-5,
+            norm_bias=True,
+        )
+        pooler_cls = ModernBertPooler
+
+    model_config = Mock(spec=ModelConfig)
+    model_config.pooler_config = PoolerConfig(seq_pooling_type="CLS")
+    model_config.hf_config = hf_config
+    model_config.head_dtype = torch.float32
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        pooler = pooler_cls(model_config)
+    hidden_states = torch.tensor([[0.25, -0.5, 1.0, -1.5]])
+
+    with_activation = pooler.head(hidden_states, _pooling_metadata(True))
+    without_activation = pooler.head(hidden_states, _pooling_metadata(False))
+    mixed_activation = pooler.head(
+        hidden_states.repeat(2, 1), _pooling_metadata(True, False)
+    )
+    if isinstance(mixed_activation, list):
+        mixed_activation = torch.stack(mixed_activation)
+
+    if isinstance(pooler, BertPooler):
+        expected = pooler.act_fn(pooler.dense(hidden_states))
+        expected_mixed = pooler.act_fn(pooler.dense(hidden_states.repeat(2, 1)))
+    else:
+        expected = pooler.norm(pooler.act(pooler.dense(hidden_states)))
+        expected_mixed = pooler.norm(
+            pooler.act(pooler.dense(hidden_states.repeat(2, 1)))
+        )
+
+    assert torch.equal(without_activation, expected)
+    assert torch.equal(without_activation, with_activation)
+    assert torch.equal(mixed_activation, expected_mixed)
 
 
 @pytest.mark.parametrize(
