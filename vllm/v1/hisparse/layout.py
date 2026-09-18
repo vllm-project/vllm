@@ -299,6 +299,82 @@ def _build_hisparse_kv_cache_tensors(
     return tensors
 
 
+def _cap_num_blocks_for_int32_rows(
+    num_blocks: int,
+    hisparse_layout: HiSparseLayout,
+    bytes_per_block: int,
+) -> int:
+    """Keep hot-buffer row indices inside AITER's int32 addressing range.
+
+    HiSparse points attention at ``PagedCacheView.attention_cache``, a view over
+    the whole multi-layer KV slab, so the row indices it emits scale with the
+    total block count rather than with one layer. ROCm's AITER sparse MLA decode
+    kernel computes its row byte offset in int32 and silently wraps once
+    ``row * row_width`` exceeds ``2**31 - 1``; the kernel then returns
+    approximately zero for those rows, which reads as a large accuracy loss
+    rather than as a failure. Measured on gfx950: exact below the limit, wrong
+    immediately above it.
+
+    Args:
+        num_blocks: Block count the memory budget allows.
+        hisparse_layout: Layout whose hot and source specs give the row shape.
+        bytes_per_block: Device bytes one block spans across all groups.
+
+    Returns:
+        ``num_blocks``, reduced if needed to keep every emitted row index
+        addressable.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return num_blocks
+    hot_spec = next(
+        (
+            group.kv_cache_spec
+            for group in hisparse_layout.device_groups
+            if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+        ),
+        None,
+    )
+    if hot_spec is None:
+        return num_blocks
+    # `HiSparseHotSpec` carries only byte sizes, so take the element width from
+    # the source spec the hot rows mirror -- the same pair `register_layer`
+    # uses to size a row.
+    source_spec = hisparse_layout.source_group.kv_cache_spec
+    if isinstance(source_spec, UniformTypeKVCacheSpecs):
+        source_spec = source_spec.first_spec
+    itemsize = (
+        1
+        if getattr(source_spec, "cache_dtype_str", None) == "fp8_ds_mla"
+        else source_spec.dtype.itemsize
+    )
+    row_bytes = hot_spec.page_size_bytes // hot_spec.block_size
+    row_width = row_bytes // itemsize
+    if row_width <= 0 or row_bytes <= 0:
+        return num_blocks
+    # `attention_cache` reinterprets the slab as [-1, block_size, row_width],
+    # so one KV block spans `block_stride // row_bytes` of its rows -- that is
+    # `attention_block_stride` in `PagedCacheView.bind`.
+    rows_per_block = bytes_per_block // row_bytes
+    if rows_per_block <= 0:
+        return num_blocks
+    max_rows = (2**31 - 1) // row_width
+    max_blocks = max_rows // rows_per_block
+    if num_blocks <= max_blocks:
+        return num_blocks
+    logger.warning(
+        "HiSparse: capping the GPU KV block count from %d to %d. ROCm's AITER "
+        "sparse MLA decode kernel addresses KV rows with a 32-bit offset, and "
+        "a larger pool would emit row indices above %d, which the kernel wraps "
+        "silently and answers with near-zero attention output.",
+        num_blocks,
+        max_blocks,
+        max_rows,
+    )
+    return max_blocks
+
+
 def get_hisparse_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -318,6 +394,9 @@ def get_hisparse_kv_cache_config(
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
     num_blocks = may_override_num_blocks(
         vllm_config, available_memory // bytes_per_block
+    )
+    num_blocks = _cap_num_blocks_for_int32_rows(
+        num_blocks, hisparse_layout, bytes_per_block
     )
     size = bytes_per_block * num_blocks
     kv_cache_tensors = _build_hisparse_kv_cache_tensors(

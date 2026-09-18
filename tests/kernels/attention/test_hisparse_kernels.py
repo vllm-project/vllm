@@ -1244,3 +1244,195 @@ def test_invalidate_written_slots_matches_reference(
         want,
         err_msg=f"invalidate_written_slots (region_stride={region_stride})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Many-row batches
+#
+# Every case above runs 1-4 rows, which on gfx950 fits inside a single
+# wavefront's worth of scheduling and leaves each op's per-row grid mapping
+# barely exercised. Serving collapses above ~8 concurrent requests, and one
+# row is one request, so these walk the batch dimension out to 64.
+# ---------------------------------------------------------------------------
+
+
+MANY_ROWS = [5, 8, 9, 16, 17, 32, 64]
+
+
+@pytest.mark.parametrize("num_rows", MANY_ROWS)
+@pytest.mark.parametrize("top_k", [32, 64])
+def test_resolve_many_rows_matches_reference(
+    requires_hisparse_ops, num_rows: int, top_k: int
+) -> None:
+    """Resolve must stay exact as the batch grows past a single wavefront."""
+    case = make_case(
+        top_k=top_k, hot_size=2 * top_k, num_rows=num_rows, seed=num_rows * 7 + top_k
+    )
+    ref_state = ResolveState(
+        case.state.device_global_indices.copy(), case.state.lru_slots.copy()
+    )
+    want = _ref_step(case, ref_state)
+    got = run_device_resolve(case, case.state)
+
+    ctx = f"num_rows={num_rows} top_k={top_k}"
+    assert_outputs_equal(got, want, ctx)
+    assert_state_equal(case.state, ref_state, ctx)
+
+
+@pytest.mark.parametrize("num_rows", MANY_ROWS)
+def test_resolve_many_rows_multi_step_matches_reference(
+    requires_hisparse_ops, num_rows: int
+) -> None:
+    """Per-row LRU state must stay independent across steps at batch scale.
+
+    A row-indexing bug that lets one request's resolve touch another's region
+    is invisible at one step (both rows still resolve to *some* valid slot) and
+    only diverges once eviction order depends on the corrupted history.
+    """
+    top_k = 64
+    case = make_case(
+        top_k=top_k, hot_size=2 * top_k, num_rows=num_rows, seed=num_rows
+    )
+    ref_state = ResolveState(
+        case.state.device_global_indices.copy(), case.state.lru_slots.copy()
+    )
+    rng = np.random.default_rng(num_rows)
+    max_token = top_k * 4
+
+    for step in range(8):
+        case.global_indices = np.stack(
+            [
+                rng.choice(max_token, size=top_k, replace=False).astype(np.int32)
+                for _ in range(case.num_rows)
+            ]
+        )
+        want = _ref_step(case, ref_state)
+        got = run_device_resolve(case, case.state)
+
+        ctx = f"num_rows={num_rows} step={step}"
+        assert_outputs_equal(got, want, ctx)
+        assert_state_equal(case.state, ref_state, ctx)
+
+
+@pytest.mark.parametrize("num_rows", MANY_ROWS)
+def test_gather_compact_many_rows_matches_reference(
+    requires_hisparse_ops, num_rows: int
+) -> None:
+    """Compact gather must copy every row's misses at batch scale.
+
+    ``hisparse_gather_compact`` splits its grid with
+    ``num_chunks = min(8, 64 / num_rows)`` (``hisparse_kernels.cu:1274``), so
+    the per-row column coverage narrows as rows grow -- exactly the region the
+    2-3 row cases above never reach.
+    """
+    top_k, host_rows = 64, 256
+    row_bytes, hot_block_size = FP8_DS_MLA_ROW_BYTES, 8
+    hot_num_blocks = max(4, (num_rows * top_k + hot_block_size - 1) // hot_block_size)
+    hot_rows = hot_block_size * hot_num_blocks
+    rng = np.random.default_rng(num_rows + 500)
+
+    host = _byte_pattern(host_rows, row_bytes, seed=num_rows)
+    hot = _byte_pattern(hot_rows, row_bytes, seed=num_rows + 1).reshape(-1)
+
+    miss_global = rng.integers(
+        -1, host_rows + 4, size=(num_rows, top_k), dtype=np.int32
+    )
+    miss_hot = _distinct_hot_indices(rng, num_rows, top_k, hot_rows)
+    # Every row misses its full width: the widest per-row work the grid sees.
+    miss_counts = np.full(num_rows, top_k, dtype=np.int32)
+
+    want_hot = hot.copy()
+    ref_gather_compact(
+        host,
+        want_hot,
+        miss_global,
+        miss_hot,
+        miss_counts,
+        hot_block_size,
+        hot_block_size * row_bytes,
+    )
+
+    d_hot = torch.from_numpy(
+        hot.copy().reshape(hot_num_blocks, hot_block_size, row_bytes)
+    ).to(DEVICE)
+    torch.ops._C_cache_ops.hisparse_gather_compact(
+        _pinned(torch.from_numpy(host.copy())),
+        d_hot,
+        torch.from_numpy(miss_global).to(DEVICE),
+        torch.from_numpy(miss_hot).to(DEVICE),
+        torch.from_numpy(miss_counts).to(DEVICE),
+    )
+    torch.accelerator.synchronize()
+
+    np.testing.assert_array_equal(
+        d_hot.cpu().numpy().reshape(-1),
+        want_hot,
+        err_msg=f"gather_compact bytes (num_rows={num_rows})",
+    )
+
+
+@pytest.mark.parametrize("num_rows", MANY_ROWS)
+def test_gather_plan_many_rows_matches_reference(
+    requires_hisparse_ops, num_rows: int
+) -> None:
+    """Planned gather must stay byte-exact at batch scale."""
+    top_k, host_rows = 64, 256
+    row_bytes, hot_block_size = FP8_DS_MLA_ROW_BYTES, 8
+    hot_num_blocks = max(4, (num_rows * top_k + hot_block_size - 1) // hot_block_size)
+    hot_rows = hot_block_size * hot_num_blocks
+    rng = np.random.default_rng(num_rows + 900)
+
+    host = _byte_pattern(host_rows, row_bytes, seed=num_rows + 2)
+    hot = _byte_pattern(hot_rows, row_bytes, seed=num_rows + 3).reshape(-1)
+
+    global_indices = rng.integers(
+        -1, host_rows + 8, size=(num_rows, top_k), dtype=np.int32
+    )
+    hot_indices = _distinct_hot_indices(rng, num_rows, top_k, hot_rows)
+    miss_mask = rng.integers(0, 2, size=(num_rows, top_k), dtype=np.int32)
+    # Alternate live and padding rows so the skip path is exercised mid-batch.
+    request_state_indices = np.where(
+        np.arange(num_rows) % 4 == 3, -1, np.arange(num_rows)
+    ).astype(np.int32)
+
+    want_hot = hot.copy()
+    want_attn = np.full((num_rows, top_k), POISON, dtype=np.int32)
+    ref_gather_plan(
+        host,
+        want_hot,
+        global_indices,
+        hot_indices,
+        miss_mask,
+        request_state_indices,
+        want_attn,
+        hot_block_size,
+        hot_block_size,
+        hot_block_size * row_bytes,
+    )
+
+    d_hot = torch.from_numpy(
+        hot.copy().reshape(hot_num_blocks, hot_block_size, row_bytes)
+    ).to(DEVICE)
+    d_attn = torch.from_numpy(np.full((num_rows, top_k), POISON, dtype=np.int32)).to(
+        DEVICE
+    )
+    torch.ops._C_cache_ops.hisparse_gather_plan(
+        _pinned(torch.from_numpy(host.copy())),
+        d_hot,
+        torch.from_numpy(global_indices).to(DEVICE),
+        torch.from_numpy(hot_indices).to(DEVICE),
+        torch.from_numpy(miss_mask).to(DEVICE),
+        torch.from_numpy(request_state_indices).to(DEVICE),
+        d_attn,
+        hot_block_size,
+    )
+    torch.accelerator.synchronize()
+
+    np.testing.assert_array_equal(
+        d_hot.cpu().numpy().reshape(-1),
+        want_hot,
+        err_msg=f"gather_plan bytes (num_rows={num_rows})",
+    )
+    np.testing.assert_array_equal(
+        d_attn.cpu().numpy(), want_attn, err_msg="gather_plan attention_indices"
+    )

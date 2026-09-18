@@ -22,6 +22,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -153,12 +157,26 @@ def _is_hisparse_host_writer(
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
+def _use_ipc_host_events() -> bool:
+    """Whether imported IPC events can carry the host-write handshake.
+
+    ROCm imposes a hard limit of 32 record/wait cycles on an imported
+    interprocess event: the 33rd raises ``hipErrorInvalidValue``, even when the
+    two sides are fully serialized, so it is a resource limit rather than a
+    race. The events here are recorded once per step and live for the process,
+    so decoding past 32 steps would always fail. Fall back to the local-event
+    handshake in :meth:`HiSparseConnectorWorker.sync_host_writes`, which orders
+    the same writes without an interprocess object.
+    """
+    return not current_platform.is_rocm()
+
+
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
-    if shared_host_region is None:
+    if shared_host_region is None or not _use_ipc_host_events():
         return torch.Event(), torch.Event()
 
     events: tuple[torch.Event, torch.Event] | None = None
@@ -308,6 +326,7 @@ class HiSparseConnectorWorker:
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
             if cache.runtime.is_group_leader
         )
+        self._ipc_host_events = _use_ipc_host_events()
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
         )
@@ -401,6 +420,7 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        self.sync_host_writes(previous_host_write_event)
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         if self._slot_mapping_staging is not None:
@@ -425,6 +445,21 @@ class HiSparseConnectorWorker:
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
+
+    def sync_host_writes(self, event: torch.Event) -> None:
+        """Order every rank behind the writer's host writes up to ``event``.
+
+        With usable IPC events the followers wait on the writer's event
+        directly and this is a no-op. Where they are unusable (see
+        :func:`_use_ipc_host_events`) each rank holds a private event, so the
+        writer blocks until its own writes land and the group meets at a
+        barrier -- the same shape ``_copy_host_blocks`` already uses.
+        """
+        if self.shared_host_region is None or self._ipc_host_events:
+            return
+        if self.is_host_writer:
+            event.synchronize()
+        get_tp_group().barrier()
 
     def _clear_forward_mirror_state(self) -> None:
         self._step_in_flight = False
