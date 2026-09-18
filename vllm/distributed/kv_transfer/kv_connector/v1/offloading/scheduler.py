@@ -1948,10 +1948,20 @@ class OffloadingConnectorScheduler:
         """
         req_status = self._req_status.get(request.request_id)
 
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request)
+        )
+        # Exclude in-flight work and the uncommitted final sampled token.
+        req_context.num_processed_tokens = min(
+            max(0, request.num_computed_tokens - request.num_in_flight_tokens),
+            max(request.num_prompt_tokens, request.num_tokens - 1),
+        )
+
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
             self.manager.on_new_request(req_context)
             self.manager.on_request_finished(req_context)
             return False, None
