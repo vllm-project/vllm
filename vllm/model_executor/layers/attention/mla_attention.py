@@ -1080,6 +1080,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
+            self._apply_lora_projection(mqa_q_nope, mqa_ql_nope, is_query=True)
+
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -1373,9 +1375,42 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
+    def _apply_lora_projection(
+        self, x: torch.Tensor, out: torch.Tensor, *, is_query: bool
+    ) -> None:
+        """Add kv_b_proj adapters to the absorbed, head-major MLA projection."""
+        from vllm.lora.layers.column_parallel_linear import ColumnParallelLinearWithLoRA
+
+        layer = self.kv_b_proj
+        if not isinstance(layer, ColumnParallelLinearWithLoRA):
+            return
+        lora_a = layer.lora_a_stacked[0]
+        lora_b = layer.lora_b_stacked[0]
+        if layer.lora_config.fully_sharded_loras and layer.tp_size > 1:
+            lora_a = get_tp_group().all_gather(lora_a, dim=2)
+        if is_query and self.dcp_q_replicate:
+            lora_b = get_dcp_group().all_gather(lora_b, dim=2)
+        # MQA may consume only the decode prefix of the mapped batch.
+        indices = layer.punica_wrapper.token_lora_indices[: x.shape[1]]
+        for slot in range(lora_a.shape[0]):
+            a = lora_a[slot, 0]
+            b = lora_b[slot, 0].view(
+                x.shape[0], self.qk_nope_head_dim + self.v_head_dim, -1
+            )
+            if is_query:
+                delta = torch.matmul(x, b[:, : self.qk_nope_head_dim]) @ a
+            else:
+                delta = torch.matmul(
+                    x @ a.T, b[:, self.qk_nope_head_dim :].transpose(1, 2)
+                )
+            out.add_(
+                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
+            )
+
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        lora_input = x
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1406,6 +1441,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        self._apply_lora_projection(lora_input, out, is_query=False)
 
 
 def unified_mla_kv_cache_update(
