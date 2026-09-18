@@ -14,6 +14,7 @@ import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -67,6 +68,30 @@ from vllm.v1.worker.utils import select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_capture_model_skips_graphs_when_model_graph_disabled():
+    runner = object.__new__(GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+
+    assert runner.capture_model() == 0
+
+
+def test_profile_cudagraph_memory_skips_when_no_graphs(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.vllm_config = object()
+    runner._init_minimal_kv_cache_for_profiling = Mock()
+    runner.cudagraph_dispatcher = SimpleNamespace(get_capture_descs=lambda: [])
+    runner._create_encoder_cudagraph_manager = Mock(return_value=None)
+    runner._cleanup_profiling_kv_cache = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "set_current_vllm_config",
+        lambda config: nullcontext(),
+    )
+
+    assert runner.profile_cudagraph_memory() == 0
+    runner._cleanup_profiling_kv_cache.assert_called_once()
 
 
 @pytest.fixture(autouse=True)

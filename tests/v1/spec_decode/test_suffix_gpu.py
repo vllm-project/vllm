@@ -11,7 +11,12 @@ import torch
 pytest.importorskip("suffix_gpu")
 
 import vllm.v1.spec_decode.suffix_proposer_gpu as suffix_proposer_module
-from vllm.v1.spec_decode.suffix_proposer_gpu import SuffixProposerGPU
+from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.config import CUDAGraphMode
+from vllm.v1.spec_decode.suffix_proposer_gpu import (
+    SuffixProposerGPU,
+    _SuffixCudagraphDispatcher,
+)
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)
@@ -35,12 +40,25 @@ def _make_config(use_cuda_graph: bool, tp_size: int = 1) -> SimpleNamespace:
         suffix_gpu_num_backoff=4,
         suffix_gpu_use_cuda_graph=use_cuda_graph,
         suffix_gpu_ingest_chunk=16,
+        enforce_eager=False,
     )
     return SimpleNamespace(
         speculative_config=spec,
-        model_config=SimpleNamespace(max_model_len=MAX_MODEL_LEN),
+        model_config=SimpleNamespace(
+            max_model_len=MAX_MODEL_LEN, enforce_eager=False
+        ),
         scheduler_config=SimpleNamespace(max_num_seqs=MAX_NUM_SEQS),
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            data_parallel_size=1,
+            use_sequence_parallel_moe=False,
+            is_moe_model=False,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            fast_moe_cold_start=False,
+            static_forward_context={},
+        ),
     )
 
 
@@ -57,6 +75,25 @@ def _seed_pending_rebuild(proposer: SuffixProposerGPU) -> None:
     index._pending = (0, docs)
     index.pending_epoch = 1
     index._pending_signature = index._snapshot_signature(0, docs)
+
+
+def _capture_graphs(
+    proposer: SuffixProposerGPU, token_ids: torch.Tensor
+) -> None:
+    capture_stream = torch.cuda.Stream(device=DEVICE)
+    capture_stream.wait_stream(torch.cuda.current_stream(DEVICE))
+    set_cudagraph_capturing_enabled(True)
+    try:
+        with torch.cuda.stream(capture_stream):
+            proposer.dummy_run(
+                MAX_NUM_SEQS,
+                token_ids,
+                use_cudagraphs=True,
+                is_graph_capturing=True,
+            )
+    finally:
+        set_cudagraph_capturing_enabled(False)
+    torch.cuda.current_stream(DEVICE).wait_stream(capture_stream)
 
 
 def _propose_repetition(
@@ -82,7 +119,12 @@ def _propose_repetition(
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 def test_propose_drafts_repetition(use_cuda_graph):
     proposer = SuffixProposerGPU(_make_config(use_cuda_graph), DEVICE)
-    draft, nv, token_ids = _propose_repetition(proposer)
+    token_ids = torch.zeros(
+        MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+    )
+    if use_cuda_graph:
+        _capture_graphs(proposer, token_ids)
+    draft, nv, token_ids = _propose_repetition(proposer, token_ids)
     n = int(nv[0])
     assert n > 0
     assert draft[0, :n].tolist() == ([6, 7, 8, 5] * 3)[:n]
@@ -91,35 +133,100 @@ def test_propose_drafts_repetition(use_cuda_graph):
     # Rows with no sampled tokens must not draft.
     assert int(nv[1]) == 0
     if use_cuda_graph:
-        assert proposer._graphs
-        # Buckets are powers of two up to max_num_seqs.
-        assert proposer._graph_buckets == [1, 2, 4, 8]
+        assert proposer._graphs_captured()
+        assert proposer._graph_dispatcher.buckets == (1, 2, 4, 8)
+
+
+def test_graph_dispatcher_covers_max_num_seqs():
+    dispatcher = _SuffixCudagraphDispatcher(6)
+    assert dispatcher.buckets == (1, 2, 4, 6)
+    assert dispatcher.dispatch(3).num_tokens == 4
+    assert dispatcher.dispatch(5).num_tokens == 6
+    assert dispatcher.dispatch(6).num_tokens == 6
+    assert dispatcher.dispatch(7) is None
 
 
 def test_graph_and_eager_agree():
     cfg_e = _make_config(False)
     cfg_g = _make_config(True)
     d_e, nv_e, _ = _propose_repetition(SuffixProposerGPU(cfg_e, DEVICE))
-    d_g, nv_g, _ = _propose_repetition(SuffixProposerGPU(cfg_g, DEVICE))
+    graph_proposer = SuffixProposerGPU(cfg_g, DEVICE)
+    persistent = torch.zeros(
+        MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+    )
+    _capture_graphs(graph_proposer, persistent)
+    d_g, nv_g, _ = _propose_repetition(graph_proposer, persistent)
     assert torch.equal(nv_e, nv_g)
     assert torch.equal(d_e, d_g)
 
 
-def test_capture_draft_graph_at_warmup():
-    """Pre-capture (capture_model hook) replays on the same buffer."""
+def test_graph_buckets_use_wrapper_pool():
     proposer = SuffixProposerGPU(_make_config(True), DEVICE)
     persistent = torch.zeros(
         MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
     )
-    proposer.capture_draft_graph(persistent)
-    assert proposer._graphs
-    # Warmup runs on scratch buffers: the persistent buffer stays clean.
+    _capture_graphs(proposer, persistent)
+
+    assert proposer._graph_runner is not None
+    entries = proposer._graph_runner.concrete_cudagraph_entries
+    graphs = [entries[desc].cudagraph for desc in entries]
+    assert all(graph is not None for graph in graphs)
+    assert {graph.pool() for graph in graphs if graph is not None} == {
+        proposer._graph_runner.graph_pool
+    }
+
+
+def test_shared_pool_graphs_replay_alternating_buckets():
+    graph_proposer = SuffixProposerGPU(_make_config(True), DEVICE)
+    eager_proposer = SuffixProposerGPU(_make_config(False), DEVICE)
+    graph_tokens = torch.zeros(
+        MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+    )
+    eager_tokens = torch.zeros_like(graph_tokens)
+    _capture_graphs(graph_proposer, graph_tokens)
+    history = torch.tensor([5, 6, 7, 8] * 3, dtype=torch.int32, device=DEVICE)
+
+    def run(proposer, token_buffer, batch_size):
+        token_buffer.zero_()
+        token_buffer[:batch_size, : history.numel()] = history
+        num_tokens = torch.full(
+            (batch_size,), history.numel(), dtype=torch.int32, device=DEVICE
+        )
+        sampled = torch.full((batch_size, K + 1), -1, dtype=torch.int32, device=DEVICE)
+        sampled[:, 0] = 5
+        counts = torch.ones(batch_size, dtype=torch.int32, device=DEVICE)
+        draft, nv = proposer.propose(
+            K, num_tokens, token_buffer[:batch_size], sampled, counts
+        )
+        torch.accelerator.synchronize()
+        return draft.clone(), nv.clone()
+
+    for batch_size in (1, 8, 2, 4, 1):
+        graph_draft, graph_nv = run(graph_proposer, graph_tokens, batch_size)
+        eager_draft, eager_nv = run(eager_proposer, eager_tokens, batch_size)
+        assert torch.equal(graph_nv, eager_nv)
+        assert torch.equal(graph_draft, eager_draft)
+
+
+def test_dummy_run_captures_and_recaptures_graphs():
+    proposer = SuffixProposerGPU(_make_config(True), DEVICE)
+    persistent = torch.zeros(
+        MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+    )
+    _capture_graphs(proposer, persistent)
+    assert proposer._graphs_captured()
     assert int(persistent.abs().sum()) == 0
 
-    graphs = {b: g for b, (g, _, _) in proposer._graphs.items()}
+    assert proposer._graph_runner is not None
+    graphs = {
+        desc: entry.cudagraph
+        for desc, entry in proposer._graph_runner.concrete_cudagraph_entries.items()
+    }
     d_g, nv_g, _ = _propose_repetition(proposer, persistent)
-    # Replayed, not re-captured: same graph objects per bucket.
-    assert {b: g for b, (g, _, _) in proposer._graphs.items()} == graphs
+    assert {
+        desc: entry.cudagraph
+        for desc, entry in proposer._graph_runner.concrete_cudagraph_entries.items()
+    } == graphs
     assert int(persistent[0, 12]) == 5  # graph scattered the sampled id
 
     d_e, nv_e, _ = _propose_repetition(SuffixProposerGPU(_make_config(False), DEVICE))
@@ -131,16 +238,21 @@ def test_capture_draft_graph_at_warmup():
     assert torch.equal(nv_e, nv_f)
     assert torch.equal(d_e, d_f)
 
+    proposer._graph_runner.clear_graphs()
+    assert not proposer._graphs_captured()
+    _capture_graphs(proposer, persistent)
+    assert proposer._graphs_captured()
 
-def test_capture_draft_graph_warms_up_without_graph():
+
+def test_dummy_run_warms_up_without_graph():
     """With the graph disabled, warmup (Triton JIT) still runs at startup."""
     proposer = SuffixProposerGPU(_make_config(False), DEVICE)
     persistent = torch.zeros(
         MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
     )
-    proposer.capture_draft_graph(persistent)
+    proposer.dummy_run(MAX_NUM_SEQS, persistent, is_graph_capturing=True)
     assert proposer._warmed_up
-    assert not proposer._graphs
+    assert proposer._graph_runner is None
     d, nv, _ = _propose_repetition(proposer, persistent)
     n = int(nv[0])
     assert n > 0

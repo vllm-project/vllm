@@ -6269,6 +6269,19 @@ class GPUModelRunner(
                     is_graph_capturing=is_graph_capturing,
                     slot_mappings=slot_mappings,
                 )
+            elif isinstance(self.drafter, SuffixProposerGPU) and (
+                get_pp_group().is_last_rank
+            ):
+                use_cudagraphs = (
+                    cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    and not self.speculative_config.enforce_eager
+                )
+                self.drafter.dummy_run(
+                    num_reqs=num_reqs,
+                    token_ids_gpu=self.token_ids_gpu_tensor,
+                    use_cudagraphs=use_cudagraphs,
+                    is_graph_capturing=is_graph_capturing,
+                )
 
         # We register layerwise NVTX hooks here after the first dynamo tracing is
         # done to avoid nvtx operations in hook functions being traced by
@@ -6718,7 +6731,7 @@ class GPUModelRunner(
         )
         total_graphs = decoder_graphs + encoder_graphs
         if total_graphs == 0:
-            logger.debug("No CUDA graphs will be captured, skipping profiling")
+            logger.debug("No model CUDA graphs will be captured, skipping profiling")
             self._cleanup_profiling_kv_cache()
             return 0
 
@@ -6849,16 +6862,6 @@ class GPUModelRunner(
 
     @instrument(span_name="Capture model")
     def capture_model(self) -> int:
-        # The standalone suffix_gpu draft graph is independent of the
-        # model cudagraph mode; pre-capture it here so the first serving
-        # step doesn't pay Triton JIT + capture latency.
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_suffix_gpu()
-        ):
-            assert isinstance(self.drafter, SuffixProposerGPU)
-            self.drafter.capture_draft_graph(self.token_ids_gpu_tensor)
-
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "

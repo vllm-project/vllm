@@ -582,7 +582,8 @@ class Worker(WorkerBase):
         cudagraph_memory_estimate = 0
         if (
             current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and self.vllm_config.compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
