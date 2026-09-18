@@ -121,7 +121,11 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        # Keep the existing usage accounting separate from output-category
+        # classification. Harmony treats addressed commentary as reasoning for
+        # usage, while output metrics classify tool calls as unclassified.
         self._reasoning_token_count = 0
+        self._phase_reasoning_token_count = 0
         self._content_token_count = 0
         self._processed_token_count = 0
 
@@ -362,7 +366,9 @@ class HarmonyParser(DelegatingParser):
                 reasoning_token_count += 1
 
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.CONTENT and delta:
+            if segment_type == _SegmentType.REASONING:
+                self._phase_reasoning_token_count += 1
+            elif segment_type == _SegmentType.CONTENT and delta:
                 self._content_token_count += 1
 
             segments.append(
@@ -387,14 +393,14 @@ class HarmonyParser(DelegatingParser):
         self, token_ids: Sequence[int]
     ) -> TokenPhaseCounts | None:
         if self._processed_token_count != len(token_ids):
-            return self._classify_complete_output(token_ids)
+            return self._analyze_complete_output(token_ids)[0]
         return TokenPhaseCounts(
-            reasoning=self._reasoning_token_count,
+            reasoning=self._phase_reasoning_token_count,
             content=self._content_token_count,
             unclassified=max(
                 0,
                 self._processed_token_count
-                - self._reasoning_token_count
+                - self._phase_reasoning_token_count
                 - self._content_token_count,
             ),
         )
@@ -411,11 +417,14 @@ class HarmonyParser(DelegatingParser):
         if self._processed_token_count == len(token_ids):
             return self._reasoning_token_count
 
-        return self._classify_complete_output(token_ids).reasoning
+        return self._analyze_complete_output(token_ids)[1]
 
-    def _classify_complete_output(self, token_ids: Sequence[int]) -> TokenPhaseCounts:
-        """Classify a complete output without changing streaming state."""
+    def _analyze_complete_output(
+        self, token_ids: Sequence[int]
+    ) -> tuple[TokenPhaseCounts, int]:
+        """Analyze a complete output without changing streaming state."""
         parser = get_streamable_parser_for_assistant()
+        usage_reasoning_token_count = 0
         reasoning_token_count = 0
         content_token_count = 0
         for token_id in token_ids:
@@ -425,17 +434,22 @@ class HarmonyParser(DelegatingParser):
             if channel == "analysis" or (
                 channel == "commentary" and recipient is not None
             ):
-                reasoning_token_count += 1
+                usage_reasoning_token_count += 1
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.CONTENT and parser.last_content_delta:
+            if segment_type == _SegmentType.REASONING:
+                reasoning_token_count += 1
+            elif segment_type == _SegmentType.CONTENT and parser.last_content_delta:
                 content_token_count += 1
-        return TokenPhaseCounts(
-            reasoning=reasoning_token_count,
-            content=content_token_count,
-            unclassified=max(
-                0,
-                len(token_ids) - reasoning_token_count - content_token_count,
+        return (
+            TokenPhaseCounts(
+                reasoning=reasoning_token_count,
+                content=content_token_count,
+                unclassified=max(
+                    0,
+                    len(token_ids) - reasoning_token_count - content_token_count,
+                ),
             ),
+            usage_reasoning_token_count,
         )
 
     def adjust_request(

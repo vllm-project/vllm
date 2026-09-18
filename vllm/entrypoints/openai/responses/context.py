@@ -112,7 +112,9 @@ class ConversationContext(ABC):
     _output_token_metrics: OutputTokenMetricsTracker | None = None
     _accumulated_token_ids: list[int]
 
-    def record_output_token_metrics(self, output: RequestOutput) -> None:
+    def record_output_token_metrics(
+        self, output: RequestOutput, *, include_batch_timing: bool = True
+    ) -> None:
         if not output.outputs:
             return
         if self._output_token_metrics is None:
@@ -125,9 +127,9 @@ class ConversationContext(ABC):
             counts = parser.classify_token_phases(self._accumulated_token_ids)
             if not isinstance(counts, TokenPhaseCounts):
                 counts = None
-        metrics = (
-            output.metrics if isinstance(output.metrics, RequestStateStats) else None
-        )
+        metrics = None
+        if include_batch_timing and isinstance(output.metrics, RequestStateStats):
+            metrics = output.metrics
         self._output_token_metrics.update(metrics, counts)
 
     def build_output_token_metrics(self):
