@@ -3,7 +3,14 @@
 
 import pytest
 import torch
+from transformers import AriaTextConfig
+from transformers.models.aria.modeling_aria import AriaTextMoELayer as HFMoE
 
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
+from vllm.model_executor.models.aria import AriaTextModel, AriaTextMoELayer
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
@@ -33,11 +40,6 @@ def test_aria_expert_weights_load_with_checkpoint_layout(
     checkpoint_name: str, loaded_name: str, param_name: str
 ):
     """Real Aria checkpoint weights must reach the right parameter and layout."""
-    from transformers import AriaTextConfig
-    from transformers.models.aria.modeling_aria import AriaTextMoELayer as HFMoE
-
-    from vllm.model_executor.models.aria import AriaTextModel, AriaTextMoELayer
-
     config = AriaTextConfig(
         hidden_size=32,
         intermediate_size=64,
@@ -68,12 +70,6 @@ def test_aria_expert_weights_load_with_checkpoint_layout(
 
 @pytest.mark.cpu_test
 def test_aria_quant_config_renames_expert_modules():
-    from vllm.config import VllmConfig
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-        CompressedTensorsConfig,
-    )
-    from vllm.model_executor.models.aria import AriaTextModel
-
     quant_config = CompressedTensorsConfig(
         target_scheme_map={},
         ignore=[
@@ -97,8 +93,6 @@ def test_aria_quant_config_renames_expert_modules():
     "name,expected", [("fc1", "gate_up_proj"), ("fc2", "down_proj")]
 )
 def test_aria_expert_scale_names(name: str, expected: str):
-    from vllm.model_executor.models.aria import AriaTextModel
-
     suffixes = ["weight_scale", "input_scale"]
     names = [f"model.layers.0.mlp.experts.{name}.{suffix}" for suffix in suffixes]
     assert AriaTextModel.hf_to_vllm_mapper.apply_list(names) == [
