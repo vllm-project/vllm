@@ -21,7 +21,10 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Any, Protocol
 
+import regex as re
 import torch
+
+from vllm.logger import init_logger
 
 from ..data import (
     BlockTransferPlan,
@@ -36,6 +39,18 @@ from .base import (
     UMBPWorkerHandle,
 )
 from .factory import UMBPRuntimeConfig
+
+logger = init_logger(__name__)
+
+_RANK_KEY_PATTERN = re.compile(r":tp(\d+):pcp(\d+):dcp(\d+):pp(\d+):g\d+:")
+
+
+def _rank_namespace_from_key(key: str) -> tuple[int, int, int, int] | None:
+    match = _RANK_KEY_PATTERN.search(key)
+    if match is None:
+        return None
+    tp_rank, pcp_rank, dcp_rank, pp_rank = map(int, match.groups())
+    return tp_rank, pcp_rank, dcp_rank, pp_rank
 
 
 class _LookupClient(Protocol):
@@ -335,19 +350,32 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
         topology: RankTopology,
         lookup_dir: str,
     ) -> None:
-        self._paths = [
-            _lookup_socket_path(namespace, rank, lookup_dir)
+        self._paths = {
+            rank: _lookup_socket_path(namespace, rank, lookup_dir)
             for rank in topology.all_namespaces()
-        ]
+        }
+        self.last_lookup_diagnostics: dict[str, tuple[Any, ...]] = {}
 
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         result = [False] * len(keys)
-        for path in self._paths:
+        keys_by_rank: dict[tuple[int, int, int, int], list[tuple[int, str]]] = {}
+        unrouted: list[tuple[int, str]] = []
+        for index, key in enumerate(keys):
+            rank = _rank_namespace_from_key(key)
+            if rank is None or rank not in self._paths:
+                unrouted.append((index, key))
+            else:
+                keys_by_rank.setdefault(rank, []).append((index, key))
+        unavailable: list[tuple[int, int, int, int]] = []
+        for rank, indexed_keys in keys_by_rank.items():
+            path = self._paths[rank]
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                     sock.settimeout(1.0)
                     sock.connect(path)
-                    sock.sendall((json.dumps(list(keys)) + "\n").encode())
+                    sock.sendall(
+                        (json.dumps([key for _, key in indexed_keys]) + "\n").encode()
+                    )
                     response = b""
                     while not response.endswith(b"\n"):
                         chunk = sock.recv(65536)
@@ -355,12 +383,44 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                             break
                         response += chunk
                     values = json.loads(response.decode() or "[]")
-                    result = [
-                        current or bool(values[index])
-                        for index, current in enumerate(result)
-                    ]
+                    if len(values) != len(indexed_keys):
+                        raise ValueError("lookup returned an invalid result length")
+                    for (index, _), value in zip(indexed_keys, values, strict=True):
+                        result[index] = bool(value)
             except (OSError, ValueError, IndexError):
+                unavailable.append(rank)
+        for path in self._paths.values():
+            if not unrouted:
+                break
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1.0)
+                    sock.connect(path)
+                    sock.sendall(
+                        (json.dumps([key for _, key in unrouted]) + "\n").encode()
+                    )
+                    response = b""
+                    while not response.endswith(b"\n"):
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        response += chunk
+                    values = json.loads(response.decode() or "[]")
+                    for (index, _), value in zip(unrouted, values, strict=True):
+                        result[index] = result[index] or bool(value)
+            except (OSError, ValueError):
                 continue
+        missing = tuple(
+            key for key, exists in zip(keys, result, strict=True) if not exists
+        )
+        self.last_lookup_diagnostics = {
+            "unavailable_ranks": tuple(unavailable),
+            "missing_keys": missing,
+        }
+        if unavailable:
+            logger.warning("UMBP lookup unavailable for ranks: %s", unavailable)
+        elif missing:
+            logger.debug("UMBP lookup missing %d objects", len(missing))
         return result
 
     def close(self) -> None:
@@ -369,7 +429,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
     def clear(self) -> bool:
         success = True
         contacted = False
-        for path in self._paths:
+        for path in self._paths.values():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                     sock.settimeout(2.0)
@@ -633,6 +693,18 @@ class EmbeddedRuntime(IUMBPRuntime):
 
         client_config = UMBPConfig()
         _configure_dram(client_config, config.options)
+        total = config.options.get("_configured_total_capacity_bytes")
+        if total is None:
+            logger.info(
+                "Embedded UMBP DRAM capacity: %.2f GiB per rank",
+                client_config.dram.capacity_bytes / 1024**3,
+            )
+        else:
+            logger.info(
+                "Embedded UMBP DRAM capacity: %.2f GiB total, %.2f GiB per rank",
+                total / 1024**3,
+                client_config.dram.capacity_bytes / 1024**3,
+            )
         return _MoriEmbeddedRuntime(
             UMBPClient(client_config),
             config.options.get("lookup_dir", "/tmp"),

@@ -83,7 +83,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: KVCacheConfig,
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
-        runtime_config = UMBPRuntimeConfig.from_vllm(vllm_config)
+        topology = RankTopology.from_vllm_config(vllm_config)
+        runtime_config = UMBPRuntimeConfig.from_vllm(
+            vllm_config
+        ).resolve_for_rank_count(topology.rank_count)
         runtime = UMBPRuntimeFactory.build(runtime_config)
         if (
             runtime_config.options.get("enable_partial_hash_hits", False)
@@ -93,7 +96,6 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "the selected UMBP runtime does not support partial hash hits"
             )
         namespace = UMBPNamespace.from_vllm_config(vllm_config, kv_cache_config)
-        topology = RankTopology.from_vllm_config(vllm_config)
         codec = BlockIdentityCodec(
             namespace=namespace,
             tp_rank=topology.tp_rank,

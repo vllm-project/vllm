@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -10,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
+    BlockIdentityCodec,
     BlockTransferPlan,
     KVLayoutDescriptor,
     KVLayoutPlanner,
@@ -18,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     RankTopology,
     TransferJobState,
     UMBPConnectorMetadata,
+    UMBPNamespace,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     EmbeddedRuntime,
@@ -25,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
     _configure_dram,
+    _lookup_socket_path,
+    _MoriLookupServer,
+    _MoriSchedulerHandle,
     _MoriWorkerHandle,
 )
 
@@ -93,6 +99,68 @@ def test_embedded_runtime_maps_dram_options_to_mori_config():
         "numa_node": 1,
         "prefault": True,
     }
+
+
+def test_runtime_config_resolves_total_embedded_capacity_per_rank():
+    config = UMBPRuntimeConfig.from_vllm(
+        _vllm_config({"mode": "embedded", "total_capacity_bytes": 4096})
+    ).resolve_for_rank_count(4)
+
+    assert config.options["capacity_bytes"] == 1024
+    assert config.options["_configured_total_capacity_bytes"] == 4096
+
+
+def test_runtime_config_rejects_ambiguous_embedded_capacity():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        UMBPRuntimeConfig.from_vllm(
+            _vllm_config(
+                {
+                    "mode": "embedded",
+                    "capacity_bytes": 1024,
+                    "total_capacity_bytes": 4096,
+                }
+            )
+        )
+
+
+def test_mori_scheduler_routes_lookup_to_owning_rank(tmp_path):
+    class _Client:
+        def __init__(self, keys):
+            self.keys = set(keys)
+
+        def batch_exists(self, keys):
+            return [key in self.keys for key in keys]
+
+        def clear(self):
+            return True
+
+    namespace = "routed-lookup"
+    topology = RankTopology(tp_size=2)
+    codec0 = BlockIdentityCodec(UMBPNamespace(namespace), tp_rank=0)
+    codec1 = BlockIdentityCodec(UMBPNamespace(namespace), tp_rank=1)
+    keys = [codec0.key(b"a"), codec1.key(b"a")]
+    servers = []
+    for rank, key in zip(topology.all_namespaces(), keys, strict=True):
+        server = _MoriLookupServer(
+            _lookup_socket_path(namespace, rank, str(tmp_path)),
+            _Client([key]),
+        )
+        server.start()
+        servers.append(server)
+    scheduler = _MoriSchedulerHandle(namespace, topology, str(tmp_path))
+    try:
+        assert scheduler.lookup(keys) == [True, True]
+        assert scheduler.last_lookup_diagnostics == {
+            "unavailable_ranks": (),
+            "missing_keys": (),
+        }
+        servers[1].close()
+        assert scheduler.lookup(keys) == [True, False]
+        assert scheduler.last_lookup_diagnostics["unavailable_ranks"] == ((1, 0, 0, 0),)
+        assert scheduler.last_lookup_diagnostics["missing_keys"] == (keys[1],)
+    finally:
+        for server in servers:
+            server.close()
 
 
 def test_embedded_round_trip_restores_all_layer_ranges():

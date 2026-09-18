@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -78,8 +78,33 @@ class UMBPRuntimeConfig:
             raise ValueError(f"{mode} UMBP cannot configure distributed-only options")
         return cls(mode=mode, options=options)
 
+    def resolve_for_rank_count(self, rank_count: int) -> UMBPRuntimeConfig:
+        """Resolve embedded total DRAM capacity into a per-rank capacity."""
+        if rank_count <= 0:
+            raise ValueError("rank_count must be positive")
+        if self.mode != "embedded" or "total_capacity_bytes" not in self.options:
+            return self
+        total = self.options["total_capacity_bytes"]
+        if total < rank_count:
+            raise ValueError(
+                "total_capacity_bytes must provide at least one byte per rank"
+            )
+        options = dict(self.options)
+        options["capacity_bytes"] = total // rank_count
+        options["_configured_total_capacity_bytes"] = total
+        return replace(self, options=options)
+
     @staticmethod
     def _validate_embedded_dram_options(options: dict[str, Any]) -> None:
+        if "capacity_bytes" in options and "total_capacity_bytes" in options:
+            raise ValueError(
+                "capacity_bytes and total_capacity_bytes are mutually exclusive"
+            )
+        if "total_capacity_bytes" in options and (
+            type(options["total_capacity_bytes"]) is not int
+            or options["total_capacity_bytes"] <= 0
+        ):
+            raise ValueError("total_capacity_bytes must be a positive integer")
         for name in _EMBEDDED_DRAM_BOOL_OPTIONS:
             if name in options and type(options[name]) is not bool:
                 raise ValueError(f"{name} must be a boolean")
