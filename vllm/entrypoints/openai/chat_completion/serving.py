@@ -176,10 +176,11 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_per_request_output_token_metrics = (
             enable_per_request_output_token_metrics
         )
-        if enable_per_request_output_token_metrics and not reasoning_parser:
-            raise ValueError(
-                "--enable-per-request-output-token-metrics requires --reasoning-parser"
-            )
+        self.validate_output_token_metrics_parser(
+            enable_per_request_output_token_metrics,
+            bool(reasoning_parser),
+            self.parser_cls,
+        )
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (

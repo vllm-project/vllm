@@ -219,8 +219,17 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
     ],
 )
 def test_per_request_metrics_require_log_stats(serve_parser, metrics_flag):
-    args = serve_parser.parse_args(args=[metrics_flag, "--disable-log-stats"])
+    cli_args = [metrics_flag, "--disable-log-stats"]
+    if metrics_flag == "--enable-per-request-output-token-metrics":
+        cli_args.extend(["--reasoning-parser", "qwen3"])
+    args = serve_parser.parse_args(args=cli_args)
     with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+def test_output_token_metrics_require_reasoning_parser(serve_parser):
+    args = serve_parser.parse_args(args=["--enable-per-request-output-token-metrics"])
+    with pytest.raises(ValueError, match="requires --reasoning-parser"):
         validate_parsed_serve_args(args)
 
 

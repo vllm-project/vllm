@@ -94,6 +94,10 @@ class ChunkResult:
 
 
 class HarmonyParser(DelegatingParser):
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        return True
+
     def __init__(self, tokenizer, tools=None, *args, **kwargs):
         super().__init__(tokenizer, tools, *args, **kwargs)
 
@@ -382,6 +386,8 @@ class HarmonyParser(DelegatingParser):
     def classify_token_phases(
         self, token_ids: Sequence[int]
     ) -> TokenPhaseCounts | None:
+        if self._processed_token_count != len(token_ids):
+            return self._classify_complete_output(token_ids)
         return TokenPhaseCounts(
             reasoning=self._reasoning_token_count,
             content=self._content_token_count,
@@ -405,8 +411,13 @@ class HarmonyParser(DelegatingParser):
         if self._processed_token_count == len(token_ids):
             return self._reasoning_token_count
 
+        return self._classify_complete_output(token_ids).reasoning
+
+    def _classify_complete_output(self, token_ids: Sequence[int]) -> TokenPhaseCounts:
+        """Classify a complete output without changing streaming state."""
         parser = get_streamable_parser_for_assistant()
         reasoning_token_count = 0
+        content_token_count = 0
         for token_id in token_ids:
             parser.process(token_id)
             channel = parser.current_channel
@@ -415,7 +426,17 @@ class HarmonyParser(DelegatingParser):
                 channel == "commentary" and recipient is not None
             ):
                 reasoning_token_count += 1
-        return reasoning_token_count
+            segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
+            if segment_type == _SegmentType.CONTENT and parser.last_content_delta:
+                content_token_count += 1
+        return TokenPhaseCounts(
+            reasoning=reasoning_token_count,
+            content=content_token_count,
+            unclassified=max(
+                0,
+                len(token_ids) - reasoning_token_count - content_token_count,
+            ),
+        )
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

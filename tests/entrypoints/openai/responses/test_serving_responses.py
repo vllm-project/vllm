@@ -1393,6 +1393,8 @@ def _make_simple_context_with_output(
 def _make_serving_instance(
     *,
     reasoning_parser: str = "",
+    enable_auto_tools: bool = False,
+    tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
     enable_per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingResponses:
@@ -1414,6 +1416,8 @@ def _make_serving_instance(
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser=reasoning_parser,
+        enable_auto_tools=enable_auto_tools,
+        tool_parser=tool_parser,
         enable_per_request_metrics=enable_per_request_metrics,
         enable_per_request_output_token_metrics=(
             enable_per_request_output_token_metrics
@@ -1422,8 +1426,18 @@ def _make_serving_instance(
 
 
 def test_output_token_metrics_require_reasoning_parser():
-    with pytest.raises(ValueError, match="requires --reasoning-parser"):
+    with pytest.raises(ValueError, match="requires a parser configuration"):
         _make_serving_instance(enable_per_request_output_token_metrics=True)
+
+
+def test_output_token_metrics_reject_unsupported_parser_combination():
+    with pytest.raises(ValueError, match="requires a parser configuration"):
+        _make_serving_instance(
+            reasoning_parser="qwen3",
+            enable_auto_tools=True,
+            tool_parser="hermes",
+            enable_per_request_output_token_metrics=True,
+        )
 
 
 async def _empty_context_generator():
@@ -1491,13 +1505,9 @@ async def test_responses_output_token_metrics_follow_parser_classification():
     parser = MagicMock()
     parser.parse.return_value = ("reasoning", "answer", None)
     parser.count_reasoning_tokens.return_value = 2
-    # SimpleContext parses only after generation. The second result verifies
-    # that classification is recorded after that production parsing step.
-    parser.classify_token_phases.side_effect = [
-        None,
-        TokenPhaseCounts(reasoning=2, content=1, unclassified=1),
-        TokenPhaseCounts(reasoning=2, content=1, unclassified=1),
-    ]
+    parser.classify_token_phases.return_value = TokenPhaseCounts(
+        reasoning=2, content=1, unclassified=1
+    )
     context = SimpleContext(response_parser=parser)
 
     async def generate(*args, **kwargs):
@@ -1530,6 +1540,7 @@ async def test_responses_output_token_metrics_follow_parser_classification():
     assert output_metrics.reasoning.token_count == 2
     assert output_metrics.content.token_count == 1
     assert output_metrics.unclassified_token_count == 1
+    parser.classify_token_phases.assert_called_once_with([10, 11, 12, 13])
 
 
 @pytest.mark.asyncio

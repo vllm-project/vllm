@@ -242,6 +242,10 @@ class Parser:
         """Classify generated tokens, or return ``None`` if unsupported."""
         return None
 
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        return cls.classify_token_phases is not Parser.classify_token_phases
+
 
 class DelegatingParser(Parser):
     """A Parser implementation that delegates to separate ReasoningParser and
@@ -838,21 +842,53 @@ class DelegatingParser(Parser):
             return None
         if self._tool_parser is not None:
             return None
-        phase_counts = reasoning_parser.classify_token_phases(token_ids)
-        if phase_counts is not None:
-            return phase_counts
         if (
             type(reasoning_parser).count_reasoning_tokens
             is ReasoningParser.count_reasoning_tokens
         ):
             return None
 
+        parser_engine = getattr(reasoning_parser, "_parser_engine", None)
+        if getattr(reasoning_parser, "_streaming_count_valid", False):
+            if parser_engine is None:
+                return None
+            phase_counts = parser_engine.classify_token_phases(token_ids)
+            if phase_counts is None or not parser_engine.reasoning_ended:
+                return phase_counts
+
+            # After the reasoning transition, ordinary content is no longer
+            # forwarded to the legacy reasoning adapter.
+            content = len(reasoning_parser.extract_content_ids(list(token_ids)))
+            return TokenPhaseCounts(
+                reasoning=phase_counts.reasoning,
+                content=max(phase_counts.content, content),
+                unclassified=max(
+                    0,
+                    len(token_ids)
+                    - phase_counts.reasoning
+                    - max(phase_counts.content, content),
+                ),
+            )
+
         reasoning = reasoning_parser.count_reasoning_tokens(token_ids)
+        counting_engine = getattr(reasoning_parser, "_counting_parser_engine", None)
+        if counting_engine is not None:
+            return counting_engine.classify_token_phases(token_ids)
         content = len(reasoning_parser.extract_content_ids(list(token_ids)))
         return TokenPhaseCounts(
             reasoning=reasoning,
             content=content,
             unclassified=max(0, len(token_ids) - reasoning - content),
+        )
+
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        reasoning_parser_cls = cls.reasoning_parser_cls
+        return (
+            reasoning_parser_cls is not None
+            and cls.tool_parser_cls is None
+            and reasoning_parser_cls.count_reasoning_tokens
+            is not ReasoningParser.count_reasoning_tokens
         )
 
     def _flush_engine_parsers(

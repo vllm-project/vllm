@@ -151,10 +151,11 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.enable_per_request_output_token_metrics = (
             enable_per_request_output_token_metrics
         )
-        if enable_per_request_output_token_metrics and not reasoning_parser:
-            raise ValueError(
-                "--enable-per-request-output-token-metrics requires --reasoning-parser"
-            )
+        self.validate_output_token_metrics_parser(
+            enable_per_request_output_token_metrics,
+            bool(reasoning_parser),
+            self.parser,
+        )
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -499,9 +500,13 @@ class OpenAIServingResponses(GenerateBaseServing):
                             )
                         ),
                     )
-            # Phase timing needs each observable engine output batch even when
-            # the client requested a non-streaming response.
-            if self.enable_per_request_output_token_metrics and not request.stream:
+            # Simple and Harmony contexts can consume engine deltas. ParsableContext
+            # expects one complete output and performs a full parse in append_output.
+            if (
+                self.enable_per_request_output_token_metrics
+                and not request.stream
+                and not isinstance(context, ParsableContext)
+            ):
                 sampling_params.output_kind = RequestOutputKind.DELTA
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
@@ -668,9 +673,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             async for res in generator:
-                context.request_metrics = res.metrics
+                if res.metrics is not None:
+                    context.request_metrics = res.metrics
                 context.append_output(res)
-                if self.enable_per_request_output_token_metrics:
+                if self.enable_per_request_output_token_metrics and isinstance(
+                    context, (HarmonyContext, ParsableContext)
+                ):
                     context.record_output_token_metrics(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
@@ -850,10 +858,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tokenizer,
                 parser=context.response_parser,
             )
-            # SimpleContext parses its output here for non-streaming requests.
-            if self.enable_per_request_output_token_metrics:
-                context.record_output_token_metrics(final_res)
-
             if request.enable_response_messages:
                 input_messages = context.input_messages
                 output_messages = context.output_messages

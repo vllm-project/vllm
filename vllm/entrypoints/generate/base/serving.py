@@ -34,6 +34,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
@@ -251,6 +252,22 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
+
+    @staticmethod
+    def validate_output_token_metrics_parser(
+        enabled: bool,
+        reasoning_parser_configured: bool,
+        parser_cls: type[Parser] | None,
+    ) -> None:
+        if enabled and (
+            not reasoning_parser_configured
+            or parser_cls is None
+            or not parser_cls.supports_token_phase_classification()
+        ):
+            raise ValueError(
+                "--enable-per-request-output-token-metrics requires a parser "
+                "configuration that supports output-token classification"
+            )
 
     def __init__(
         self,
