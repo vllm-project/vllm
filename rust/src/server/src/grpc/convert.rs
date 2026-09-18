@@ -316,6 +316,11 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
+    let sampling_mask = finished
+        .and_then(|finished| finished.sampling_mask.as_ref())
+        .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
+        .unwrap_or_default();
+
     Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
@@ -333,6 +338,7 @@ pub fn to_sequence_output(
         ranks: rank_values,
         candidate_tokens: candidates,
         finish_info,
+        sampling_mask,
     })
 }
 
@@ -524,6 +530,7 @@ impl ResponseOpts {
 mod tests {
     use prost::Message as _;
     use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -720,6 +727,7 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
         }
     }
 
@@ -803,5 +811,41 @@ mod tests {
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+    }
+
+    #[test]
+    fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        fin.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, 10], vec![2, 20]],
+        });
+
+        let terminal =
+            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
+                .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
+
+        assert_eq!(
+            terminal.sampling_mask,
+            vec![
+                pb::TokenIds { ids: vec![1, 10] },
+                pb::TokenIds { ids: vec![2, 20] }
+            ]
+        );
+        assert!(intermediate.sampling_mask.is_empty());
+    }
+
+    #[test]
+    fn sampling_mask_uses_additive_proto_tag_ten() {
+        let response = pb::SequenceOutput {
+            sampling_mask: vec![pb::TokenIds { ids: vec![7, 8] }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response.encode_to_vec(),
+            vec![0x52, 0x04, 0x0a, 0x02, 0x07, 0x08]
+        );
     }
 }
