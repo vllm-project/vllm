@@ -1098,11 +1098,19 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     """`reducer_override` must use an exact-type check, not `isinstance`:
     the `dispatch_table` it falls through to is itself keyed by exact type
     (pickle looks up `type(obj)`, not its MRO), so a `Tensor` subclass like
-    `torch.nn.Parameter` must decline here too, or it gets diverted into
-    the arena and rebuilt as a plain `Tensor` -- silently losing its
-    subclass identity, unlike the no-arena path (where it falls through to
-    its own `__reduce_ex__` and keeps its type, as
-    test_tensor_pickle_roundtrip["param"] verifies for the non-arena path)."""
+    `torch.nn.Parameter` must decline here too. Declining lets pickle fall
+    through to `Parameter.__reduce_ex__` itself, which returns
+    `(_rebuild_parameter, (plain_data_tensor, requires_grad, state_dict))`
+    -- an exact-type `torch.Tensor` constructor arg that the arena then
+    legitimately (and separately) diverts. So the arena IS still touched
+    (`written` is non-empty); what must hold is that the *outer* object
+    survives as a `Parameter`, not a bare `Tensor`. With the old
+    `isinstance` check, the outer `param` itself would have matched
+    `reducer_override` directly, bypassing `_rebuild_parameter` entirely
+    and reconstructing as a plain `Tensor` -- silently losing its subclass
+    identity, unlike the no-arena path (test_tensor_pickle_roundtrip
+    ["param"], which keeps the type via the same `_rebuild_parameter`
+    protocol this test now also exercises through the arena)."""
     writer, (reader,) = _make_arena(n_reader=1)
     monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
     monkeypatch.setitem(
@@ -1116,11 +1124,16 @@ def test_arena_pickler_excludes_tensor_subclasses(monkeypatch):
     assert param.numel() * param.element_size() >= shm_tensor_arena._ARENA_MIN_BYTES
 
     data, buffers, written = _dumps_arena(param, writer)
-    # Declined by the arena -- no slot consumed.
-    assert written == []
+    # The inner data tensor is still a legitimate, separate diversion.
+    assert written != []
     out = pickle.loads(data, buffers=buffers)
+    # The outer Parameter's type identity survives: reducer_override
+    # declined it and let Parameter's own reduce protocol run.
+    assert type(out) is torch.nn.Parameter
     assert torch.equal(out, param)
-    assert isinstance(out, torch.nn.Parameter)
+    assert out.requires_grad == param.requires_grad
+    del out
+    _drain(reader)
 
 
 def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
