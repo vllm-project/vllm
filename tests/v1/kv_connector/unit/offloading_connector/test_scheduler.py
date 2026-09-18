@@ -67,6 +67,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -3566,7 +3567,7 @@ class TestEagle:
             gs.block_ids = list(range(next_id, next_id + count))
             next_id += count
         scheduler._req_status[request.request_id] = state
-        ordinary_keys = set()
+        ordinary_keys: set[OffloadKey] = set()
         stored_keys = set()
         for scheduled in (prompt_tokens - 48, 48):
             end = request.num_computed_tokens + scheduled
