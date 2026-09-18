@@ -129,29 +129,49 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k0 = tl.make_block_ptr(
-            k, (T, K), (H * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0)
+        p_k0 = tl.make_tensor_descriptor(
+            k,
+            shape=[T, K],
+            strides=[H * K, 1],
+            block_shape=[BC, BK],
+            padding_option="zero",
         )
-        p_g0 = tl.make_block_ptr(
-            g, (T, K), (HV * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0)
+        p_g0 = tl.make_tensor_descriptor(
+            g,
+            shape=[T, K],
+            strides=[HV * K, 1],
+            block_shape=[BC, BK],
+            padding_option="zero",
         )
-        b_k0 = tl.load(p_k0, boundary_check=(0, 1)).to(tl.float32)
-        b_g0 = tl.load(p_g0, boundary_check=(0, 1)).to(tl.float32)
+        b_k0 = p_k0.load([i_tc0, i_k * BK]).to(tl.float32)
+        b_g0 = p_g0.load([i_tc0, i_k * BK]).to(tl.float32)
 
         if i_tc1 < T:
-            p_q1 = tl.make_block_ptr(
-                q, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
+            p_q1 = tl.make_tensor_descriptor(
+                q,
+                shape=[T, K],
+                strides=[H * K, 1],
+                block_shape=[BC, BK],
+                padding_option="zero",
             )
-            p_k1 = tl.make_block_ptr(
-                k, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
+            p_k1 = tl.make_tensor_descriptor(
+                k,
+                shape=[T, K],
+                strides=[H * K, 1],
+                block_shape=[BC, BK],
+                padding_option="zero",
             )
-            p_g1 = tl.make_block_ptr(
-                g, (T, K), (HV * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
+            p_g1 = tl.make_tensor_descriptor(
+                g,
+                shape=[T, K],
+                strides=[HV * K, 1],
+                block_shape=[BC, BK],
+                padding_option="zero",
             )
             # [BC, BK]
-            b_q1 = tl.load(p_q1, boundary_check=(0, 1)).to(tl.float32)
-            b_k1 = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
-            b_g1 = tl.load(p_g1, boundary_check=(0, 1)).to(tl.float32)
+            b_q1 = p_q1.load([i_tc1, i_k * BK]).to(tl.float32)
+            b_k1 = p_k1.load([i_tc1, i_k * BK]).to(tl.float32)
+            b_g1 = p_g1.load([i_tc1, i_k * BK]).to(tl.float32)
             # [BK]
             b_gn1 = tl.load(g + i_tc1 * HV * K + o_k, mask=m_k, other=0).to(tl.float32)
             # [BC, BK]
@@ -163,19 +183,31 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt)
 
             if i_tc2 < T:
-                p_q2 = tl.make_block_ptr(
-                    q, (T, K), (H * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
+                p_q2 = tl.make_tensor_descriptor(
+                    q,
+                    shape=[T, K],
+                    strides=[H * K, 1],
+                    block_shape=[BC, BK],
+                    padding_option="zero",
                 )
-                p_k2 = tl.make_block_ptr(
-                    k, (T, K), (H * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
+                p_k2 = tl.make_tensor_descriptor(
+                    k,
+                    shape=[T, K],
+                    strides=[H * K, 1],
+                    block_shape=[BC, BK],
+                    padding_option="zero",
                 )
-                p_g2 = tl.make_block_ptr(
-                    g, (T, K), (HV * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
+                p_g2 = tl.make_tensor_descriptor(
+                    g,
+                    shape=[T, K],
+                    strides=[HV * K, 1],
+                    block_shape=[BC, BK],
+                    padding_option="zero",
                 )
                 # [BC, BK]
-                b_q2 = tl.load(p_q2, boundary_check=(0, 1)).to(tl.float32)
-                b_k2 = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
-                b_g2 = tl.load(p_g2, boundary_check=(0, 1)).to(tl.float32)
+                b_q2 = p_q2.load([i_tc2, i_k * BK]).to(tl.float32)
+                b_k2 = p_k2.load([i_tc2, i_k * BK]).to(tl.float32)
+                b_g2 = p_g2.load([i_tc2, i_k * BK]).to(tl.float32)
                 # [BK]
                 b_gn2 = tl.load(g + i_tc2 * HV * K + o_k, mask=m_k, other=0).to(
                     tl.float32
@@ -195,19 +227,31 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_Akk21 += tl.dot(b_kg2, b_kgt)
 
                 if i_tc3 < T:
-                    p_q3 = tl.make_block_ptr(
-                        q, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
+                    p_q3 = tl.make_tensor_descriptor(
+                        q,
+                        shape=[T, K],
+                        strides=[H * K, 1],
+                        block_shape=[BC, BK],
+                        padding_option="zero",
                     )
-                    p_k3 = tl.make_block_ptr(
-                        k, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
+                    p_k3 = tl.make_tensor_descriptor(
+                        k,
+                        shape=[T, K],
+                        strides=[H * K, 1],
+                        block_shape=[BC, BK],
+                        padding_option="zero",
                     )
-                    p_g3 = tl.make_block_ptr(
-                        g, (T, K), (HV * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
+                    p_g3 = tl.make_tensor_descriptor(
+                        g,
+                        shape=[T, K],
+                        strides=[HV * K, 1],
+                        block_shape=[BC, BK],
+                        padding_option="zero",
                     )
                     # [BC, BK]
-                    b_q3 = tl.load(p_q3, boundary_check=(0, 1)).to(tl.float32)
-                    b_k3 = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
-                    b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
+                    b_q3 = p_q3.load([i_tc3, i_k * BK]).to(tl.float32)
+                    b_k3 = p_k3.load([i_tc3, i_k * BK]).to(tl.float32)
+                    b_g3 = p_g3.load([i_tc3, i_k * BK]).to(tl.float32)
                     # [BK]
                     b_gn3 = tl.load(g + i_tc3 * HV * K + o_k, mask=m_k, other=0).to(
                         tl.float32
@@ -236,82 +280,116 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # save off-diagonal Aqk blocks and prepare Akk
     ################################################################################
     if i_tc1 < T:
-        p_Aqk10 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0)
+        p_Aqk10 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        tl.store(
-            p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk10.store(offsets=[i_tc1, 0], value=(b_Aqk10 * scale).to(Aqk.dtype.element_ty))
 
-        p_b1 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc1,), (BC,), (0,)
+        p_b1 = tl.make_tensor_descriptor(
+            beta + bos * HV + i_hv,
+            shape=[T],
+            strides=[HV],
+            block_shape=[BC],
+            padding_option="zero",
         )
-        b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
+        b_b1 = p_b1.load([i_tc1]).to(tl.float32)
         b_Akk10 = b_Akk10 * b_b1[:, None]
     if i_tc2 < T:
-        p_Aqk20 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0)
+        p_Aqk20 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        p_Aqk21 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc2, BC), (BC, BC), (1, 0)
+        p_Aqk21 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        tl.store(
-            p_Aqk20, (b_Aqk20 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk21, (b_Aqk21 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk20.store(offsets=[i_tc2, 0], value=(b_Aqk20 * scale).to(Aqk.dtype.element_ty))
+        p_Aqk21.store(offsets=[i_tc2, BC], value=(b_Aqk21 * scale).to(Aqk.dtype.element_ty))
 
-        p_b2 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc2,), (BC,), (0,)
+        p_b2 = tl.make_tensor_descriptor(
+            beta + bos * HV + i_hv,
+            shape=[T],
+            strides=[HV],
+            block_shape=[BC],
+            padding_option="zero",
         )
-        b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
+        b_b2 = p_b2.load([i_tc2]).to(tl.float32)
         b_Akk20 = b_Akk20 * b_b2[:, None]
         b_Akk21 = b_Akk21 * b_b2[:, None]
     if i_tc3 < T:
-        p_Aqk30 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0)
+        p_Aqk30 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        p_Aqk31 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, BC), (BC, BC), (1, 0)
+        p_Aqk31 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        p_Aqk32 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0)
+        p_Aqk32 = tl.make_tensor_descriptor(
+            Aqk,
+            shape=[T, BT],
+            strides=[HV * BT, 1],
+            block_shape=[BC, BC],
         )
-        tl.store(
-            p_Aqk30, (b_Aqk30 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk31, (b_Aqk31 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk32, (b_Aqk32 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk30.store(offsets=[i_tc3, 0], value=(b_Aqk30 * scale).to(Aqk.dtype.element_ty))
+        p_Aqk31.store(offsets=[i_tc3, BC], value=(b_Aqk31 * scale).to(Aqk.dtype.element_ty))
+        p_Aqk32.store(offsets=[i_tc3, 2 * BC], value=(b_Aqk32 * scale).to(Aqk.dtype.element_ty))
 
-        p_b3 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc3,), (BC,), (0,)
+        p_b3 = tl.make_tensor_descriptor(
+            beta + bos * HV + i_hv,
+            shape=[T],
+            strides=[HV],
+            block_shape=[BC],
+            padding_option="zero",
         )
-        b_b3 = tl.load(p_b3, boundary_check=(0,)).to(tl.float32)
+        b_b3 = p_b3.load([i_tc3]).to(tl.float32)
         b_Akk30 = b_Akk30 * b_b3[:, None]
         b_Akk31 = b_Akk31 * b_b3[:, None]
         b_Akk32 = b_Akk32 * b_b3[:, None]
 
-    p_Akk00 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc0, 0), (BC, BC), (1, 0)
+    p_Akk00 = tl.make_tensor_descriptor(
+        Akkd,
+        shape=[T, BC],
+        strides=[HV * BC, 1],
+        block_shape=[BC, BC],
+        padding_option="zero",
     )
-    p_Akk11 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc1, 0), (BC, BC), (1, 0)
+    p_Akk11 = tl.make_tensor_descriptor(
+        Akkd,
+        shape=[T, BC],
+        strides=[HV * BC, 1],
+        block_shape=[BC, BC],
+        padding_option="zero",
     )
-    p_Akk22 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc2, 0), (BC, BC), (1, 0)
+    p_Akk22 = tl.make_tensor_descriptor(
+        Akkd,
+        shape=[T, BC],
+        strides=[HV * BC, 1],
+        block_shape=[BC, BC],
+        padding_option="zero",
     )
-    p_Akk33 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc3, 0), (BC, BC), (1, 0)
+    p_Akk33 = tl.make_tensor_descriptor(
+        Akkd,
+        shape=[T, BC],
+        strides=[HV * BC, 1],
+        block_shape=[BC, BC],
+        padding_option="zero",
     )
-    b_Ai00 = tl.load(p_Akk00, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai11 = tl.load(p_Akk11, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai22 = tl.load(p_Akk22, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
+    b_Ai00 = p_Akk00.load([i_tc0, 0]).to(tl.float32)
+    b_Ai11 = p_Akk11.load([i_tc1, 0]).to(tl.float32)
+    b_Ai22 = p_Akk22.load([i_tc2, 0]).to(tl.float32)
+    b_Ai33 = p_Akk33.load([i_tc3, 0]).to(tl.float32)
 
     ################################################################################
     # forward substitution on diagonals
@@ -397,47 +475,77 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # store full Akk_inv to Akk
     ################################################################################
 
-    p_Akk00 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc0, 0), (BC, BC), (1, 0)
+    p_Akk00 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk10 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0)
+    p_Akk10 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk11 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc1, BC), (BC, BC), (1, 0)
+    p_Akk11 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk20 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0)
+    p_Akk20 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk21 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, BC), (BC, BC), (1, 0)
+    p_Akk21 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk22 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0)
+    p_Akk22 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk30 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0)
+    p_Akk30 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk31 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, BC), (BC, BC), (1, 0)
+    p_Akk31 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk32 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0)
+    p_Akk32 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk33 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0)
+    p_Akk33 = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
 
-    tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    p_Akk00.store(offsets=[i_tc0, 0], value=b_Ai00.to(Akk.dtype.element_ty))
+    p_Akk10.store(offsets=[i_tc1, 0], value=b_Ai10.to(Akk.dtype.element_ty))
+    p_Akk11.store(offsets=[i_tc1, BC], value=b_Ai11.to(Akk.dtype.element_ty))
+    p_Akk20.store(offsets=[i_tc2, 0], value=b_Ai20.to(Akk.dtype.element_ty))
+    p_Akk21.store(offsets=[i_tc2, BC], value=b_Ai21.to(Akk.dtype.element_ty))
+    p_Akk22.store(offsets=[i_tc2, 2 * BC], value=b_Ai22.to(Akk.dtype.element_ty))
+    p_Akk30.store(offsets=[i_tc3, 0], value=b_Ai30.to(Akk.dtype.element_ty))
+    p_Akk31.store(offsets=[i_tc3, BC], value=b_Ai31.to(Akk.dtype.element_ty))
+    p_Akk32.store(offsets=[i_tc3, 2 * BC], value=b_Ai32.to(Akk.dtype.element_ty))
+    p_Akk33.store(offsets=[i_tc3, 3 * BC], value=b_Ai33.to(Akk.dtype.element_ty))
 
 
 @triton.heuristics(
@@ -505,16 +613,40 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     Aqk = Aqk + (bos * HV + i_hv) * BT
     Akk = Akk + (bos * HV + i_hv) * BC
 
-    p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
-    p_g = tl.make_block_ptr(g, (T, K), (HV * K, 1), (i_ti, 0), (BC, BK), (1, 0))
+    p_q = tl.make_tensor_descriptor(
+        q,
+        shape=[T, K],
+        strides=[H * K, 1],
+        block_shape=[BC, BK],
+        padding_option="zero",
+    )
+    p_k = tl.make_tensor_descriptor(
+        k,
+        shape=[T, K],
+        strides=[H * K, 1],
+        block_shape=[BC, BK],
+        padding_option="zero",
+    )
+    p_g = tl.make_tensor_descriptor(
+        g,
+        shape=[T, K],
+        strides=[HV * K, 1],
+        block_shape=[BC, BK],
+        padding_option="zero",
+    )
 
-    p_beta = tl.make_block_ptr(beta, (T,), (HV,), (i_ti,), (BC,), (0,))
+    p_beta = tl.make_tensor_descriptor(
+        beta,
+        shape=[T],
+        strides=[HV],
+        block_shape=[BC],
+        padding_option="zero",
+    )
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_beta = tl.load(p_beta, boundary_check=(0,)).to(tl.float32)
+    b_q = p_q.load([i_ti, 0])
+    b_k = p_k.load([i_ti, 0])
+    b_g = p_g.load([i_ti, 0])
+    b_beta = p_beta.load([i_ti]).to(tl.float32)
 
     if USE_GATHER:
         b_gn = gather(
@@ -546,12 +678,20 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_Aqk = tl.where(m_Aqk, b_Aqk, 0.0)
     b_Akk = tl.where(m_Akk, b_Akk, 0.0)
 
-    p_Aqk = tl.make_block_ptr(
-        Aqk, (T, BT), (HV * BT, 1), (i_ti, i_i * BC), (BC, BC), (1, 0)
+    p_Aqk = tl.make_tensor_descriptor(
+        Aqk,
+        shape=[T, BT],
+        strides=[HV * BT, 1],
+        block_shape=[BC, BC],
     )
-    p_Akk = tl.make_block_ptr(Akk, (T, BC), (HV * BC, 1), (i_ti, 0), (BC, BC), (1, 0))
-    tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    p_Akk = tl.make_tensor_descriptor(
+        Akk,
+        shape=[T, BC],
+        strides=[HV * BC, 1],
+        block_shape=[BC, BC],
+    )
+    p_Aqk.store(offsets=[i_ti, i_i * BC], value=b_Aqk.to(Aqk.dtype.element_ty))
+    p_Akk.store(offsets=[i_ti, 0], value=b_Akk.to(Akk.dtype.element_ty))
 
     tl.debug_barrier()
 
@@ -566,7 +706,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
         b_a += tl.sum(b_a[:, None] * b_Ai, 0)
         b_Ai = tl.where((o_i == i)[:, None], b_a, b_Ai)
     b_Ai += m_I
-    tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    p_Akk.store(offsets=[i_ti, 0], value=b_Ai.to(Akk.dtype.element_ty))
 
 
 def chunk_kda_fwd_intra(
