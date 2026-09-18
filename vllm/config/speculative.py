@@ -1244,7 +1244,10 @@ class SpeculativeConfig:
                 self.draft_model_config.hf_config, **hf_config
             )
             self.update_arch_()
-            self.draft_parallel_config = self.target_parallel_config
+            self.draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+                self.target_parallel_config,
+                self.target_parallel_config.tensor_parallel_size,
+            )
 
         else:
             self.prompt_lookup_max = 0
