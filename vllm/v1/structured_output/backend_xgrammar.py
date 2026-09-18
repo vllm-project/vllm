@@ -245,16 +245,24 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
-    def check_object(obj: dict[str, Any]) -> bool:
+    def check_schema(obj: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
+        obj_type = obj.get("type")
+        if isinstance(obj_type, str):
+            possible_types = [obj_type]
+        elif isinstance(obj_type, list):
+            possible_types = obj_type
+        else:
+            possible_types = ["integer", "number", "array", "string", "object"]
+
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+        if any(t in ("integer", "number") for t in possible_types) and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
+        if "array" in possible_types and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
@@ -262,7 +270,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for strings
         if (
-            obj.get("type") == "string"
+            "string" in possible_types
             and "format" in obj
             and obj["format"] not in STRING_SUPPORTED_FORMATS
         ):
@@ -275,13 +283,13 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if obj.get("type") == "string" and _has_pattern_and_length_bounds(obj):
+        if "string" in possible_types and _has_pattern_and_length_bounds(obj):
             return True
 
         # propertyNames validates names, so it is a string schema even when it
         # omits "type", which is the form that escapes the check above.
         if (
-            obj.get("type") == "object"
+            "object" in possible_types
             and isinstance(obj.get("propertyNames"), dict)
             and _has_pattern_and_length_bounds(obj["propertyNames"])
         ):
@@ -291,7 +299,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
         if (
-            obj.get("type") == "object"
+            "object" in possible_types
             and "propertyNames" in obj
             and (
                 "properties" in obj
@@ -305,25 +313,42 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
         if (
-            obj.get("type") == "object"
+            "object" in possible_types
             and isinstance(obj.get("patternProperties"), dict)
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
 
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
+        # Schema-aware traversal of nested schemas
+        for key in [
+            "items", "additionalProperties", "unevaluatedProperties",
+            "not", "if", "then", "else", "propertyNames", "contains"
+        ]:
+            if key in obj and isinstance(obj[key], dict):
+                if check_schema(obj[key]):
                     return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
+                    
+        for key in ["properties", "patternProperties", "dependentSchemas", "$defs", "definitions"]:
+            if key in obj and isinstance(obj[key], dict):
+                for sub in obj[key].values():
+                    if isinstance(sub, dict) and check_schema(sub):
                         return True
+                        
+        for key in ["allOf", "anyOf", "oneOf", "prefixItems"]:
+            if key in obj and isinstance(obj[key], list):
+                for sub in obj[key]:
+                    if isinstance(sub, dict) and check_schema(sub):
+                        return True
+
+        # items can also be a list of schemas (tuple validation)
+        if "items" in obj and isinstance(obj["items"], list):
+            for sub in obj["items"]:
+                if isinstance(sub, dict) and check_schema(sub):
+                    return True
 
         return False
 
-    return check_object(schema)
+    return check_schema(schema)
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
