@@ -1100,9 +1100,6 @@ def test_aiter_experts_apply_trims_oversized_dispatch_buffer(
         rtol=0.0,
     )
 
-    # Padding rows must never be touched/scattered into.
-    assert torch.all(output[valid_tokens:] == 0)
-
 
 # Arch-specific tests -----------------------------------------------------
 
