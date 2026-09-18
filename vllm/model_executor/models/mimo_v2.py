@@ -50,6 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -465,13 +466,13 @@ def _requantize_fp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Block-quantize a rank's ``[Q | K | V]`` rows back to fp8.
 
-    A rank's rows need not end on a block boundary (a single 1856-row stripe is
+    A rank's rows need not end on a block boundary (a single 1856-row slice is
     14.5 blocks) while ``scaled_quantize`` requires both dims to be multiples of
     the block size, so pad the tail with zeros: zero rows cannot raise a block's
     amax, so every scale -- and the number of scale rows -- is unchanged. The
     padding is dropped again here.
     """
-    padded = -(-rows_rank // block) * block
+    padded = cdiv(rows_rank, block) * block
     if padded != rows_rank:
         grouped = torch.cat(
             [grouped, grouped.new_zeros(padded - rows_rank, grouped.shape[1])], dim=0
@@ -507,10 +508,9 @@ def _shard_fp8_qkv_proj(
     ``(num_kv_heads / ckpt_tp) * v_head_dim`` rows, and the fp8 block scales
     are tiled per chunk too (``ceil(rows_per_chunk / block)`` rows each).
 
-    Note this is *not* one chunk per KV head: a MiMo-V2.5 SWA layer has 8 KV
-    heads but a ckpt_tp of 4, so each chunk carries two KV heads (3712 rows =
-    29 blocks). Assuming one chunk per KV head is what made the SWA layers
-    unloadable (14 scale rows expanded to 1792 rows for an 1856-row slice).
+    ``ckpt_tp`` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
+    KV heads over 4 chunks, so each chunk carries two KV heads (3712 rows = 29
+    blocks) while a GA layer has 4 KV heads over 4 chunks (3392 rows each).
 
     The forward expects each rank's slice de-interleaved:
 
@@ -524,10 +524,11 @@ def _shard_fp8_qkv_proj(
     assert num_heads % tp_size == 0, (
         f"num_heads={num_heads} must be divisible by tp_size={tp_size}."
     )
-    assert ckpt_tp > 0 and num_heads % ckpt_tp == 0 and num_kv_heads % ckpt_tp == 0, (
-        f"num_heads={num_heads} / num_kv_heads={num_kv_heads} must split the "
-        f"checkpoint's fused qkv_proj TP size {ckpt_tp}."
-    )
+    if ckpt_tp <= 0 or num_heads % ckpt_tp or num_kv_heads % ckpt_tp:
+        raise ValueError(
+            f"fused qkv_proj is pre-sharded at {ckpt_tp} chunks, which do not "
+            f"divide num_heads={num_heads} / num_kv_heads={num_kv_heads}."
+        )
     # When there are fewer KV heads than ranks, vLLM replicates them
     # (`num_kv_head_replicas`) and rank r owns KV head r // replicas, which
     # keeps every Q head grouped with the KV head it attends to.
@@ -554,27 +555,28 @@ def _shard_fp8_qkv_proj(
     q_per_chunk = (num_heads // ckpt_tp) * head_dim
     k_per_chunk = (num_kv_heads // ckpt_tp) * head_dim
     v_per_chunk = (num_kv_heads // ckpt_tp) * v_head_dim
-    assert q_per_chunk + k_per_chunk + v_per_chunk == rows_per_chunk, (
-        f"fused qkv_proj rows {w_full.shape[0]} are not {ckpt_tp} chunks of "
-        f"{q_per_chunk} Q + {k_per_chunk} K + {v_per_chunk} V rows"
-    )
+    if q_per_chunk + k_per_chunk + v_per_chunk != rows_per_chunk:
+        raise ValueError(
+            f"fused qkv_proj has {w_full.shape[0]} rows, not {ckpt_tp} chunks of "
+            f"{q_per_chunk} Q + {k_per_chunk} K + {v_per_chunk} V rows."
+        )
 
     # The scales are tiled per chunk; they collapse to one continuous grid when
     # a chunk is a whole number of blocks (the SWA chunks are: 3712 = 29 * 128).
-    chunk_scale_rows = -(-rows_per_chunk // block)
+    chunk_scale_rows = cdiv(rows_per_chunk, block)
     rows = torch.arange(w_full.shape[0])
     per_chunk_scales = s_full.shape[0] == ckpt_tp * chunk_scale_rows
     if per_chunk_scales:
         scale_index = (rows // rows_per_chunk) * chunk_scale_rows + (
             rows % rows_per_chunk
         ) // block
-    elif s_full.shape[0] == -(-w_full.shape[0] // block):
+    elif s_full.shape[0] == cdiv(w_full.shape[0], block):
         scale_index = rows // block
     else:
         raise ValueError(
             f"fused qkv_proj scale has {s_full.shape[0]} rows, expected either "
             f"{ckpt_tp * chunk_scale_rows} ({ckpt_tp} chunks of "
-            f"{chunk_scale_rows} rows) or {-(-w_full.shape[0] // block)} "
+            f"{chunk_scale_rows} rows) or {cdiv(w_full.shape[0], block)} "
             f"(one continuous grid)"
         )
 
