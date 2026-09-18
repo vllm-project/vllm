@@ -568,6 +568,7 @@ class BlockTransferPlan:
     medium: str = "CPU"
     token_start: int | None = None
     token_end: int | None = None
+    logical_key: str | None = None
 
 
 @dataclass

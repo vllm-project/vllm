@@ -1380,6 +1380,37 @@ def test_embedded_logical_hit_requires_all_tp_dcp_pp_objects(monkeypatch):
     assert scheduler.get_num_new_matched_tokens(request, 0) == (16, False)
 
 
+def test_worker_localizes_scheduler_plan_key_to_its_tp_rank():
+    handle = _LayerStoreRecordingWorkerHandle()
+    codec = BlockIdentityCodec(UMBPNamespace("rank-local"), tp_rank=3)
+    layout = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
+    layout.register_kv_caches(
+        {
+            name: torch.empty_strided(
+                (8, 2, 16, 8),
+                (512, 256, 8, 1),
+                dtype=torch.float16,
+            )
+            for name in ("layer1", "layer2")
+        }
+    )
+    worker = UMBPStoreConnectorWorker(handle, layout, codec=codec)
+    plan = BlockTransferPlan(
+        key=BlockIdentityCodec(UMBPNamespace("rank-local")).key(b"hash", 0),
+        block_id=1,
+        group_id=0,
+        block_hash=b"hash",
+    )
+    metadata = UMBPConnectorMetadata(store_plans=[plan])
+
+    worker.enqueue_stores(metadata)
+    worker.wait_for_save()
+
+    assert handle.store_calls[0][0].key == codec.key(b"hash", 0)
+    worker_meta = worker.build_connector_worker_meta()
+    assert worker_meta.completed_store_tokens == {(plan.key, 0): 1}
+
+
 def test_scheduler_partial_prefix_load_plans_partial_block():
     config = _kv_cache_config()
     scheduler = UMBPStoreConnectorScheduler(

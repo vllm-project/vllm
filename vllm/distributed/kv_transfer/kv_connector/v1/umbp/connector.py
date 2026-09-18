@@ -122,6 +122,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     namespace.value, topology, layout_descriptor
                 ),
                 layout,
+                codec=codec,
                 layerwise_load=runtime.capabilities.layerwise_load,
                 layerwise_store=runtime.capabilities.layerwise_store,
             )

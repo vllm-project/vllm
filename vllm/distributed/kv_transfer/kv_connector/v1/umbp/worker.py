@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from .data import (
+    BlockIdentityCodec,
     BlockTransferPlan,
     KVLayoutPlanner,
     PartialTailPlan,
@@ -36,11 +37,13 @@ class UMBPStoreConnectorWorker:
         runtime: UMBPWorkerHandle,
         layout: KVLayoutPlanner | None = None,
         *,
+        codec: BlockIdentityCodec | None = None,
         layerwise_load: bool = True,
         layerwise_store: bool = False,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
+        self.codec = codec
         self.layerwise_load = layerwise_load
         self.layerwise_store = layerwise_store
         self._load_jobs: dict[str, TransferJobState] = {}
@@ -66,12 +69,15 @@ class UMBPStoreConnectorWorker:
     def _materialize_plans(
         self, plans: list[BlockTransferPlan]
     ) -> list[BlockTransferPlan]:
+        plans = [self._localize_plan(plan) for plan in plans]
         if self.layout is None or not self.layout.regions:
             return plans
-        return [
-            plan
-            if plan.ranges
-            else self.layout.plan_registered_block(
+        materialized: list[BlockTransferPlan] = []
+        for plan in plans:
+            if plan.ranges:
+                materialized.append(plan)
+                continue
+            physical = self.layout.plan_registered_block(
                 plan.key,
                 plan.block_id,
                 request_id=plan.request_id,
@@ -79,8 +85,36 @@ class UMBPStoreConnectorWorker:
                 token_start=plan.token_start,
                 token_end=plan.token_end,
             )
-            for plan in plans
-        ]
+            materialized.append(
+                replace(
+                    physical,
+                    logical_key=plan.logical_key,
+                    group_id=plan.group_id,
+                    block_hash=plan.block_hash,
+                    parent_block_hash=plan.parent_block_hash,
+                    token_ids=plan.token_ids,
+                    block_size=plan.block_size,
+                    medium=plan.medium,
+                )
+            )
+        return materialized
+
+    def _localize_plan(self, plan: BlockTransferPlan) -> BlockTransferPlan:
+        if self.codec is None or plan.group_id is None:
+            return plan
+        try:
+            block_hash = bytes.fromhex(plan.key.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            return plan
+        return replace(
+            plan,
+            key=self.codec.key(block_hash, plan.group_id),
+            logical_key=plan.logical_key or plan.key,
+        )
+
+    @staticmethod
+    def _completion_token(plan: BlockTransferPlan) -> tuple[str, int]:
+        return (plan.logical_key or plan.key, plan.generation)
 
     def start_load_kv(
         self, forward_context: ForwardContext, metadata: UMBPConnectorMetadata
@@ -204,7 +238,7 @@ class UMBPStoreConnectorWorker:
                     self._worker_meta.completed_store_counts.get(key, 0) + 1
                 )
             for plan in result.plans:
-                token = (plan.key, plan.generation)
+                token = self._completion_token(plan)
                 if plan.key in result.completed_keys:
                     self._worker_meta.completed_store_tokens[token] = (
                         self._worker_meta.completed_store_tokens.get(token, 0) + 1
@@ -222,7 +256,7 @@ class UMBPStoreConnectorWorker:
                     )
                 for plan in result.plans:
                     if plan.key in failed_keys:
-                        token = (plan.key, plan.generation)
+                        token = self._completion_token(plan)
                         self._worker_meta.failed_store_tokens[token] = (
                             self._worker_meta.failed_store_tokens.get(token, 0) + 1
                         )
@@ -385,9 +419,7 @@ class UMBPStoreConnectorWorker:
         self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
-        self._report_store_completions = set(
-            metadata.deferred_store_requests
-        )
+        self._report_store_completions = set(metadata.deferred_store_requests)
         store_requests = {
             request_id: list(plans)
             for request_id, plans in metadata.store_requests.items()
