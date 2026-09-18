@@ -127,19 +127,37 @@ def test_measure_kv_cache_blocks():
     assert measure_kv_cache_blocks(requested_memory=9 * gib, **common) == 24
     # Headroom-bound: at most what is free plus what is already committed.
     assert measure_kv_cache_blocks(requested_memory=20 * gib, **common) == 28
-    # The margin comes off the headroom (floor or fraction, whichever is
-    # larger), not off an explicit budget that already leaves it free.
+    # The measured transient peak is kept free in full, on either bound.
     assert (
         measure_kv_cache_blocks(
-            requested_memory=20 * gib, **{**common, "margin_floor_bytes": gib}
+            requested_memory=20 * gib, transient_peak_bytes=gib, **common
         )
         == 24
     )
     assert (
         measure_kv_cache_blocks(
-            requested_memory=20 * gib, **{**common, "margin_fraction": 0.5}
+            requested_memory=9 * gib, transient_peak_bytes=gib, **common
         )
-        == 14
+        == 20
+    )
+    # The margin is a share of that peak with a floor, taken off the headroom
+    # (floor or fraction, whichever is larger), never off an explicit budget
+    # that already leaves it free.
+    assert (
+        measure_kv_cache_blocks(
+            requested_memory=20 * gib,
+            transient_peak_bytes=gib,
+            **{**common, "margin_floor_bytes": gib},
+        )
+        == 20
+    )
+    assert (
+        measure_kv_cache_blocks(
+            requested_memory=20 * gib,
+            transient_peak_bytes=2 * gib,
+            **{**common, "margin_fraction": 0.5},
+        )
+        == 16
     )
     assert (
         measure_kv_cache_blocks(
