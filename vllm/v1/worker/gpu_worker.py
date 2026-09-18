@@ -834,15 +834,17 @@ class Worker(WorkerBase):
         """Size an extensible KV cache from the memory free after warmup.
 
         Transient activations are kept free in full: the larger of the profiled
-        peak and the peak the warmup steps reached. Torch's cache is emptied
-        first so that peak is measured against truly free memory rather than
-        blocks the allocator happens to hold, which need not be reusable for
-        the large workspaces the first real steps allocate.
+        peak and what the allocator had to hold from the device for the warmup
+        steps beyond the tensors that outlive them (its reserved peak, which
+        includes fragmentation, less the live allocations). Torch's cache is
+        emptied first so that peak is measured against truly free memory rather
+        than blocks the allocator happens to hold, which need not be reusable
+        for the large workspaces the first real steps allocate.
         """
         torch.accelerator.synchronize()
         gc.collect()
         stats = torch.accelerator.memory_stats(self.device)
-        warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
+        warmup_peak = stats.get("reserved_bytes.all.peak", 0) - stats.get(
             "allocated_bytes.all.current", 0
         )
         torch.accelerator.empty_cache()
@@ -856,7 +858,8 @@ class Worker(WorkerBase):
             committed_bytes=kv_cache.physical_bytes,
             requested_memory=int(self.requested_memory),
             bytes_per_block=kv_cache.bytes_per_block,
-            extra_margin_bytes=kv_cache.commit_rounding_overhead + transient_peak,
+            transient_peak_bytes=transient_peak,
+            extra_margin_bytes=kv_cache.commit_rounding_overhead,
         )
         num_blocks = (
             reserve_mm_ipc_gpu_memory(

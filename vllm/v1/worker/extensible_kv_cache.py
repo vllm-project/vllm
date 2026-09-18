@@ -25,10 +25,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Headroom left after sizing from measured memory, for allocations that only
-# happen after warmup, taken off the free device memory.
+# Headroom left after sizing from measured memory, beyond the measured transient
+# peak, for allocations that only happen after warmup. Such transients scale
+# with the model's working set rather than the device, so the margin is a share
+# of the measured peak with an absolute floor.
 KV_CACHE_MARGIN_FLOOR_BYTES = 256 * (1 << 20)
-KV_CACHE_MARGIN_FRACTION = 0.02
+KV_CACHE_MARGIN_FRACTION = 0.25
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
@@ -192,12 +194,12 @@ class ExtensibleKVCache:
         """
         free_memory, _ = torch.accelerator.get_memory_info(self.buffer.device)
         headroom = free_memory + self.physical_bytes
-        margin = max(
-            KV_CACHE_MARGIN_FLOOR_BYTES, int(headroom * KV_CACHE_MARGIN_FRACTION)
-        )
         reserve = max(
             self.reserved_headroom_bytes,
             int(headroom * KV_CACHE_WARMUP_RESERVE_FRACTION),
+        )
+        margin = max(
+            KV_CACHE_MARGIN_FLOOR_BYTES, int(reserve * KV_CACHE_MARGIN_FRACTION)
         )
         budget = headroom - margin - reserve
         budget -= self.commit_rounding_overhead
@@ -332,6 +334,7 @@ def measure_kv_cache_blocks(
     committed_bytes: int,
     requested_memory: int,
     bytes_per_block: int,
+    transient_peak_bytes: int = 0,
     extra_margin_bytes: int = 0,
     margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
@@ -341,12 +344,14 @@ def measure_kv_cache_blocks(
     Everything resident except the committed KV prefix is needed by the engine;
     the cache gets the rest of the budget, capped by the device headroom (free
     memory plus the committed prefix) less a margin of
-    ``max(margin_floor_bytes, margin_fraction * headroom) + extra_margin_bytes``.
-    The margin guards physical memory, so it never reduces an explicit budget
-    that already leaves that much free.
+    ``max(margin_floor_bytes, margin_fraction * transient_peak_bytes)``. The
+    measured ``transient_peak_bytes`` and ``extra_margin_bytes`` are then kept
+    free in full. The margin guards physical memory, so it never reduces an
+    explicit budget that already leaves that much free.
     """
     non_kv_used = init_free_memory - free_memory - committed_bytes
     headroom = free_memory + committed_bytes
-    margin = max(margin_floor_bytes, int(headroom * margin_fraction))
+    margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
-    return max((available - extra_margin_bytes) // bytes_per_block, 0)
+    available -= transient_peak_bytes + extra_margin_bytes
+    return max(available // bytes_per_block, 0)
