@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import partial
 from typing import Any, Literal
 
 import vllm.envs as envs
@@ -51,9 +52,11 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
-        # use_v2_model_runner is a property; evaluate it once instead of per
-        # request.
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Load the custom logits processor classes once; the returned callable
+        # runs their validate_params hooks per request at admission.
+        self.validate_logits_processors_params = (
+            self._build_logits_processors_params_validator()
+        )
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -84,6 +87,25 @@ class InputProcessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
+    def _build_logits_processors_params_validator(
+        self,
+    ) -> Callable[[SamplingParams], None]:
+        """Load the custom logits processor classes and return the per-request
+        params validator for the active model runner."""
+        custom_logitsprocs = self.model_config.logits_processors
+        if self.vllm_config.use_v2_model_runner:
+            from vllm.v1.worker.gpu.sample.logits_processor import (
+                build_custom_logits_processors_params_validator,
+            )
+
+            return build_custom_logits_processors_params_validator(custom_logitsprocs)
+
+        from vllm.v1.sample.logits_processor import (
+            validate_logits_processors_parameters,
+        )
+
+        return partial(validate_logits_processors_parameters, custom_logitsprocs)
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -104,22 +126,7 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if self.use_v2_model_runner:
-                from vllm.v1.worker.gpu.sample.logits_processor import (
-                    validate_custom_logits_processors_params,
-                )
-
-                validate_custom_logits_processors_params(
-                    self.model_config.logits_processors, params
-                )
-            else:
-                from vllm.v1.sample.logits_processor import (
-                    validate_logits_processors_parameters,
-                )
-
-                validate_logits_processors_parameters(
-                    self.model_config.logits_processors, params
-                )
+            self.validate_logits_processors_params(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

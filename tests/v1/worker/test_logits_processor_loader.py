@@ -6,6 +6,8 @@ Load-time validation is pure Python (importlib + issubclass), so it runs
 without CUDA. Pipeline behavior is covered by test_gpu_logits_processors.py.
 """
 
+import subprocess
+import sys
 from enum import Enum, auto
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +15,7 @@ from typing import Any
 import pytest
 import torch
 
-import vllm.v1.worker.gpu.sample.logits_processor as loader
+import vllm.v1.worker.gpu.sample.logits_processor.loader as loader
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import (
@@ -193,14 +195,34 @@ class ValidatingProcessor(DummyV2Processor):
 
 
 def test_validate_params_runs_at_admission():
-    """The V2 entry runs validate_params once per loaded class and wraps
-    rejections as VLLMValidationError."""
+    """The factory loads classes up front; the returned validator runs
+    validate_params per request and wraps rejections as VLLMValidationError."""
     loader._cached_load_v2_logitsprocs.cache_clear()
-    loader.validate_custom_logits_processors_params(
-        [ValidatingProcessor], SamplingParams(extra_args={"target_token": 1})
+    validate = loader.build_custom_logits_processors_params_validator(
+        [ValidatingProcessor]
     )
+    validate(SamplingParams(extra_args={"target_token": 1}))
     with pytest.raises(VLLMValidationError, match="target_token"):
-        loader.validate_custom_logits_processors_params(
-            [ValidatingProcessor],
-            SamplingParams(extra_args={"target_token": -1}),
-        )
+        validate(SamplingParams(extra_args={"target_token": -1}))
+
+
+def test_validator_factory_loads_classes_eagerly():
+    """A bad reference fails when the validator is built (at startup), not on
+    the first request."""
+    loader._cached_load_v2_logitsprocs.cache_clear()
+    with pytest.raises(RuntimeError, match="no.such.module:Nope"):
+        loader.build_custom_logits_processors_params_validator(["no.such.module:Nope"])
+
+
+def test_loader_import_stays_frontend_safe():
+    """The frontend process imports the loader to validate params; importing
+    it must not pull in model-runner side modules."""
+    code = (
+        "import sys\n"
+        "import vllm.v1.worker.gpu.sample.logits_processor.loader\n"
+        "assert 'vllm.sampling_params' not in sys.modules\n"
+        "assert 'vllm.v1.sample.logits_processor' not in sys.modules\n"
+        "assert 'vllm.v1.worker.gpu.states' not in sys.modules\n"
+        "assert 'vllm.v1.worker.gpu.buffer_utils' not in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

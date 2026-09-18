@@ -1,18 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""V2 logits processor interface.
+
+Import-light by design: custom processor classes are also loaded in the
+frontend process (to validate per-request params), so this module must not
+pull in model-runner side modules (torch, triton, worker state) at import
+time. Heavy imports live under TYPE_CHECKING; annotations are deferred.
+"""
+
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
-import torch
-
-from vllm import SamplingParams
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
-from vllm.v1.worker.gpu.states import RequestState
-
 if TYPE_CHECKING:
+    import numpy as np
+    import torch
+
     from vllm.config import VllmConfig
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 @dataclass(frozen=True)
@@ -39,7 +48,7 @@ class LogitsProcRequestState:
     total_len: StagedWriteTensor
 
     @classmethod
-    def from_request_state(cls, req_states: RequestState) -> "LogitsProcRequestState":
+    def from_request_state(cls, req_states: RequestState) -> LogitsProcRequestState:
         return cls(
             device=req_states.device,
             max_num_reqs=req_states.max_num_reqs,
@@ -101,7 +110,7 @@ class LogitsProcessor(ABC):
     """
 
     def __init__(  # noqa: B027
-        self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState
+        self, vllm_config: VllmConfig, req_states: LogitsProcRequestState
     ):
         """Capture what stays constant for the processor's lifetime.
 
