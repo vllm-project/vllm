@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from threading import Lock
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -786,82 +788,79 @@ def test_mla_kv_b_lora_uses_explicit_token_mapping(dtype):
     torch.testing.assert_close(v_output, v_snapshot)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
-)
-@pytest.mark.parametrize("dtype", DTYPES)
-def test_mla_kv_b_lora_q_composes_dcp_local_heads(dtype):
-    device = f"{DEVICE_TYPE}:0"
-    set_random_seed(1)
-    num_tokens = 4
-    num_loras = 1
-    dcp_size = 2
-    local_heads = 2
-    kv_lora_rank = 16
-    qk_nope_head_dim = 8
-    v_head_dim = 8
-    lora_rank = 4
-    full_head_dim = qk_nope_head_dim + v_head_dim
-    mapping = torch.zeros(num_tokens, dtype=torch.long, device=device)
-    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+@pytest.mark.parametrize("with_lora", [False, True])
+def test_mla_kv_b_lora_uses_local_query_before_dcp_gather(with_lora):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 
-    lora_a = torch.randn(
-        num_loras, 1, lora_rank, kv_lora_rank, dtype=dtype, device=device
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.num_heads = 1
+    layer.qk_nope_head_dim = layer.kv_lora_rank = layer.v_head_dim = 2
+    layer.qk_rope_head_dim = 0
+    layer.kv_cache_dtype = "auto"
+    layer.use_pcp = False
+    layer.q_pad_num_heads = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_amx_bmm_enabled = False
+    layer.W_UK_T = torch.eye(2, device="cpu").unsqueeze(0)
+    layer.W_UK_T_dcp_qrep = layer.W_UK_T.repeat(2, 1, 1)
+    layer.W_UV = layer.W_UK_T
+    local_q = torch.tensor([[[1.0, 2.0]]], device="cpu")
+    replicated_q = torch.cat([local_q, local_q + 2], dim=1)
+    mapping = torch.tensor([0], device="cpu")
+    apply_q_lora = Mock(side_effect=lambda q, out, *_: out.add_(2 * q))
+    layer.kv_b_proj = (
+        SimpleNamespace(
+            punica_wrapper=SimpleNamespace(token_lora_indices=mapping),
+            apply_mla_kv_b_lora_q=apply_q_lora,
+        )
+        if with_lora
+        else SimpleNamespace()
     )
-    local_q = [
-        torch.randn(
-            num_tokens, local_heads, qk_nope_head_dim, dtype=dtype, device=device
-        )
-        for _ in range(dcp_size)
-    ]
-    local_b = [
-        torch.randn(
-            num_loras,
-            1,
-            local_heads * full_head_dim,
-            lora_rank,
-            dtype=dtype,
-            device=device,
-        )
-        for _ in range(dcp_size)
-    ]
-    local_outputs = [
-        torch.zeros(num_tokens, local_heads, kv_lora_rank, dtype=dtype, device=device)
-        for _ in range(dcp_size)
-    ]
-
-    for q_nope, lora_b, output in zip(local_q, local_b, local_outputs):
-        triton_ops.mla_kv_b_lora_q(
-            q_nope,
-            lora_a,
-            lora_b,
-            output,
-            mapping,
-            no_lora_flag_cpu,
-            v_head_dim,
-        )
-
-    gathered_output = torch.cat(local_outputs, dim=1)
-    gathered_q = torch.cat(local_q, dim=1)
-    gathered_b = torch.cat(
-        [
-            shard.view(num_loras, local_heads, full_head_dim, lora_rank)
-            for shard in local_b
-        ],
-        dim=1,
-    ).view(num_loras, 1, dcp_size * local_heads * full_head_dim, lora_rank)
-    expected = torch.zeros_like(gathered_output)
-    triton_ops.mla_kv_b_lora_q(
-        gathered_q,
-        lora_a,
-        gathered_b,
-        expected,
-        mapping,
-        no_lora_flag_cpu,
-        v_head_dim,
+    latent_output = torch.ones_like(local_q)
+    layer.impl = SimpleNamespace(
+        is_sparse=False,
+        dcp_world_size=2,
+        forward_mqa=Mock(return_value=(latent_output, torch.zeros(1, device="cpu"))),
     )
-
-    torch.testing.assert_close(gathered_output, expected, rtol=3e-2, atol=3e-2)
+    layer.dcp_manager = SimpleNamespace(
+        query_gather=Mock(side_effect=lambda q: torch.cat([q, q], dim=1)),
+        combine=Mock(return_value=latent_output),
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_prefills=0,
+        num_decode_tokens=1,
+        decode=SimpleNamespace(seq_lens=torch.tensor([1], device="cpu")),
+        query_start_loc=torch.tensor([0, 1], device="cpu"),
+    )
+    output = torch.empty((1, 2), device="cpu")
+    layer.forward_impl(
+        local_q,
+        torch.empty((1, 2), device="cpu"),
+        torch.empty((1, 1, 0), device="cpu"),
+        torch.empty(0, device="cpu"),
+        metadata,
+        output,
+        q_dcp_replicated=replicated_q,
+    )
+    if with_lora:
+        apply_q_lora.assert_called_once()
+        torch.testing.assert_close(apply_q_lora.call_args.args[0], local_q)
+        torch.testing.assert_close(apply_q_lora.call_args.args[2], mapping)
+        layer.dcp_manager.query_gather.assert_called_once()
+        torch.testing.assert_close(
+            layer.dcp_manager.query_gather.call_args.args[0], 3 * local_q
+        )
+        expected_query = torch.cat([3 * local_q, 3 * local_q], dim=1)
+    else:
+        apply_q_lora.assert_not_called()
+        layer.dcp_manager.query_gather.assert_not_called()
+        expected_query = replicated_q
+    torch.testing.assert_close(layer.impl.forward_mqa.call_args.args[0], expected_query)
+    torch.testing.assert_close(output, latent_output.view(1, 2))
 
 
 @pytest.mark.skipif(
