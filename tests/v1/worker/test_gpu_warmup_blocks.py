@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
     run_mixed_prefill_decode_warmup,
@@ -108,6 +109,7 @@ def _make_runner(
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
         extensible_kv_cache=None,
+        prompt_logprobs_worker=None,
     )
 
 
@@ -376,3 +378,59 @@ def test_num_lookahead_tokens_without_speculation():
     config = _Config()
 
     assert config.num_lookahead_tokens == 0
+
+
+def _prompt_logprobs_runner(max_logprobs: int, calls: list) -> SimpleNamespace:
+    hidden_size, vocab_size = 8, 32
+
+    def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
+        calls.append(("logits", tuple(hidden_states.shape)))
+        return torch.zeros(hidden_states.shape[0], vocab_size)
+
+    return SimpleNamespace(
+        prompt_logprobs_worker=object(),
+        model=SimpleNamespace(compute_logits=compute_logits),
+        model_config=SimpleNamespace(
+            max_logprobs=max_logprobs,
+            get_hidden_size=lambda: hidden_size,
+            dtype=torch.float32,
+        ),
+        device=torch.device("cpu"),
+    )
+
+
+@pytest.mark.parametrize(("max_logprobs", "expected_topk"), [(5, 5), (-1, 32)])
+def test_prompt_logprobs_warmup_materializes_one_chunk(
+    monkeypatch, max_logprobs, expected_topk
+):
+    """One chunk of full-vocab logits is computed and scored with the configured
+    (or, uncapped, the whole-vocab) number of logprobs."""
+    calls: list = []
+    monkeypatch.setattr(
+        warmup,
+        "compute_topk_scores",
+        lambda logits, num_logprobs, token_ids: calls.append(
+            ("topk", tuple(logits.shape), num_logprobs, tuple(token_ids.shape))
+        ),
+    )
+    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(max_logprobs, calls))
+    chunk = warmup.PROMPT_LOGPROBS_CHUNK_SIZE
+    assert calls == [
+        ("logits", (chunk, 8)),
+        ("topk", (chunk, 32), expected_topk, (chunk,)),
+    ]
+
+
+def test_prompt_logprobs_warmup_skips_when_unavailable():
+    """Nothing runs for pooling / non-last-PP ranks (no worker), disabled
+    logprobs, or models without a logits head."""
+    calls: list = []
+    runner = _prompt_logprobs_runner(5, calls)
+    runner.prompt_logprobs_worker = None
+    warmup._warmup_prompt_logprobs(runner)
+    runner = _prompt_logprobs_runner(0, calls)
+    warmup._warmup_prompt_logprobs(runner)
+    runner = _prompt_logprobs_runner(5, calls)
+    runner.model = SimpleNamespace()
+    warmup._warmup_prompt_logprobs(runner)
+    assert calls == []

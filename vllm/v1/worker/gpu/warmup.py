@@ -31,6 +31,8 @@ from vllm.v1.worker.extensible_kv_cache import (
     num_committable_kv_blocks,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.prompt_logprob import PROMPT_LOGPROBS_CHUNK_SIZE
 
 logger = init_logger(__name__)
 
@@ -246,6 +248,31 @@ def warmup_kernels(
             rejection_sampler.enable_adaptive_verification = True
 
 
+def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
+    """Materialize one prompt-logprobs logits chunk for memory sizing."""
+    model_config = model_runner.model_config
+    if (
+        model_runner.prompt_logprobs_worker is None
+        or model_config.max_logprobs == 0
+        or not hasattr(model_runner.model, "compute_logits")
+    ):
+        return
+    hidden_size = model_config.get_hidden_size()
+    if hidden_size <= 0:
+        # Composite configs (e.g. encoder-decoder ASR) expose no head width.
+        return
+    chunk_size = PROMPT_LOGPROBS_CHUNK_SIZE
+    hidden_states = torch.zeros(
+        chunk_size, hidden_size, dtype=model_config.dtype, device=model_runner.device
+    )
+    logits = model_runner.model.compute_logits(hidden_states)
+    num_logprobs = model_config.max_logprobs
+    if num_logprobs == -1:
+        num_logprobs = logits.shape[-1]
+    token_ids = torch.zeros(chunk_size, dtype=torch.int64, device=model_runner.device)
+    compute_topk_scores(logits, num_logprobs, token_ids)
+
+
 def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -253,6 +280,8 @@ def _warmup_kernels(
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
+
+    _warmup_prompt_logprobs(model_runner)
 
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
