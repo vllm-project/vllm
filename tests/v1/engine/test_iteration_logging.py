@@ -6,10 +6,12 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import fields
 from types import SimpleNamespace
 from typing import Any
 
 import vllm.v1.engine.core as engine_core_module
+from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.logging_utils import dump_input
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -219,6 +221,10 @@ def make_timeout_config() -> SimpleNamespace:
             max_model_len=4096,
             model="private/model/path",
             runner_type="generate",
+        ),
+        offload_config=SimpleNamespace(
+            offload_backend="auto",
+            uva=SimpleNamespace(cpu_offload_gb=0),
         ),
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
@@ -676,6 +682,47 @@ def test_engine_execution_timeout_context_balances_detail_and_privacy(monkeypatc
     assert "[101, 102, 103]" not in combined_logs
     assert "num_scheduled_new_reqs" in combined_logs
     assert "num_running_reqs" in combined_logs
+
+
+def test_engine_timeout_config_allowlists_match_real_configs(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 32,
+                "intermediate_size": 64,
+                "max_position_embeddings": 32,
+                "model_type": "llama",
+                "num_attention_heads": 4,
+                "num_hidden_layers": 1,
+                "vocab_size": 32,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = VllmConfig(model_config=ModelConfig(model=str(tmp_path)))
+    allowlists = (
+        (config.model_config, dump_input._ENGINE_TIMEOUT_MODEL_CONFIG_FIELDS),
+        (config.parallel_config, dump_input._ENGINE_TIMEOUT_PARALLEL_CONFIG_FIELDS),
+        (config.scheduler_config, dump_input._ENGINE_TIMEOUT_SCHEDULER_CONFIG_FIELDS),
+        (config.cache_config, dump_input._ENGINE_TIMEOUT_CACHE_CONFIG_FIELDS),
+        (config.offload_config, dump_input._ENGINE_TIMEOUT_OFFLOAD_CONFIG_FIELDS),
+        (
+            config.offload_config.uva,
+            dump_input._ENGINE_TIMEOUT_UVA_OFFLOAD_CONFIG_FIELDS,
+        ),
+    )
+
+    for config_object, field_names in allowlists:
+        assert not [name for name in field_names if not hasattr(config_object, name)]
+    speculative_fields = {field.name for field in fields(SpeculativeConfig)}
+    assert set(dump_input._ENGINE_TIMEOUT_SPECULATIVE_CONFIG_FIELDS).issubset(
+        speculative_fields
+    )
+
+    summary = dump_input._make_engine_config_summary(config)
+    assert "swap_space_bytes" not in summary["cache"]
+    assert summary["offload"]["cpu_offload_gb"] == 0
 
 
 def test_engine_execution_timeout_snapshot_uses_scheduler_dataclasses():

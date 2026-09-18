@@ -29,6 +29,45 @@ ENGINE_EXECUTION_TIMEOUT_REQUEST_SAMPLE_LIMIT = 20
 ENGINE_EXECUTION_TIMEOUT_REQUEST_ID_MAX_CHARS = 256
 ENGINE_EXECUTION_TIMEOUT_SUMMARY_MAX_CHARS = 32_768
 ENGINE_EXECUTION_TIMEOUT_WATCHDOG_STOP_TIMEOUT_S = 1.0
+_ENGINE_TIMEOUT_MODEL_CONFIG_FIELDS = (
+    "dtype",
+    "enforce_eager",
+    "max_model_len",
+    "quantization",
+    "runner_type",
+)
+_ENGINE_TIMEOUT_PARALLEL_CONFIG_FIELDS = (
+    "data_parallel_size",
+    "enable_expert_parallel",
+    "pipeline_parallel_size",
+    "tensor_parallel_size",
+)
+_ENGINE_TIMEOUT_SCHEDULER_CONFIG_FIELDS = (
+    "async_scheduling",
+    "enable_chunked_prefill",
+    "long_prefill_token_threshold",
+    "max_num_batched_tokens",
+    "max_num_scheduled_tokens",
+    "max_num_seqs",
+    "policy",
+    "prefill_schedule_interval",
+    "runner_type",
+)
+_ENGINE_TIMEOUT_CACHE_CONFIG_FIELDS = (
+    "block_size",
+    "cache_dtype",
+    "enable_prefix_caching",
+    "gpu_memory_utilization",
+)
+_ENGINE_TIMEOUT_OFFLOAD_CONFIG_FIELDS = ("offload_backend",)
+_ENGINE_TIMEOUT_UVA_OFFLOAD_CONFIG_FIELDS = ("cpu_offload_gb",)
+_ENGINE_TIMEOUT_SPECULATIVE_CONFIG_FIELDS = (
+    "draft_tensor_parallel_size",
+    "max_model_len",
+    "method",
+    "num_speculative_tokens",
+    "quantization",
+)
 
 
 @dataclass(frozen=True)
@@ -182,62 +221,38 @@ def _make_engine_config_summary(config: VllmConfig) -> dict[str, Any]:
         "model": {
             **_select_diagnostic_fields(
                 model_config,
-                (
-                    "dtype",
-                    "enforce_eager",
-                    "max_model_len",
-                    "quantization",
-                    "runner_type",
-                ),
+                _ENGINE_TIMEOUT_MODEL_CONFIG_FIELDS,
             ),
             "architectures": list(getattr(hf_config, "architectures", None) or ()),
             "model_type": getattr(hf_config, "model_type", None),
         },
         "parallel": _select_diagnostic_fields(
             config.parallel_config,
-            (
-                "data_parallel_size",
-                "enable_expert_parallel",
-                "pipeline_parallel_size",
-                "tensor_parallel_size",
-            ),
+            _ENGINE_TIMEOUT_PARALLEL_CONFIG_FIELDS,
         ),
         "scheduler": _select_diagnostic_fields(
             config.scheduler_config,
-            (
-                "async_scheduling",
-                "enable_chunked_prefill",
-                "long_prefill_token_threshold",
-                "max_num_batched_tokens",
-                "max_num_scheduled_tokens",
-                "max_num_seqs",
-                "policy",
-                "prefill_schedule_interval",
-                "runner_type",
-            ),
+            _ENGINE_TIMEOUT_SCHEDULER_CONFIG_FIELDS,
         ),
         "cache": _select_diagnostic_fields(
             config.cache_config,
-            (
-                "block_size",
-                "cache_dtype",
-                "cpu_offload_gb",
-                "enable_prefix_caching",
-                "gpu_memory_utilization",
-                "swap_space_bytes",
-            ),
+            _ENGINE_TIMEOUT_CACHE_CONFIG_FIELDS,
         ),
+        "offload": {
+            **_select_diagnostic_fields(
+                config.offload_config,
+                _ENGINE_TIMEOUT_OFFLOAD_CONFIG_FIELDS,
+            ),
+            **_select_diagnostic_fields(
+                config.offload_config.uva,
+                _ENGINE_TIMEOUT_UVA_OFFLOAD_CONFIG_FIELDS,
+            ),
+        },
         "speculative": {
             "enabled": speculative_config is not None,
             **_select_diagnostic_fields(
                 speculative_config,
-                (
-                    "draft_tensor_parallel_size",
-                    "max_model_len",
-                    "method",
-                    "num_speculative_tokens",
-                    "quantization",
-                ),
+                _ENGINE_TIMEOUT_SPECULATIVE_CONFIG_FIELDS,
             ),
         },
     }
