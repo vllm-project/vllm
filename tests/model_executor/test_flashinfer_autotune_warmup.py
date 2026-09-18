@@ -9,6 +9,7 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from vllm.model_executor.warmup.kernel_warmup import (
+    _all_ranks_have_file,
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
 )
@@ -125,3 +126,24 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
             **({"skip_attn": True} if skip_attn else {}),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("world_size", "gathered", "expected"),
+    [(1, None, True), (2, [True, True], True), (2, [True, False], False)],
+)
+def test_all_ranks_have_file_requires_every_rank(
+    tmp_path, world_size, gathered, expected
+):
+    path = tmp_path / "autotune_configs_dp0_rank0.json"
+    path.touch()
+    world = SimpleNamespace(world_size=world_size, cpu_group=object())
+
+    def fake_all_gather_object(out, obj, group):
+        assert obj is True and group is world.cpu_group
+        out[:] = gathered
+
+    with patch(
+        "torch.distributed.all_gather_object", side_effect=fake_all_gather_object
+    ):
+        assert _all_ranks_have_file(path, world) is expected
