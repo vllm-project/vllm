@@ -23,7 +23,7 @@ steps:
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 20
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -49,8 +49,9 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) CUDAGraph"
+      dind: false
       device: mi250_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
