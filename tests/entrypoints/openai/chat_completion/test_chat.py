@@ -16,6 +16,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.exceptions import VLLMValidationError
@@ -1010,6 +1011,53 @@ def test_chat_completion_request_n_parameter_default():
 
     # SamplingParams.from_optional converts None to 1
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
+
+
+@pytest.mark.parametrize(
+    ("logprobs", "top_logprobs", "expected"),
+    [(True, None, 0), (True, 0, 0), (False, None, None)],
+)
+@pytest.mark.parametrize(
+    ("request_cls", "messages"),
+    [
+        (ChatCompletionRequest, [{"role": "user", "content": "Hello"}]),
+        (BatchChatCompletionRequest, [[{"role": "user", "content": "Hello"}]]),
+    ],
+)
+def test_chat_completion_request_normalizes_null_top_logprobs(
+    logprobs, top_logprobs, expected, request_cls, messages
+):
+    data = {
+        "model": "test-model",
+        "messages": messages,
+        "logprobs": logprobs,
+        "top_logprobs": top_logprobs,
+    }
+    original = data.copy()
+
+    request = request_cls.model_validate(data)
+
+    assert data == original
+    assert request.top_logprobs == expected
+    if isinstance(request, BatchChatCompletionRequest):
+        request = request.to_chat_completion_request(request.messages[0])
+    assert request.to_sampling_params(16, {}).logprobs == expected
+
+
+@pytest.mark.parametrize(
+    ("request_cls", "messages"),
+    [
+        (ChatCompletionRequest, [{"role": "user", "content": "Hello"}]),
+        (BatchChatCompletionRequest, [[{"role": "user", "content": "Hello"}]]),
+    ],
+)
+def test_chat_completion_request_omitted_top_logprobs_stays_unset(
+    request_cls, messages
+):
+    request = request_cls(model="test-model", messages=messages, logprobs=True)
+
+    assert request.top_logprobs == 0
+    assert "top_logprobs" not in request.model_fields_set
 
 
 def test_chat_completion_request_accepts_model_specific_reasoning_effort():
