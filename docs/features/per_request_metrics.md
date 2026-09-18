@@ -66,7 +66,7 @@ request.
     (`prompt_tokens`, `completion_tokens`) remains accurate in these cases.
     Per-request metrics also require server-side statistics logging, which is
     on by default. vLLM rejects `--enable-per-request-metrics` or
-    `--per-request-output-token-metrics` when `--disable-log-stats` is also
+    `--enable-per-request-output-token-metrics` when `--disable-log-stats` is also
     set.
 
 ## Example Request
@@ -141,7 +141,7 @@ supported reasoning parser:
 ```bash
 vllm serve openai/gpt-oss-20b \
   --reasoning-parser openai_gptoss \
-  --per-request-output-token-metrics
+  --enable-per-request-output-token-metrics
 ```
 
 This option does not require `--enable-per-request-metrics`; it includes the

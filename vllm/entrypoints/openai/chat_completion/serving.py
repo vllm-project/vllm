@@ -140,7 +140,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         enable_per_request_metrics: bool = False,
-        per_request_output_token_metrics: bool = False,
+        enable_per_request_output_token_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -173,10 +173,12 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.enable_per_request_metrics = enable_per_request_metrics
-        self.per_request_output_token_metrics = per_request_output_token_metrics
-        if per_request_output_token_metrics and not reasoning_parser:
+        self.enable_per_request_output_token_metrics = (
+            enable_per_request_output_token_metrics
+        )
+        if enable_per_request_output_token_metrics and not reasoning_parser:
             raise ValueError(
-                "--per-request-output-token-metrics requires --reasoning-parser"
+                "--enable-per-request-output-token-metrics requires --reasoning-parser"
             )
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -337,7 +339,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     self.default_sampling_params,
                 )
                 if (
-                    self.per_request_output_token_metrics
+                    self.enable_per_request_output_token_metrics
                     and not request.stream
                     and (request.n or 1) == 1
                 ):
@@ -692,7 +694,10 @@ class OpenAIServingChat(GenerateBaseServing):
                             tuple(generated_token_ids[i])
                         )
 
-                    if self.per_request_output_token_metrics and num_choices == 1:
+                    if (
+                        self.enable_per_request_output_token_metrics
+                        and num_choices == 1
+                    ):
                         phase_counts = (
                             parser.classify_token_phases(generated_token_ids[i])
                             if parser is not None
@@ -866,7 +871,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 if (request.n or 1) == 1:
                     if (
                         self.enable_per_request_metrics
-                        or self.per_request_output_token_metrics
+                        or self.enable_per_request_output_token_metrics
                     ):
                         last_metrics = (
                             last_res.metrics if last_res is not None else None
@@ -874,7 +879,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         stream_per_request_metrics = build_per_request_timing_metrics(
                             last_metrics, completion_tokens
                         )
-                        if self.per_request_output_token_metrics:
+                        if self.enable_per_request_output_token_metrics:
                             stream_per_request_metrics.output_token_metrics = (
                                 output_token_metrics_tracker.build()
                             )
@@ -956,10 +961,11 @@ class OpenAIServingChat(GenerateBaseServing):
         output_token_metrics_tracker = OutputTokenMetricsTracker()
         phase_token_ids: list[int] = []
         collect_request_metrics = (
-            self.enable_per_request_metrics or self.per_request_output_token_metrics
+            self.enable_per_request_metrics
+            or self.enable_per_request_output_token_metrics
         ) and (request.n or 1) == 1
         collect_output_token_metrics = (
-            self.per_request_output_token_metrics and (request.n or 1) == 1
+            self.enable_per_request_output_token_metrics and (request.n or 1) == 1
         )
 
         try:
@@ -1222,11 +1228,14 @@ class OpenAIServingChat(GenerateBaseServing):
         # generation stream. For n>1 the stats belong to only one of the n
         # sequences, so they cannot be attributed to the request; suppress.
         if (request.n or 1) == 1:
-            if self.enable_per_request_metrics or self.per_request_output_token_metrics:
+            if (
+                self.enable_per_request_metrics
+                or self.enable_per_request_output_token_metrics
+            ):
                 per_request_metrics = build_per_request_timing_metrics(
                     final_res.metrics, num_generated_tokens
                 )
-                if self.per_request_output_token_metrics:
+                if self.enable_per_request_output_token_metrics:
                     per_request_metrics.output_token_metrics = (
                         output_token_metrics_tracker.build()
                     )
