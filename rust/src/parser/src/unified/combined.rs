@@ -164,9 +164,10 @@ mod tests {
         GrammarCoverage, OutputGrammarContext, full_format_from_builder_for_test,
     };
     use crate::reasoning::{
-        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm47ReasoningParser,
-        KimiK2ReasoningParser, MiniMaxM2ReasoningParser, NemotronV3ReasoningParser,
-        Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Step3ReasoningParser,
+        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
+        Glm47ReasoningParser, KimiK2ReasoningParser, MiniMaxM2ReasoningParser,
+        NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser,
+        Step3ReasoningParser,
     };
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
@@ -509,6 +510,39 @@ mod tests {
 
         assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero);
         assert_eq!(actual.format, expected);
+    }
+
+    #[test]
+    fn glm45_wrapper_keeps_only_generated_start_framing() {
+        let tools = test_tools();
+        let tool_choice = ToolChoice::required();
+        let ctx = OutputGrammarContext {
+            tools: &tools,
+            tool_choice: &tool_choice,
+            tool_strict_level: Default::default(),
+            parallel_tool_calls: true,
+        };
+        let visible = Format::const_string("answer");
+
+        // GLM-4.5/4.6 thinking prompts leave the whole reasoning opener to generation.
+        for (prompt, begin) in [(vec![], "\n<think>"), (vec![256], "")] {
+            let mut parser = Glm45ReasoningParser::new(Arc::new(tokenizer())).unwrap();
+            parser.initialize(&prompt).unwrap();
+            let reasoning = Format::sequence(vec![
+                Format::tag(begin, Format::any_text(), "</think>"),
+                Format::const_string("\n"),
+            ]);
+            let reasoning = if prompt.is_empty() {
+                Format::optional(reasoning)
+            } else {
+                reasoning
+            };
+            assert_eq!(
+                parser.wrap_visible_format(&ctx, &visible).unwrap(),
+                Some(Format::sequence(vec![reasoning, visible.clone()])),
+                "prompt {prompt:?}"
+            );
+        }
     }
 
     #[test]

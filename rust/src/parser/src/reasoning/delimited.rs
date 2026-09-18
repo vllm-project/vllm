@@ -154,7 +154,7 @@ impl DelimitedReasoningParser {
         let begin = if self.current_in_reasoning {
             "".to_string()
         } else {
-            self.start_token.clone()
+            self.framed_start_token.clone()
         };
         let mut reasoning = Format::tag(begin, Format::any_text(), self.end_token.clone());
         if !self.after_end.is_empty() {
