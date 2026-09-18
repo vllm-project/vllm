@@ -15,7 +15,7 @@ from openai_harmony import (
 from transformers import AutoTokenizer, GenerationConfig
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
-from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall, TokenPhaseCounts
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
@@ -843,6 +843,31 @@ class TestProcessChunk:
         assert (
             harmony_parser.classify_token_phases(token_ids) == expected_classification
         )
+
+    def test_tool_call_tokens_are_unclassified_for_output_metrics(
+        self, harmony_parser, chat_request
+    ):
+        token_ids = get_model_output_tokens(
+            [tool_call("functions.get_weather", '{"location": "SF"}')]
+        )
+
+        harmony_parser.process_chunk(token_ids)
+        expected = TokenPhaseCounts(
+            reasoning=0,
+            content=0,
+            unclassified=len(token_ids),
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
+        # A subsequent full parse must retain the same classification instead
+        # of treating the addressed commentary as reasoning output.
+        harmony_parser.flush()
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
 
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
         result = harmony_parser.process_chunk(

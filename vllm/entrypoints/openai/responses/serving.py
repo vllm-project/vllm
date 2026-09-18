@@ -678,7 +678,13 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if self.enable_per_request_output_token_metrics and isinstance(
                     context, (HarmonyContext, ParsableContext)
                 ):
-                    context.record_output_token_metrics(res)
+                    # ParsableContext consumes one complete output. Its final
+                    # timestamp cannot identify category boundaries, so retain
+                    # accurate counts but leave category timings unavailable.
+                    context.record_output_token_metrics(
+                        res,
+                        include_batch_timing=not isinstance(context, ParsableContext),
+                    )
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
