@@ -145,6 +145,10 @@ class Platform:
     # empty string means the device does not support ray
     ray_device_key: str = ""
 
+    @classmethod
+    def log_warnings(cls) -> None:
+        """Log platform-specific diagnostics after logging is configured."""
+
     # platform-agnostic way to specify the device control environment variable,
     # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
     # hint: search for "get_visible_accelerator_ids_env_var" in
