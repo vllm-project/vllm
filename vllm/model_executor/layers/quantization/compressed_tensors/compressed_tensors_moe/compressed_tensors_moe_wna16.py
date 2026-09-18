@@ -106,7 +106,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             weight_key=weight_key,
             quant_config=self.weight_quant,
             may_have_zp=not self.symmetric,
-            may_have_bias=self.moe.has_bias,
+            may_have_bias=False,
             allow_tile_padding=True,
         )
 
