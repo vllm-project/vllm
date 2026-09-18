@@ -987,6 +987,10 @@ class KpoolTailSpec(SlidingWindowSpec):
     def prefix_cacheable(self) -> bool:
         return False
 
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
