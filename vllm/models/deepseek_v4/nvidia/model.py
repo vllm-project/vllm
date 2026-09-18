@@ -1002,10 +1002,6 @@ class DeepseekV4MoE(nn.Module):
         self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        assert self.n_physical_experts % ep_size == 0, (
-            f"n_physical_experts={self.n_physical_experts} must be divisible by "
-            f"ep_size={ep_size}. Adjust num_redundant_experts."
-        )
         self.n_local_physical_experts = self.n_physical_experts // ep_size
         self.n_local_experts = self.n_local_physical_experts
         self.experts_start_idx = ep_rank * self.n_local_experts
