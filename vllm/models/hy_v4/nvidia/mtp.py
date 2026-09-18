@@ -316,7 +316,7 @@ class HYV4SharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
+            quant_config=None,
             prefix="lm_head",
         )
 
@@ -342,7 +342,7 @@ class HYV4MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.shared_head = HYV4SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = HYV4SharedHead(config=config, quant_config=None)
 
         # HYV4DecoderLayer indexes layer_types/mlp_layer_types by the numeric
         # layer id parsed from the prefix. MTP layers live after the backbone

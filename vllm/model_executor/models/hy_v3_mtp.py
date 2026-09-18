@@ -83,7 +83,7 @@ class HYV3SharedHead(nn.Module):
     ) -> None:
         super().__init__()
         self.head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
+            config.vocab_size, config.hidden_size, quant_config=None
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -104,7 +104,7 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.shared_head = HYV3SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = HYV3SharedHead(config=config, quant_config=None)
         self.mtp_block = HYV3DecoderLayer(
             config=config,
             cache_config=cache_config,

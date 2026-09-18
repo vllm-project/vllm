@@ -56,7 +56,7 @@ class BailingMTPSharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=vllm_config.quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "head"),
         )
 

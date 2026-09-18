@@ -60,7 +60,7 @@ class SharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "head"),
         )
 
@@ -75,7 +75,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -96,7 +95,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             topk_indices_buffer = None
 
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         self.mtp_block = DeepseekV2DecoderLayer(
             vllm_config,
