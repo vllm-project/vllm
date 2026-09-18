@@ -28,6 +28,24 @@ from vllm.v1.worker.mamba_utils import (
 _ORIGINAL_POPULATE_METADATA = MambaSpecDecodeGPUContext._populate_metadata
 
 
+def _full_rows(block_table: torch.Tensor) -> torch.Tensor:
+    """Restore the rows a batch-order slice hides.
+
+    The caller passes slices of the persistent block tables, sized to the batch
+    that happened to be running at capture time. The kernels reach later rows
+    anyway, since they address the buffer by pointer and stride; indexing the
+    slice would instead raise once a second request needs a copy.
+    """
+    row_stride = block_table.stride(0)
+    if row_stride == 0:
+        return block_table
+    elements = block_table.untyped_storage().nbytes() // block_table.element_size()
+    rows = elements // row_stride
+    if rows <= block_table.size(0):
+        return block_table
+    return block_table.as_strided((rows, block_table.size(1)), block_table.stride())
+
+
 def populate_metadata(
     self,
     kv_cache_config: KVCacheConfig,
@@ -58,7 +76,7 @@ def populate_metadata(
         f"collected {len(states)} state tensors, metadata describes {self.num_states}"
     )
     self._cpu_states = states
-    self._cpu_block_tables = list(block_tables)
+    self._cpu_block_tables = [_full_rows(bt) for bt in block_tables]
     # Read once: the copy below is per (request, state) and these never move.
     self._cpu_conv_widths = [int(width) for width in self.state_conv_widths]
     self._cpu_group_indices = [int(group) for group in self.state_group_indices]
