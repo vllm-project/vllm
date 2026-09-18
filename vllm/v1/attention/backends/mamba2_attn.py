@@ -6,17 +6,24 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.exact_replay import (
+    ExactReplayMetadata,
+    build_exact_replay_metadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -100,6 +107,45 @@ class Mamba2AttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # In batch-invariant mode every SSD call starts at the sequence's last
+        # chunk boundary (exact replay, see exact_replay.py), so prefill,
+        # chunked prefill and decode produce the same bits.
+        return True
+
+    @classmethod
+    def check_batch_invariant_config(cls, vllm_config: VllmConfig) -> None:
+        """Reject engine settings the batch-invariant SSD path does not support.
+
+        Raises:
+            ValueError: for an unsupported setting, with the flag to change.
+
+        """
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
+        prefix = "VLLM_BATCH_INVARIANT=1 with Mamba2 layers"
+        if cache_config.use_replayssm:
+            raise ValueError(f"{prefix} is not supported together with --use-replayssm")
+        if cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                f"{prefix} does not support prefix caching yet; pass "
+                "--no-enable-prefix-caching"
+            )
+        if vllm_config.num_speculative_tokens > 0:
+            raise ValueError(f"{prefix} does not support speculative decoding")
+        if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(f"{prefix} requires --mamba-backend triton")
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(f"{prefix} currently requires PP=1")
+        if parallel_config.use_ubatching:
+            raise ValueError(
+                f"{prefix} does not support micro-batching (--enable-dbo or "
+                "--ubatch-size > 1)"
+            )
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError(f"{prefix} does not support KV connectors")
+
 
 @dataclass
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
@@ -108,6 +154,9 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
+    # Exact-replay mode (None when disabled or when there are no such rows)
+    exact_replay_p: ExactReplayMetadata | None = None
+    exact_replay_d: ExactReplayMetadata | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -128,6 +177,19 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.exact_replay: bool = envs.VLLM_BATCH_INVARIANT
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        if envs.VLLM_BATCH_INVARIANT:
+            # The replayed SSD step re-feeds each row's buffered partial chunk,
+            # so its shapes are data dependent and cannot be captured.
+            return AttentionCGSupport.NEVER
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
 
     def build(
         self,
@@ -168,6 +230,43 @@ class Mamba2AttentionMetadataBuilder(
                 )
             )
 
+        exact_replay_p = None
+        exact_replay_d = None
+        if self.exact_replay:
+            device = common_attn_metadata.query_start_loc.device
+            # Derive per-row computed-token counts from CPU metadata only:
+            # `seq_lens_cpu_upper_bound` is exact for every row without
+            # speculative decoding, which this mode rejects, and it avoids the
+            # D2H sync of the deprecated `num_computed_tokens_cpu` property.
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu is None:
+                raise ValueError(
+                    "VLLM_BATCH_INVARIANT=1 needs CPU sequence lengths in the "
+                    "attention metadata for Mamba2 layers"
+                )
+            query_lens = torch.diff(common_attn_metadata.query_start_loc_cpu)
+            num_computed_cpu = (seq_lens_cpu - query_lens).tolist()
+            query_lens_cpu = query_lens.tolist()
+            num_reqs = common.num_reqs
+            # The metadata carries batch rows, not state slots, so the copy
+            # that `update_block_table` hands to the other KV cache groups of a
+            # hybrid model stays valid: each layer resolves its own slots from
+            # its state indices when it runs the SSD step.
+            if common.num_decodes > 0:
+                exact_replay_d = build_exact_replay_metadata(
+                    num_computed_cpu[: common.num_decodes],
+                    query_lens_cpu[: common.num_decodes],
+                    self.chunk_size,
+                    device,
+                )
+            if common.num_prefills > 0:
+                exact_replay_p = build_exact_replay_metadata(
+                    num_computed_cpu[num_reqs - common.num_prefills : num_reqs],
+                    query_lens_cpu[num_reqs - common.num_prefills : num_reqs],
+                    self.chunk_size,
+                    device,
+                )
+
         return replace(
             common,
             prep_initial_states=prep_initial_states,
@@ -175,4 +274,6 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            exact_replay_p=exact_replay_p,
+            exact_replay_d=exact_replay_d,
         )
