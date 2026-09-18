@@ -155,8 +155,8 @@ class GatedResidual(nn.Module):
             )
         down_and_injection = self.input_mix_weight_down_block_inject(xn)
         split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
-        lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        return hc_silu(lora, self.hc_count), injection
+        lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+        return hc_silu(lowrank, self.hc_count), injection
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -168,8 +168,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        lora, injection = self._down_and_inject(xn)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank, injection = self._down_and_inject(xn)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
@@ -196,8 +196,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        lora, injection = self._down_and_inject(xn)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank, injection = self._down_and_inject(xn)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
