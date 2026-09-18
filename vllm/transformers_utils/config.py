@@ -627,7 +627,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.validate_rope()
 
 
-def _iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
+def iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
     """Yield a config's rope parameters, one dict per layer type if nested."""
     rope_parameters = getattr(config, "rope_parameters", None)
     if not isinstance(rope_parameters, dict):
@@ -649,7 +649,7 @@ def _mrope_section(config: PretrainedConfig) -> Sequence[int] | None:
 
     names = ("mrope_section", "xdrope_section")
 
-    for params in _iter_rope_parameters(config):
+    for params in iter_rope_parameters(config):
         for i, name in enumerate(names):
             section = params.get(name)
             if isinstance(section, (list, tuple)):
