@@ -236,7 +236,9 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         else:
             assert rank not in reads and f"P-rank{rank}" in notified
     assert meta.region_blocks_to_zero == (
-        [[30 + group * 10 + num_pages] for group in region_groups] if num_pages else []
+        [[30 + group * 10 + num_pages] for group in region_groups]
+        if num_pages
+        else None
     )
 
 
@@ -1580,6 +1582,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
+    scheduler.prefix_replay_tokens = 0
 
     request = MagicMock()
     request.request_id = "req-1"

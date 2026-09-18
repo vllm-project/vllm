@@ -517,6 +517,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -5805,7 +5806,46 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn wake_up_route_without_tags_sends_none() {
+async fn release_kv_cache_memory_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("release_kv_cache_memory"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_accepts_bool_result() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5818,7 +5858,7 @@ async fn wake_up_route_without_tags_sends_none() {
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
 
-            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
         })
     })
     .await;
@@ -5829,6 +5869,51 @@ async fn wake_up_route_without_tags_sends_none() {
             Request::builder()
                 .method("POST")
                 .uri("/wake_up")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_accepts_repeated_tags() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("wake_up"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("weights"),
+                    Value::from("kv_cache"),
+                ])])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up?tags=weights&tags%5B%5D=ignored&tags=kv_cache")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -6160,6 +6245,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     for (method, uri) in [
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
+        ("POST", "/release_kv_cache_memory"),
         ("POST", "/wake_up"),
         ("GET", "/is_paused"),
         ("POST", "/pause"),

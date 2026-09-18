@@ -17,6 +17,7 @@ mod logprobs;
 use std::sync::Arc;
 
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -35,6 +36,8 @@ pub struct CollectedTextOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned with generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -90,6 +93,7 @@ impl<T: TextOutputStream> T {
                                 usage: vllm_llm::TokenUsage::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
+                                sampling_mask: None,
                             })
                         };
 
@@ -99,6 +103,7 @@ impl<T: TextOutputStream> T {
                             collected.usage = finished.usage;
                             collected.kv_transfer_params = finished.kv_transfer_params;
                             collected.ec_transfer_params = finished.ec_transfer_params;
+                            collected.sampling_mask = finished.sampling_mask;
                             return Ok(collected);
                         }
                     }
@@ -173,6 +178,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 })),
             }),
         ]);
@@ -295,6 +301,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    sampling_mask: None,
                 })),
             }),
         ]);
