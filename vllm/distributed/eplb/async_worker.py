@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
+from .policy import EplbPlan, EplbRebalanceContext, EplbTopology
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -51,9 +52,7 @@ def run_rebalance_experts(
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
     stream: torch.Stream,
-) -> torch.Tensor:
-    from .eplb_state import EplbRebalanceContext, EplbTopology
-
+) -> EplbPlan:
     assert model_state.eplb_stats is not None
     stats = model_state.eplb_stats
     with device_stream(stream):
@@ -67,11 +66,11 @@ def run_rebalance_experts(
             num_ranks=stats.num_gpus,
         ),
         num_replicas=stats.num_replicas,
+        cpu_group=get_eplb_group().cpu_group,
     )
-    new_physical_to_logical_map = eplb_state.plan_rebalance(context)
-    assert new_physical_to_logical_map.device == torch.device("cpu")
+    plan = eplb_state.plan_rebalance(model_state, context)
 
-    return new_physical_to_logical_map
+    return plan
 
 
 def transfer_run_periodically(
@@ -98,9 +97,10 @@ def transfer_run_periodically(
             with device_stream(stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
-            new_physical_to_logical_map = run_rebalance_experts(
+            plan = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
             )
+            new_physical_to_logical_map = plan.physical_to_logical_map
 
             migration_batches_by_layer = None
             if state.parallel_config.eplb_config.migration_batching_enabled:
