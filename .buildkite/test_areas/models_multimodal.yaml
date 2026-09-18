@@ -109,22 +109,24 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor Shard %N"
   key: multi-modal-processor
   timeout_in_minutes: 98
   device: h200_18gb
+  parallelism: 4
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Processor"
+      label: ":amd: (MI355) Multimodal Processor Shard %N"
       dind: false
       device: mi355_1
+      parallelism: 4
       timeout_in_minutes: 115
       depends_on:
       - image-build-amd
