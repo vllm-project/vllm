@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
     if kv_cache_config.hisparse_host_num_blocks is None:
-        return tuple(range(len(kv_cache_config.kv_cache_groups)))
+        return kv_cache_config.prefix_cacheable_group_ids
     return tuple(
         group_id
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -135,12 +135,12 @@ def build_offloading_config(
             )
 
     worker_kv_bytes_per_block = 0
-    all_groups_selected = len(selected_groups) == len(kv_cache_config.kv_cache_groups)
     if (
-        all_groups_selected
+        kv_cache_config.hisparse_host_num_blocks is None
         and kv_cache_config.num_blocks > 0
         and kv_cache_config.kv_cache_tensors
     ):
+        # Scratch filtering must preserve the scheduler/worker allocation stride.
         # Every KVCacheTensor describes placement within the same backing allocation,
         # so its size is the total, not a per-tensor share.
         total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
