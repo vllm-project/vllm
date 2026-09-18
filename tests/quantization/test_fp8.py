@@ -7,7 +7,6 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 
 import logging
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import regex as re
@@ -18,7 +17,7 @@ from tests.quantization.utils import (
     load_model_without_vllm_runner,
 )
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
@@ -230,7 +229,8 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
     )
     resolved = model_module._linear_scale_param_name(
-        cast(VllmConfig, vllm_config), expert_dtype
+        vllm_config,  # type: ignore[arg-type]
+        expert_dtype,
     )
     assert resolved == scale_name
 

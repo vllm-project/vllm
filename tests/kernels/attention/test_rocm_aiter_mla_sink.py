@@ -3,19 +3,12 @@
 """Correctness tests for ROCm AITER sparse MLA attention sinks."""
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-        ROCMAiterMLASparseMetadata,
-    )
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
@@ -177,7 +170,7 @@ def test_sparse_mla_sink_matches_ragged_reference(
         SimpleNamespace(_q_scale=q_scale, _k_scale=kv_scale),
         q,
         kv,
-        cast("ROCMAiterMLASparseMetadata", metadata),
+        metadata,  # type: ignore[arg-type]
     )
     kv_flat = kv_ref[:, 0]
     references = []
@@ -251,7 +244,7 @@ def test_sparse_mla_sink_rejects_unsupported_aiter_dtypes(
             SimpleNamespace(_q_scale=None, _k_scale=None),
             torch.empty(1, 16, Q_HEAD_DIM, dtype=q_dtype),
             torch.empty(1, 1, Q_HEAD_DIM, dtype=kv_dtype),
-            cast("ROCMAiterMLASparseMetadata", metadata),
+            metadata,  # type: ignore[arg-type]
         )
 
 
@@ -405,7 +398,7 @@ def test_sparse_mla_sink_matches_dense_attention_with_empty_rows_and_paged_cache
         SimpleNamespace(_q_scale=None, _k_scale=None),
         padded_q,
         kv_rows.unsqueeze(1),
-        cast("ROCMAiterMLASparseMetadata", metadata),
+        metadata,
     )
 
     references = []
@@ -442,15 +435,15 @@ def test_sparse_mla_backend_resolves_only_contiguous_layer_layouts(monkeypatch, 
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
     monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", layout)
-    config = cast("VllmConfig", SimpleNamespace(cache_config=CacheConfig()))
+    config = SimpleNamespace(cache_config=CacheConfig())
     supported = [
         [x.name for x in ROCMAiterMLASparseBackend.supported_kv_cache_layouts()]
     ]
     if layout == "BLNHC":
         with pytest.raises(ValueError, match="does not satisfy"):
-            resolve_kv_cache_layout(config, supported)
+            resolve_kv_cache_layout(config, supported)  # type: ignore[arg-type]
     else:
-        assert resolve_kv_cache_layout(config, supported).name == layout
+        assert resolve_kv_cache_layout(config, supported).name == layout  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -501,7 +494,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     actual, _ = impl.forward_mqa(
         (q[..., :V_HEAD_DIM], q[..., V_HEAD_DIM:]),
         kv,
-        cast("ROCMAiterMLASparseMetadata", metadata),
+        metadata,  # type: ignore[arg-type]
         SimpleNamespace(_q_scale=None, _k_scale=None),
     )
     references = [

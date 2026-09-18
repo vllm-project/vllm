@@ -34,7 +34,7 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
 
     with set_current_vllm_config(vllm_config):
         backend = get_attn_backend(16, torch.float16, "auto")
-        assert backend.get_name() == "ROCM_FLASH" or backend.get_name() == "TRITON_ATTN"
+        assert backend.get_name() == "ROCM_ATTN"
 
     # MLA test for deepseek related
     # Change the attention backend to triton MLA

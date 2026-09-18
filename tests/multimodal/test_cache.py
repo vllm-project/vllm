@@ -4,7 +4,6 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -783,14 +782,11 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.llm_engine import LLMEngine
 
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
-        ),
+    model_config = SimpleNamespace(
+        get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
     )
-    sender = MultiModalProcessorSenderCache(model_config)
-    receiver = MultiModalReceiverCache(model_config)
+    sender = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    receiver = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
     item = _dummy_item({"pixel_values": 16})
     mm_hash = "image_A"
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
@@ -799,7 +795,8 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
     renderer = SimpleNamespace(mm_processor_cache=sender, _mm_cache_stats=None)
     renderer.clear_mm_cache = partial(
-        BaseRenderer.clear_mm_cache, cast(BaseRenderer, renderer)
+        BaseRenderer.clear_mm_cache,
+        renderer,  # type: ignore[arg-type]
     )
 
     def release():
@@ -812,7 +809,8 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
             renderer.clear_mm_cache, executor=executor
         )
         renderer.clear_mm_cache_async = partial(
-            BaseRenderer.clear_mm_cache_async, cast(BaseRenderer, renderer)
+            BaseRenderer.clear_mm_cache_async,
+            renderer,  # type: ignore[arg-type]
         )
         engine = SimpleNamespace(
             renderer=renderer,
@@ -825,9 +823,9 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
 
         async def call_release():
             if use_async:
-                await AsyncLLM.release_kv_cache_memory(cast(AsyncLLM, engine))
+                await AsyncLLM.release_kv_cache_memory(engine)  # type: ignore[arg-type]
             else:
-                LLMEngine.release_kv_cache_memory(cast(LLMEngine, engine))
+                LLMEngine.release_kv_cache_memory(engine)  # type: ignore[arg-type]
 
         if release_error:
             with pytest.raises(RuntimeError, match=release_error):
