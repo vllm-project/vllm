@@ -366,7 +366,7 @@ class HarmonyParser(DelegatingParser):
                 reasoning_token_count += 1
 
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.REASONING:
+            if segment_type == _SegmentType.REASONING and delta:
                 self._phase_reasoning_token_count += 1
             elif segment_type == _SegmentType.CONTENT and delta:
                 self._content_token_count += 1
@@ -436,7 +436,7 @@ class HarmonyParser(DelegatingParser):
             ):
                 usage_reasoning_token_count += 1
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
-            if segment_type == _SegmentType.REASONING:
+            if segment_type == _SegmentType.REASONING and parser.last_content_delta:
                 reasoning_token_count += 1
             elif segment_type == _SegmentType.CONTENT and parser.last_content_delta:
                 content_token_count += 1
