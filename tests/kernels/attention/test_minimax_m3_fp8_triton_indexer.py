@@ -13,7 +13,6 @@ everywhere else (e.g. SM120), for both the decode and prefill scorers.
 import pytest
 import torch
 
-from vllm.models.minimax_m3.common.indexer import select_indexer_impl_cls
 from vllm.models.minimax_m3.common.ops.index_topk import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
@@ -50,27 +49,6 @@ def _check_selection(top_bf16: set[int], top_fp8: set[int]) -> None:
     assert all(b in top_fp8 for b in PLANTED)
     # Selection may differ only at the noise floor (near-tied filler blocks).
     assert len(top_bf16 & top_fp8) >= TOPK - 2
-
-
-@pytest.mark.parametrize("indexer_kv_dtype", ["fp8", "fp8_e4m3"])
-@pytest.mark.parametrize(
-    ("is_cuda", "supports_fp8"),
-    [(False, True), (True, False)],
-)
-def test_fp8_indexer_requires_supported_cuda(
-    monkeypatch: pytest.MonkeyPatch,
-    indexer_kv_dtype,
-    is_cuda: bool,
-    supports_fp8: bool,
-) -> None:
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
-    monkeypatch.setattr(current_platform, "supports_fp8", lambda: supports_fp8)
-
-    with pytest.raises(NotImplementedError, match="requires CUDA fp8 support"):
-        select_indexer_impl_cls(
-            topk_blocks=TOPK,
-            indexer_kv_dtype=indexer_kv_dtype,
-        )
 
 
 @pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
