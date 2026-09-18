@@ -136,7 +136,7 @@ Disk offloading is outside the embedded DRAM runtime's scope.
 - [ ] Add configurable transfer concurrency and queue-depth tuning if MORI
   measurements show the current worker pool is limiting throughput.
 - [ ] Tune `lazy_offload_max_blocks` against GPU pressure and transfer latency.
-- [ ] Verify that DRAM watermark eviction produces timely and complete KV
+- [x] Verify that DRAM watermark eviction produces timely and complete KV
   removal events under sustained load.
 - [ ] Harden cancellation when GPU blocks are reused immediately after
   preemption.
@@ -157,7 +157,7 @@ Disk offloading is outside the embedded DRAM runtime's scope.
 - [ ] Store cancellation followed by immediate GPU block reuse.
 - [ ] Partial failure where one TP rank fails to publish an object.
 - [ ] Partial eviction where one TP rank loses an object before lookup.
-- [ ] Repeated eviction and restore cycles under a deliberately small DRAM
+- [x] Repeated eviction and restore cycles under a deliberately small DRAM
   capacity.
 - [ ] PP=2 serving-level restore.
 - [ ] TP=2 plus PP=2 serving-level restore.

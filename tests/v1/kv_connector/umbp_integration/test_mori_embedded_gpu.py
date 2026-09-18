@@ -204,3 +204,93 @@ def test_mori_store_overlaps_gpu_compute(tmp_path):
     assert overlap_seconds > 0
     worker.publish(stored)
     worker.close()
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(),
+    reason="requires a ROCm GPU",
+)
+def test_mori_embedded_dram_eviction_and_restore(tmp_path):
+    torch.accelerator.set_device_index(0)
+    object_size = 1 << 20
+    topology = RankTopology()
+    layout = KVLayoutDescriptor(
+        regions=(KVRegion("layer0", 0, object_size, object_size, 0),),
+        topology=topology,
+    )
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig(
+            "embedded",
+            {
+                "capacity_bytes": 8 << 20,
+                "dram_high_watermark": 0.75,
+                "dram_low_watermark": 0.5,
+                "lookup_dir": str(tmp_path),
+                "timeout_ms": 60000,
+            },
+        )
+    )
+    worker = runtime.create_worker_handle("mori-eviction", topology, layout)
+    source = torch.empty(object_size, dtype=torch.uint8, device="cuda:0")
+    destination = torch.empty_like(source)
+    worker.register_buffers({"layer0": source, "destination": destination})
+    keys = []
+    expected = {}
+
+    for index in range(16):
+        source.fill_(index)
+        key = f"eviction-{index}"
+        plan = BlockTransferPlan(
+            key,
+            index,
+            ranges=(
+                KVRange(
+                    "layer0",
+                    0,
+                    index,
+                    source.data_ptr(),
+                    object_size,
+                    object_size,
+                    0,
+                ),
+            ),
+        )
+        stored = worker.wait(worker.store([plan]))
+        assert stored.status is TransferJobStatus.COMPLETED
+        worker.publish(stored)
+        keys.append(key)
+        expected[key] = index
+
+    hits = list(worker.batch_exists(keys))
+    missing = {key for key, hit in zip(keys, hits, strict=True) if not hit}
+    assert missing
+    assert hits[-1]
+    assert missing <= set(worker.take_evicted_keys())
+
+    destination.zero_()
+    latest = keys[-1]
+    loaded = worker.wait(
+        worker.load(
+            [
+                BlockTransferPlan(
+                    latest,
+                    len(keys) - 1,
+                    ranges=(
+                        KVRange(
+                            "layer0",
+                            0,
+                            len(keys) - 1,
+                            destination.data_ptr(),
+                            object_size,
+                            object_size,
+                            0,
+                        ),
+                    ),
+                )
+            ]
+        )
+    )
+    assert loaded.status is TransferJobStatus.COMPLETED
+    torch.accelerator.synchronize()
+    assert torch.all(destination == expected[latest])
+    worker.close()
