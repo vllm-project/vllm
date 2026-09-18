@@ -13,6 +13,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -670,18 +671,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
+        def compressor_kv_score(compressor: DeepseekCompressor) -> torch.Tensor:
+            proj = compressor.fused_wkv_wgate
+            kv_score = torch.mm(hidden_states, proj.weight.T, out_dtype=torch.float32)
+            if isinstance(proj, BaseLinearLayerWithLoRA):
+                delta = proj._apply_lora_to_output(
+                    hidden_states,
+                    torch.zeros_like(kv_score, dtype=hidden_states.dtype),
+                )
+                kv_score.add_(delta)
+            return kv_score
+
         if self.compressor is not None:
             # Local ref so the closure keeps a non-None type for mypy.
             compressor = self.compressor
-
-            def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
-
-            aux_fns[0] = compressor_kv_score
+            aux_fns[0] = lambda: compressor_kv_score(compressor)
 
         if self.indexer is not None:
             indexer = self.indexer
@@ -691,15 +695,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 weights, _ = indexer.weights_proj(hidden_states)
                 return weights
 
-            def indexer_compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
-
             aux_fns[1] = indexer_weights_proj
-            aux_fns[2] = indexer_compressor_kv_score
+            aux_fns[2] = lambda: compressor_kv_score(indexer.compressor)
 
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
             lambda: self._fused_wqa_wkv_gemm(hidden_states),
