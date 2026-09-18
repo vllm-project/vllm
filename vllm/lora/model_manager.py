@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.utils import replace as replace_config
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -543,10 +544,18 @@ class LoRAModelManager:
                     self.model.config,
                 )
             else:
+                module_lora_config = self.lora_config
+                if self.lora_config.fully_sharded_loras and module_name.endswith(
+                    "kv_b_proj"
+                ):
+                    # MLA decode needs replicated A for the rank-local correction.
+                    module_lora_config = replace_config(
+                        self.lora_config, fully_sharded_loras=False
+                    )
                 new_module = from_layer(
                     module,
                     self.lora_slots,
-                    self.lora_config,
+                    module_lora_config,
                     packed_moduled_lst,
                     self.model.config,
                 )

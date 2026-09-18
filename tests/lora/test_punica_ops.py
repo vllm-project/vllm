@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from threading import Lock
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -639,3 +641,243 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_mla_kv_b_lora_uses_explicit_token_mapping(dtype):
+    device = f"{DEVICE_TYPE}:0"
+    set_random_seed(0)
+    num_tokens = 7
+    num_heads = 3
+    kv_lora_rank = 16
+    qk_nope_head_dim = 8
+    v_head_dim = 8
+    lora_rank = 4
+    num_loras = 2
+    full_head_dim = qk_nope_head_dim + v_head_dim
+    mapping = torch.tensor([1, -1, 0, 1, 0, -1, 1], device=device)
+    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+
+    lora_a = torch.randn(
+        num_loras, 1, lora_rank, kv_lora_rank, dtype=dtype, device=device
+    )
+    lora_b = torch.randn(
+        num_loras,
+        1,
+        num_heads * full_head_dim,
+        lora_rank,
+        dtype=dtype,
+        device=device,
+    )
+    b_by_head = lora_b[:, 0].view(num_loras, num_heads, full_head_dim, lora_rank)
+
+    x = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    linear_output = torch.randn(
+        num_tokens, num_heads * full_head_dim, dtype=dtype, device=device
+    )
+    linear_output_3d = linear_output.clone().view(num_tokens, num_heads, full_head_dim)
+    expected_linear = linear_output.clone()
+    q_nope = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    q_output = torch.randn(
+        num_tokens, num_heads, kv_lora_rank, dtype=dtype, device=device
+    )
+    expected_q = q_output.clone()
+    latent_output = torch.randn_like(q_output)
+    v_output = torch.randn(
+        num_tokens, num_heads, v_head_dim, dtype=dtype, device=device
+    )
+    expected_v = v_output.clone()
+
+    for token_idx, lora_id in enumerate(mapping.tolist()):
+        if lora_id == -1:
+            continue
+        a = lora_a[lora_id, 0]
+        b = lora_b[lora_id, 0]
+        expected_linear[token_idx] += (
+            x[token_idx].float() @ a.float().T @ b.float().T
+        ).to(dtype)
+        expected_q[token_idx] += torch.einsum(
+            "hp,hpr,rl->hl",
+            q_nope[token_idx].float(),
+            b_by_head[lora_id, :, :qk_nope_head_dim].float(),
+            a.float(),
+        ).to(dtype)
+        expected_v[token_idx] += torch.einsum(
+            "hl,rl,hvr->hv",
+            latent_output[token_idx].float(),
+            a.float(),
+            b_by_head[lora_id, :, qk_nope_head_dim:].float(),
+        ).to(dtype)
+
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, linear_output, mapping, no_lora_flag_cpu
+    )
+    triton_ops.mla_kv_b_lora_linear(
+        x,
+        lora_a,
+        lora_b,
+        linear_output_3d,
+        mapping,
+        no_lora_flag_cpu,
+    )
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        mapping,
+        no_lora_flag_cpu,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        mapping,
+        no_lora_flag_cpu,
+        qk_nope_head_dim,
+    )
+
+    torch.testing.assert_close(linear_output, expected_linear, rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(
+        linear_output_3d,
+        expected_linear.view(num_tokens, num_heads, full_head_dim),
+        rtol=3e-2,
+        atol=3e-2,
+    )
+    torch.testing.assert_close(q_output, expected_q, rtol=3e-2, atol=3e-2)
+    torch.testing.assert_close(v_output, expected_v, rtol=3e-2, atol=3e-2)
+
+    no_lora_flag_cpu.fill_(True)
+    linear_snapshot = linear_output.clone()
+    q_snapshot = q_output.clone()
+    v_snapshot = v_output.clone()
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, linear_output, mapping, no_lora_flag_cpu
+    )
+    triton_ops.mla_kv_b_lora_q(
+        q_nope,
+        lora_a,
+        lora_b,
+        q_output,
+        mapping,
+        no_lora_flag_cpu,
+        v_head_dim,
+    )
+    triton_ops.mla_kv_b_lora_v(
+        latent_output,
+        lora_a,
+        lora_b,
+        v_output,
+        mapping,
+        no_lora_flag_cpu,
+        qk_nope_head_dim,
+    )
+    torch.testing.assert_close(linear_output, linear_snapshot)
+    torch.testing.assert_close(q_output, q_snapshot)
+    torch.testing.assert_close(v_output, v_snapshot)
+
+
+@pytest.mark.parametrize("with_lora", [False, True])
+def test_mla_kv_b_lora_uses_local_query_before_dcp_gather(with_lora):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.num_heads = 1
+    layer.qk_nope_head_dim = layer.kv_lora_rank = layer.v_head_dim = 2
+    layer.qk_rope_head_dim = 0
+    layer.kv_cache_dtype = "auto"
+    layer.use_pcp = False
+    layer.q_pad_num_heads = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_amx_bmm_enabled = False
+    layer.W_UK_T = torch.eye(2, device="cpu").unsqueeze(0)
+    layer.W_UK_T_dcp_qrep = layer.W_UK_T.repeat(2, 1, 1)
+    layer.W_UV = layer.W_UK_T
+    local_q = torch.tensor([[[1.0, 2.0]]], device="cpu")
+    replicated_q = torch.cat([local_q, local_q + 2], dim=1)
+    mapping = torch.tensor([0], device="cpu")
+    apply_q_lora = Mock(side_effect=lambda q, out, *_: out.add_(2 * q))
+    layer.kv_b_proj = (
+        SimpleNamespace(
+            punica_wrapper=SimpleNamespace(token_lora_indices=mapping),
+            apply_mla_kv_b_lora_q=apply_q_lora,
+        )
+        if with_lora
+        else SimpleNamespace()
+    )
+    latent_output = torch.ones_like(local_q)
+    layer.impl = SimpleNamespace(
+        is_sparse=False,
+        dcp_world_size=2,
+        forward_mqa=Mock(return_value=(latent_output, torch.zeros(1, device="cpu"))),
+    )
+    layer.dcp_manager = SimpleNamespace(
+        query_gather=Mock(side_effect=lambda q: torch.cat([q, q], dim=1)),
+        combine=Mock(return_value=latent_output),
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        num_decodes=1,
+        num_prefills=0,
+        num_decode_tokens=1,
+        decode=SimpleNamespace(seq_lens=torch.tensor([1], device="cpu")),
+        query_start_loc=torch.tensor([0, 1], device="cpu"),
+    )
+    output = torch.empty((1, 2), device="cpu")
+    layer.forward_impl(
+        local_q,
+        torch.empty((1, 2), device="cpu"),
+        torch.empty((1, 1, 0), device="cpu"),
+        torch.empty(0, device="cpu"),
+        metadata,
+        output,
+        q_dcp_replicated=replicated_q,
+    )
+    if with_lora:
+        apply_q_lora.assert_called_once()
+        torch.testing.assert_close(apply_q_lora.call_args.args[0], local_q)
+        torch.testing.assert_close(apply_q_lora.call_args.args[2], mapping)
+        layer.dcp_manager.query_gather.assert_called_once()
+        torch.testing.assert_close(
+            layer.dcp_manager.query_gather.call_args.args[0], 3 * local_q
+        )
+        expected_query = torch.cat([3 * local_q, 3 * local_q], dim=1)
+    else:
+        apply_q_lora.assert_not_called()
+        layer.dcp_manager.query_gather.assert_not_called()
+        expected_query = replicated_q
+    torch.testing.assert_close(layer.impl.forward_mqa.call_args.args[0], expected_query)
+    torch.testing.assert_close(output, latent_output.view(1, 2))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+def test_mla_kv_b_lora_rounds_delta_before_adding_bf16_base():
+    device = f"{DEVICE_TYPE}:0"
+    x = torch.ones((1, 2), dtype=torch.bfloat16, device=device)
+    lora_a = torch.tensor([[[[2**-8, 2**-17]]]], dtype=torch.bfloat16, device=device)
+    lora_b = torch.ones((1, 1, 1, 1), dtype=torch.bfloat16, device=device)
+    output = torch.ones((1, 1), dtype=torch.bfloat16, device=device)
+    mapping = torch.zeros(1, dtype=torch.long, device=device)
+    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+
+    triton_ops.mla_kv_b_lora_linear(
+        x, lora_a, lora_b, output, mapping, no_lora_flag_cpu
+    )
+
+    # The delta rounds to 2**-8; adding it to 1 is a BF16 tie that rounds to 1.
+    torch.testing.assert_close(output, torch.ones_like(output), rtol=0, atol=0)

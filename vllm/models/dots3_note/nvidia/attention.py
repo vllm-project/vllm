@@ -586,6 +586,8 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         prefill = attn_metadata.prefill
         sliding = getattr(prefill, "sliding_window", None)
@@ -599,11 +601,18 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
                 k_scale,
                 output,
                 output_scale,
+                kv_b_proj_lora,
+                token_lora_mapping,
             )
         assert output_scale is None
         assert isinstance(prefill.prefill_backend, Dots3NoteFlashAttnPrefillBackend)
         use_fp8_prefill = prefill.q_data_type == current_platform.fp8_dtype()
         output = output.view(-1, self.num_heads, self.v_head_dim)
+        request_lora_mapping = None
+        if token_lora_mapping is not None:
+            request_lora_mapping = token_lora_mapping[
+                prefill.query_start_loc[:-1].long()
+            ]
 
         for chunk in sliding.chunks:
             toks = chunk.num_kv_tokens
@@ -648,6 +657,12 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
             kv_nope = self.kv_b_proj(kv_c)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
+            if apply_lora is not None and request_lora_mapping is not None:
+                context_lora_mapping = request_lora_mapping[
+                    chunk.req_start : chunk.req_end
+                ][chunk.token_to_seq[:toks].long()]
+                apply_lora(kv_c, kv_nope, context_lora_mapping)
             if use_fp8_prefill:
                 kv_nope = kv_nope.to(prefill.q_data_type)
                 k_pe_chunk = k_pe_chunk.to(prefill.q_data_type)
@@ -743,6 +758,8 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         super().forward_mha(
             q,
@@ -753,6 +770,8 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             k_scale,
             output,
             output_scale,
+            kv_b_proj_lora,
+            token_lora_mapping,
         )
 
     def forward_mqa(

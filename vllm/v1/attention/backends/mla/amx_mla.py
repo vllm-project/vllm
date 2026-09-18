@@ -327,6 +327,8 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         assert output_scale is None, (
             "AMXMLAImpl.forward_mha does not support fused output quantization"
@@ -349,6 +351,14 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_tokens, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
         ops.bmm_cpu(ql_nope.transpose(0, 1), q_nope_t, self._w_uk_packed, True, None)
+        apply_q_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_q", None)
+        if apply_q_lora is not None and token_lora_mapping is not None:
+            apply_q_lora(
+                q_nope,
+                ql_nope,
+                token_lora_mapping,
+                self.v_head_dim,
+            )
         mqa_q = torch.cat([ql_nope, q_pe], dim=-1)
 
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
@@ -403,3 +413,11 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             0, 1
         )
         ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, None)
+        apply_v_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_v", None)
+        if apply_v_lora is not None and token_lora_mapping is not None:
+            apply_v_lora(
+                attn_out,
+                output.view(num_tokens, num_heads, self.v_head_dim),
+                token_lora_mapping,
+                self.qk_nope_head_dim,
+            )
