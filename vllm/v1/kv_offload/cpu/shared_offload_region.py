@@ -357,11 +357,22 @@ class SharedOffloadRegion:
             self._views.clear()
         self._base = None
         if self.mmap_obj:
+            retained = False
             try:
                 self.mmap_obj.close()
+            except BufferError:
+                # A native user still exports this mapping, so unmapping would
+                # let the NIC write into reused address space. Keep it mapped;
+                # dropping the fd and the pathname below is still safe.
+                retained = True
+                logger.warning(
+                    "Keeping %s mapped: buffers are still exported to native users",
+                    self.mmap_path,
+                )
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
-            self.mmap_obj = None
+            if not retained:
+                self.mmap_obj = None
         if self.fd is not None:
             try:
                 os.close(self.fd)
