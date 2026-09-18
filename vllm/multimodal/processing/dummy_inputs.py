@@ -10,8 +10,8 @@ from PIL import Image
 
 from vllm.config.multimodal import (
     AudioDummyOptions,
-    BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
@@ -45,7 +45,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         """Build the multimodal input which, after processing, results in
         the maximum possible number of placeholder tokens.
@@ -65,7 +65,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
         """Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
@@ -124,9 +124,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         width: int,
         height: int,
         num_images: int,
-        overrides: BaseDummyOptions | None = None,
+        overrides: ImageDummyOptions | None = None,
     ) -> list[Image.Image]:
-        assert overrides is None or isinstance(overrides, ImageDummyOptions)
         if num_images == 0:
             return []
         if overrides:

@@ -54,8 +54,8 @@ from vllm.compilation.decorators import (
 )
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
-    BaseDummyOptions,
     MultiModalConfig,
+    MultiModalDummyOptions,
     VideoDummyOptions,
     VideoPruningMethod,
 )
@@ -1119,11 +1119,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-        image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
 
         target_image_width, target_image_height = (
@@ -1133,7 +1130,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # treat videos as special images
         target_num_frames = 2
         if video_overrides:
-            assert isinstance(video_overrides, VideoDummyOptions)
             num_frames_override = video_overrides.num_frames
             if num_frames_override:
                 if num_frames_override > target_num_frames:
@@ -1204,7 +1200,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             target_video_size.height,
         )
         if video_overrides:
-            assert isinstance(video_overrides, VideoDummyOptions)
             width_override = video_overrides.width
             if width_override:
                 if width_override > target_video_width:
@@ -1230,14 +1225,14 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             "image": self._get_dummy_images(
                 width=target_image_width,
                 height=target_image_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_video_width,
                 height=target_video_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
+                num_videos=mm_counts.get("video", 0),
             ),
         }
 

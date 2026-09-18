@@ -13,10 +13,7 @@ from PIL import Image
 from transformers import BatchFeature
 
 from vllm.config.multimodal import (
-    AudioDummyOptions,
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
+    MultiModalDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
@@ -584,7 +581,7 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         data: dict[str, Any] = {}
         num_images = mm_counts.get("image", 0)
@@ -594,7 +591,7 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
                 width=width,
                 height=height,
                 num_images=num_images,
-                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
+                overrides=mm_options.get("image"),
             )
         num_audios = mm_counts.get("audio", 0)
         if num_audios:
@@ -611,7 +608,7 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
             data["audio"] = self._get_dummy_audios(
                 length=min(chunk_samples, max(1, seq_len) * stride),
                 num_audios=num_audios,
-                overrides=cast(AudioDummyOptions | None, mm_options.get("audio")),
+                overrides=mm_options.get("audio"),
             )
         num_videos = mm_counts.get("video", 0)
         if num_videos:
@@ -625,7 +622,7 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
                 height=height,
                 num_frames=num_frames,
                 num_videos=num_videos,
-                overrides=cast(VideoDummyOptions | None, mm_options.get("video")),
+                overrides=mm_options.get("video"),
             )
         return data
 

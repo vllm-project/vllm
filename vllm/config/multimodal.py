@@ -3,11 +3,18 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, final
+from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
 import torch
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass
+from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
@@ -17,6 +24,8 @@ from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -51,17 +60,50 @@ class AudioDummyOptions(BaseDummyOptions):
 
 
 @final
-class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
-    """Type annotations for modality types predefined by vLLM."""
+class MultiModalDummyOptions(dict[str, BaseDummyOptions]):
+    """Dummy data options for each modality.
 
-    image: ImageDummyOptions
-    """Options for dummy images."""
+    Lookups of the modalities predefined by vLLM return their own options
+    class, while any other modality returns
+    [`BaseDummyOptions`][vllm.config.multimodal.BaseDummyOptions].
+    """
 
-    video: VideoDummyOptions
-    """Options for dummy videos."""
+    @overload  # type: ignore[override]
+    def get(self, key: Literal["image"], /) -> ImageDummyOptions | None: ...
 
-    audio: AudioDummyOptions
-    """Options for dummy audios."""
+    @overload
+    def get(self, key: Literal["image"], default: _T, /) -> ImageDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["video"], /) -> VideoDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["video"], default: _T, /) -> VideoDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: Literal["audio"], /) -> AudioDummyOptions | None: ...
+
+    @overload
+    def get(self, key: Literal["audio"], default: _T, /) -> AudioDummyOptions | _T: ...
+
+    @overload
+    def get(self, key: str, /) -> BaseDummyOptions | None: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> BaseDummyOptions | _T: ...
+
+    def get(self, key: str, default: object = None, /) -> object:
+        return super().get(key, default)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls, handler.generate_schema(dict[str, BaseDummyOptions])
+        )
 
 
 MMEncoderTPMode = Literal["weights", "data"]
@@ -75,15 +117,6 @@ MMProcessorDevice: TypeAlias = str
 `"xpu"` on XPU). Validated against that set by the CLI."""
 
 
-MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
-"""
-A dictionary containing an entry for each modality type of dummy data.
-
-The built-in modalities are defined by
-[`MultiModalDummyOptionsBuiltins`][vllm.config.multimodal.MultiModalDummyOptionsBuiltins].
-"""
-
-
 @config
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
@@ -91,7 +124,9 @@ class MultiModalConfig:
     language_model_only: bool = False
     """If True, disables all multimodal inputs by setting all modality limits to 0.
     Equivalent to setting `--limit-mm-per-prompt` to 0 for every modality."""
-    limit_per_prompt: MMDummyOptions = Field(default_factory=dict)
+    limit_per_prompt: MultiModalDummyOptions = Field(
+        default_factory=MultiModalDummyOptions
+    )
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
@@ -257,8 +292,8 @@ class MultiModalConfig:
     def _validate_limit_per_prompt(
         cls,
         value: dict[str, int | dict[str, int]],
-    ) -> MMDummyOptions:
-        out: MMDummyOptions = {}
+    ) -> MultiModalDummyOptions:
+        out = MultiModalDummyOptions()
 
         for k, v in value.items():
             # Handle legacy format where only count is specified
