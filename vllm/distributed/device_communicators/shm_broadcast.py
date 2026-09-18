@@ -613,7 +613,15 @@ class MessageQueue:
                 self.tensor_arena = ShmTensorArena(
                     *arena_handle, reader_rank=self.local_reader_rank
                 )
-                _TENSOR_ARENAS[self.tensor_arena.shared_memory.name] = self.tensor_arena
+                # `shared_memory` is unset (not just None) if attaching to
+                # the writer's segment raised FileNotFoundError -- see
+                # ShmTensorArena.__init__'s reader branch. Registering a
+                # broken arena is a no-op deferred failure (same convention
+                # ShmRingBuffer uses above), not a crash here.
+                if hasattr(self.tensor_arena, "shared_memory"):
+                    _TENSOR_ARENAS[self.tensor_arena.shared_memory.name] = (
+                        self.tensor_arena
+                    )
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
@@ -686,14 +694,6 @@ class MessageQueue:
         self.shutting_down = True
         if self._spin_condition is not None:
             self._spin_condition.cancel()
-        if self.tensor_arena is not None:
-            # Drop the registry's strong reference so the arena (and its
-            # pinned mapping) can be garbage-collected once this queue is,
-            # instead of being held in `_TENSOR_ARENAS` for the rest of the
-            # process's life. A writer's arena was never registered (only
-            # readers attach via `create_from_handle`), so this is a no-op
-            # `pop` for writers.
-            _TENSOR_ARENAS.pop(self.tensor_arena.shared_memory.name, None)
 
     @contextmanager
     def acquire_write(self, timeout: float | None = None):

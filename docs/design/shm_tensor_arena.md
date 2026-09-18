@@ -100,8 +100,8 @@ and wires it in but otherwise treats it as an internal implementation detail.
 
 A second shared-memory region created alongside the existing `ShmRingBuffer`:
 
-- **N slots × slot_bytes** (default 8 × 256 MB, env-tunable), plus per-slot
-  metadata `[written_flag, reader0_done … readerN_done]`.
+- **N slots × slot_bytes** (default 8 × 256 MB, internal constants -- see
+  §3), plus per-slot metadata `[written_flag, reader0_done … readerN_done]`.
 - Concurrency uses the **same lock-free single-writer/N-reader protocol as
   `ShmRingBuffer`** (memory fences, per-reader done flags), so the model is one
   the codebase already trusts.
@@ -288,7 +288,9 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
   base tensor while still holding a view into it (see the residual-
   limitation callout in §2.3) — that remains a real, if currently
   theoretical, hazard.
-- **Fallback observability**: arena exhaustion / oversize fallbacks are
-  rate-limited log lines today; a counter metric would be better.
+- **Fallback observability**: arena exhaustion (no free slot) is a
+  rate-limited log line today; a counter metric would be better. An
+  oversize tensor (bigger than a slot) falls back silently, with no log at
+  all -- worth adding if that path turns out to matter in practice.
 - **Scope**: the arena activates only when every queue reader is node-local.
   Remote readers (multi-node PP/TP) keep the existing socket path.

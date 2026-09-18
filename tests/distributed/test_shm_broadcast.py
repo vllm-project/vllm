@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import io
 import pickle
 import random
@@ -1063,6 +1064,36 @@ def test_arena_pickler_noncontig_falls_through(monkeypatch):
     del out
 
 
+@pytest.mark.parametrize("case", ["requires_grad", "conj"])
+def test_arena_pickler_excludes_requires_grad_and_conj(monkeypatch, case: str):
+    """Tensors `_reduce_tensor` excludes (requires_grad, or exotic tensors
+    like a conjugate-bit view that can't be aliased as uint8) must fall
+    through the arena the same way, even when they qualify on every other
+    criterion (CPU, contiguous, above the divert threshold). Regression
+    test: the arena's reducer_override used to divert these unconditionally
+    -- silently dropping requires_grad on the receiving side, or crashing
+    enqueue() with an uncaught RuntimeError from write_tensor's uint8 view."""
+    writer, (reader,) = _make_arena(n_reader=1)
+    monkeypatch.setattr(shm_tensor_arena, "_ARENA_MIN_BYTES", 1 << 20)
+    monkeypatch.setitem(
+        shm_tensor_arena._TENSOR_ARENAS, reader.shared_memory.name, reader
+    )
+    if case == "requires_grad":
+        tensor = torch.randn(1024, 1024, requires_grad=True)  # 4MiB, above threshold
+    else:
+        tensor = torch.randn(600, 600, dtype=torch.complex64).conj()  # ~2.9MiB
+    assert tensor.is_contiguous()
+    assert tensor.numel() * tensor.element_size() >= shm_tensor_arena._ARENA_MIN_BYTES
+
+    data, buffers, written = _dumps_arena(tensor, writer)
+    # Declined by the arena -- no slot consumed -- and handled by
+    # _reduce_tensor's identical exclusion instead.
+    assert written == []
+    out = pickle.loads(data, buffers=buffers)
+    assert torch.equal(out, tensor)
+    assert out.requires_grad == tensor.requires_grad
+
+
 def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     """A reader that cudaHostRegister-ed its mapping must cudaHostUnregister
     the same pointer before the mapping is closed; an unpinned arena must not
@@ -1119,20 +1150,62 @@ def test_arena_event_gated_release():
     del dev
 
 
-def test_message_queue_shutdown_drops_tensor_arena_registry_entry():
-    """`shutdown()` must drop the queue's arena from the module-level
-    `_TENSOR_ARENAS` registry so the arena (and its pinned mapping) can be
-    garbage-collected once the queue is, instead of being held for the rest
-    of the process's life."""
+def test_tensor_arena_registry_is_weak_and_survives_shutdown():
+    """`_TENSOR_ARENAS` must not be the thing keeping an arena alive -- or it
+    holds the arena (and its pinned mapping) for the life of the process
+    even after the owning MessageQueue is gone -- but it also must not be
+    forcibly cleared by `shutdown()`, since `shutdown()` can run on a
+    different thread than an in-flight `dequeue()` still reconstructing a
+    tensor from that same arena (e.g. multiproc_executor's death-pipe
+    monitor calling `mq.shutdown()` while the worker's main thread is mid
+    `pickle.loads`). A weak-value registry gets both right: the entry
+    survives `shutdown()` untouched, and only disappears once the arena is
+    genuinely unreferenced -- no explicit cleanup call needed or safe."""
     writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
     handle = writer_mq.export_handle()
     reader_mq = MessageQueue.create_from_handle(handle, rank=0)
 
     name = reader_mq.tensor_arena.shared_memory.name
     assert shm_tensor_arena._TENSOR_ARENAS[name] is reader_mq.tensor_arena
+
+    # shutdown() must NOT remove the entry: that would race with a
+    # concurrent dequeue() still reconstructing a tensor from this arena.
     reader_mq.shutdown()
+    assert shm_tensor_arena._TENSOR_ARENAS[name] is reader_mq.tensor_arena
+
+    # Once nothing else references the arena, the registry entry vanishes
+    # on its own.
+    reader_mq.tensor_arena = None
     assert name not in shm_tensor_arena._TENSOR_ARENAS
 
+    writer_mq.shutdown()
+
+
+def test_create_from_handle_tolerates_arena_attach_failure():
+    """If a reader's `ShmTensorArena.__init__` can't attach to the writer's
+    shared-memory segment (`FileNotFoundError` -- e.g. "deserialized on a
+    different node"), `create_from_handle` must not crash: this is an
+    anticipated, deferred-failure state (`ShmTensorArena.__del__` already
+    guards for it with `hasattr(self, "shared_memory")`), matching how the
+    sibling `ShmRingBuffer` path handles the identical `FileNotFoundError`
+    without ever dereferencing `.shared_memory` up front."""
+    writer_mq = MessageQueue(n_reader=1, n_local_reader=1, enable_shm_tensor_arena=True)
+    handle = writer_mq.export_handle()
+    n_reader, slot_bytes, n_slots, _real_name = handle.tensor_arena_handle
+    bogus_handle = dataclasses.replace(
+        handle,
+        tensor_arena_handle=(n_reader, slot_bytes, n_slots, "vllm-arena-does-not-exist"),
+    )
+
+    reader_mq = MessageQueue.create_from_handle(bogus_handle, rank=0)
+
+    # Attach failed silently: the arena object exists but never got its
+    # shared_memory attribute, and was never registered.
+    assert reader_mq.tensor_arena is not None
+    assert not hasattr(reader_mq.tensor_arena, "shared_memory")
+    assert "vllm-arena-does-not-exist" not in shm_tensor_arena._TENSOR_ARENAS
+
+    reader_mq.shutdown()
     writer_mq.shutdown()
 
 

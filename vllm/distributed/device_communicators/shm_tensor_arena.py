@@ -67,11 +67,18 @@ _ARENA_MIN_BYTES = 8 * 1024 * 1024
 # is not guaranteed to attach to only one arena (that only happens to be true
 # today, since only the engine->worker broadcast queue enables the arena), so
 # this is a name-keyed registry rather than a single slot. Populated by
-# `MessageQueue.create_from_handle`, and an entry is dropped by
-# `MessageQueue.shutdown` so the arena can be garbage-collected (and its
-# pinned mapping unregistered) instead of being held for the life of the
-# process. Consumed by `_rebuild_arena_tensor` when unpickling a tensor stub.
-_TENSOR_ARENAS: dict[str, "ShmTensorArena"] = {}
+# `MessageQueue.create_from_handle`; consumed by `_rebuild_arena_tensor` when
+# unpickling a tensor stub. A WEAK-value mapping: the registry must not be
+# the thing keeping an arena alive, or it holds the arena (and its pinned
+# mapping) for the life of the process even after the owning MessageQueue is
+# gone. Since the map holds no strong reference, there is also nothing for
+# `MessageQueue.shutdown` to proactively (and unsafely -- shutdown() can run
+# on a different thread than an in-flight `dequeue`, e.g. multiproc_executor's
+# death-pipe monitor) remove: an entry simply disappears once nothing else
+# (chiefly `MessageQueue.tensor_arena`) references that arena anymore.
+_TENSOR_ARENAS: weakref.WeakValueDictionary[str, "ShmTensorArena"] = (
+    weakref.WeakValueDictionary()
+)
 
 
 class ShmTensorArena:
@@ -168,6 +175,17 @@ class ShmTensorArena:
         nbytes = t.numel() * t.element_size()
         if nbytes > self.slot_bytes:
             return None
+        try:
+            # The uint8 view exposes the raw bytes via the buffer protocol.
+            # Computed BEFORE claiming any slot, and with the same
+            # try/except as `_reduce_tensor`'s identical view: exotic
+            # tensors (e.g. with the conjugate bit set) don't support
+            # aliasing views and raise RuntimeError here. Falling back
+            # cleanly before claiming a slot avoids leaving one claimed
+            # with nothing ever written into it.
+            src = t.detach().reshape(-1).view(torch.uint8)
+        except RuntimeError:
+            return None
         memory_fence()
         for probe in range(self.n_slots):
             idx = (self._next_slot + probe) % self.n_slots
@@ -176,7 +194,6 @@ class ShmTensorArena:
                 if not free:
                     continue
                 meta[0] = 0  # claim
-            src = t.detach().reshape(-1).view(torch.uint8)
             slot_mv = self._slot(idx, nbytes)
             try:
                 dst = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
@@ -386,13 +403,16 @@ class _ArenaPickler(pickle.Pickler):
     """Pickler that diverts large contiguous CPU tensors into the arena.
 
     `reducer_override` is consulted before an object's normal reduction.
-    For a tensor that qualifies (CPU, strided, contiguous, >= the divert
-    threshold), it does ONE memcpy into a free arena slot and returns a
-    tiny `(arena_name, slot, nbytes, dtype, shape)` rebuild stub. Everything
-    it declines — too small, non-contiguous, or the arena is full — returns
-    `NotImplemented`, which falls through to the pickler's `dispatch_table`
-    (i.e. `_reduce_tensor`'s out-of-band `PickleBuffer` path), exactly as if
-    no arena were attached.
+    For a tensor that qualifies (CPU, strided, contiguous, not
+    `requires_grad` — the same criteria as `_reduce_tensor`, plus the
+    divert-size threshold), it does ONE memcpy into a free arena slot and
+    returns a tiny `(arena_name, slot, nbytes, dtype, shape)` rebuild stub.
+    Everything it declines — too small, non-contiguous, `requires_grad`,
+    exotic (e.g. conjugate-bit) tensors `write_tensor` can't alias, or the
+    arena is full — returns `NotImplemented`, which falls through to the
+    pickler's `dispatch_table` (i.e. `_reduce_tensor`'s out-of-band
+    `PickleBuffer` path, which applies the identical exclusions), exactly
+    as if no arena were attached.
     """
 
     def __init__(self, file, arena: ShmTensorArena, buffer_callback=None):
@@ -409,6 +429,7 @@ class _ArenaPickler(pickle.Pickler):
             and obj.device.type == "cpu"
             and obj.layout == torch.strided
             and obj.is_contiguous()
+            and not obj.requires_grad
             and obj.numel() * obj.element_size() >= _ARENA_MIN_BYTES
         ):
             idx = self.arena.write_tensor(obj)
