@@ -960,7 +960,7 @@ def compare_golden(
 
 
 def _format_error(where: str, problem: str) -> str:
-    return f"{where}: {problem}. Regenerate with `{REGENERATE_COMMAND}`"
+    return f"{where}: {problem}"
 
 
 def _require_mapping(value: object, where: str) -> dict[str, object]:
