@@ -35,9 +35,7 @@ from vllm.utils.flashinfer import has_flashinfer
 
 
 class TrtLlmMxfp4ExpertsBase:
-    """
-    MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic.
-    """
+    """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
     def __init__(
         self,
@@ -153,8 +151,7 @@ class TrtLlmMxfp4ExpertsBase:
 class TrtLlmMxfp4ExpertsMonolithic(
     TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsMonolithic
 ):
-    """
-    Monolithic version of the MXFP4 TRTLLM kernel (router + experts).
+    """Monolithic version of the MXFP4 TRTLLM kernel (router + experts).
     Wraps flashinfer.trtllm_fp4_block_scale_moe().
     """
 
@@ -287,8 +284,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
 
 
 class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    Modular base version of the MXFP4 TRTLLM kernel (just the experts).
+    """Modular base version of the MXFP4 TRTLLM kernel (just the experts).
     Wraps flashinfer.trtllm_fp4_block_scale_routed_moe().
     The subclasses for this are split because only the mxfp4+mxfp8 experts support
     PaddedStandard format.
