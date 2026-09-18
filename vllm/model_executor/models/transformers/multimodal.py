@@ -135,6 +135,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             return False
         return mm_tokens["num_video_tokens"] is not None
 
+    @cached_property
+    def _video_needs_metadata(self) -> bool:
+        video_processor = getattr(self.get_hf_processor(), "video_processor", None)
+        return getattr(video_processor, "do_sample_frames", False)
+
     def _get_min_video_frames(self) -> int:
         video_processor = self.get_hf_processor().video_processor
         # A processor without `temporal_patch_size` groups no frames, so one is enough
@@ -167,7 +172,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             target_sr=self._get_audio_sampling_rate()
             if self._is_audio_model()
             else None,
-            video_needs_metadata=self._is_video_model,
+            video_needs_metadata=self._video_needs_metadata,
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
@@ -376,8 +381,8 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
     ) -> list["VideoItem"]:
         """Attach the metadata the parser requires to each dummy video.
 
-        `video_needs_metadata=True` (see `get_data_parser`) makes the parser
-        require a metadata dict on every item, and `do_sample_frames=False`
+        `video_needs_metadata` (see `get_data_parser`) makes the parser require
+        a metadata dict on every item, and `do_sample_frames=False`
         plus `frames_indices=range(T)` has the frames consumed verbatim.
         """
         videos = super()._get_dummy_videos(
@@ -390,14 +395,14 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         videos = [v.copy() for v in videos]
 
         video_processor = self.info.get_hf_processor().video_processor
-        fps = getattr(video_processor, "fps", None) or 2.0
+        fps = getattr(video_processor, "fps", None)
 
         video_items: list[VideoItem] = []
         for video in videos:
             video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": fps,
-                "duration": video_num_frames / fps,
+                "duration": video_num_frames / fps if fps else None,
                 "total_num_frames": video_num_frames,
                 "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
@@ -424,7 +429,7 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
         hf_data = hf_inputs.hf_data
 
-        if "videos" not in hf_data:
+        if "videos" not in hf_data or not self.info._video_needs_metadata:
             return hf_inputs
 
         videos = hf_data["videos"]

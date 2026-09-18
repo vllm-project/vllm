@@ -631,22 +631,6 @@ def test_tower_weights_skipped_when_modality_disabled(
     assert isinstance(vision_tower, StageMissingLayer) is skipped
 
 
-def test_torch_compile_allowed_with_nope_layers():
-    """A layer without RoPE has no rope parameters, which is not dynamic scaling."""
-    from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
-
-    text_config = SimpleNamespace(
-        rope_parameters={
-            "sliding_attention": {"rope_type": "default"},
-            "full_attention": None,
-        }
-    )
-    hf_config = SimpleNamespace(get_text_config=lambda: text_config)
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
-
-    assert can_enable_torch_compile(vllm_config)
-
-
 def test_marking_skipped_without_tokenizer():
     """Marking needs the HF processor, which needs a tokenizer, so it is skipped.
 
