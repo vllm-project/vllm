@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
     kFp8DynamicTokenSym,
@@ -128,7 +131,7 @@ def sigmoid_mul_fp8_per_token(
 
 def o_proj_is_ptpc_fp8(o_proj: torch.nn.Module) -> bool:
     """True when o_proj advertised the per-token FP8 consumer ABI."""
-    return getattr(o_proj, "input_quant_key", None) == kFp8DynamicTokenSym
+    return get_input_quant_key(o_proj) == kFp8DynamicTokenSym
 
 
 def wrap_ptpc_activation(
