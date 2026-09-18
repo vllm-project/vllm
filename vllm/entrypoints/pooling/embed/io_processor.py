@@ -57,6 +57,7 @@ logger = init_logger(__name__)
 class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0
+    num_chunks: int = 0
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
@@ -214,6 +215,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator.weighted_sum += weighted_embedding
 
             aggregator.total_weight += weight
+            aggregator.num_chunks += 1
 
         if ctx.original_engine_inputs is None:
             raise ValueError("Original engine inputs not available")
@@ -239,6 +241,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 ):
                     # Compute final mean embedding
                     final_embedding = weighted_sum / total_weight
+                    if ctx.pooling_params.use_activation and aggregator.num_chunks > 1:
+                        final_embedding = torch.nn.functional.normalize(
+                            final_embedding, dim=-1
+                        )
 
                     # Create a PoolingRequestOutput
                     # for the aggregated result
