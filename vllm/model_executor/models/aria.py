@@ -222,6 +222,7 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            is_fused_checkpoint_transposed=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -267,13 +268,11 @@ class AriaTextModel(LlamaModel, SupportsQuant):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    # Aria packs all experts into single (transposed) fc1/fc2 tensors, which is
-    # exactly the pre-fused checkpoint layout FusedMoE self-loads once fc1/fc2
-    # are renamed to the fused gate_up_proj/down_proj names.
+    # The fused expert loader expects names without the .weight suffix.
     hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_substr={
-            "experts.fc1": "experts.gate_up_proj",
-            "experts.fc2": "experts.down_proj",
+        orig_to_new_suffix={
+            "experts.fc1.weight": "experts.gate_up_proj",
+            "experts.fc2.weight": "experts.down_proj",
         }
     )
 
