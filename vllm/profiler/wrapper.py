@@ -6,10 +6,9 @@ import inspect
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
-from typing import Literal
 from uuid import uuid4
 
 import torch
@@ -18,7 +17,7 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import _is_uri_path
+from vllm.config.profiler import TorchProfilerActivity, _is_uri_path
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -55,6 +54,11 @@ class WorkerProfiler(ABC):
     @property
     def is_running(self) -> bool:
         """Whether the underlying profiler is currently collecting data."""
+        return self._running
+
+    @property
+    def should_annotate(self) -> bool:
+        """Whether worker iterations should receive profiler annotations."""
         return self._running
 
     @abstractmethod
@@ -176,7 +180,6 @@ class WorkerProfiler(ABC):
         return nullcontext()
 
 
-TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 TorchProfilerActivityMap = {
     "CPU": torch.profiler.ProfilerActivity.CPU,
     "CUDA": torch.profiler.ProfilerActivity.CUDA,
@@ -191,7 +194,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         profiler_config: ProfilerConfig,
         worker_name: str,
         local_rank: int,
-        activities: list[TorchProfilerActivity],
+        activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
     ) -> None:
         super().__init__(profiler_config)
@@ -224,7 +227,11 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
-        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
+        self._records_cpu_activity = "CPU" in activities
+        self.dump_cuda_time_total = (
+            "CUDA" in activities and profiler_config.torch_profiler_dump_cuda_time_total
+        )
+        self.dump_cpu_time_total = self._records_cpu_activity and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
         profiler_schedule = None
@@ -244,7 +251,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self.profiler = torch.profiler.profile(
+        self._profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -253,6 +260,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self.profiler: torch.profiler.profile | None = None
 
         # Track if we're using a schedule (need to call step())
         self._uses_schedule = profiler_schedule is not None
@@ -260,10 +268,11 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Subtract 1 because profiler.start() already consumes step 0
         # (WAIT or WARMUP), so only wait + warmup - 1 non-active steps
         # remain to be advanced through via profiler.step() calls.
-        self._warmup_steps_remaining = max(
+        self._initial_warmup_steps_remaining = max(
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
 
     def _build_profiler_table(
@@ -271,6 +280,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
+        assert self.profiler is not None
         group_by_input_shape = (
             current_platform.is_cpu()
             and self.profiler_config.torch_profiler_record_shapes
@@ -299,7 +309,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         add_metadata_json is a no-op until Kineto is initialized, which with a
         schedule only happens after the WAIT phase, so stamp once it's live.
         """
-        if self._version_metadata_added:
+        if self._version_metadata_added or self.profiler is None:
             return
         # None while the schedule is still in the WAIT phase.
         if self.profiler.profiler is None:
@@ -319,6 +329,9 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
+        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
+        self._version_metadata_added = False
         self.profiler.start()
         # No-schedule case: Kineto is live immediately. With a schedule this
         # no-ops and _profiler_step stamps it once WAIT ends.
@@ -326,11 +339,11 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _stop(self) -> None:
+        assert self.profiler is not None
         self.profiler.stop()
 
-        profiler_config = self.profiler_config
         rank = self.local_rank
-        if profiler_config.torch_profiler_dump_cuda_time_total:
+        if self.dump_cuda_time_total:
             table = self._build_profiler_table(sort_key="self_cuda_time_total")
             self._write_profiler_table(rank, table)
 
@@ -358,6 +371,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         """
         if self._uses_schedule:
+            assert self.profiler is not None
             self.profiler.step()
             # Stamp once the schedule leaves WAIT and Kineto is live.
             self._maybe_add_version_metadata()
@@ -367,8 +381,15 @@ class TorchProfilerWrapper(WorkerProfiler):
                 return False
         return True
 
+    @property
+    @override
+    def should_annotate(self) -> bool:
+        return self._running and self._records_cpu_activity
+
     @override
     def annotate_context_manager(self, name: str):
+        if not self.should_annotate:
+            return nullcontext()
         return torch.profiler.record_function(name)
 
 
