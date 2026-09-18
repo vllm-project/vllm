@@ -586,6 +586,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Batch Invariance"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 35
       depends_on:
