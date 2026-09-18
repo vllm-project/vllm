@@ -109,6 +109,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -135,6 +136,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
