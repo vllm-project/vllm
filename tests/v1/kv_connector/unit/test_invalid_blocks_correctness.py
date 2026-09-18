@@ -483,8 +483,7 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 def test_update_invalid_blocks_resets_output_placeholders_branch1(
     recompute_scheduler: Scheduler,
 ):
-    """
-    Regression test for #45138 — Branch 1 (unique invalid block).
+    """Regression test for #45138 — Branch 1 (unique invalid block).
 
     When _update_requests_with_invalid_blocks truncates num_computed_tokens
     at the first invalid block, it must also reset num_output_placeholders to 0.
@@ -545,8 +544,7 @@ def test_update_invalid_blocks_resets_output_placeholders_branch1(
 def test_update_invalid_blocks_resets_output_placeholders_branch2(
     recompute_scheduler: Scheduler,
 ):
-    """
-    Regression test for #45138 — Branch 2 (shared-block fallthrough).
+    """Regression test for #45138 — Branch 2 (shared-block fallthrough).
 
     When two requests share the same invalid block, the second request
     skips the first-hit truncation (marked_invalid_block remains False)
