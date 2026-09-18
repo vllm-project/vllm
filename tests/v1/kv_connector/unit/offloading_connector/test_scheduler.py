@@ -1079,6 +1079,38 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+@pytest.mark.parametrize("tracked", [True, False])
+@pytest.mark.parametrize(
+    ("computed", "in_flight", "num_tokens", "expected"),
+    [(32, 16, 64, 16), (16, 16, 64, 0), (64, 0, 64, 64), (80, 0, 80, 79)],
+)
+def test_request_finished_records_processed_prefix(
+    tracked, computed, in_flight, num_tokens, expected
+):
+    """Final context excludes in-flight work and the uncommitted last token."""
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._maybe_observe_lookup_async_delay = lambda state: None
+    request = SimpleNamespace(
+        request_id="req",
+        kv_transfer_params=None,
+        num_computed_tokens=computed,
+        num_in_flight_tokens=in_flight,
+        num_prompt_tokens=64,
+        num_tokens=num_tokens,
+    )
+    ctx = ReqContext(req_id="req")
+    state = SimpleNamespace(
+        req_context=ctx, transfer_jobs=(), update_offload_keys=lambda: None
+    )
+    scheduler._req_status = {"req": state} if tracked else {}
+
+    assert scheduler.request_finished(request) == (False, None)
+    if not tracked:
+        ctx = scheduler.manager.on_request_finished.call_args.args[0]
+    assert ctx.num_processed_tokens == expected
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_on_request_finished_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
@@ -4608,6 +4640,7 @@ class TestMambaHybridOffloadServing:
             request.num_prompt_tokens = self.PROMPT_TOKENS
             request.num_tokens = self.PROMPT_TOKENS
             request.num_computed_tokens = 0
+            request.num_in_flight_tokens = 0
             request.block_hashes = [
                 BlockHash(f"h{i}".encode())
                 for i in range(self.PROMPT_TOKENS // self.BLOCK)
