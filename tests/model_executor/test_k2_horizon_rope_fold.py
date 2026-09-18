@@ -5,6 +5,7 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.k2_horizon import (
+    K2HorizonRMSNorm,
     _rope_weight_perm,
     apply_partial_rope,
 )
@@ -91,6 +92,12 @@ def fold_qk_proj_weight(
 ) -> torch.Tensor:
     hidden = weight.shape[-1]
     return weight.view(-1, head_dim, hidden)[:, idx, :].reshape(-1, hidden).contiguous()
+
+
+def fold_qk_channels(
+    vec: torch.Tensor, head_dim: int, idx: torch.Tensor
+) -> torch.Tensor:
+    return vec.view(-1, head_dim)[:, idx].reshape(-1).contiguous()
 
 
 SHAPES = [
@@ -188,3 +195,78 @@ def test_rope_fold_matches_permute_then_rope(
     torch.testing.assert_close(
         scores(q_neox, k_neox), scores(q_gptj, k_gptj), atol=atol, rtol=rtol
     )
+
+
+@pytest.mark.parametrize("head_dim,rope_head_dim", SHAPES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("num_heads", [8, 2])
+def test_qk_bias_fold_matches_permute(
+    head_dim, rope_head_dim, dtype, num_heads, default_vllm_config
+):
+    set_random_seed(0)
+    num_tokens = 17
+    hidden_size = 512
+    torch.set_default_dtype(dtype)
+
+    scale = hidden_size**-0.5
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=DEVICE)
+    w = (
+        torch.randn(num_heads * head_dim, hidden_size, dtype=dtype, device=DEVICE)
+        * scale
+    )
+    b = torch.randn(num_heads * head_dim, dtype=dtype, device=DEVICE)
+
+    idx = _rope_weight_perm(head_dim, rope_head_dim).to(DEVICE)
+
+    ref = _apply_head_perm(
+        torch.nn.functional.linear(x, w, b), num_heads, head_dim, idx
+    )
+    folded = torch.nn.functional.linear(
+        x,
+        fold_qk_proj_weight(w, head_dim, idx),
+        fold_qk_channels(b, head_dim, idx),
+    )
+
+    if dtype == torch.float32:
+        atol, rtol = 1e-3, 1e-3
+    else:
+        atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(folded, ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a GPU (CUDA/ROCm)"
+)
+@pytest.mark.parametrize("head_dim,rope_head_dim", SHAPES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("num_heads", [8, 2])
+def test_qk_norm_scale_fold_matches_permute(
+    head_dim, rope_head_dim, dtype, num_heads, default_vllm_config
+):
+    set_random_seed(0)
+    num_tokens = 13
+    torch.set_default_dtype(dtype)
+
+    hidden = num_heads * head_dim
+    idx = _rope_weight_perm(head_dim, rope_head_dim).to(DEVICE)
+
+    x = torch.randn(num_tokens, hidden, dtype=dtype, device=DEVICE)
+
+    norm = K2HorizonRMSNorm(hidden_size=hidden, n_groups=num_heads).to(DEVICE)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(hidden, dtype=dtype, device=DEVICE))
+
+    y_ref = _apply_head_perm(norm(x.clone()), num_heads, head_dim, idx)
+
+    folded_norm = K2HorizonRMSNorm(hidden_size=hidden, n_groups=num_heads).to(DEVICE)
+    with torch.no_grad():
+        folded_norm.weight.copy_(fold_qk_channels(norm.weight, head_dim, idx))
+    # Permute x to emulate the folded q_proj/k_proj: at runtime the norm sees the
+    # already-permuted projection output (P @ x), not the raw activations.
+    y_folded = folded_norm(_apply_head_perm(x.clone(), num_heads, head_dim, idx))
+
+    if dtype == torch.float32:
+        atol, rtol = 1e-5, 1e-5
+    else:
+        atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(y_folded, y_ref, atol=atol, rtol=rtol)
