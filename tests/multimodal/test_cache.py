@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -17,6 +21,7 @@ from vllm.multimodal.cache import (
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
@@ -32,6 +37,8 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing import PromptInsertion
+from vllm.renderers.base import BaseRenderer
+from vllm.utils.async_utils import make_async
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
 from ..utils import create_new_process_for_each_test
@@ -92,7 +99,7 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
@@ -150,7 +157,7 @@ def _compare_caches(
         for item in all_items
     ]
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
@@ -247,6 +254,34 @@ class _StubModelConfig:
         return self._mm_config
 
 
+@pytest.mark.skip_global_cleanup
+def test_oversized_item_is_served_uncached():
+    """Items larger than the processor cache must not crash insert.
+
+    cachetools.LRUCache raises ValueError("value too large") when a single
+    item exceeds maxsize. Engine profiling uses a max-size dummy item, so this
+    used to abort EngineCore startup (vllm-project/vllm#52835). Skip the
+    insert and serve the item uncached instead.
+    """
+    # 1 KiB cache; a 4 KiB item cannot fit even if the cache is empty.
+    model_config = _StubModelConfig(mm_processor_cache_gb=1024 / GiB_bytes)
+    item = MultiModalKwargsItem.dummy(nbytes=4096)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+
+    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    assert p0_only.get_and_update_item((item, []), "big")[0] is item
+    assert not p0_only.is_cached_item("big")
+    assert p0_only.get_and_update_item((small, []), "small")[0] is small
+    assert p0_only.is_cached_item("small")
+
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    assert p0.get_and_update_item((item, []), "big")[0] is item
+    assert not p0.is_cached_item("big")
+    assert p1.get_and_update_item(item, "big") is item
+    assert "big" not in p1._cache
+
+
 def test_mm_cache_miss_raises_and_recovers():
     """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
 
@@ -331,6 +366,76 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     assert exc_info.value.mm_hashes == ["B", "D", "E"]
     # The non-drifted items were still ingested into P1 before the raise.
     assert "A" in p1._cache and "C" in p1._cache
+
+
+def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
+    """Regression test for the EngineCore crash with prefix caching + SHM cache.
+
+    On a repeated request, prefix caching can fully cover an item's
+    placeholder range, so strip_covered_mm_data() drops its payload: uncached
+    items arrive at the worker with data=None, while SHM-cached items keep
+    their address descriptor. Before the fix the SHM receiver asserted on the
+    None item, terminating EngineCore on the second identical request
+    (vllm-project/vllm#54994). The address item must still be resolved and
+    acknowledged so the object stays reclaimable.
+    """
+    monkeypatch.setenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_prefix_covered_items"
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(world_size=1),
+        model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
+    )
+    p0 = ShmObjectStoreSenderCache(vllm_config)  # type: ignore[arg-type]
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())  # type: ignore[arg-type]
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=100),
+            mm_hash=mm_hash,
+        )
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=1024)
+
+    try:
+        # Request 1 (sender miss): the payload is put into SHM; the worker
+        # receives an address descriptor and resolves it.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item, _ = p0.get_and_update_item((item, []), mm_hash)
+        first = _feature(mm_hash, address_item)
+        p1.get_and_update_features([first])
+        assert torch.equal(first.data["dummy"].data, item["dummy"].data)
+
+        # Request 2 (identical, fully prefix-covered): the sender hit takes
+        # writer references (touch + get_cached) and returns the address
+        # descriptor; the scheduler strips the covered uncached payload to
+        # data=None.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item_2, _ = p0.get_and_update_item(None, mm_hash)
+        covered_uncached = _feature("image_B", None)
+        covered_cached = _feature(mm_hash, address_item_2)
+
+        # Pre-fix this asserted in touch_receiver_cache_item and terminated
+        # EngineCore.
+        p1.get_and_update_features([covered_uncached, covered_cached])
+
+        assert covered_uncached.data is None
+        # The address item is resolved to the cached payload.
+        assert torch.equal(covered_cached.data["dummy"].data, item["dummy"].data)
+
+        # The hit's writer references were acknowledged by the worker, so the
+        # object remains reclaimable instead of permanently protected.
+        p0._shm_cache.free_unused()
+        assert not p0._shm_cache.is_cached(mm_hash)
+    finally:
+        p1._shm_cache.close()
+        p0.close()
 
 
 def _run_test_cache_eviction_lru(
@@ -653,6 +758,76 @@ def test_processor_cache_shared_across_loras():
 
     receiver_cache.get_and_update_features([feature_lora_b])
     assert feature_lora_b.data == item_data
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize(
+    "release_error",
+    [
+        None,
+        "requires a completed pause first",
+        "requires all executor memory to be resident",
+    ],
+    ids=["released", "not-paused", "nonresident-memory"],
+)
+@pytest.mark.asyncio
+async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
+    """Release must not leave a sender hit pointing at a cleared receiver."""
+    from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    model_config = SimpleNamespace(
+        get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
+    )
+    sender = MultiModalProcessorSenderCache(model_config)
+    receiver = MultiModalReceiverCache(model_config)
+    item = _dummy_item({"pixel_values": 16})
+    mm_hash = "image_A"
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert receiver.get_and_update_item(payload, mm_hash) is item
+    assert sender.get_and_update_item(None, mm_hash)[0] is None
+
+    renderer = SimpleNamespace(mm_processor_cache=sender, _mm_cache_stats=None)
+    renderer.clear_mm_cache = partial(BaseRenderer.clear_mm_cache, renderer)
+
+    def release():
+        if release_error:
+            raise RuntimeError(release_error)
+        receiver.clear_cache()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        renderer._clear_mm_cache_async = make_async(
+            renderer.clear_mm_cache, executor=executor
+        )
+        renderer.clear_mm_cache_async = partial(
+            BaseRenderer.clear_mm_cache_async, renderer
+        )
+        engine = SimpleNamespace(
+            renderer=renderer,
+            engine_core=SimpleNamespace(
+                release_kv_cache_memory=release,
+                release_kv_cache_memory_async=make_async(release, executor=executor),
+            ),
+            logger_manager=Mock(),
+        )
+
+        async def call_release():
+            if use_async:
+                await AsyncLLM.release_kv_cache_memory(engine)
+            else:
+                LLMEngine.release_kv_cache_memory(engine)
+
+        if release_error:
+            with pytest.raises(RuntimeError, match=release_error):
+                await call_release()
+            engine.logger_manager.record_sleep_state.assert_not_called()
+        else:
+            await call_release()
+            engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
+
+    payload, _ = sender.get_and_update_item((item, []), mm_hash)
+    assert payload is item
+    assert receiver.get_and_update_item(payload, mm_hash) is item
 
 
 _SLEEP_VISION_PROMPT = (

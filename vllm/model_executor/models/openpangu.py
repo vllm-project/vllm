@@ -677,14 +677,18 @@ class OpenPanguSinkAttention(nn.Module):
                     },
                 )
             else:
-                self.param_sink_value = torch.zeros(
-                    (
-                        self.param_sink_number,
-                        self.num_kv_heads,
-                        self.v_channels,
+                self.register_buffer(
+                    "param_sink_value",
+                    torch.zeros(
+                        (
+                            self.param_sink_number,
+                            self.num_kv_heads,
+                            self.v_channels,
+                        ),
+                        device=current_platform.current_device(),
+                        dtype=config.torch_dtype,
                     ),
-                    device=current_platform.current_device(),
-                    dtype=config.torch_dtype,
+                    persistent=False,
                 )
         # To enable dummy run with out weight
         self.post_weight_load()
@@ -1153,10 +1157,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

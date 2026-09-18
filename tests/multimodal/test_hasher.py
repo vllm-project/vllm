@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import hashlib
+import struct
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -8,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
@@ -137,6 +139,33 @@ def test_hash_collision_video_num_frames():
     )
 
 
+def test_hash_video_tensor_frames():
+    """Videos holding tensor frames (e.g. NVDEC-decoded) hash like
+    array-framed ones, from the original bytes without a D2H copy."""
+    source = b"x" * 100
+
+    def item_for_hash(frames):
+        metadata = {
+            "total_num_frames": 2,
+            "fps": 2.0,
+            "duration": 1.0,
+            "video_backend": "torchcodec",
+            "frames_indices": [0, 1],
+            "do_sample_frames": False,
+        }
+        video = MediaWithBytes((frames, metadata), source)
+        items = MultiModalDataParser()._parse_video_data([video])
+        return items.get_all_items_for_hash()[0]
+
+    np_frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    torch_frames = torch.zeros((2, 8, 8, 3), dtype=torch.uint8)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", video=item_for_hash(np_frames)) == (
+        hasher.hash_kwargs("blake3", video=item_for_hash(torch_frames))
+    )
+
+
 def test_hash_non_contiguous_array():
     arr = np.arange(24).reshape(4, 6).T
     assert not arr.flags.c_contiguous
@@ -170,6 +199,33 @@ def test_hash_image_exif_id():
     assert hasher.hash_kwargs("blake3", image=image2) == hasher.hash_kwargs(
         "blake3", image=image2a
     )
+
+
+def test_hash_image_malformed_exif():
+    # Test that images with malformed EXIF headers (e.g. invalid TIFF header)
+    # do not raise an unhandled exception during hashing and fall back to image data.
+    buf = BytesIO()
+    Image.new("RGB", (64, 48)).save(buf, "JPEG")
+    jpg = buf.getvalue()
+    rest = jpg[2:]
+    rest = rest[2 + struct.unpack(">H", rest[2:4])[0] :]
+    payload = b"Exif\x00\x00XXXX\x00\x00\x00\x08" + bytes(32)
+    data = b"\xff\xd8\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + rest
+
+    image = Image.open(BytesIO(data))
+    with contextlib.suppress(Exception):
+        image = ImageOps.exif_transpose(image)
+    image.load()
+
+    hasher = MultiModalHasher
+    # Should hash without raising SyntaxError or any other exception
+    hash_val = hasher.hash_kwargs("blake3", image=image)
+    assert isinstance(hash_val, str) and len(hash_val) > 0
+
+    # Also verify MediaWithBytes wrapping the image with malformed EXIF
+    media_item = MediaWithBytes(image, data)
+    hash_media = hasher.hash_kwargs("blake3", image=media_item)
+    assert isinstance(hash_media, str) and len(hash_media) > 0
 
 
 def _rgba_png_bytes() -> bytes:

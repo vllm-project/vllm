@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from typing import Protocol
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -27,8 +28,37 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
+def test_routed_experts_offset_validated_before_engine_submission(offset):
+    """Reject invalid offsets even when routed-expert output is disabled."""
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    params = SamplingParams(routed_experts_prompt_start=offset)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    if not 0 <= offset <= 3:
+        with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+            InputProcessor.process_inputs(
+                processor, "invalid", prompt, params, ("generate",)
+            )
+        params.routed_experts_prompt_start = 0
+
+    request = InputProcessor.process_inputs(
+        processor, "valid", prompt, params, ("generate",)
+    )
+    assert (
+        request.sampling_params.routed_experts_prompt_start
+        == params.routed_experts_prompt_start
+    )
 
 
 # --- Stop strings: public requests cap the number of stop strings ---------
@@ -162,6 +192,40 @@ def test_bad_word_tokenization_limit_can_be_overridden(monkeypatch):
     assert tokenizer.calls == 3
 
 
+class EmptyBaseEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [216] if text.startswith(" ") else []
+
+
+def test_bad_word_rejects_empty_base_tokenization():
+    params = SamplingParams(bad_words=["\x16"])
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="must tokenize to at least one token",
+    ) as exc_info:
+        params.update_from_tokenizer(EmptyBaseEncodingTokenizer())
+
+    assert exc_info.value.parameter == "bad_words"
+
+
+class EmptyPrefixedEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [] if text.startswith(" ") else [321]
+
+
+def test_bad_word_skips_empty_optional_prefixed_tokenization():
+    params = SamplingParams(bad_words=["word"])
+
+    params.update_from_tokenizer(EmptyPrefixedEncodingTokenizer())
+
+    assert params.bad_words_token_ids == [[321]]
+
+
 # --- Beam search: beam width / n honor the sequence cap --------------------
 
 
@@ -271,3 +335,19 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
         "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
         "Hi<｜end▁of▁sentence｜>Again<｜end▁of▁sentence｜>"
     )
+
+
+@pytest.mark.parametrize(
+    "encoding_module",
+    ENCODING_MODULES,
+    ids=["deepseek_v32", "deepseek_v4"],
+)
+def test_encode_messages_unknown_role_raises_value_error(encoding_module):
+    # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be
+    # raised as ValueError so the OpenAI serving layer maps it to HTTP 400
+    # instead of NotImplementedError, which would map to HTTP 501.
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encoding_module.encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

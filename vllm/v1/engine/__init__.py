@@ -16,7 +16,11 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    PrefillStats,
+    RequestSpecDecodeMetrics,
+    SchedulerStats,
+)
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
@@ -41,8 +45,7 @@ class EEPNotificationType(enum.Enum):
 
 
 class FinishReason(enum.IntEnum):
-    """
-    Reason a request finished - stop, length, abort, error, or repetition.
+    """Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -98,6 +101,8 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    # Full-attention block size in tokens after initialization, or unavailable.
+    effective_attention_block_size: int | None = None
 
 
 class EngineCoreRequest(
@@ -225,6 +230,10 @@ class EngineCoreOutput(
 
     new_sampling_mask: SamplingMaskLists | None = None
 
+    # Per-request spec-decode acceptance; attached only on the final output.
+    # Appended last so `array_like` positional serialization stays compatible.
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -274,8 +283,7 @@ class EngineCoreOutputs(
 
 
 class EngineCoreRequestType(enum.Enum):
-    """
-    Request types defined as hex byte strings, so it can be sent over sockets
+    """Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
 
@@ -300,9 +308,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
 
 
 class ReconfigureRankType(enum.IntEnum):
-    """
-    Rank type for reconfiguring distributed request.
-    """
+    """Rank type for reconfiguring distributed request."""
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2

@@ -67,6 +67,10 @@ from vllm.model_executor.models.glm4_moe import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -74,7 +78,6 @@ from .utils import (
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -109,6 +112,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         prefix: str,
         config: "Glm4MoeLiteConfig | None" = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__()
 
@@ -132,10 +136,16 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
 
+        attn_cls: Callable[..., Glm4MoeLiteMLAAttention | Glm4MoeLiteAttention]
         if model_config.use_mla:
             attn_cls = Glm4MoeLiteMLAAttention
         else:
             attn_cls = Glm4MoeLiteAttention
+        attn_kwargs: dict[str, typing.Any] = (
+            {"index_group_builder": index_group_builder}
+            if attn_cls is Glm4MoeLiteMLAAttention
+            else {}
+        )
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -145,13 +155,14 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
+            q_lora_rank=getattr(config, "q_lora_rank", None),
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            **attn_kwargs,
         )
 
         if (
@@ -234,6 +245,14 @@ class Glm4MoeLiteModel(nn.Module):
             )
         else:
             topk_indices_buffer = None
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -252,6 +271,7 @@ class Glm4MoeLiteModel(nn.Module):
                 config=config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                index_group_builder=index_group_builder,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -266,9 +286,6 @@ class Glm4MoeLiteModel(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -454,7 +471,9 @@ class Glm4MoeLiteModel(nn.Module):
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, mapping_expert_id, mapping_shard_id = (
+                            mapping
+                        )
                         if weight_name not in chunk_name:
                             continue
 
@@ -480,8 +499,8 @@ class Glm4MoeLiteModel(nn.Module):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                            shard_id=mapping_shard_id,
+                            expert_id=mapping_expert_id,
                             return_success=True,
                         )
                         if success:
@@ -502,9 +521,10 @@ class Glm4MoeLiteModel(nn.Module):
                             continue
 
                         # Remapping the name of FP8 kv-scale.
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         if is_pp_missing_parameter(name, self):
                             continue

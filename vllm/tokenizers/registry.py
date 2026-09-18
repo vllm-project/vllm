@@ -7,9 +7,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import huggingface_hub
+import transformers
+from packaging.version import Version
+from transformers.models.auto.tokenization_auto import (
+    TOKENIZER_MAPPING_NAMES as _HF_TOKENIZER_MAPPING_NAMES,
+)
+from transformers.utils.import_utils import is_mistral_common_available
 from typing_extensions import TypeVar, assert_never
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
@@ -25,6 +31,8 @@ if TYPE_CHECKING:
     from vllm.config.model import ModelConfig, RunnerType
 
 logger = init_logger(__name__)
+
+_MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL = Version("5.15.0")
 
 
 # Model types whose hub tokenizer_class is incorrect and should be overridden with
@@ -45,6 +53,7 @@ _VLLM_TOKENIZERS = {
     "cohere": ("hf", "CachedHfTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
+    "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
@@ -72,8 +81,6 @@ class _TokenizerRegistry:
             )
 
         self.tokenizers[tokenizer_mode] = (module, class_name)
-
-        return None
 
     def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
         if tokenizer_mode not in self.tokenizers:
@@ -149,12 +156,15 @@ def resolve_tokenizer_args(
     if (
         tokenizer_mode == "auto"
         and is_mistral_model_repo(
-            model_name_or_path=str(tokenizer_name), revision=revision
+            model_name_or_path=str(tokenizer_name),
+            revision=revision,
+            token=kwargs.get("token"),
         )
         and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
+            token=kwargs.get("token"),
         )
     ):
         tokenizer_mode = "mistral"
@@ -162,6 +172,13 @@ def resolve_tokenizer_args(
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
+
+    if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
+        kwargs["mistral_format"] = False
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 
@@ -230,6 +247,27 @@ def get_tokenizer(
             trust_remote_code=trust_remote_code,
             revision=revision,
             config_format=config_format,
+            token=kwargs.get("token"),
+        )
+
+    # TODO: delete when Transformers version dependency is bumped >= 5.15.0
+    if (
+        tokenizer_mode == "hf"
+        and Version(transformers.__version__) < _MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL
+        and is_mistral_common_available()
+        and _HF_TOKENIZER_MAPPING_NAMES.get(getattr(config, "model_type", None))
+        == "MistralCommonBackend"
+        and any_pattern_in_repo_files(
+            model_name_or_path=str(tokenizer_name),
+            allow_patterns=["tekken.json", "tokenizer.model.v*"],
+            revision=revision,
+            token=kwargs.get("token"),
+        )
+    ):
+        raise ValueError(
+            "Loading Mistral models with tokenizer_mode='hf' requires "
+            f"transformers>={_MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL}. "
+            "Please upgrade transformers or delete Mistral tokenizer files."
         )
 
     # Some models have an incorrect tokenizer_class on the hub.

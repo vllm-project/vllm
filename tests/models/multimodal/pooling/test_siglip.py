@@ -63,6 +63,20 @@ def _run_test(
         vllm_model.embed(texts)
         vllm_model.embed([""], images=images)
 
+        mixed_outputs = vllm_outputs_per_case[2]
+        check_embeddings_close(
+            embeddings_0_lst=[vllm_outputs_per_case[0][0]],
+            embeddings_1_lst=[mixed_outputs[0]],
+            name_0="text_only",
+            name_1="mixed_text",
+        )
+        check_embeddings_close(
+            embeddings_0_lst=[vllm_outputs_per_case[1][0]],
+            embeddings_1_lst=[mixed_outputs[1]],
+            name_0="image_only",
+            name_1="mixed_image",
+        )
+
     with hf_runner(model, dtype=dtype, auto_cls=SiglipModel) as hf_model:
         hf_outputs_per_case = []
         for input_texts, input_images, tokenization_kwargs in input_cases:
@@ -122,6 +136,14 @@ def test_models(
             },
         ),
         (HF_IMAGE_PROMPTS, images, {}),
+        (
+            [HF_TEXT_PROMPTS[0], HF_IMAGE_PROMPTS[0]],
+            [None, images[0]],
+            {
+                "padding": "max_length",
+                "max_length": 64,
+            },
+        ),
     ]
 
     _run_test(
