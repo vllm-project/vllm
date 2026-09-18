@@ -115,11 +115,9 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    expand_idx_mapping,
     post_update,
     post_update_num_computed_tokens,
-    prepare_pos_seq_lens,
+    prepare_decode_inputs,
     prepare_prefill_inputs,
     set_dummy_context,
 )
@@ -1312,7 +1310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
-            # combine_sampled_and_draft_tokens places a request's logits rows
+            # prepare_decode_inputs places a request's logits rows
             # at [query_end - num_logits, query_end). Fewer query rows than
             # that would silently select the preceding request's hidden states.
             assert (num_scheduled_tokens_np >= num_logits).all()
@@ -1353,10 +1351,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
-        if draft_tokens:
-            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
-                idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
-            )
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
 
@@ -1372,30 +1366,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.num_computed_tokens.gpu,
             )
 
-        # Prepare positions and seq_lens.
-        prepare_pos_seq_lens(
+        # One kernel prepares positions and seq_lens, writes the last sampled
+        # and draft token ids into input_ids, computes the logits indices and,
+        # with draft tokens, expands idx_mapping to one entry per logit row.
+        logits_indices, expanded, expanded_pos = prepare_decode_inputs(
             idx_mapping,
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
-        )
-        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
-
-        # Some input token ids are directly read from the last sampled tokens
-        # and draft tokens. Also, get the logits indices to sample tokens from.
-        logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
-            idx_mapping,
             self.req_states.last_sampled_tokens,
-            query_start_loc,
-            seq_lens,
             self.req_states.prefill_len.gpu,
             self.req_states.draft_tokens,
             cu_num_logits,
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
+            max_expand_len=self.decode_query_len if draft_tokens else None,
         )
+        if draft_tokens:
+            expanded_idx_mapping, expanded_local_pos = expanded, expanded_pos
+        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
         fast_prefill = None
         if self.fast_prefill is not None:

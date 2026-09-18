@@ -186,3 +186,84 @@ def test_maybe_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
+@pytest.mark.parametrize(
+    "num_new_sampled,drafts_per_req",
+    [(1, [0, 0, 0, 0]), (1, [0, 3, 2, 1]), (0, [1, 3, 2, 1])],
+    ids=["bonus-only", "bonus-plus-drafts", "drafts-only"],
+)
+def test_prepare_decode_inputs_matches_per_request_reference(
+    num_new_sampled, drafts_per_req
+):
+    """The fused kernel must write what the three per-request kernels wrote.
+
+    Covers positions, seq_lens, sampled/draft input ids, logits indices and the
+    expanded per-logit request mapping. Request 0 is mid-prefill so its ids must
+    survive untouched, and request 2 has more query rows than logits rows so the
+    ``end - num_logits`` placement is exercised.
+    """
+    from vllm.v1.worker.gpu.input_batch import prepare_decode_inputs
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    max_num_reqs, num_spec = 8, 3
+    idx_mapping = torch.tensor([5, 2, 7, 0], dtype=torch.int32)
+    num_computed = torch.tensor([9, 0, 40, 0, 0, 16, 0, 60], dtype=torch.int32)
+    prefill_len = torch.tensor([0, 0, 0, 9, 0, 999, 0, 0], dtype=torch.int32)
+    num_logits = [d + num_new_sampled for d in drafts_per_req]
+    query_lens = [n + (r == 2) for r, n in enumerate(num_logits)]
+    cu = torch.tensor([0, *torch.tensor(num_logits).cumsum(0)], dtype=torch.int32)
+    qsl = torch.tensor([0, *torch.tensor(query_lens).cumsum(0)], dtype=torch.int32)
+    num_tokens, total_logits = int(qsl[-1]), int(cu[-1])
+    last_sampled = torch.randint(1, 999, (max_num_reqs,), dtype=torch.int64)
+    drafts = torch.randint(1, 999, (max_num_reqs, num_spec), dtype=torch.int64)
+
+    pos_ref = torch.zeros(num_tokens, dtype=torch.int64)
+    seq_ref = torch.zeros(max_num_reqs, dtype=torch.int32)
+    ids_ref = torch.zeros(num_tokens, dtype=torch.int32)
+    li_ref, ex_ref, lp_ref = [], [], []
+    for r, st in enumerate(idx_mapping.tolist()):
+        start, end = int(qsl[r]), int(qsl[r + 1])
+        seq = int(num_computed[st]) + end - start
+        seq_ref[r] = seq
+        pos_ref[start:end] = torch.arange(int(num_computed[st]), seq)
+        n = int(cu[r + 1]) - int(cu[r])
+        li_ref += list(range(end - n, end))
+        ex_ref += [st] * n
+        lp_ref += list(range(n))
+        if seq <= int(prefill_len[st]):
+            continue
+        if num_new_sampled and seq - n >= int(prefill_len[st]):
+            ids_ref[end - n] = last_sampled[st]
+        if n - num_new_sampled:
+            ids_ref[end - n + num_new_sampled : end] = drafts[st, : n - num_new_sampled]
+
+    pos = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    seq_lens = torch.full((max_num_reqs,), 99, dtype=torch.int32, device=device)
+    ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    logits_indices, expanded, local_pos = prepare_decode_inputs(
+        idx_mapping.to(device),
+        qsl.to(device),
+        num_computed.to(device),
+        pos,
+        seq_lens,
+        ids,
+        last_sampled.to(device),
+        prefill_len.to(device),
+        drafts.to(device),
+        cu.to(device),
+        total_logits,
+        num_new_sampled,
+        max_expand_len=(num_spec + 1) if any(drafts_per_req) else None,
+    )
+    assert torch.equal(pos.cpu(), pos_ref)
+    assert torch.equal(seq_lens.cpu(), seq_ref)
+    assert torch.equal(ids.cpu(), ids_ref)
+    assert logits_indices.cpu().tolist() == li_ref
+    if any(drafts_per_req):
+        assert expanded.cpu().tolist() == ex_ref
+        assert local_pos.cpu().tolist() == lp_ref
+    else:
+        assert expanded is None and local_pos is None

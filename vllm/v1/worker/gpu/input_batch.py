@@ -337,15 +337,29 @@ def prepare_prefill_inputs(
 
 
 @triton.jit
-def _prepare_pos_seq_lens_kernel(
-    pos_ptr,
-    seq_lens_ptr,
+def _prepare_decode_inputs_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
+    pos_ptr,
+    seq_lens_ptr,
     max_num_reqs,
+    input_ids_ptr,
+    last_sampled_tokens_ptr,
+    prefill_len_ptr,
+    draft_tokens_ptr,
+    draft_tokens_stride,
+    cu_num_logits_ptr,
+    logits_indices_ptr,
+    expanded_idx_mapping_ptr,
+    expanded_local_pos_ptr,
     BLOCK_SIZE: tl.constexpr,
+    LOGITS_BLOCK: tl.constexpr,
+    NUM_NEW_SAMPLED_TOKENS: tl.constexpr,
+    EXPAND_IDX_MAPPING: tl.constexpr,
 ):
+    """One program per request: positions, seq_lens, sampled/draft input ids,
+    logits indices and (optionally) the per-logit request mapping."""
     req_id = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
     if req_id == num_reqs:
@@ -358,90 +372,47 @@ def _prepare_pos_seq_lens_kernel(
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
-
     start = tl.load(query_start_loc_ptr + req_id)
     end = tl.load(query_start_loc_ptr + req_id + 1)
     query_len = end - start
-
     seq_len = num_computed_tokens + query_len
     tl.store(seq_lens_ptr + req_id, seq_len)
-
     for i in tl.range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
-        pos = num_computed_tokens + block
-        tl.store(pos_ptr + start + block, pos, mask=mask)
+        tl.store(pos_ptr + start + block, num_computed_tokens + block, mask=mask)
 
-
-def prepare_pos_seq_lens(
-    idx_mapping: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    num_computed_tokens: torch.Tensor,
-    pos: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    # NOTE(woosuk): We do +1 because the last thread block is used
-    # to pad unused seq_lens as 0 for full CUDA graphs.
-    _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
-        pos,
-        seq_lens,
-        idx_mapping,
-        query_start_loc,
-        num_computed_tokens,
-        seq_lens.shape[0],
-        BLOCK_SIZE=1024,
-    )
-
-
-@triton.jit
-def _combine_sampled_and_draft_tokens_kernel(
-    input_ids_ptr,
-    idx_mapping_ptr,
-    last_sampled_tokens_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    prefill_len_ptr,
-    draft_tokens_ptr,
-    draft_tokens_stride,
-    cu_num_logits_ptr,
-    logits_indices_ptr,
-    BLOCK_SIZE: tl.constexpr,
-    NUM_NEW_SAMPLED_TOKENS: tl.constexpr = 1,
-):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
-
-    # Get the number of logits and draft tokens.
-    cu_num_logits_start = tl.load(cu_num_logits_ptr + batch_idx)
-    cu_num_logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
+    # Logits rows sit at [end - num_logits, end).
+    cu_num_logits_start = tl.load(cu_num_logits_ptr + req_id)
+    cu_num_logits_end = tl.load(cu_num_logits_ptr + req_id + 1)
     num_logits = cu_num_logits_end - cu_num_logits_start
-    num_draft_tokens = num_logits - NUM_NEW_SAMPLED_TOKENS
-
-    # Compute the logits indices.
-    block = tl.arange(0, BLOCK_SIZE)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    logits_start = query_end - num_logits
+    block = tl.arange(0, LOGITS_BLOCK)
+    mask = block < num_logits
+    logits_start = end - num_logits
     tl.store(
         logits_indices_ptr + cu_num_logits_start + block,
         logits_start + block,
-        mask=block < num_logits,
+        mask=mask,
     )
+    if EXPAND_IDX_MAPPING:
+        tl.store(
+            expanded_idx_mapping_ptr + cu_num_logits_start + block,
+            req_state_idx,
+            mask=mask,
+        )
+        tl.store(expanded_local_pos_ptr + cu_num_logits_start + block, block, mask=mask)
 
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
     if seq_len <= prefill_len:
         # Handling prefill tokens. No sampled or draft tokens.
         return
 
     # Keep prompt-tail slots intact; only rewrite generated-token slots.
+    num_draft_tokens = num_logits - NUM_NEW_SAMPLED_TOKENS
     first_logit_seq_pos = seq_len - num_logits
     if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
-        # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
         tl.store(input_ids_ptr + logits_start, last_token_id)
-
-    # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:
         mask = block < num_draft_tokens
         draft_tokens = tl.load(
@@ -449,55 +420,76 @@ def _combine_sampled_and_draft_tokens_kernel(
             mask=mask,
         )
         tl.store(
-            input_ids_ptr + query_end - num_draft_tokens + block,
-            draft_tokens,
-            mask=mask,
+            input_ids_ptr + end - num_draft_tokens + block, draft_tokens, mask=mask
         )
 
 
-def combine_sampled_and_draft_tokens(
-    input_ids: torch.Tensor,
+def prepare_decode_inputs(
     idx_mapping: torch.Tensor,
-    last_sampled_tokens: torch.Tensor,
     query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
     seq_lens: torch.Tensor,
+    input_ids: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
     prefill_len: torch.Tensor,
     draft_tokens: torch.Tensor,
     cu_num_logits: torch.Tensor,
     num_logits: int,
     num_new_sampled_tokens: int = 1,  # excl accepted draft tokens, a.k.a bonus tokens
-) -> torch.Tensor:
+    max_expand_len: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Fill positions/seq_lens/input_ids and return logits indices.
+
+    When ``max_expand_len`` is given, also expand ``idx_mapping`` to one entry
+    per logit row and return ``(logits_indices, expanded_idx_mapping,
+    expanded_local_pos)``; otherwise the last two are ``None``.
+    """
     assert num_new_sampled_tokens in (0, 1), (
         f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
     )
-    # use idx_mapping.shape[0] for actual request count
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
-
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
-    _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
-        input_ids,
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=pos.device)
+    expand = max_expand_len is not None
+    if expand:
+        expanded_idx_mapping = idx_mapping.new_empty(num_logits)
+        expanded_local_pos = torch.empty(
+            num_logits, dtype=torch.int32, device=pos.device
+        )
+    else:
+        # Unused; any valid pointer will do.
+        expanded_idx_mapping = expanded_local_pos = logits_indices
+    # NOTE(woosuk): We do +1 because the last thread block is used
+    # to pad unused seq_lens as 0 for full CUDA graphs.
+    _prepare_decode_inputs_kernel[(num_reqs + 1,)](
         idx_mapping,
-        last_sampled_tokens,
         query_start_loc,
+        num_computed_tokens,
+        pos,
         seq_lens,
+        seq_lens.shape[0],
+        input_ids,
+        last_sampled_tokens,
         prefill_len,
         draft_tokens,
         draft_tokens.stride(0),
         cu_num_logits,
         logits_indices,
-        NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
-        # NOTE(woosuk): Add num_new_sampled_tokens to ensure the block covers the
-        # last sampled token in addition to all draft tokens.
-        BLOCK_SIZE=triton.next_power_of_2(
-            num_speculative_steps + num_new_sampled_tokens
+        expanded_idx_mapping,
+        expanded_local_pos,
+        BLOCK_SIZE=1024,
+        # Covers the last sampled token plus every draft token, and every
+        # expanded logit row.
+        LOGITS_BLOCK=triton.next_power_of_2(
+            max(num_speculative_steps + num_new_sampled_tokens, max_expand_len or 1)
         ),
+        NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
+        EXPAND_IDX_MAPPING=expand,
     )
-    return logits_indices
+    if not expand:
+        return logits_indices, None, None
+    return logits_indices, expanded_idx_mapping, expanded_local_pos
 
 
 @triton.jit
@@ -681,44 +673,3 @@ def post_update_num_computed_tokens(
         num_computed_tokens,
         query_start_loc,
     )
-
-
-@triton.jit
-def _expand_idx_mapping_kernel(
-    idx_mapping_ptr,
-    expanded_idx_mapping_ptr,
-    expanded_local_pos_ptr,
-    cu_num_logits_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    num_tokens = end_idx - start_idx
-
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < num_tokens
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    tl.store(expanded_idx_mapping_ptr + start_idx + block, req_state_idx, mask=mask)
-    tl.store(expanded_local_pos_ptr + start_idx + block, block, mask=mask)
-
-
-def expand_idx_mapping(
-    idx_mapping: torch.Tensor,
-    total_num_logits: int,
-    cu_num_logits: torch.Tensor,
-    max_expand_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = idx_mapping.shape[0]
-    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
-    _expand_idx_mapping_kernel[(num_reqs,)](
-        idx_mapping,
-        expanded_idx_mapping,
-        expanded_local_pos,
-        cu_num_logits,
-        BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
-    )
-    return expanded_idx_mapping, expanded_local_pos
