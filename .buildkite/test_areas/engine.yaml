@@ -56,6 +56,8 @@ steps:
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling"
   key: e2e-scheduling-1-gpu
@@ -73,6 +75,8 @@ steps:
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Core"
   device: h200_18gb

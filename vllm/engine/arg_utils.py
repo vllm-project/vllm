@@ -10,7 +10,6 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
-from itertools import permutations
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -411,7 +410,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         if type(None) in type_hints and not contains_type(type_hints, bool):
             kwargs[name]["type"] = optional_type(kwargs[name]["type"])
             if kwargs[name].get("choices"):
-                kwargs[name]["choices"].append("None")
+                kwargs[name]["choices"].append(None)
     return kwargs
 
 
@@ -557,6 +556,7 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -866,7 +866,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         model_group = parser.add_argument_group(
@@ -1524,13 +1523,6 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
-        # TODO: generalise this special case
-        choices = observability_kwargs["collect_detailed_traces"]["choices"]
-        metavar = f"{{{','.join(choices)}}}"
-        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
-        observability_kwargs["collect_detailed_traces"]["choices"] += [
-            ",".join(p) for p in permutations(get_args(DetailedTraceModules), r=2)
-        ]
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
@@ -1597,6 +1589,10 @@ class EngineArgs:
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
+        )
+        scheduler_group.add_argument(
+            "--max-num-active-seqs",
+            **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
@@ -2042,8 +2038,7 @@ class EngineArgs:
         usage_context: UsageContext | None = None,
         headless: bool = False,
     ) -> VllmConfig:
-        """
-        Create the VllmConfig.
+        """Create the VllmConfig.
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
@@ -2431,6 +2426,7 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_active_seqs=self.max_num_active_seqs,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
