@@ -367,12 +367,13 @@ class OnlineDerenderer:
                 tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
             )
 
-            # NOTE for the parser-aware streaming path: the generate chat
-            # streaming path suppresses logprobs entirely when a parser is
-            # configured and reasoning is hidden, because decoded logprob
-            # token text would leak hidden reasoning. Unreachable here (the
-            # parser path fails closed above); mirror that suppression when
-            # it lands.
+            # NOTE: parser-configured servers dispatch to
+            # _derender_chat_stream_parsed above and never reach this plain
+            # path. That parsed path does not resolve logprobs yet; when it
+            # does, mirror the generate chat streaming path, which suppresses
+            # logprobs entirely when a parser is configured and reasoning is
+            # hidden, because decoded logprob token text would leak hidden
+            # reasoning.
             resolved_logprobs = None
             if choice.logprobs is not None:
                 resolved_logprobs = _resolve_logprobs(
