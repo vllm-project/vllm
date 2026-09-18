@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.flashinfer import FlashInferBackend  # noqa: E40
 from vllm.v1.attention.backends.utils import (  # noqa: E402
     PerLayerParameters,
     make_local_attention_virtual_batches,
+    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     ChunkedLocalAttentionSpec,
@@ -136,6 +137,35 @@ def test_paged_kv_buffers_fit_local_attention_virtual_batches(spec_name: str):
     assert builder.paged_kv_last_page_len.np.shape[0] >= num_reqs
     num_actual_pages = int(builder.paged_kv_indptr.np[num_reqs])
     assert builder.paged_kv_indices.shape[0] >= num_actual_pages
+
+
+def test_xqa_decode_mask_covers_local_attention_virtual_decodes():
+    """The uniform XQA draft mask must have a row for every virtual decode."""
+    vllm_config = create_vllm_config(
+        max_model_len=2048,
+        block_size=BLOCK_SIZE,
+        max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=2048,
+    )
+    builder = _build_builder(vllm_config, _make_specs(vllm_config)["promoted_full"])
+
+    # A 4-token speculative verify window split evenly by a chunk boundary.
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(query_lens=[4], seq_lens=[ATTN_CHUNK_SIZE + 2]),
+        BLOCK_SIZE,
+        torch.device("cpu"),
+    )
+    local_metadata, _ = make_local_attention_virtual_batches(
+        ATTN_CHUNK_SIZE, common_attn_metadata, BLOCK_SIZE
+    )
+    assert local_metadata.query_start_loc_cpu.diff().tolist() == [2, 2]
+    num_decodes, _, _, _ = split_decodes_and_prefills(
+        local_metadata, decode_threshold=4
+    )
+    assert num_decodes > MAX_NUM_SEQS
+
+    mask = builder._get_decode_mask(2, None, num_decodes, causal=True)
+    assert mask.shape[0] == num_decodes
 
 
 def test_chunked_local_sizing_never_shrinks_full_attention_capacity():

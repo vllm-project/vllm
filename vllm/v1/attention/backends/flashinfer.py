@@ -722,7 +722,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.max_num_reqs = max_num_reqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         # Chunked local attention emits one virtual batch per local attention
         # block, so `build()` sees a `num_reqs` far above `max_num_seqs`. These
@@ -1137,7 +1136,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if buf is None:
                 per_req = _make_xqa_draft_block_mask(q_len_per_req, causal, self.device)
                 buf = (
-                    per_req.unsqueeze(0).expand(self.max_num_reqs, -1, -1).contiguous()
+                    per_req.unsqueeze(0)
+                    .expand(self.max_buffer_reqs, -1, -1)
+                    .contiguous()
                 )
                 self._decode_mask_cache[key] = buf
             return buf[:num_decodes]
@@ -1296,6 +1297,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.paged_kv_last_page_len = CpuGpuBuffer(
                 num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
             )
+            self._decode_mask_cache.clear()
         if grow_pages:
             self.paged_kv_indices = torch.zeros(
                 num_pages, dtype=torch.int32, device=self.device
