@@ -52,10 +52,12 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
@@ -344,7 +346,7 @@ def _insert_context_kv(
         )
 
 
-class DSparkDeepseekV4ForCausalLM(nn.Module):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
     # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
@@ -371,6 +373,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        collect_moe_layers(self, self.model.layers, self.config)
 
     # --- Hooks used by the speculator -------------------------------------
 

@@ -9,6 +9,10 @@ import torch
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.models.interfaces import (
+    get_mixture_of_experts_model,
+    is_mixture_of_experts,
+)
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4ForCausalLM,
@@ -877,6 +881,46 @@ def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
 
     assert calls == ["mtp", "dspark"]
+
+
+def test_dspark_draft_registers_mixture_of_experts(
+    v41_moe_config, monkeypatch, dist_init
+):
+    """DSpark MoE drafts expose MixtureOfExperts for EPLB registration."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DeepGEMM MegaMoE requires SM100")
+
+    hf_config = v41_moe_config.model_config.hf_config
+    hf_config.hc_mult = 1
+    hf_config.hc_eps = 1e-5
+    hf_config.rms_norm_eps = 1e-5
+    hf_config.dspark_target_layer_ids = [0]
+    hf_config.dspark_markov_rank = 8
+    hf_config.index_topk = 4
+    hf_config.head_dim = 64
+    hf_config.num_attention_heads = 4
+    hf_config.vocab_size = 256
+    hf_config.n_mtp_layers = 2
+    hf_config.enable_confidence_head = False
+
+    v41_moe_config.speculative_config = SimpleNamespace(
+        draft_model_config=v41_moe_config.model_config,
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark.get_current_vllm_config",
+        lambda: v41_moe_config,
+    )
+
+    with (
+        set_default_torch_dtype(v41_moe_config.model_config.dtype),
+        torch.device("cuda"),
+    ):
+        draft = DSparkDeepseekV4ForCausalLM(vllm_config=v41_moe_config)
+
+    assert is_mixture_of_experts(draft)
+    assert get_mixture_of_experts_model(draft) is draft
+    assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
+    assert draft.num_routed_experts == hf_config.dspark_n_routed_experts
 
 
 @pytest.mark.skipif(
