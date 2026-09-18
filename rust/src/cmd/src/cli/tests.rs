@@ -2274,6 +2274,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         ready_timeout,
         local_input_address,
         local_output_address,
+        ..
     } = &config.transport_mode
     else {
         panic!("expected handshake-owned transport");
@@ -2307,6 +2308,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 local_output_address: Some(
                     "<ipc output>",
                 ),
+                handshake_listener: None,
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
@@ -2381,6 +2383,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             ready_timeout: *ready_timeout,
             local_input_address: Some("<ipc input>".to_string()),
             local_output_address: Some("<ipc output>".to_string()),
+            handshake_listener: None,
         },
         ..config.clone()
     });
@@ -2415,6 +2418,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 ready_timeout: 600s,
                 local_input_address: None,
                 local_output_address: None,
+                handshake_listener: None,
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",

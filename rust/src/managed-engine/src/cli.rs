@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory};
 
-use crate::{ManagedEngineConfig, allocate_handshake_port};
+use crate::ManagedEngineConfig;
 
 /// Managed Python headless-engine CLI arguments.
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -72,12 +72,12 @@ impl ManagedEngineArgs {
         format!("tcp://{}:{}", self.handshake_host, handshake_port)
     }
 
-    /// Resolve the handshake port, either from the CLI argument (if specified)
-    /// or by allocating a fresh port.
-    pub fn resolve_handshake_port(&self) -> anyhow::Result<u16> {
+    /// Handshake port from the CLI, if the operator pinned one.
+    ///
+    /// Auto-assigned ports are bound later by the handshake ROUTER so the
+    /// kernel-chosen port is never released before engines connect.
+    pub fn resolve_handshake_port(&self) -> Option<u16> {
         self.handshake_port
-            .map(Ok)
-            .unwrap_or_else(|| allocate_handshake_port(&self.handshake_host))
     }
 
     /// Build the managed Python-engine spawn configuration.

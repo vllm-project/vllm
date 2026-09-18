@@ -18,7 +18,9 @@ use vllm_chat::{
     ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRequest, LoadModelBackendsOptions,
     load_model_backends,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
+use vllm_engine_core_client::{
+    EngineCoreClient, EngineCoreClientConfig, HandshakeListener, TransportMode,
+};
 use vllm_llm::Llm;
 use vllm_managed_engine::cli::ManagedEngineArgs;
 use vllm_managed_engine::{ManagedEngineConfig, ManagedEngineHandle};
@@ -142,11 +144,21 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         );
     }
 
+    // Bind the handshake ROUTER before spawning the engine when the port is not
+    // pinned, so the kernel-assigned port is never released in between.
+    let (handshake_port, handshake_listener) = match args.engine.resolve_handshake_port() {
+        Some(port) => (port, None),
+        None => {
+            let listener =
+                HandshakeListener::bind(format!("tcp://{}:0", args.engine.handshake_host))
+                    .await
+                    .context("failed to bind handshake listener")?;
+            let port = listener.port().context("failed to read handshake port")?;
+            (port, Some(listener))
+        }
+    };
+
     // Spawn the managed headless Python engine (real weights, real encoder).
-    let handshake_port = args
-        .engine
-        .resolve_handshake_port()
-        .context("failed to allocate handshake port")?;
     let mut python_args = args.engine.python_args.clone();
     if args.trust_remote_code {
         python_args.push("--trust-remote-code".to_string());
@@ -167,7 +179,8 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         .await
         .context("failed to start managed Python headless engine")?;
 
-    let result = run_mm_processor_with_engine(args, handshake_port, &timing).await;
+    let result =
+        run_mm_processor_with_engine(args, handshake_port, handshake_listener, &timing).await;
     let shutdown_result = engine
         .shutdown(ENGINE_SHUTDOWN_TIMEOUT)
         .await
@@ -180,6 +193,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
 async fn run_mm_processor_with_engine(
     args: MmProcessorArgs,
     handshake_port: u16,
+    handshake_listener: Option<Arc<HandshakeListener>>,
     timing: &RequestTimingStats,
 ) -> Result<()> {
     let range_ratio =
@@ -217,7 +231,12 @@ async fn run_mm_processor_with_engine(
     // Connect to the engine over the same transport the serving frontend uses.
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: TransportMode::HandshakeOwner {
-            handshake_address: format!("tcp://{}:{}", args.engine.handshake_host, handshake_port),
+            handshake_address: handshake_listener
+                .as_ref()
+                .map(|listener| listener.address().to_string())
+                .unwrap_or_else(|| {
+                    format!("tcp://{}:{}", args.engine.handshake_host, handshake_port)
+                }),
             advertised_host: args.engine.handshake_host.clone(),
             engine_count: args
                 .engine
@@ -226,6 +245,7 @@ async fn run_mm_processor_with_engine(
             ready_timeout: ENGINE_READY_TIMEOUT,
             local_input_address: None,
             local_output_address: None,
+            handshake_listener,
         },
         coordinator_mode: None,
         model_name: args.model.clone(),
