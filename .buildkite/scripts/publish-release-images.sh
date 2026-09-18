@@ -181,8 +181,8 @@ fi
 # `:latest` multi-arch manifest still resolves to the previous release.
 
 if target_enabled cpu; then
-  CPU_X86_TAG=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}
-  CPU_ARM_TAG=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION}
+  CPU_X86_TAG=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:${COMMIT}-x86_64
+  CPU_ARM_TAG=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:${COMMIT}-arm64
 
   CPU_X86_AVAILABLE=false
   CPU_ARM_AVAILABLE=false
