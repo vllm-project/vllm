@@ -67,7 +67,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -1395,13 +1395,14 @@ def _make_serving_instance(
     reasoning_parser: str = "",
     enable_auto_tools: bool = False,
     tool_parser: str | None = None,
+    model_type: str = "test",
     enable_per_request_metrics: bool = False,
     enable_per_request_output_token_metrics: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
-    model_config.hf_config.model_type = "test"
+    model_config.hf_config.model_type = model_type
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
@@ -1425,9 +1426,20 @@ def _make_serving_instance(
     )
 
 
-def test_output_token_metrics_require_reasoning_parser():
+def test_output_token_metrics_require_supported_parser():
     with pytest.raises(ValueError, match="requires a parser configuration"):
         _make_serving_instance(enable_per_request_output_token_metrics=True)
+
+
+def test_output_token_metrics_accept_harmony_without_reasoning_parser():
+    serving = _make_serving_instance(
+        enable_auto_tools=True,
+        tool_parser="openai",
+        model_type="gpt_oss",
+        enable_per_request_output_token_metrics=True,
+    )
+
+    assert serving.parser is HarmonyParser
 
 
 def test_output_token_metrics_reject_unsupported_parser_combination():

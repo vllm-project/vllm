@@ -256,13 +256,10 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     @staticmethod
     def validate_output_token_metrics_parser(
         enabled: bool,
-        reasoning_parser_configured: bool,
         parser_cls: type[Parser] | None,
     ) -> None:
         if enabled and (
-            not reasoning_parser_configured
-            or parser_cls is None
-            or not parser_cls.supports_token_phase_classification()
+            parser_cls is None or not parser_cls.supports_token_phase_classification()
         ):
             raise ValueError(
                 "--enable-per-request-output-token-metrics requires a parser "

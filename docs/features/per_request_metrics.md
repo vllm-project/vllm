@@ -136,7 +136,7 @@ accumulated across all turns.
 ## Output Token Metrics
 
 Output-token metrics are experimental and subject to change. Enable them with a
-supported reasoning parser:
+parser configuration that supports output-token classification:
 
 ```bash
 vllm serve openai/gpt-oss-20b \

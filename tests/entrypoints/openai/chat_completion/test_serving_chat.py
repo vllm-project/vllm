@@ -747,21 +747,9 @@ async def test_chat_per_request_metrics_follow_server_flag():
     enabled_serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=True
     )
-    first = _make_metrics_request_output(
-        metrics=RequestStateStats(
-            queued_ts=1.0,
-            scheduled_ts=1.5,
-            first_token_ts=2.0,
-            last_token_ts=2.0,
-        ),
-        token_ids=(100,),
-    )
-    first.outputs[0].finish_reason = None
-    first.finished = False
-    second = _make_metrics_request_output(token_ids=(101,))
     enabled_response = await enabled_serving.chat_completion_full_generator(
         request,
-        _stream_request_outputs(first, second),
+        _single_request_output(_make_metrics_request_output()),
         "chatcmpl-test-id",
         "test-model",
         conversation=[{"role": "user", "content": "Test"}],
@@ -773,6 +761,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
     assert enabled_response.metrics.output_token_metrics is None
     assert "output_token_metrics" not in enabled_response.metrics.model_dump()
     assert enabled_response.usage.completion_tokens == 2
+    assert enabled_response.choices[0].message.content == "Hello"
 
 
 @pytest.mark.asyncio
