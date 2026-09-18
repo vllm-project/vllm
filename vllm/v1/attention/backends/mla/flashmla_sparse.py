@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -708,6 +709,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             128 if current_platform.is_device_capability_family(100) else 64
         )
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
+
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla() and envs.VLLM_SPARSE_MLA_SPLITK <= 1:
+            logger.warning_once(
+                "Triton sparse-MLA split-K decode is disabled "
+                "(VLLM_SPARSE_MLA_SPLITK unset or <=1). Setting "
+                "VLLM_SPARSE_MLA_SPLITK=32 substantially lowers single-stream "
+                "decode latency on SM12x; leave it unset for prefill-bound or "
+                "high-concurrency serving."
+            )
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens

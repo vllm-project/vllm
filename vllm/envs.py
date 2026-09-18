@@ -686,9 +686,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE", "").strip()
     ),
     # Split-K decode path for the Triton sparse-MLA kernel: number of
-    # candidate-tile splits (0/1 = disabled). Read uncached in
-    # sm12x_sparse_mla_attn.py so a micro-benchmark harness can toggle it per
-    # call; registered here only so environment validation accepts it.
+    # candidate-tile splits (0/1 = disabled). Enabling it (e.g. 32) is a large
+    # single-stream decode win on SM12x; skip it for prefill-bound or
+    # high-concurrency runs. Read uncached in sm12x_sparse_mla_attn.py so a
+    # micro-benchmark harness can toggle it per call; registered here only so
+    # environment validation accepts it.
     "VLLM_SPARSE_MLA_SPLITK": lambda: _env_int_or_zero("VLLM_SPARSE_MLA_SPLITK"),
     # Fused gather+dequant+attend path (default on); "0" selects the legacy
     # materialized path for A/B/debug. Also read uncached in the kernel file.
