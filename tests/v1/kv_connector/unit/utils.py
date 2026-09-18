@@ -17,6 +17,7 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -106,6 +107,7 @@ def create_vllm_config(
     kv_connector_module_path: str | None = None,
     kv_role: str = "kv_consumer",
     disable_hybrid_kv_cache_manager: bool | None = None,
+    num_speculative_tokens: int | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -141,6 +143,11 @@ def create_vllm_config(
         kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
+    speculative_config = (
+        SpeculativeConfig(model="ngram", num_speculative_tokens=num_speculative_tokens)
+        if num_speculative_tokens is not None
+        else None
+    )
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -148,6 +155,7 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
         attention_config=attention_config,
+        speculative_config=speculative_config,
     )
 
 
@@ -155,7 +163,6 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
-    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -186,7 +193,6 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
-        hash_block_size=hash_block_size,
     )
 
 
@@ -263,7 +269,6 @@ def create_model_runner_output(
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
-
     # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}

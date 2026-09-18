@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for MXFP4 MoE oracle backend selection on mi355x (GFX950).
+"""Tests for MXFP4 MoE oracle backend selection on mi355x (GFX950).
 
 These tests run on real hardware — no mocks. Skipped on non-GFX950 platforms.
 """

@@ -31,11 +31,14 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -72,12 +75,10 @@ def _get_priority_backends(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> list[Fp8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
-
     _AVAILABLE_BACKENDS = [
         Fp8MoeBackend.AITER,
         Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -273,8 +274,7 @@ def refine_fp8_moe_block_shape(
     config: FusedMoEConfig,
     weight_block_size: list[int],
 ) -> list[int] | None:
-    """
-    Compute a refined block shape for block-quantized FP8 MoE weights whose
+    """Compute a refined block shape for block-quantized FP8 MoE weights whose
     checkpoint blocks cannot be sharded exactly across TP ranks.
 
     TP shards the intermediate dim of the expert weights, so a per-shard size
@@ -302,17 +302,89 @@ def refine_fp8_moe_block_shape(
     return [refine, refine]
 
 
+def pad_tp_shard_to_weight_blocks(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> bool:
+    """Pad the TP shard to whole checkpoint blocks, keeping scales rank-local."""
+    block_n, block_k = weight_block_size
+    if (
+        block_n != block_k
+        or config.tp_size == 1
+        or config.intermediate_size_per_partition % block_n == 0
+    ):
+        return False
+    if (
+        config.intermediate_size % block_n != 0
+        or config.hidden_dim % block_n != 0
+        or config.ep_size != 1
+        or config.is_lora_enabled
+        or config.has_bias
+    ):
+        raise ValueError(
+            f"Block-aligned FP8 TP sharding requires {block_n}-aligned "
+            "global expert dimensions, pure TP, and no LoRA or "
+            "expert bias."
+        )
+    config.tp_shard_with_padding = True
+    config.intermediate_size_per_partition = round_up(
+        config.intermediate_size_per_partition, block_n
+    )
+    return True
+
+
+def resolve_fp8_moe_weight_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+    activation_key: QuantKey,
+    is_checkpoint_fp8_serialized: bool,
+) -> tuple[list[int], tuple[int, int] | None]:
+    """Return the TP-adapted block shape and refine factor:
+    refine if kernels allow, else pad to the TP shard."""
+    refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
+    if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
+        kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
+        can_refine = refined_shape is not None and any(
+            k_cls._supports_quant_scheme(
+                create_fp8_quant_key(
+                    static=True, group_shape=GroupShape(*refined_shape)
+                ),
+                activation_key,
+            )
+            for k_cls in kernel_classes
+        )
+        if not can_refine and pad_tp_shard_to_weight_blocks(config, weight_block_size):
+            logger.info_once(
+                "FP8 %s TP loading uses complete checkpoint blocks: "
+                "local allocation %d, without weight requantization.",
+                config.moe_backend,
+                config.intermediate_size_per_partition,
+            )
+            return weight_block_size, None
+    if refined_shape is None:
+        return weight_block_size, None
+    logger.info_once(
+        "FP8 MoE block scales refined from %s to %s to fit "
+        "the TP-sharded intermediate size %d.",
+        str(weight_block_size),
+        str(refined_shape),
+        config.intermediate_size_per_partition,
+    )
+    return refined_shape, (
+        weight_block_size[0] // refined_shape[0],
+        weight_block_size[1] // refined_shape[1],
+    )
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary FP8 MoE backend
+    """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 
@@ -614,8 +686,7 @@ def make_fp8_moe_quant_config(
     gemm1_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Create FusedMoEQuantConfig for the specified FP8 Backend.
+    """Create FusedMoEQuantConfig for the specified FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
     at runtime by the Modular Kernel abstraction.
 
@@ -626,7 +697,6 @@ def make_fp8_moe_quant_config(
     In a future PR, we will have this function should be
     a method of the modular kernel itself.
     """
-
     # MARLIN and CPU are mixed precision W8A16 config.
     if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(

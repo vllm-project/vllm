@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-disagg_encoder_proxy.py
+"""disagg_encoder_proxy.py
 
 Proxy that routes OpenAI-compatible “/v1/chat/completions” requests to two
 clusters:
@@ -11,8 +10,8 @@ clusters:
 
 For MM input we:
     1. Extract *every* image/audio/video item.
-    2. Fire N concurrent requests to the encoder cluster
-       (one request per item, with **all text removed**).
+    2. Send concurrent encoder requests with all text removed,
+       grouping images assigned to the same encoder.
     3. Wait for all of them to succeed.
     4. Forward the *original* request to a decode server.
 """
@@ -100,6 +99,11 @@ def validate_ec_consumer_routing(
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
 NO_REWRITE = False
+# Maximum images per encoder subrequest; 0 leaves batches unlimited.
+ENCODER_MAX_BATCH_SIZE = int(os.getenv("ENCODER_MAX_BATCH_SIZE", "0"))
+if ENCODER_MAX_BATCH_SIZE < 0:
+    raise ValueError("ENCODER_MAX_BATCH_SIZE must be non-negative")
+
 # Decode-side retries for a retryable internal error (`finish_reason="error"`,
 # e.g. an encoder embedding the connector could not deliver). Re-issuing runs
 # the encode again, which produces a fresh transfer.
@@ -200,8 +204,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
-    """
-    Return *all* image/audio/video items that appear anywhere in `messages`.
+    """Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
@@ -224,8 +227,7 @@ async def fanout_encoder_primer(
     req_id: str,
     consumer_zmq: str | None = None,
 ) -> tuple[dict[int, dict], dict[str, Any]]:
-    """
-    1. Build one request *per MM item* with all text removed.
+    """1. Group images by encoder, retaining per-item round-robin assignment.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
 
@@ -251,6 +253,7 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
+    transfer_items: dict[int, dict[str, str]] = {}
     ec_params: dict[str, Any] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
@@ -262,29 +265,45 @@ async def fanout_encoder_primer(
             e_urls, encoder_rr_idx, len(mm_items)
         )
 
+    groups: list[tuple[str, list[int]]] = []
+    image_groups: dict[str, list[int]] = {}
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
+        if item["type"] == "image_url":
+            indices = image_groups.get(target_url)
+            if indices is None or (
+                ENCODER_MAX_BATCH_SIZE and len(indices) >= ENCODER_MAX_BATCH_SIZE
+            ):
+                indices = []
+                image_groups[target_url] = indices
+                groups.append((target_url, indices))
+            indices.append(idx)
+        else:
+            groups.append((target_url, [idx]))
+
+    for target_url, indices in groups:
         # Derive a *child* request id:  <parent>:<index>:<random-short>
-        child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
+        child_req_id = f"{req_id}:{indices[0]}:{uuid.uuid4().hex[:6]}"
         headers = {"x-request-id": child_req_id, "Content-Type": "application/json"}
 
         # With --no-rewrite the decoder still receives the raw image and derives
         # the cache key by hashing it, so the encoder must do the same -- passing
         # a uuid here would make the two disagree and silently defeat the EC
         # transfer, leaving the decoder to encode the image itself.
-        item_uuid = None if NO_REWRITE else content_uuid(item)
-        if item_uuid is not None:
-            item_uuids[idx] = item_uuid
-        transfer_id = uuid.uuid4().hex
-        item_transfer_ids[idx] = transfer_id
+        content = []
+        for idx in indices:
+            item = mm_items[idx]
+            item_uuid = None if NO_REWRITE else content_uuid(item)
+            if item_uuid is not None:
+                item_uuids[idx] = item_uuid
+            item_transfer_ids[idx] = uuid.uuid4().hex
+            content.append(item if item_uuid is None else {**item, "uuid": item_uuid})
 
         encoder_req = {
             "model": orig_request.get("model"),
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        item if item_uuid is None else {**item, "uuid": item_uuid}
-                    ],
+                    "content": content,
                 },
             ],
             # No max_tokens cap: the encoder instance never samples, it finishes
@@ -300,17 +319,13 @@ async def fanout_encoder_primer(
             if key in orig_request:
                 encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
-            # No mm_hash here on purpose. The encoder's own
-            # `mm_features[i].identifier` is derived from the uuid *and* the
-            # engine's media_io_kwargs / mm_processor_kwargs, so this proxy
-            # cannot know it before the encoder runs. Sending the bare uuid
-            # would fail the connector's hash match and make the producer
-            # invent its own transfer id, which the consumer could then never
-            # cancel. Omitting it lets the connector match by position, which
-            # is exact: one encoder request carries exactly one item.
+            # The engine may rehash UUIDs with processing options. Match by
+            # position instead; batches contain only images in input order.
             encoder_req["ec_transfer_params"] = {
                 "consumer_zmq": consumer_zmq,
-                "ec_items": [{"transfer_id": transfer_id}],
+                "ec_items": [
+                    {"transfer_id": item_transfer_ids[idx]} for idx in indices
+                ],
             }
         tasks.append(
             encode_session.post(
@@ -323,7 +338,8 @@ async def fanout_encoder_primer(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Fail fast if any sub-request failed
-    for idx, r in enumerate(results):
+    for (_, indices), r in zip(groups, results):
+        idx = indices[0]
         if isinstance(r, Exception):
             logger.error(
                 "[%s] Encoder request #%d raised exception: %s",
@@ -360,18 +376,45 @@ async def fanout_encoder_primer(
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
             params = {}
         if params:
-            # One encoder request carries exactly one item, so there is a
-            # single reported entry. Do not key it by this proxy's uuid: when
-            # media_io_kwargs or mm_processor_kwargs are set the engine
-            # re-hashes the uuid together with them, so the encoder's own
-            # `mm_features[i].identifier` is a derived value this proxy cannot
-            # predict. Fall back to the sole entry, and carry the key the
-            # encoder actually used through as `ec_mm_hash`.
-            ec_mm_hash = item_uuids.get(idx)
-            reported = params.get(ec_mm_hash)
-            if reported is None and len(params) == 1:
-                ((ec_mm_hash, reported),) = params.items()
-            if reported:
+            by_index = {}
+            for mm_hash, reported in params.items():
+                if len(indices) == 1:
+                    break
+                for local_index in reported.get("item_indices", []):
+                    if type(local_index) is not int or not 0 <= local_index < len(
+                        indices
+                    ):
+                        raise HTTPException(502, "Invalid encoder item index")
+                    if local_index in by_index:
+                        raise HTTPException(502, "Duplicate encoder item index")
+                    by_index[local_index] = (mm_hash, reported)
+            for local_index, idx in enumerate(indices):
+                matched = by_index.get(local_index)
+                if matched is None:
+                    # Compatibility with encoders without position metadata.
+                    mm_hash = item_uuids.get(idx)
+                    if mm_hash in params:
+                        matched = (mm_hash, params[mm_hash])
+                    elif len(indices) == 1 and len(params) == 1:
+                        matched = next(iter(params.items()))
+                    elif (
+                        mm_items[idx]["type"] == "video_url"
+                        and (orig_request.get("mm_processor_kwargs") or {}).get(
+                            "use_audio_in_video"
+                        )
+                        and len(params) == 2
+                        and consumer_zmq is None
+                        and all(
+                            entry.keys() <= {"metadata", "item_indices"}
+                            for entry in params.values()
+                        )
+                    ):
+                        # Keep raw video for its audio/video features when no transfer
+                        # handles need to be forwarded.
+                        continue
+                    else:
+                        raise HTTPException(502, "Encoder metadata cannot be matched")
+                ec_mm_hash, reported = matched
                 metadata = reported.get("metadata") or {}
                 if metadata:
                     item_meta[idx] = {
@@ -387,12 +430,16 @@ async def fanout_encoder_primer(
                 # looks it up by mm_hash on the request, so carry it through.
                 ec_params[ec_mm_hash] = reported
                 if NO_REWRITE and consumer_zmq is not None:
-                    ec_params.setdefault("ec_items", []).append(
-                        {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
-                    )
+                    transfer_items[idx] = {
+                        "mm_hash": ec_mm_hash,
+                        "transfer_id": item_transfer_ids[idx],
+                    }
+
+    if transfer_items:
+        ec_params["ec_items"] = [transfer_items[idx] for idx in sorted(transfer_items)]
 
     logger.info(
-        "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
+        "[%s] All %d encoder requests completed successfully", req_id, len(groups)
     )
     return item_meta, ec_params
 
@@ -402,8 +449,7 @@ async def maybe_prefill(
     p_url: str,
     req_id: str,
 ) -> dict:
-    """
-    - Do prefill-only task if p_url exist;
+    """- Do prefill-only task if p_url exist;
     - Return a new body carrying kv transfer params (for nixl connector)
     - Else, skip and return the original request data for decode
 
@@ -849,14 +895,14 @@ async def _post_if_available(
     payload: dict,
     headers: dict,
 ) -> dict | None:
-    """
-    POST `payload` to `url`.
+    """POST `payload` to `url`.
 
     Returns
     -------
     • The decoded JSON body on success (2xx)
     • None if the endpoint does not exist (404)
     • Raises for anything else.
+
     """
     try:
         resp = await session.post(url, json=payload, headers=headers)
@@ -877,9 +923,7 @@ async def _post_if_available(
 
 
 async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: str):
-    """
-    Fire & forget to both clusters, tolerate 404.
-    """
+    """Fire & forget to both clusters, tolerate 404."""
     headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
 
     encode_task = _post_if_available(
