@@ -1,14 +1,14 @@
 // vLLM-native CPU cache-write op for MLA's single-latent-buffer KV cache.
+// `concat_and_cache_mla` (the generic op used by every GPU backend) is
+// CUDA-only; this is the CPU counterpart, adapted in spirit from SGLang's
+// `store_cache_cpu` (csrc/cpu/kvcache.cpp).
 //
-// `concat_and_cache_mla` (the generic MLA cache-write op used by every GPU
-// backend) is registered CUDA-only. This is the CPU counterpart, adapted in
-// spirit from SGLang's `store_cache_cpu` (csrc/cpu/kvcache.cpp) but
-// generalized to write two source tensors (`kv_c_normed`, `k_pe`) into two
-// different column-offset ranges of the SAME destination row -- SGLang's
-// version assumes k/v land in two independent, equal-row-width cache
-// tensors, which doesn't hold here since MLA's cache is one 576-wide buffer
-// and the two column ranges (512-wide, 64-wide) don't match the buffer's
-// true per-token stride, so the write can't reuse `store_cache_cpu` as-is.
+// Difference from upstream: writes two source tensors (`kv_c_normed`,
+// `k_pe`) into two column-offset ranges of the SAME destination row.
+// Upstream assumes k/v land in two independent, equal-row-width cache
+// tensors -- MLA's cache is one 576-wide buffer whose two column ranges
+// (512-wide, 64-wide) don't match that per-token stride, so
+// `store_cache_cpu` can't be reused as-is.
 
 #include "common.h"
 #include "vec.h"

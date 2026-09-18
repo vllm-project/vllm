@@ -193,6 +193,14 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
 
 
+def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
+    """Default decoding must not append Vorbis padding to the speech waveform."""
+    expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
+    assert sr == expected_sr
+    assert audio.shape == expected.shape
+
+
 def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
     """An unknown backend must fail loudly instead of silently degrading."""
     with pytest.raises(ValueError, match="Unknown audio backend"):
@@ -210,7 +218,7 @@ def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
 
 
 def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
-    """torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
+    """Torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
     must surface as ImportError so `auto` falls back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "AudioDecoder", None):
@@ -224,7 +232,7 @@ def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
 def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
     dummy_audio_bytes,
 ):
-    """torchcodec loads its ffmpeg-backed core lazily at decoder construction;
+    """Torchcodec loads its ffmpeg-backed core lazily at decoder construction;
     a "Could not load libtorchcodec" RuntimeError there (no system ffmpeg)
     must also surface as ImportError so `auto` falls back."""
 

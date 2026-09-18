@@ -227,8 +227,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
+        """This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         m = common_attn_metadata
@@ -273,16 +272,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
-        """
-        Default build implementation for Mamba-like attention backends.
+        """Default build implementation for Mamba-like attention backends.
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
         return self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
             prev_last_scheduled_idx=prev_last_scheduled_idx,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
 
     def _compute_chunk_metadata(
@@ -292,8 +292,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
     ) -> tuple[list[int], list[int], list[int]]:
-        """
-        Compute chunk-specific metadata for Mamba models.
+        """Compute chunk-specific metadata for Mamba models.
 
         The code below carefully constructs the chunks such that:
         1. Chunks contain tokens from a *single* sequence only.
@@ -380,8 +379,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common: M,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Compute chunk metadata and return as device tensors.
+        """Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
         """
         num_prefills = common.num_prefills
@@ -459,10 +457,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """
-        Compute metadata common to both Mamba1 and Mamba2.
-        """
+        """Compute metadata common to both Mamba1 and Mamba2."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
@@ -484,10 +481,28 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
         query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
-        single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
-        # First-token prefills have no prior Mamba state and must stay prefills.
-        has_prior_state = seq_lens_cpu > 1
-        prefill_to_decode = single_token_prefill_rows & has_prior_state
+
+        # First prompt chunks have no prior Mamba state and must stay prefills.
+        has_prior_state = seq_lens_cpu > query_lens_cpu
+        stateful_prefill_rows = is_prefilling & has_prior_state
+
+        # One-token prefills with prior state can use the decode/update path.
+        prefill_to_decode = stateful_prefill_rows & (query_lens_cpu == 1)
+
+        # The scheduler may pad a one-token remote prompt tail with placeholder
+        # drafts to retain the uniform K+1 decode graph. This is a speculative
+        # decode transaction even though the real token is still in the prompt:
+        # the decode kernels keep h(N) in the running slot and h(N+i) in scratch
+        # slots, so normal acceptance rollback remains valid. The prefill kernels
+        # only return h(N+K) and cannot roll the placeholders back.
+        if num_decode_draft_tokens_cpu is not None:
+            padded_prompt_tail_rows = (
+                stateful_prefill_rows
+                & (num_decode_draft_tokens_cpu >= 0)
+                & (query_lens_cpu == num_decode_draft_tokens_cpu + 1)
+            )
+            prefill_to_decode |= padded_prompt_tail_rows
+
         if torch.any(prefill_to_decode).item():
             # ReplaySSM handles these rows as single-token flushes (see the
             # write-position derivation below), same as the baseline decode path.
@@ -612,13 +627,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
-            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
-            if decode_base_cpu is None or num_computed_tokens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            async_spec_decode = (
+                self.vllm_config.scheduler_config.async_scheduling
+                and self.vllm_config.speculative_config is not None
+            )
+            if decode_base_cpu is None or seq_lens_cpu is None or async_spec_decode:
                 raise ValueError(
-                    "--use-replayssm requires CPU decode-base and "
-                    "computed-token counts to derive decode write positions"
+                    "--use-replayssm requires exact CPU sequence lengths and "
+                    "decode-base counts to derive decode write positions"
                 )
-            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
+            )
+            num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
             decode_base_d = decode_base_cpu[:num_decodes]
             align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
             block_size = self.kv_cache_spec.block_size
@@ -635,10 +658,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             # write_pos counts decode steps since the ring's last full-state
             # write (the anchor), so a resumed request re-anchors correctly.
             decode_steps_cpu = num_computed_d - effective_base
-            query_lens_cpu = (
-                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
-                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
-            )
             valid_decode_rows = query_lens_cpu > 0
             # A single-token prefill row replayed as decode (query_len==1 with
             # prior state) has decode_steps < 0; force it to a one-token flush
@@ -727,8 +746,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self,
         metadata: M,
     ) -> M:
-        """
-        Update the metadata for cudagraph capture.
+        """Update the metadata for cudagraph capture.
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d

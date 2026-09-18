@@ -60,11 +60,11 @@ _BAD_SF_CODES = {0, 1, 3, 4}
 
 # Audio decoding backends selectable via `load_audio(backend=...)` or
 # `--media-io-kwargs '{"audio": {"audio_backend": ...}}'`.
-# "auto" tries torchcodec, then soundfile, then PyAV.
+# "auto" tries soundfile, then torchcodec, then PyAV.
 AUDIO_BACKENDS = ("auto", "soundfile", "pyav", "torchcodec")
 
 # Raised as ImportError when the torchcodec backend cannot be used, so
-# `load_audio(backend="auto")` falls back to the soundfile → PyAV chain.
+# `load_audio(backend="auto")` can continue to PyAV.
 _TORCHCODEC_UNAVAILABLE_MSG = (
     "torchcodec audio backend is unavailable (requires the torchcodec "
     "package and a system ffmpeg installation)"
@@ -92,6 +92,10 @@ def load_audio_pyav(
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to average the channels down to mono.
+        max_decode_bytes: If set, abort decoding once this many bytes have
+            been read from the source.
         max_duration_s: If set, abort decoding once the accumulated
             sample count exceeds this many seconds of audio.  Prevents
             decompression-bomb attacks where a small compressed file
@@ -100,6 +104,7 @@ def load_audio_pyav(
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
+
     """
     try:
         container = av.open(path)
@@ -209,7 +214,7 @@ def load_audio_soundfile(
     max_duration_s: float | None = None,
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Load audio via soundfile"""
+    """Load audio via soundfile."""
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:
@@ -274,6 +279,7 @@ def load_audio_torchcodec(
         ``(waveform, sample_rate)`` where *waveform* is a float32 NumPy
         array (1-D when ``mono=True``) and *sample_rate* is the output
         sample rate in Hz.
+
     """
     if AudioDecoder is None:
         # Unify "torchcodec not installed" and "system ffmpeg missing" into
@@ -412,10 +418,17 @@ def load_audio(
     """Load audio using the selected decoding backend.
 
     Args:
+        path: Audio file path or in-memory buffer.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to downmix to a single channel.
+        max_duration_s: Reject audio longer than this many seconds.
+        max_decode_bytes: Reject audio that would decode to more than this
+            many bytes.
         backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
-            ``"auto"``, which tries torchcodec, then falls back to the
-            soundfile → PyAV chain; the other values select a single
+            ``"auto"``, which tries soundfile, then torchcodec, then PyAV;
+            the other values select a single
             backend with no fallback.
+
     """
     backend = backend or "auto"
     if backend not in AUDIO_BACKENDS:
@@ -433,27 +446,11 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
 
-    # "auto": torchcodec → soundfile → PyAV. Each backend is called by its
+    # Keep soundfile first to preserve decoding and padding of supported formats.
+    # "auto": soundfile → torchcodec → PyAV. Each backend is called by its
     # bare name so tests that monkeypatch it take effect. Only an ImportError
     # (backend missing) or, for soundfile, an unsupported-format error defers
     # to the next; any other error (decode failure, guard ValueError) raises.
-    if isinstance(path, BytesIO):
-        path.seek(0)
-    try:
-        return load_audio_torchcodec(
-            path,
-            sr=sr,
-            mono=mono,
-            max_duration_s=max_duration_s,
-            max_decode_bytes=max_decode_bytes,
-        )
-    except ImportError as exc:
-        # Decode errors don't defer: torchcodec is FFmpeg-based like PyAV, so
-        # retrying would just fail the same way.
-        logger.warning(
-            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
-        )
-
     if isinstance(path, BytesIO):
         path.seek(0)
     try:
@@ -476,6 +473,21 @@ def load_audio(
         # recognised) since PyAV would hit the same corruption.
         if exc.code not in _BAD_SF_CODES:
             raise
+
+    if isinstance(path, BytesIO):
+        path.seek(0)
+    try:
+        return load_audio_torchcodec(
+            path,
+            sr=sr,
+            mono=mono,
+            max_duration_s=max_duration_s,
+            max_decode_bytes=max_decode_bytes,
+        )
+    except ImportError as exc:
+        # Decode errors don't defer: torchcodec is FFmpeg-based like PyAV, so
+        # retrying would just fail the same way.
+        logger.warning("torchcodec unavailable (%r); falling back to PyAV.", exc)
 
     # PyAV is terminal: nothing left to fall back to. Normalize an FFmpeg
     # failure to ValueError; let a missing soundfile/PyAV surface its
