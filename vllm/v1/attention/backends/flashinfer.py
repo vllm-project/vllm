@@ -1006,7 +1006,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 break
 
         use_non_causal = vllm_config.attention_config.use_non_causal
+        speculative_config = vllm_config.speculative_config
         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
+            if (
+                speculative_config is not None
+                and speculative_config.enable_adaptive_verification
+                and cls._get_flashinfer_trtllm_api_decode_kernel()
+                == FlashInferDecodeKernel.TRTLLM_GEN
+            ):
+                return AttentionCGSupport.VARLEN_DECODE
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -1302,7 +1310,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.reorder_batch_threshold,
-                    require_uniform=not self.use_xqa,
+                    require_uniform=not (
+                        self.use_xqa or self.use_trtllm_gen_varlen_decode
+                    ),
                 )
             )
         else:
@@ -1682,15 +1692,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         bool(causal),
                     )
                 elif self.use_trtllm_gen_varlen_decode:
-                    # CPU lens are only an upper bound, device qo_indptr is
-                    # the truth.
-                    decode_q_lens = (
-                        qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+                    # CPU placeholders may underestimate query lengths;
+                    # use a safe upper bound.
+                    q_len_per_req = min(
+                        common_attn_metadata.max_query_len, self.reorder_batch_threshold
                     )
-                    max_q_upper = int(decode_q_lens.max())
-                    if max_q_upper > 1:
-                        q_len_per_req = max_q_upper
-                        q_cu_seq_lens = qo_indptr[: num_decodes + 1]
+                    # Always pass GPU offsets so a graph captured with uniform
+                    # query lengths can replay batches with variable query lengths.
+                    q_cu_seq_lens = qo_indptr[: num_decodes + 1]
                 attn_metadata.decode = FlashInferTrtllmAPIDecode(
                     kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
