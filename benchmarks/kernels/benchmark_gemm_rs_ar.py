@@ -25,7 +25,10 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
@@ -197,6 +200,9 @@ def make_projection(
             bias=False,
             params_dtype=weight.dtype,
             quant_config=quant_config,
+            # The unfused baseline wants the local partial, as under sequence
+            # parallel; the collective candidates reduce it themselves.
+            reduce_results=False,
             return_bias=False,
         )
     # Select the fused path before online quantization replaces the weights.
@@ -306,6 +312,20 @@ def benchmark_shape(
 
         return run
 
+    def make_vllm_gemm_collective(
+        x: torch.Tensor, linear: RowParallelLinear
+    ) -> Callable[[], torch.Tensor]:
+        # The model's unfused sequence-parallel path: the projection's own
+        # kernel followed by vLLM's reduce-scatter dispatch.
+        from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
+
+        def run() -> torch.Tensor:
+            if all_reduce:
+                return tensor_model_parallel_all_reduce(linear(x))
+            return sp_reduce_scatter(linear(x))
+
+        return run
+
     def make_fused_gemm_collective(
         x: torch.Tensor, linear: RowParallelLinear
     ) -> Callable[[], torch.Tensor]:
@@ -363,6 +383,10 @@ def benchmark_shape(
             [make_torch_ldmc_gemm_collective(x, w) for x, w in pairs],
         ),
         Candidate(
+            "vllm_us",
+            [make_vllm_gemm_collective(x, w) for x, w in pairs],
+        ),
+        Candidate(
             "gemm_rs_ar_us",
             [make_fused_gemm_collective(x, w) for x, w in pairs],
         ),
@@ -390,11 +414,13 @@ def benchmark_shape(
             continue
         actual = candidate.runs[0]()
         torch.accelerator.synchronize(device)
+        label = f"{candidate.name} vs ring_ll at M={M}"
         torch.testing.assert_close(
             actual[:rows],
             expected[:rows],
             rtol=5e-2,
             atol=4.0,
+            msg=lambda m, label=label: f"{label}: {m}",
         )
 
     candidate_graphs = {}
@@ -425,6 +451,7 @@ def benchmark_shape(
         "best_nccl_us": best_nccl_us,
         "speedup_vs_ring_ll": times["ring_ll_us"] / times["gemm_rs_ar_us"],
         "speedup_vs_ldmc": times["ldmc_us"] / times["gemm_rs_ar_us"],
+        "speedup_vs_vllm": times["vllm_us"] / times["gemm_rs_ar_us"],
     }
 
 
@@ -439,18 +466,22 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
                 "K",
                 "ring_ll_us",
                 "ldmc_us",
+                "vllm_us",
                 "gemm_rs_ar_us",
                 "speedup_vs_ring_ll",
                 "speedup_vs_ldmc",
+                "speedup_vs_vllm",
             ]
         ]
         .rename(
             columns={
                 "ring_ll_us": f"Torch GEMM + NCCL {collective} (RING_LL) (us)",
                 "ldmc_us": f"Torch GEMM + NCCL {collective} (LDMC) (us)",
+                "vllm_us": f"vLLM linear + {collective} (us)",
                 "gemm_rs_ar_us": f"GEMM-{collective} (us)",
                 "speedup_vs_ring_ll": "Speedup vs RING_LL",
                 "speedup_vs_ldmc": "Speedup vs LDMC",
+                "speedup_vs_vllm": "Speedup vs vLLM",
             }
         )
         .round(3)
