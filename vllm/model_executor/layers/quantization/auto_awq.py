@@ -93,7 +93,7 @@ def _replace_or_register_parameter(
 def _convert_awq_to_standard_format(
     layer: torch.nn.Module,
     w_q_name: str,
-    w_zp_name: str,
+    w_zp_name: str | None,
     size_bits: int,
 ) -> None:
     """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
@@ -101,6 +101,7 @@ def _convert_awq_to_standard_format(
     AWQ packs qweight along the output dim with a non-standard bit order.
     This converts to standard bit order and repacks qweight along the input
     dim, matching the format expected by the MPLinearKernel framework.
+    If w_zp_name is None (symmetric quantization), only the weight is converted.
     """
     pack_factor = 32 // size_bits
     mask = (1 << size_bits) - 1
@@ -138,6 +139,9 @@ def _convert_awq_to_standard_format(
         weight_loader=_noop_loader,
     )
     setattr(layer, w_q_name, new_param)
+
+    if w_zp_name is None:
+        return
 
     # --- Convert qzeros: fix AWQ bit ordering and repack
     # AWQ qzeros: (G, N // pack) packed along dim 1, AWQ bit order
@@ -393,6 +397,7 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AWQ Marlin quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -701,7 +706,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -880,6 +884,7 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
 
     Args:
         quant_config: The AWQ quantization config.
+
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
