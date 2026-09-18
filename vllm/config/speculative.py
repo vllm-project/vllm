@@ -1971,6 +1971,7 @@ class SpeculativeConfig:
         N-gram               ngram         No       0
         Draft model          draft_model   No       1
         PARD                 draft_model   Yes      K
+        PARD-2               pard2         Yes      K
         ==================== ============= ======== ================
         """
         num_draft_tokens = self.num_speculative_tokens
@@ -1986,6 +1987,10 @@ class SpeculativeConfig:
                 return num_draft_tokens
 
             # The existing query is reused; only masked queries need new slots.
+            # PARD-2 also prepends the anchor row carrying the sequence's first
+            # token, which costs one slot back.
+            if self.method == "pard2":
+                return num_draft_tokens
             return num_draft_tokens - 1
 
         if self.uses_draft_model():
