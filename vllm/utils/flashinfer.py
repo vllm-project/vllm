@@ -82,8 +82,21 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 
 @functools.cache
 def has_flashinfer_cubin() -> bool:
-    """Return `True` if flashinfer-cubin package is available."""
+    """Return `True` if pre-downloaded FlashInfer cubins are available.
+
+    This is the case when the flashinfer-cubin package is installed, when
+    `VLLM_HAS_FLASHINFER_CUBIN=1` is set, or when `FLASHINFER_CUBIN_DIR`
+    points FlashInfer at an existing local cubin directory (FlashInfer reads
+    cubins from that directory before it ever contacts the artifactory).
+    """
     if envs.VLLM_HAS_FLASHINFER_CUBIN:
+        return True
+    cubin_dir = os.environ.get("FLASHINFER_CUBIN_DIR")
+    if cubin_dir and os.path.isdir(cubin_dir):
+        logger.debug_once(
+            "Using pre-downloaded FlashInfer cubins from FLASHINFER_CUBIN_DIR=%s",
+            cubin_dir,
+        )
         return True
     if importlib.util.find_spec("flashinfer_cubin") is not None:
         return True
@@ -566,6 +579,11 @@ def has_nvidia_artifactory() -> bool:
 
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
+
+    The result gates TRTLLM attention for the whole process (see
+    `supports_trtllm_attention`), so a failed probe silently changes the
+    attention kernels that get used. Pre-downloaded cubins (see
+    `has_flashinfer_cubin`) skip the probe entirely.
     """
     # If we have pre-downloaded cubins, we can assume the cubins are available.
     if has_flashinfer_cubin():
@@ -579,13 +597,28 @@ def has_nvidia_artifactory() -> bool:
             logger.debug_once("NVIDIA artifactory is accessible")
         else:
             logger.warning_once(
-                "NVIDIA artifactory returned failed status code: %d",
+                "NVIDIA artifactory returned failed status code: %d. %s",
                 response.status_code,
+                _ARTIFACTORY_UNAVAILABLE_HINT,
             )
         return accessible
     except Exception as e:
-        logger.warning_once("Failed to connect to NVIDIA artifactory: %s", e)
+        logger.warning_once(
+            "Failed to connect to NVIDIA artifactory: %s. %s",
+            e,
+            _ARTIFACTORY_UNAVAILABLE_HINT,
+        )
         return False
+
+
+_ARTIFACTORY_UNAVAILABLE_HINT = (
+    "TRTLLM attention kernels (trtllm-gen) are disabled for this process "
+    "because their cubins cannot be downloaded; attention falls back to the "
+    "FlashInfer native kernels, which can be significantly slower on "
+    "Blackwell GPUs. If the cubins are already present locally, set "
+    "FLASHINFER_CUBIN_DIR to that directory (or VLLM_HAS_FLASHINFER_CUBIN=1) "
+    "to skip this connectivity check."
+)
 
 
 @functools.cache

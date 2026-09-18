@@ -1826,7 +1826,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
-    # read the cubin files directly.
+    # read the cubin files directly. Setting FLASHINFER_CUBIN_DIR to an
+    # existing directory has the same effect (see has_flashinfer_cubin).
     "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(
         int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
     ),
