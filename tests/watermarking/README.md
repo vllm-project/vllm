@@ -12,11 +12,13 @@ makes the detector skip positions that were watermarked.
 
 ## Updating the contract
 
-A failing golden is a backwards-compatibility break to investigate. Do not
-regenerate the snapshot merely to make the test pass.
+A failing golden means the output contract changed and must be investigated.
+Do not regenerate the snapshot merely to make the test pass. Regeneration is
+appropriate once the change is understood and accepted, including when a bug
+fix makes the result more correct.
 
-When an intentional, reviewed protocol change requires a new contract, rebuild
-the snapshot from the repository root:
+When an intentional, reviewed protocol change or correctness fix requires a new
+contract, rebuild the snapshot from the repository root:
 
 ```bash
 python -m tests.watermarking.generate_goldens
