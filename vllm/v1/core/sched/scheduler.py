@@ -3317,7 +3317,16 @@ class Scheduler(SchedulerInterface):
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
     def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
-        """Fail closed for layouts whose block IDs are not globally unique."""
+        """Propagate receive failures to every reader of the failed load."""
+        failed_req_ids = failed_req_ids.copy()
+        for owner_id in tuple(failed_req_ids):
+            key = self._shared_load_owners.get(owner_id)
+            if key is not None:
+                # The transfer can fail after its initiating request aborts.
+                # Mark the entry before filtering out finished requests.
+                entry = self._shared_prefix_loads[key]
+                entry.failed = True
+                failed_req_ids.update(entry.followers)
         affected_req_ids: set[str] = set()
         for req_id in failed_req_ids:
             request = self.requests.get(req_id)

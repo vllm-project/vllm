@@ -91,9 +91,12 @@ def test_shared_external_prefix_lifetime(monkeypatch, cancel):
 
 @pytest.mark.parametrize("policy", ["recompute", "fail"])
 @pytest.mark.parametrize("abort_owner", [False, True])
-@pytest.mark.parametrize("early_error", [False, True])
+@pytest.mark.parametrize(
+    "error_kind,early_error",
+    [("blocks", False), ("blocks", True), ("request", False)],
+)
 def test_shared_external_prefix_load_failure(
-    monkeypatch, policy, abort_owner, early_error
+    monkeypatch, policy, abort_owner, error_kind, early_error
 ):
     """Failed shared destinations cannot become cache hits or shared writes."""
     scheduler = _shared_load_scheduler(monkeypatch, policy)
@@ -113,15 +116,20 @@ def test_shared_external_prefix_load_failure(
         )
         output = scheduler.schedule()
         assert not output.num_scheduled_tokens
-    scheduler.update_from_output(
-        output,
-        create_model_runner_output(
-            reqs=[],
-            finished_recving={owner.request_id},
-            invalid_block_ids=None if early_error else error,
-        ),
+    result = create_model_runner_output(
+        reqs=[],
+        finished_recving={owner.request_id},
+        invalid_block_ids=error if error_kind == "blocks" and not early_error else None,
     )
+    if error_kind == "request":
+        result.kv_connector_output.failed_recving = {owner.request_id}
+    scheduler.update_from_output(output, result)
     assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
+    assert not scheduler._shared_load_followers
+    assert all(block.ref_cnt == 0 for block in blocks)
+    assert all(block.block_hash is None for block in blocks)
+    assert not scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     if policy == "fail":
         assert follower.status == RequestStatus.FINISHED_ERROR
     else:
