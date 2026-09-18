@@ -23,13 +23,19 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 import torch
+from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_utils import (
+    filter_duplicate_safetensors_files,
+)
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
@@ -59,127 +65,53 @@ class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
 
 
-def check_ipc_platform_support(*, where: str) -> None:
+def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
     Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
 
-    Args:
-        where: Short tag ("daemon"/"engine") used in the error message.
-
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
             CUDA/ROCm.
+
     """
     if current_platform.is_cuda_alike():
         return
     raise UnsupportedPlatformForIPCError(
-        f"[weight_cache:{where}] platform {current_platform.device_name!r} "
-        "does not support CUDA IPC weight sharing; only CUDA and ROCm are "
-        "supported. Use the default --load-format for this platform."
+        f"platform {current_platform.device_name!r} does not support CUDA IPC "
+        "weight sharing; only CUDA and ROCm are supported. Use the default "
+        "--load-format for this platform."
     )
 
 
-# The daemon exports tensor data only, so sharing is correct just for methods
-# whose post-load effect is either fully captured by that data or rebuilt when
-# process_weights_after_loading runs under weights_already_processed. Anything
-# absent from this registry hard-errors: a method that silently repacks into
-# shapes the client cannot reproduce or stamps unrebuildable Python-side state
-# would serve wrong numerics. Extend it only after an end-to-end check against
-# a disk-loaded baseline.
-#
-# This check is config-only so the daemon fails fast before a slow full load,
-# rather than surfacing the incompatibility only after the engine has built the
-# model (where process_weights_after_loading's supports_pre_processed_weights
-# guard would eventually catch it).
-
-
-def _quant_config_field(quant_config: Any, key: str) -> Any:
-    if quant_config is None:
-        return None
-    if isinstance(quant_config, dict):
-        return quant_config.get(key)
-    return getattr(quant_config, key, None)
-
-
-def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
-    """Only block-wise FP8 is verified.
-
-    Block-wise FP8 preserves the weight shape, while per-tensor FP8 transposes
-    ``layer.weight`` during post-processing -- a shape the client's
-    meta-initialized model cannot reproduce.
-    """
-    return _quant_config_field(quant_config, "weight_block_size") is not None
-
-
-# quantization name -> predicate(quant_config) -> True when verified safe.
-IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
-    None: lambda _quant_config: True,  # unquantized
-    "fp8": _fp8_round_trips_via_ipc,
-    "modelopt_fp4": lambda _quant_config: True,
-    # Kimi-K3 routed experts (mxfp4-pack): the MegaMoE experts keep their packed
-    # weights and scales as plain parameters and defer the DeepGEMM transform to
-    # forward(), so the exported tensors are complete. Any other mxfp4 method
-    # that repacks or drops parameters still fails closed at the engine's
-    # supports_pre_processed_weights guard.
-    "mxfp4": lambda _quant_config: True,
-}
-
-
-def is_ipc_quant_supported(quantization: str | None, quant_config: Any) -> bool:
-    predicate = IPC_QUANT_ALLOWLIST.get(quantization)
-    return False if predicate is None else bool(predicate(quant_config))
-
-
-def check_ipc_quant_support(model_config: ModelConfig, *, where: str) -> None:
-    """Hard-error unless the model's quantization is verified for IPC sharing.
+# The daemon transfers post processed weights directly
+def check_ipc_quant_support(model: torch.nn.Module) -> None:
+    """Hard-error unless every quant method supports pre-processed weights.
 
     Args:
-        model_config: Model configuration to inspect.
-        where: Short tag ("daemon"/"engine") used in the error message.
+        model: The model to inspect (weights need not be loaded).
 
     Raises:
-        UnsupportedQuantForIPCError: If the quantization method is not on the
-            verified allowlist.
+        UnsupportedQuantForIPCError: If any quant method does not declare
+            ``supports_pre_processed_weights``.
+
     """
-    quantization = model_config.quantization
-    # Prefer the canonical, nested-aware config (multimodal models keep it under
-    # text_config); fall back to the raw hf_config for older code paths.
-    quant_config = getattr(
-        getattr(model_config, "model_arch_config", None), "quantization_config", None
-    )
-    if quant_config is None:
-        quant_config = getattr(model_config.hf_config, "quantization_config", None)
-    if is_ipc_quant_supported(quantization, quant_config):
-        return
-    verified = ", ".join(
-        "unquantized" if name is None else repr(name) for name in IPC_QUANT_ALLOWLIST
-    )
-    raise UnsupportedQuantForIPCError(
-        f"[weight_cache:{where}] quantization {quantization!r} is not verified "
-        f"for CUDA IPC weight sharing: its post-load processing may repack "
-        f"weights into shapes the client cannot reproduce or stamp Python-side "
-        f"state that tensor export cannot carry, which would silently serve "
-        f"wrong numerics. Verified: {verified} (FP8 only with weight_block_size "
-        f"set, i.e. block-wise). Use the default --load-format for this model."
-    )
+    for name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if (
+            isinstance(quant_method, QuantizeMethodBase)
+            and not quant_method.supports_pre_processed_weights
+        ):
+            raise UnsupportedQuantForIPCError(
+                f"layer {name or '<root>'}: {type(quant_method).__name__} "
+                "does not support loading from pre-processed weights."
+            )
 
 
-def get_physical_device_id(device_index: int) -> int | None:
-    """Map a local CUDA device index to the physical GPU id.
-
-    Returns None if CUDA_VISIBLE_DEVICES contains non-integer entries
-    (e.g. GPU UUIDs), in which case an explicit socket path is required.
-    """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not visible:
-        return device_index
-    entries = visible.split(",")
-    try:
-        return int(entries[device_index])
-    except (IndexError, ValueError):
-        return None
+def get_current_device_uuid() -> str:
+    """UUID of the physical GPU backing the current accelerator device."""
+    return current_platform.get_device_uuid(torch.accelerator.current_device_index())
 
 
 def get_socket_dir(socket_dir: str | None = None) -> str:
@@ -196,9 +128,9 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_id: int, socket_dir: str | None = None) -> str:
+def get_socket_path(gpu_uuid: str, socket_dir: str | None = None) -> str:
     directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_id=gpu_id))
+    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_uuid=gpu_uuid))
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -309,12 +241,6 @@ def hash_checkpoint(model: str) -> str | None:
     """
     if not os.path.isdir(model):
         return None
-    from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
-
-    from vllm.model_executor.model_loader.weight_utils import (
-        filter_duplicate_safetensors_files,
-    )
-
     files = glob.glob(os.path.join(model, "*.safetensors"))
     if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
         files = filter_duplicate_safetensors_files(
@@ -401,8 +327,6 @@ class TensorEntry:
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
-        from torch.multiprocessing.reductions import reduce_tensor
-
         tensor = tensor.detach()
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
@@ -413,8 +337,6 @@ class TensorEntry:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
-        from torch.multiprocessing.reductions import rebuild_cuda_tensor
-
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
