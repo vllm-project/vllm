@@ -93,6 +93,9 @@ _MODALITY_SIZE_KEYS = {
 # past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
 # 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
 _MAX_FRAMES_PER_VIDEO = 16
+# From this version on, a processor reporting no offsets is an error rather than a
+# fallback to searching the expanded prompt
+_HAS_REPLACEMENT_OFFSETS = Version(transformers.__version__) >= Version("5.15.0")
 
 
 def _get_embed_token_id(replacement_ids: torch.Tensor) -> int:
@@ -116,6 +119,16 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     @cached_property
     def _is_video_model(self) -> bool:
         if not hasattr(self.get_hf_processor(), "video_processor"):
+            return False
+        # `LegacyMultiModalProcessor` locates placeholders by searching the expanded
+        # prompt, which it only knows how to do for image and audio
+        if not _HAS_REPLACEMENT_OFFSETS:
+            logger.info_once(
+                "Locating video placeholders needs the replacement offsets of "
+                "transformers>=5.15.0, but %s is installed, so the Transformers "
+                "modeling backend serves this model without video inputs.",
+                transformers.__version__,
+            )
             return False
         width, height = self.get_image_size_with_most_features()
         num_frames = self._get_min_video_frames()
@@ -1181,12 +1194,10 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         )
 
 
-# From this version on, a processor reporting no offsets is an error rather than a
-# fallback to searching the expanded prompt
 MultiModalProcessor = (
-    LegacyMultiModalProcessor
-    if Version(transformers.__version__) < Version("5.15.0")
-    else OffsetsMultiModalProcessor
+    OffsetsMultiModalProcessor
+    if _HAS_REPLACEMENT_OFFSETS
+    else LegacyMultiModalProcessor
 )
 
 
