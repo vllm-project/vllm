@@ -12,6 +12,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingSpec,
+    OffloadingStartupError,
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import (
@@ -202,6 +203,41 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block
     assert spec.num_chunks == 8
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, OffloadingStartupError, KeyboardInterrupt]
+)
+def test_tiering_startup_cleanup(monkeypatch, error_type):
+    """Unsafe failures must retain mappings: native work may still touch them."""
+    from vllm.v1.kv_offload.tiering import spec as module
+
+    retained: list[object] = []
+    monkeypatch.setattr("vllm.v1.kv_offload.base._RETAINED_RESOURCES", retained)
+    region, primary, secondary = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(module, "SharedOffloadRegion", lambda **kwargs: region)
+    monkeypatch.setattr(
+        module, "CPUPrimaryTierOffloadingManager", lambda **kwargs: primary
+    )
+    unsafe = error_type is not RuntimeError
+    monkeypatch.setattr(
+        module.SecondaryTierFactory,
+        "create_secondary_tier",
+        MagicMock(side_effect=[secondary, error_type("startup failed")]),
+    )
+    spec = TieringOffloadingSpec(
+        _make_offloading_config(
+            spec_name="TieringOffloadingSpec",
+            extra_config={
+                "secondary_tiers": [{"type": "example"}, {"type": "example"}]
+            },
+        )
+    )
+    with pytest.raises(error_type, match="startup failed"):
+        spec.get_manager()
+    for tier in (primary, secondary):
+        assert tier.shutdown.call_count == (0 if unsafe else 1)
+    assert retained == ([primary, region, secondary] if unsafe else [])
 
 
 def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
