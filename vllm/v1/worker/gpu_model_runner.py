@@ -828,6 +828,9 @@ class GPUModelRunner(
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
+        self.is_padding = torch.zeros(
+            self.max_num_tokens, dtype=torch.bool, device=self.device
+        )
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -1891,8 +1894,12 @@ class GPUModelRunner(
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if self.enable_prompt_embeds:
             # The multimodal embed path reads is_token_ids.gpu; its .cpu copy is
-            # refreshed every step but the async fast paths below only scatter
-            # input_ids.gpu, so refresh is_token_ids.gpu here too.
+            # refreshed every step but the async fast path below replaces draft
+            # tokens directly on the GPU. Mark those positions as token IDs before
+            # refreshing the GPU mask so their embeddings are rebuilt. Sampled
+            # tokens are already marked by bookkeeping.
+            if spec_flattened_indices:
+                self.is_token_ids.np[spec_flattened_indices] = True
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_common_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
@@ -3529,6 +3536,14 @@ class GPUModelRunner(
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
+    def _prepare_padding_mask(
+        self, num_tokens_unpadded: int, num_tokens_padded: int
+    ) -> torch.Tensor:
+        padding_mask = self.is_padding[:num_tokens_padded]
+        padding_mask[:num_tokens_unpadded].fill_(False)
+        padding_mask[num_tokens_unpadded:].fill_(True)
+        return padding_mask
+
     def _prepare_mm_inputs(
         self, num_tokens: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
@@ -4470,6 +4485,7 @@ class GPUModelRunner(
                 num_tokens_unpadded,
                 ubatch_slices_padded,
             )
+        is_padding = self._prepare_padding_mask(num_tokens_unpadded, num_tokens_padded)
         with (
             set_forward_context(
                 attn_metadata,
@@ -4481,6 +4497,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                is_padding=is_padding,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -6189,6 +6206,11 @@ class GPUModelRunner(
                     num_tokens_padded, None, False
                 )
 
+            num_tokens_unpadded = num_tokens_padded if is_profile else 0
+            is_padding = self._prepare_padding_mask(
+                num_tokens_unpadded, num_tokens_padded
+            )
+
             if ubatch_slices_padded is not None:
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
@@ -6210,6 +6232,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    is_padding=is_padding,
                 ),
             ):
                 outputs = self.model(
