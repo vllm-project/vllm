@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from vllm.v1.worker.cpu.mamba_utils import (
+    _full_rows,
     preprocess_mamba_align,
     run_fused_postprocess_align,
     run_fused_precopy,
@@ -436,6 +437,34 @@ def test_precopy_leaves_state_alone_when_nothing_crosses():
     run_fused_precopy(ctx, 4, state_idx, src_col, token_bias, idx_mapping)
 
     _assert_states_close(ctx, expected_ctx)
+
+
+@pytest.mark.parametrize("captured_rows", [1, 3])
+def test_full_rows_recovers_what_a_sliced_block_table_hides(captured_rows):
+    """The runner hands over batch-order slices of the persistent block tables.
+
+    The kernels reach later rows regardless, addressing the buffer by pointer
+    and stride, so a fallback that kept the slice would raise as soon as a
+    second request needed a copy.
+    """
+    persistent = torch.arange(MAX_REQS * MAX_BLOCKS, dtype=torch.int32).reshape(
+        MAX_REQS, MAX_BLOCKS
+    )
+    captured = persistent[:captured_rows]
+
+    restored = _full_rows(captured)
+
+    assert restored.size(0) == MAX_REQS, (
+        f"recovered {restored.size(0)} rows from a {captured_rows}-row slice"
+    )
+    torch.testing.assert_close(restored, persistent)
+
+
+def test_full_rows_leaves_a_whole_block_table_alone():
+    persistent = torch.arange(MAX_REQS * MAX_BLOCKS, dtype=torch.int32).reshape(
+        MAX_REQS, MAX_BLOCKS
+    )
+    torch.testing.assert_close(_full_rows(persistent), persistent)
 
 
 @pytest.mark.parametrize("kinds", [["temporal"], ["conv_sd", "temporal"]])
