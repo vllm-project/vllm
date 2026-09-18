@@ -39,6 +39,9 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processors.mistral3 import (
+    enable_numba_image_processing,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -234,7 +237,8 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
+        processor = self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
+        return enable_numba_image_processing(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
