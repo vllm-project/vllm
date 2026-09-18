@@ -8,9 +8,9 @@ import pytest
 
 from vllm.multimodal.video import sample_frames_from_video
 
-from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-from ...utils import dummy_hf_overrides
-from ..generation.vlm_utils.builders import sample_frames_with_video_metadata
+from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
+from ....utils import dummy_hf_overrides
+from ...generation.vlm_utils.builders import sample_frames_with_video_metadata
 
 
 @dataclass

@@ -12,8 +12,12 @@ from ._vit_cudagraph import (
     run_vit_cudagraph_video,
 )
 
+MODEL_IDS = ("minicpmv_25", "minicpmv_26", "minicpmv_40")
 
-@pytest.mark.parametrize("model_id", params_with_marks(CORE_MODEL_CONFIGS))
+
+@pytest.mark.parametrize(
+    "model_id", params_with_marks({key: CORE_MODEL_CONFIGS[key] for key in MODEL_IDS})
+)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
 )
@@ -21,7 +25,9 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     run_vit_cudagraph_image(model_id, vllm_runner, image_assets)
 
 
-@pytest.mark.parametrize("model_id", params_with_marks(CORE_MODEL_CONFIGS))
+@pytest.mark.parametrize(
+    "model_id", params_with_marks({key: CORE_MODEL_CONFIGS[key] for key in MODEL_IDS})
+)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
 )
