@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -72,8 +72,7 @@ from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - c: Number of channels (3)
         - h: Height
@@ -88,8 +87,7 @@ class LlavaImagePixelInputs(TensorSchema):
 
 
 class PixtralHFImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - c: Number of channels
         - h: Height
@@ -107,11 +105,10 @@ class PixtralHFImagePixelInputs(TensorSchema):
 
 
 class LlavaImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -231,20 +228,16 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -323,7 +316,7 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
 
 class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -440,6 +433,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
     Args:
         hf_config: Model config with vision feature layer(s).
+
     """
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -707,9 +701,12 @@ class LlavaForConditionalGeneration(
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`LlavaImageInputs`][vllm.model_executor.models.llava.LlavaImageInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -731,9 +728,7 @@ class LlavaForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
