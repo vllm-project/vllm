@@ -497,6 +497,87 @@ def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor
     return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
 
 
+@pytest.mark.parametrize("layout", ["SD", "DS"])
+@torch.inference_mode()
+def test_gdn_nonspec_dispatches_conv_state_layout(
+    layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Python call site transposes SD state and passes DS state directly."""
+    num_slots = 2
+    state_len = CONV_KERNEL - 1
+    if layout == "SD":
+        conv_state = torch.zeros(num_slots, state_len, CONV_DIM)
+    else:
+        conv_state = torch.zeros(num_slots, CONV_DIM, state_len)
+
+    forwarded_conv_state = None
+
+    def record_update(**kwargs):
+        nonlocal forwarded_conv_state
+        forwarded_conv_state = kwargs["conv_states"]
+        return kwargs["x"]
+
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: True)
+    monkeypatch.setattr(
+        gdn_attention,
+        "is_conv_state_dim_first",
+        lambda: layout == "DS",
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "causal_conv1d_update_cpu",
+        record_update,
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_cpu",
+        lambda **kwargs: torch.zeros(1, 1, CONV_DIM),
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(
+            weight=torch.empty(CONV_DIM, 1, CONV_KERNEL),
+            bias=None,
+        ),
+        A_log=torch.empty(1),
+        dt_bias=torch.empty(1, dtype=torch.bfloat16),
+        kv_cache=[conv_state, torch.empty(num_slots, 1, 2, 2)],
+        rearrange_mixed_qkv=lambda x: (x, x, x),
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=1,
+        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    gdn_attention._cpu_gdn_attention_nonspec(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv=torch.zeros(1, CONV_DIM, dtype=torch.bfloat16),
+        b=torch.zeros(1, 1, dtype=torch.bfloat16),
+        a=torch.zeros(1, 1, dtype=torch.bfloat16),
+        core_attn_out=torch.zeros(1, CONV_DIM, dtype=torch.bfloat16),
+    )
+
+    assert forwarded_conv_state is not None
+    if layout == "SD":
+        assert forwarded_conv_state.shape == (num_slots, CONV_DIM, state_len)
+        assert forwarded_conv_state.stride() == (
+            state_len * CONV_DIM,
+            1,
+            CONV_DIM,
+        )
+        assert forwarded_conv_state.data_ptr() == conv_state.data_ptr()
+    else:
+        assert forwarded_conv_state is conv_state
+
+
 @torch.inference_mode()
 def test_spec_aware_mixed_routing_preserves_token_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -1133,6 +1214,183 @@ def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False, layout: str = "SD
         is_vnni=is_vnni,
     )
     return out.transpose(0, 1).contiguous(), conv_state
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@torch.inference_mode()
+def test_conv_cpp_fixed_prefill_indexed_initial_state() -> None:
+    """Fixed-length prefill keeps DS and SD state updates equivalent."""
+    batch_size = 3
+    seq_len = 7
+    state_len = _STATE_LEN + 5
+    x, weight, bias = _conv_inputs(batch_size * seq_len)
+    x = x.view(batch_size, seq_len, CONV_DIM).transpose(1, 2)
+    cache_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False, True])
+    logical_state = tensor_cache(
+        batch_size * CONV_DIM * state_len, torch.bfloat16
+    ).view(batch_size, CONV_DIM, state_len)
+    state_sd = _conv_states(batch_size, state_len, CONV_DIM, "SD")
+    state_ds = _conv_states(batch_size, state_len, CONV_DIM, "DS")
+    state_sd.copy_(logical_state)
+    state_ds.copy_(logical_state)
+
+    packed_weight = _maybe_pack_conv_weight(weight, False)
+    out_sd = ops.causal_conv1d_fwd_cpu(
+        x=x,
+        weight=packed_weight,
+        bias=bias,
+        conv_states=state_sd,
+        query_start_loc=None,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+    out_ds = ops.causal_conv1d_fwd_cpu(
+        x=x,
+        weight=packed_weight,
+        bias=bias,
+        conv_states=state_ds,
+        query_start_loc=None,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+
+    torch.testing.assert_close(out_ds, out_sd, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(state_ds, state_sd, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@torch.inference_mode()
+def test_conv_update_cpp_ds_padded_slot_stride() -> None:
+    """Indexed DS updates honor a slot stride larger than one state payload."""
+    batch_size = 3
+    state_len = _STATE_LEN + 4
+    slot_stride = CONV_DIM * state_len + 17
+    x, weight, bias = _conv_inputs(batch_size)
+    cache_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
+    logical_state = tensor_cache(
+        batch_size * CONV_DIM * state_len, torch.bfloat16
+    ).view(batch_size, CONV_DIM, state_len)
+
+    storage = torch.empty(batch_size * slot_stride + 32, dtype=torch.bfloat16)
+    state_ds = torch.as_strided(
+        storage,
+        (batch_size, CONV_DIM, state_len),
+        (slot_stride, state_len, 1),
+    )
+    state_sd = _conv_states(batch_size, state_len, CONV_DIM, "SD")
+    state_ds.copy_(logical_state)
+    state_sd.copy_(logical_state)
+
+    out_ds = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=state_ds,
+        weight=weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=cache_indices,
+        is_vnni=False,
+    )
+    out_sd = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=state_sd,
+        weight=weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=cache_indices,
+        is_vnni=False,
+    )
+
+    torch.testing.assert_close(out_ds, out_sd, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(state_ds, state_sd, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_causal_conv1d_rejects_invalid_ds_metadata() -> None:
+    dim = CONV_DIM
+    weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    x_2d = torch.zeros(1, dim, dtype=torch.bfloat16)
+
+    invalid_layout = torch.empty_strided(
+        (1, dim, _STATE_LEN),
+        (dim * _STATE_LEN, 2, 1),
+        dtype=torch.bfloat16,
+    )
+    with pytest.raises(RuntimeError, match="must use SD.*or DS"):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=invalid_layout,
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+    with pytest.raises((RuntimeError, IndexError), match="out of range"):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=_conv_states(1, _STATE_LEN, dim, "DS"),
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([1], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+    with pytest.raises(RuntimeError):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=_conv_states(1, _STATE_LEN - 1, dim, "DS"),
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_rejects_invalid_ds_history() -> None:
+    dim = CONV_DIM
+    x = torch.zeros(1, 2, dim, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="history window exceeds"):
+        ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=_conv_states(1, 3, dim, "DS"),
+            weight=torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16),
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+            num_accepted_tokens=torch.tensor([2], dtype=torch.int32),
+        )
+
+
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_requires_initial_state_metadata() -> None:
+    x = torch.zeros(1, 1, CONV_DIM, dtype=torch.bfloat16).transpose(1, 2)
+    with pytest.raises(RuntimeError, match="has_initial_state is required"):
+        torch.ops._C.causal_conv1d_fwd_cpu(
+            x,
+            torch.zeros(CONV_DIM, CONV_KERNEL, dtype=torch.bfloat16),
+            None,
+            _conv_states(1, _STATE_LEN, CONV_DIM, "DS"),
+            None,
+            torch.tensor([0], dtype=torch.int32),
+            None,
+            False,
+            -1,
+            False,
+        )
 
 
 @pytest.mark.skipif(

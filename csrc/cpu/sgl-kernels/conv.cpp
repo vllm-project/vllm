@@ -65,25 +65,9 @@ void inline update_conv_state(
     int64_t width,
     int64_t dim,
     int64_t seqlen,
-    bool has_initial_states,
-    ConvStateLayout layout,
-    int64_t state_len) {
+    bool has_initial_states) {
   // width for `conv_states`
   int64_t width1 = width - 1;
-  if (layout == ConvStateLayout::DS) {
-    for (int64_t d = 0; d < dim; ++d) {
-      scalar_t* state = conv_states + d * state_len;
-      int64_t w = 0;
-      for (; w < width1 - seqlen; ++w) {
-        state[w] = has_initial_states ? state[w + seqlen] : scalar_t(0);
-      }
-      for (; w < width1; ++w) {
-        state[w] = input[(w + seqlen - width1) * dim + d];
-      }
-    }
-    return;
-  }
-
   int64_t w = 0;
   for (; w < width1 - seqlen; ++w) {
     scalar_t* y = conv_states + w * dim;
@@ -146,10 +130,8 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
 
     // k: {-3, -2, -1} -> {0, 1, 2}
     auto set_conv_states = [&](int k, int col) -> __m512i {
-      return has_initial_state
-                 ? _mm512_loadu_si512(
-                       conv_states + (k + K - 1) * lda + col * 32)
-                 : _mm512_setzero_si512();
+      return has_initial_state ? _mm512_loadu_si512(conv_states + (k + K - 1) * lda + col * 32)
+                               : _mm512_setzero_si512();
     };
 
 #define MM512_LOAD_A(idx)                                                 \
@@ -268,7 +250,7 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
       weight + nb_start * width,                                                             \
       out + bs * seqlen * dim + mb_start * dim + nb_start,                                   \
       has_bias ? bias + nb_start : nullptr,                                                  \
-      tinygemm_state == nullptr ? nullptr : tinygemm_state + nb_start,                       \
+      has_conv_states ? conv_states + conv_state_index * conv_state_slot_stride + nb_start : nullptr, \
       has_initial_states_value,                                                              \
       mb_size,                                                                               \
       dim,                                                                                   \
@@ -289,11 +271,7 @@ void causal_conv1d_fwd_kernel_impl(
     int64_t seqlen,
     int64_t width,
     int64_t num_seq_blocks,
-    int64_t conv_state_slot_stride,
-    ConvStateLayout layout,
-    int64_t state_len,
-    const scalar_t* __restrict__ tinygemm_states,
-    int64_t tinygemm_state_slot_stride) {
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -319,15 +297,6 @@ void causal_conv1d_fwd_kernel_impl(
 
         const bool has_initial_states_value = has_conv_states ? has_initial_state[bs] : false;
         int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
-        const scalar_t* tinygemm_state = nullptr;
-        if (has_conv_states) {
-          tinygemm_state =
-              layout == ConvStateLayout::DS
-                  ? (tinygemm_states == nullptr
-                         ? nullptr
-                         : tinygemm_states + bs * tinygemm_state_slot_stride)
-                  : conv_states + conv_state_index * conv_state_slot_stride;
-        }
 
         switch (width << 4 | nb_size >> 4) {
           case 0x42:
@@ -357,9 +326,7 @@ void causal_conv1d_fwd_kernel_impl(
             width,
             dim,
             seqlen,
-            has_initial_state[bs],
-            layout,
-            state_len);
+            has_initial_state[bs]);
       }
     });
   }
@@ -371,7 +338,7 @@ void causal_conv1d_fwd_kernel_impl(
       weight + nb_start * width,                                                                    \
       out + batch_offset * dim + mb_start * dim + nb_start,                                         \
       has_bias ? bias + nb_start : nullptr,                                                         \
-      tinygemm_state == nullptr ? nullptr : tinygemm_state + nb_start,                              \
+      has_conv_states ? conv_states + conv_state_index * conv_state_slot_stride + nb_start : nullptr, \
       has_initial_states_value,                                                                     \
       mb_size,                                                                                      \
       dim,                                                                                          \
@@ -393,11 +360,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
     int64_t dim,
     int64_t width,
     int64_t num_seq_blocks,
-    int64_t conv_state_slot_stride,
-    ConvStateLayout layout,
-    int64_t state_len,
-    const scalar_t* __restrict__ tinygemm_states,
-    int64_t tinygemm_state_slot_stride) {
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -424,15 +387,6 @@ void causal_conv1d_fwd_varlen_kernel_impl(
 
         const bool has_initial_states_value = has_conv_states ? has_initial_state[bs] : false;
         int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
-        const scalar_t* tinygemm_state = nullptr;
-        if (has_conv_states) {
-          tinygemm_state =
-              layout == ConvStateLayout::DS
-                  ? (tinygemm_states == nullptr
-                         ? nullptr
-                         : tinygemm_states + bs * tinygemm_state_slot_stride)
-                  : conv_states + conv_state_index * conv_state_slot_stride;
-        }
 
         switch (width << 4 | nb_size >> 4) {
           case 0x42:
@@ -464,9 +418,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
             width,
             dim,
             seqlen,
-            has_initial_state[bs],
-            layout,
-            state_len);
+            has_initial_state[bs]);
       }
     });
   }
@@ -485,11 +437,7 @@ void causal_conv1d_update_kernel_impl(
     int64_t dim,
     int64_t seqlen,
     int64_t width,
-    int64_t conv_state_slot_stride,
-    ConvStateLayout layout,
-    int64_t state_len,
-    const scalar_t* __restrict__ tinygemm_states,
-    int64_t tinygemm_state_slot_stride) {
+    int64_t conv_state_slot_stride) {
   // handle 32 x 64 per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n() * 2;
@@ -512,10 +460,6 @@ void causal_conv1d_update_kernel_impl(
 
         const bool has_initial_states_value = true;
         int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
-        const scalar_t* tinygemm_state =
-            layout == ConvStateLayout::DS
-                ? tinygemm_states + bs * tinygemm_state_slot_stride
-                : conv_states + conv_state_index * conv_state_slot_stride;
 
         switch (width << 4 | nb_size >> 4) {
           case 0x42:
@@ -534,34 +478,18 @@ void causal_conv1d_update_kernel_impl(
     });
   });
 
+#define CONV_STATE_INDEXR(w) conv_states + conv_state_index*conv_state_slot_stride + (w) * dim
+
   // update conv_states
   at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
     for (int64_t bs = begin; bs < end; ++bs) {
       // update old states, range [1, width - 1)
       int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
-      scalar_t* state =
-          conv_states + conv_state_index * conv_state_slot_stride;
-      if (layout == ConvStateLayout::DS) {
-        for (int64_t d = 0; d < dim; ++d) {
-          scalar_t* row = state + d * state_len;
-          for (int64_t w = 1; w < width - 1; ++w) {
-            row[w - 1] = row[w];
-          }
-          row[width - 2] = input[bs * dim + d];
-        }
-        continue;
-      }
       for (int64_t w = 1; w < width - 1; ++w) {
-        std::memcpy(
-            state + (w - 1) * dim,
-            state + w * dim,
-            dim * sizeof(scalar_t));
+        std::memcpy(CONV_STATE_INDEXR(w - 1), CONV_STATE_INDEXR(w), dim * sizeof(scalar_t));
       }
       // copy new states
-      std::memcpy(
-          state + (width - 2) * dim,
-          input + bs * dim,
-          dim * sizeof(scalar_t));
+      std::memcpy(CONV_STATE_INDEXR(width - 2), input + bs * dim, dim * sizeof(scalar_t));
     }
   });
 }
@@ -581,10 +509,7 @@ void causal_conv1d_update_multi_kernel_impl(
     int64_t seqlen,
     int64_t width,
     int64_t state_len,
-    int64_t conv_state_slot_stride,
-    ConvStateLayout layout,
-    const scalar_t* __restrict__ tinygemm_states,
-    int64_t tinygemm_state_slot_stride) {
+    int64_t conv_state_slot_stride) {
   constexpr int64_t BLOCK_N = block_size_n() * 2;
   const int64_t NB = div_up(dim, BLOCK_N);
 
@@ -598,10 +523,6 @@ void causal_conv1d_update_multi_kernel_impl(
         const int64_t nb_size = std::min(dim - nb_start, BLOCK_N);
         const int32_t conv_state_index = conv_indices[bs];
         const int32_t history_offset = num_accepted_tokens[bs] - 1;
-        const scalar_t* tinygemm_state =
-            layout == ConvStateLayout::DS
-                ? tinygemm_states + bs * tinygemm_state_slot_stride
-                : conv_states + conv_state_index * conv_state_slot_stride;
 
         switch (width << 4 | nb_size >> 4) {
           case 0x42:
@@ -610,7 +531,8 @@ void causal_conv1d_update_multi_kernel_impl(
                 weight + nb_start * width,
                 out + bs * seqlen * dim + nb_start,
                 has_bias ? bias + nb_start : nullptr,
-                tinygemm_state + history_offset * dim + nb_start,
+                conv_states + conv_state_index * conv_state_slot_stride +
+                    history_offset * dim + nb_start,
                 true,
                 seqlen,
                 dim,
@@ -622,7 +544,8 @@ void causal_conv1d_update_multi_kernel_impl(
                 weight + nb_start * width,
                 out + bs * seqlen * dim + nb_start,
                 has_bias ? bias + nb_start : nullptr,
-                tinygemm_state + history_offset * dim + nb_start,
+                conv_states + conv_state_index * conv_state_slot_stride +
+                    history_offset * dim + nb_start,
                 true,
                 seqlen,
                 dim,
@@ -643,28 +566,14 @@ void causal_conv1d_update_multi_kernel_impl(
       const int32_t num_accepted = num_accepted_tokens[bs];
       scalar_t* state = conv_states + conv_state_index * conv_state_slot_stride;
 
-      if (layout == ConvStateLayout::DS) {
-        for (int64_t d = 0; d < dim; ++d) {
-          scalar_t* row = state + d * state_len;
-          std::memmove(
-              row,
-              row + num_accepted,
-              (state_len - seqlen) * sizeof(scalar_t));
-          for (int64_t t = 0; t < seqlen; ++t) {
-            row[state_len - seqlen + t] =
-                input[(bs * seqlen + t) * dim + d];
-          }
-        }
-      } else {
-        std::memmove(
-            state,
-            state + num_accepted * dim,
-            (state_len - seqlen) * dim * sizeof(scalar_t));
-        std::memcpy(
-            state + (state_len - seqlen) * dim,
-            input + bs * seqlen * dim,
-            seqlen * dim * sizeof(scalar_t));
-      }
+      std::memmove(
+          state,
+          state + num_accepted * dim,
+          (state_len - seqlen) * dim * sizeof(scalar_t));
+      std::memcpy(
+          state + (state_len - seqlen) * dim,
+          input + bs * seqlen * dim,
+          seqlen * dim * sizeof(scalar_t));
     }
   });
 }
@@ -672,7 +581,10 @@ void causal_conv1d_update_multi_kernel_impl(
 at::Tensor stage_ds_conv_states(
     const at::Tensor& conv_states,
     const std::optional<at::Tensor>& conv_state_indices,
-    int64_t batch) {
+    int64_t batch,
+    int64_t prefix_len) {
+  // Narrow before selecting slots so a wide speculative tail is never copied.
+  auto prefix_states = conv_states.narrow(2, 0, prefix_len);
   at::Tensor selected_states;
   bool identity_indices = true;
   if (conv_state_indices.has_value()) {
@@ -685,12 +597,148 @@ at::Tensor stage_ds_conv_states(
       }
     }
     selected_states = identity_indices
-                         ? conv_states.narrow(0, 0, batch)
-                         : conv_states.index_select(0, indices);
+                         ? prefix_states.narrow(0, 0, batch)
+                         : prefix_states.index_select(0, indices);
   } else {
-    selected_states = conv_states.narrow(0, 0, batch);
+    selected_states = prefix_states.narrow(0, 0, batch);
   }
   return selected_states.transpose(1, 2).contiguous();
+}
+
+at::Tensor identity_conv_state_indices(int64_t batch, const at::Tensor& conv_states) {
+  return at::arange(
+      batch,
+      at::TensorOptions().dtype(at::kInt).device(conv_states.device()));
+}
+
+template <typename scalar_t>
+void update_ds_conv_states_fwd(
+    const at::Tensor& x,
+    const at::Tensor& conv_states,
+    const std::optional<at::Tensor>& query_start_loc,
+    const std::optional<at::Tensor>& conv_state_indices,
+    const at::Tensor& has_initial_state,
+    int64_t batch,
+    int64_t dim,
+    int64_t width,
+    int64_t conv_state_slot_stride) {
+  const int64_t state_len = conv_states.size(2);
+  const int64_t width1 = width - 1;
+  const bool is_var_seqlen = query_start_loc.has_value();
+  const int32_t* offsets =
+      is_var_seqlen ? query_start_loc.value().data_ptr<int32_t>() : nullptr;
+  const int32_t* indices =
+      conv_state_indices.has_value() ? conv_state_indices.value().data_ptr<int32_t>()
+                                     : nullptr;
+  const bool* initial_state = has_initial_state.data_ptr<bool>();
+  const scalar_t* input = x.data_ptr<scalar_t>();
+  scalar_t* states = conv_states.data_ptr<scalar_t>();
+
+  at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t bs = begin; bs < end; ++bs) {
+      const int64_t slot = indices == nullptr ? bs : indices[bs];
+      const int64_t sequence_start =
+          is_var_seqlen ? offsets[bs] : bs * x.size(-1);
+      const int64_t seqlen = is_var_seqlen
+                                 ? offsets[bs + 1] - offsets[bs]
+                                 : x.size(-1);
+      scalar_t* state = states + slot * conv_state_slot_stride;
+      const scalar_t* sequence = input + sequence_start * dim;
+
+      int64_t w = 0;
+      for (; w < width1 - seqlen; ++w) {
+        for (int64_t d = 0; d < dim; ++d) {
+          state[d * state_len + w] =
+              initial_state[bs] ? state[d * state_len + w + seqlen]
+                                : scalar_t(0);
+        }
+      }
+      for (; w < width1; ++w) {
+        const int64_t input_offset = w + seqlen - width1;
+        for (int64_t d = 0; d < dim; ++d) {
+          state[d * state_len + w] = sequence[input_offset * dim + d];
+        }
+      }
+    }
+  });
+}
+
+template <typename scalar_t>
+void update_ds_conv_states_single(
+    const at::Tensor& x,
+    const at::Tensor& conv_states,
+    const std::optional<at::Tensor>& conv_state_indices,
+    int64_t batch,
+    int64_t dim,
+    int64_t width,
+    int64_t conv_state_slot_stride) {
+  const int64_t state_len = conv_states.size(2);
+  const int64_t width1 = width - 1;
+  const int32_t* indices =
+      conv_state_indices.has_value() ? conv_state_indices.value().data_ptr<int32_t>()
+                                     : nullptr;
+  const scalar_t* input = x.data_ptr<scalar_t>();
+  scalar_t* states = conv_states.data_ptr<scalar_t>();
+
+  at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t bs = begin; bs < end; ++bs) {
+      const int64_t slot = indices == nullptr ? bs : indices[bs];
+      scalar_t* state = states + slot * conv_state_slot_stride;
+      for (int64_t d = 0; d < dim; ++d) {
+        scalar_t* row = state + d * state_len;
+        for (int64_t w = 1; w < width1; ++w) {
+          row[w - 1] = row[w];
+        }
+        row[width1 - 1] = input[bs * dim + d];
+      }
+    }
+  });
+}
+
+template <typename scalar_t>
+void update_ds_conv_states_multi(
+    const at::Tensor& x,
+    const at::Tensor& conv_states,
+    const at::Tensor& num_accepted_tokens,
+    const at::Tensor& conv_state_indices,
+    int64_t batch,
+    int64_t dim,
+    int64_t seqlen,
+    int64_t conv_state_slot_stride) {
+  const int64_t state_len = conv_states.size(2);
+  const int32_t* accepted = num_accepted_tokens.data_ptr<int32_t>();
+  const int32_t* indices = conv_state_indices.data_ptr<int32_t>();
+  const scalar_t* input = x.data_ptr<scalar_t>();
+  scalar_t* states = conv_states.data_ptr<scalar_t>();
+
+  at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t bs = begin; bs < end; ++bs) {
+      const int64_t slot = indices[bs];
+      const int64_t accepted_count = accepted[bs];
+      scalar_t* state = states + slot * conv_state_slot_stride;
+      for (int64_t d = 0; d < dim; ++d) {
+        scalar_t* row = state + d * state_len;
+        std::memmove(
+            row,
+            row + accepted_count,
+            (state_len - seqlen) * sizeof(scalar_t));
+        for (int64_t t = 0; t < seqlen; ++t) {
+          row[state_len - seqlen + t] =
+              input[(bs * seqlen + t) * dim + d];
+        }
+      }
+    }
+  });
+}
+
+bool any_initial_state(const at::Tensor& has_initial_state) {
+  const bool* values = has_initial_state.data_ptr<bool>();
+  for (int64_t i = 0; i < has_initial_state.size(0); ++i) {
+    if (values[i]) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // anonymous namespace
@@ -791,7 +839,7 @@ at::Tensor get_block_indices(const std::optional<at::Tensor>& offsets, int64_t n
 //   activation: either None or "silu" or "swish"
 //   pad_slot_id: int
 //
-at::Tensor causal_conv1d_fwd_cpu(
+at::Tensor causal_conv1d_fwd_cpu_sd(
     const at::Tensor& x,
     const at::Tensor& weight,
     const std::optional<at::Tensor>& bias,
@@ -822,8 +870,6 @@ at::Tensor causal_conv1d_fwd_cpu(
   CHECK_OPTIONAL_SHAPE_DTYPE(conv_state_indices, batch, at::kInt);
   CHECK_OPTIONAL_SHAPE_DTYPE(has_initial_state, batch, at::kBool);
 
-  ConvStateLayout layout = ConvStateLayout::SD;
-  int64_t state_len = 0;
   int64_t conv_state_slot_stride = 0;
   if (conv_states.has_value()) {
     const auto& conv_states_val = conv_states.value();
@@ -831,28 +877,10 @@ at::Tensor causal_conv1d_fwd_cpu(
     CHECK_EQ(conv_states_val.scalar_type(), scalar_type);
     CHECK_GE(padded_batch, batch);
     CHECK_EQ(conv_states_val.size(1), dim);
-    const auto layout_info = validate_conv_state_layout(
-        conv_states_val, dim, width, "causal_conv1d_fwd_cpu");
-    layout = layout_info.layout;
-    state_len = layout_info.state_len;
-    conv_state_slot_stride = layout_info.conv_state_slot_stride;
-  }
-
-  at::Tensor tinygemm_states;
-  if (layout == ConvStateLayout::DS && conv_states.has_value() &&
-      has_initial_state.has_value()) {
-    const bool* initial_state_data = has_initial_state.value().data_ptr<bool>();
-    bool reads_initial_state = false;
-    for (int64_t bs = 0; bs < batch; ++bs) {
-      if (initial_state_data[bs]) {
-        reads_initial_state = true;
-        break;
-      }
-    }
-    if (reads_initial_state) {
-      tinygemm_states =
-          stage_ds_conv_states(conv_states.value(), conv_state_indices, batch);
-    }
+    CHECK_EQ(conv_states_val.stride(-2), 1);
+    CHECK_EQ(conv_states_val.stride(-1), dim);
+    // Preserve the physical per-slot stride used by the vLLM KV cache.
+    conv_state_slot_stride = conv_states_val.stride(0);
   }
 
   // block size for sequence blocks, 32
@@ -863,10 +891,6 @@ at::Tensor causal_conv1d_fwd_cpu(
 
   at::Tensor out = at::empty_like(x);
   AT_DISPATCH_REDUCED_FLOATING_TYPES(scalar_type, "causal_conv1d_fwd_kernel_impl", [&] {
-    const scalar_t* tinygemm_states_ptr =
-        tinygemm_states.defined() ? tinygemm_states.data_ptr<scalar_t>() : nullptr;
-    const int64_t tinygemm_state_slot_stride =
-        tinygemm_states.defined() ? tinygemm_states.stride(0) : 0;
     if (is_var_seqlen) {
       // record seq blocks in Coordinate format, aka [num_seq_blocks, 2]
       at::Tensor block_indices = get_block_indices<BLOCK_M>(query_start_loc, num_seq_blocks);
@@ -886,11 +910,7 @@ at::Tensor causal_conv1d_fwd_cpu(
           dim,
           width,
           num_seq_blocks,
-          conv_state_slot_stride,
-          layout,
-          state_len,
-          tinygemm_states_ptr,
-          tinygemm_state_slot_stride);
+          conv_state_slot_stride);
     } else {
       causal_conv1d_fwd_kernel_impl<scalar_t>(
           out.data_ptr<scalar_t>(),
@@ -906,11 +926,7 @@ at::Tensor causal_conv1d_fwd_cpu(
           seqlen,
           width,
           num_seq_blocks,
-          conv_state_slot_stride,
-          layout,
-          state_len,
-          tinygemm_states_ptr,
-          tinygemm_state_slot_stride);
+          conv_state_slot_stride);
     }
   });
   return out;
@@ -927,7 +943,7 @@ at::Tensor causal_conv1d_fwd_cpu(
 //   pad_slot_id: int
 //   out: (batch, dim) or (batch, seqlen, dim)
 //
-at::Tensor causal_conv1d_update_cpu(
+at::Tensor causal_conv1d_update_cpu_sd(
     const at::Tensor& x,
     const at::Tensor& conv_states,
     const at::Tensor& weight,
@@ -957,14 +973,12 @@ at::Tensor causal_conv1d_update_cpu(
 
   CHECK_EQ(conv_states.scalar_type(), scalar_type);
   CHECK_EQ(conv_states.size(1), dim);
-  const auto layout_info = validate_conv_state_layout(
-      conv_states, dim, width, "causal_conv1d_update_cpu");
-  const ConvStateLayout layout = layout_info.layout;
-  const int64_t state_len = layout_info.state_len;
-  const int64_t conv_state_slot_stride =
-      layout_info.conv_state_slot_stride;
-
-  at::Tensor tinygemm_states;
+  CHECK_EQ(conv_states.stride(-2), 1);
+  CHECK_EQ(conv_states.stride(-1), dim);
+  const int64_t state_len = conv_states.size(2);
+  CHECK_GE(state_len, width - 1);
+  // Preserve the physical per-slot stride used by the vLLM KV cache.
+  const int64_t conv_state_slot_stride = conv_states.stride(0);
 
   if (x.dim() == 3) {
     TORCH_CHECK(
@@ -1005,11 +1019,6 @@ at::Tensor causal_conv1d_update_cpu(
           "causal_conv1d_update_cpu: history window exceeds conv_states.");
     }
 
-    if (layout == ConvStateLayout::DS) {
-      tinygemm_states =
-          stage_ds_conv_states(conv_states, conv_state_indices, batch);
-    }
-
     at::Tensor out = at::empty_like(x);
     AT_DISPATCH_REDUCED_FLOATING_TYPES(
         scalar_type, "causal_conv1d_update_multi_kernel_impl", [&] {
@@ -1027,12 +1036,7 @@ at::Tensor causal_conv1d_update_cpu(
               seqlen,
               width,
               state_len,
-              conv_state_slot_stride,
-              layout,
-              tinygemm_states.defined()
-                  ? tinygemm_states.data_ptr<scalar_t>()
-                  : nullptr,
-              tinygemm_states.defined() ? tinygemm_states.stride(0) : 0);
+              conv_state_slot_stride);
         });
     return out;
   }
@@ -1041,11 +1045,6 @@ at::Tensor causal_conv1d_update_cpu(
       !num_accepted_tokens.has_value(),
       "causal_conv1d_update_cpu: num_accepted_tokens is only supported for 3D "
       "x.");
-
-  if (layout == ConvStateLayout::DS) {
-    tinygemm_states =
-        stage_ds_conv_states(conv_states, conv_state_indices, batch);
-  }
 
   at::Tensor out = at::empty_like(x);
   AT_DISPATCH_REDUCED_FLOATING_TYPES(scalar_type, "causal_conv1d_update_kernel_impl", [&] {
@@ -1061,13 +1060,267 @@ at::Tensor causal_conv1d_update_cpu(
         dim,
         seqlen,
         width,
-        conv_state_slot_stride,
-        layout,
-        state_len,
-        tinygemm_states.defined()
-            ? tinygemm_states.data_ptr<scalar_t>()
-            : nullptr,
-        tinygemm_states.defined() ? tinygemm_states.stride(0) : 0);
+        conv_state_slot_stride);
   });
+  return out;
+}
+
+at::Tensor causal_conv1d_fwd_cpu(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    const std::optional<at::Tensor>& conv_states,
+    const std::optional<at::Tensor>& query_start_loc,
+    const std::optional<at::Tensor>& conv_state_indices,
+    const std::optional<at::Tensor>& has_initial_state,
+    bool silu_activation,
+    int64_t pad_slot_id,
+    bool is_vnni) {
+  const bool is_var_seqlen = query_start_loc.has_value();
+  const int64_t input_ndim = is_var_seqlen ? 2 : 3;
+  TORCH_CHECK(
+      x.dim() == input_ndim,
+      "causal_conv1d_fwd_cpu: expect x to be ",
+      input_ndim,
+      "D tensor.");
+  TORCH_CHECK(
+      x.stride(-2) == 1 && x.stride(-1) == x.size(-2),
+      "causal_conv1d_fwd_cpu: expect x to be transposed.");
+  if (!is_var_seqlen) {
+    TORCH_CHECK(
+        x.stride(0) == x.size(-2) * x.size(-1),
+        "causal_conv1d_fwd_cpu: expect the batch dimension to be dense.");
+  } else {
+    CHECK_CONTIGUOUS(query_start_loc.value());
+    TORCH_CHECK(query_start_loc.value().dim() == 1);
+    CHECK_EQ(query_start_loc.value().scalar_type(), at::kInt);
+    TORCH_CHECK(query_start_loc.value().size(0) >= 1);
+  }
+
+  const int64_t batch =
+      is_var_seqlen ? query_start_loc.value().size(0) - 1 : x.size(0);
+  const int64_t dim = x.size(-2);
+  const int64_t seqlen = x.size(-1);
+  const int64_t width = weight.size(-1);
+  if (!conv_states.has_value()) {
+    return causal_conv1d_fwd_cpu_sd(
+        x,
+        weight,
+        bias,
+        conv_states,
+        query_start_loc,
+        conv_state_indices,
+        has_initial_state,
+        silu_activation,
+        pad_slot_id,
+        is_vnni);
+  }
+
+  const auto& states = conv_states.value();
+  TORCH_CHECK(states.dim() == 3, "causal_conv1d_fwd_cpu: conv_states must be 3D.");
+  CHECK_EQ(states.scalar_type(), x.scalar_type());
+  CHECK_GE(states.size(0), batch);
+  CHECK_EQ(states.size(1), dim);
+  const auto layout_info =
+      validate_conv_state_layout(states, dim, width, "causal_conv1d_fwd_cpu");
+  TORCH_CHECK(
+      has_initial_state.has_value(),
+      "causal_conv1d_fwd_cpu: has_initial_state is required with conv_states.");
+  CHECK_OPTIONAL_SHAPE_DTYPE(has_initial_state, batch, at::kBool);
+
+  if (layout_info.layout == ConvStateLayout::SD) {
+    return causal_conv1d_fwd_cpu_sd(
+        x,
+        weight,
+        bias,
+        conv_states,
+        query_start_loc,
+        conv_state_indices,
+        has_initial_state,
+        silu_activation,
+        pad_slot_id,
+        is_vnni);
+  }
+
+  const bool reads_initial_state = any_initial_state(has_initial_state.value());
+  at::Tensor out;
+  if (!reads_initial_state) {
+    out = causal_conv1d_fwd_cpu_sd(
+        x,
+        weight,
+        bias,
+        std::nullopt,
+        query_start_loc,
+        std::nullopt,
+        std::nullopt,
+        silu_activation,
+        pad_slot_id,
+        is_vnni);
+  } else {
+    at::Tensor staged_storage =
+        stage_ds_conv_states(states, conv_state_indices, batch, width - 1);
+    at::Tensor staged_states = staged_storage.transpose(1, 2);
+    out = causal_conv1d_fwd_cpu_sd(
+        x,
+        weight,
+        bias,
+        staged_states,
+        query_start_loc,
+        std::nullopt,
+        has_initial_state,
+        silu_activation,
+        pad_slot_id,
+        is_vnni);
+  }
+
+  const int64_t state_slot_stride = states.stride(0);
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+      x.scalar_type(), "update_ds_conv_states_fwd", [&] {
+        update_ds_conv_states_fwd<scalar_t>(
+            x,
+            states,
+            query_start_loc,
+            conv_state_indices,
+            has_initial_state.value(),
+            batch,
+            dim,
+            width,
+            state_slot_stride);
+      });
+  return out;
+}
+
+at::Tensor causal_conv1d_update_cpu(
+    const at::Tensor& x,
+    const at::Tensor& conv_states,
+    const at::Tensor& weight,
+    const std::optional<at::Tensor>& bias,
+    bool silu_activation,
+    const std::optional<at::Tensor>& num_accepted_tokens,
+    const std::optional<at::Tensor>& conv_state_indices,
+    int64_t pad_slot_id,
+    bool is_vnni) {
+  TORCH_CHECK(
+      x.dim() == 2 || x.dim() == 3,
+      "causal_conv1d_update_cpu: expect x to be 2D or 3D tensor.");
+  const int64_t batch = x.size(0);
+  const int64_t dim = x.dim() == 2 ? x.size(1) : x.size(2);
+  const int64_t seqlen = x.dim() == 2 ? 1 : x.size(1);
+  const int64_t width = weight.size(-1);
+
+  TORCH_CHECK(conv_states.dim() == 3, "causal_conv1d_update_cpu: conv_states must be 3D.");
+  CHECK_EQ(conv_states.scalar_type(), x.scalar_type());
+  CHECK_EQ(conv_states.size(1), dim);
+  const auto layout_info = validate_conv_state_layout(
+      conv_states, dim, width, "causal_conv1d_update_cpu");
+  const int64_t state_len = layout_info.state_len;
+  if (x.dim() == 3) {
+    TORCH_CHECK(
+        num_accepted_tokens.has_value(),
+        "causal_conv1d_update_cpu: num_accepted_tokens is required for 3D x.");
+    TORCH_CHECK(
+        conv_state_indices.has_value(),
+        "causal_conv1d_update_cpu: conv_state_indices is required for 3D x.");
+    CHECK_OPTIONAL_SHAPE_DTYPE(num_accepted_tokens, batch, at::kInt);
+    TORCH_CHECK(
+        width == 4,
+        "causal_conv1d_update_cpu: support only width of 4 for 3D x.");
+    TORCH_CHECK(
+        seqlen > 0,
+        "causal_conv1d_update_cpu: expect non-empty sequence for 3D x.");
+    TORCH_CHECK(
+        state_len >= seqlen,
+        "causal_conv1d_update_cpu: state_len must be >= seqlen for 3D x.");
+    const int32_t* accepted_counts =
+        num_accepted_tokens.value().data_ptr<int32_t>();
+    const int32_t* indices = conv_state_indices.value().data_ptr<int32_t>();
+    for (int64_t bs = 0; bs < batch; ++bs) {
+      const int32_t num_accepted = accepted_counts[bs];
+      TORCH_CHECK(
+          num_accepted >= 1 && num_accepted <= seqlen,
+          "causal_conv1d_update_cpu: num_accepted_tokens must be in [1, "
+          "seqlen].");
+      TORCH_CHECK(
+          num_accepted - 1 + width - 1 <= state_len,
+          "causal_conv1d_update_cpu: history window exceeds conv_states.");
+    }
+  } else {
+    TORCH_CHECK(
+        !num_accepted_tokens.has_value(),
+        "causal_conv1d_update_cpu: num_accepted_tokens is only supported "
+        "for 3D x.");
+  }
+
+  if (layout_info.layout == ConvStateLayout::SD) {
+    return causal_conv1d_update_cpu_sd(
+        x,
+        conv_states,
+        weight,
+        bias,
+        silu_activation,
+        num_accepted_tokens,
+        conv_state_indices,
+        pad_slot_id,
+        is_vnni);
+  }
+
+  const int64_t scratch_len =
+      x.dim() == 2
+          ? width - 1
+          : [&] {
+              const int32_t* accepted =
+                  num_accepted_tokens.value().data_ptr<int32_t>();
+              int64_t max_accepted = 0;
+              for (int64_t bs = 0; bs < batch; ++bs) {
+                max_accepted = std::max<int64_t>(max_accepted, accepted[bs]);
+              }
+              return std::max<int64_t>(
+                  seqlen, max_accepted + width - 2);
+            }();
+  at::Tensor staged_storage =
+      stage_ds_conv_states(conv_states, conv_state_indices, batch, scratch_len);
+  at::Tensor staged_states = staged_storage.transpose(1, 2);
+  std::optional<at::Tensor> scratch_indices = std::nullopt;
+  if (x.dim() == 3) {
+    scratch_indices = identity_conv_state_indices(batch, conv_states);
+  }
+  at::Tensor out = causal_conv1d_update_cpu_sd(
+      x,
+      staged_states,
+      weight,
+      bias,
+      silu_activation,
+      num_accepted_tokens,
+      scratch_indices,
+      pad_slot_id,
+      is_vnni);
+
+  const int64_t state_slot_stride = conv_states.stride(0);
+  if (x.dim() == 2) {
+    AT_DISPATCH_REDUCED_FLOATING_TYPES(
+        x.scalar_type(), "update_ds_conv_states_single", [&] {
+          update_ds_conv_states_single<scalar_t>(
+              x,
+              conv_states,
+              conv_state_indices,
+              batch,
+              dim,
+              width,
+              state_slot_stride);
+        });
+  } else {
+    AT_DISPATCH_REDUCED_FLOATING_TYPES(
+        x.scalar_type(), "update_ds_conv_states_multi", [&] {
+          update_ds_conv_states_multi<scalar_t>(
+              x,
+              conv_states,
+              num_accepted_tokens.value(),
+              conv_state_indices.value(),
+              batch,
+              dim,
+              seqlen,
+              state_slot_stride);
+        });
+  }
   return out;
 }
