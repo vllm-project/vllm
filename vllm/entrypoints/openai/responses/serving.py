@@ -153,7 +153,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
         self.validate_output_token_metrics_parser(
             enable_per_request_output_token_metrics,
-            bool(reasoning_parser),
             self.parser,
         )
 

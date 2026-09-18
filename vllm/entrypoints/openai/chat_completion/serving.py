@@ -178,7 +178,6 @@ class OpenAIServingChat(GenerateBaseServing):
         )
         self.validate_output_token_metrics_parser(
             enable_per_request_output_token_metrics,
-            bool(reasoning_parser),
             self.parser_cls,
         )
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -961,10 +960,6 @@ class OpenAIServingChat(GenerateBaseServing):
         final_res: RequestOutput | None = None
         output_token_metrics_tracker = OutputTokenMetricsTracker()
         phase_token_ids: list[int] = []
-        collect_request_metrics = (
-            self.enable_per_request_metrics
-            or self.enable_per_request_output_token_metrics
-        ) and (request.n or 1) == 1
         collect_output_token_metrics = (
             self.enable_per_request_output_token_metrics and (request.n or 1) == 1
         )
@@ -990,7 +985,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
                 if final_res is None:
                     final_res = res
-                elif collect_request_metrics:
+                elif collect_output_token_metrics:
                     final_res.add(res, aggregate=True)
                     final_res.metrics = res.metrics
                     # DELTA outputs carry these request-wide values only on
