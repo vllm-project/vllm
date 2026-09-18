@@ -6,20 +6,14 @@ import pytest
 import torch
 from PIL import Image
 from transformers import BatchFeature
-from transformers.models.pixtral.image_processing_pixtral import (
-    PixtralImageProcessor,
-)
+from transformers.models.pixtral import PixtralProcessor
 
 from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
-from vllm.transformers_utils.processors import mistral3 as mistral3_processor
-from vllm.transformers_utils.processors.mistral3 import (
-    Mistral3ImageProcessor,
-    Mistral3Processor,
-)
 
 from ...utils import build_model_context
 
@@ -28,105 +22,6 @@ from ...utils import build_model_context
 _MODEL_CONFIG_KWARGS = {"config_format": "hf"}
 _MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 _LIGHTON_MODEL_ID = "lightonai/LightOnOCR-1B-1025"
-
-
-def test_numba_rescale_and_normalize_matches_hf():
-    image_processor = Mistral3ImageProcessor()
-    images = (torch.arange(16 * 17).to(torch.uint8).reshape(1, 16, 17, 1)).repeat(
-        2, 1, 1, 3
-    )
-    images = images.permute(0, 3, 1, 2)
-
-    actual = image_processor.rescale_and_normalize(
-        images,
-        do_rescale=True,
-        rescale_factor=1 / 255,
-        do_normalize=True,
-        image_mean=(0.48145466, 0.4578275, 0.40821073),
-        image_std=(0.26862954, 0.26130258, 0.27577711),
-    )
-    expected = PixtralImageProcessor().rescale_and_normalize(
-        images,
-        do_rescale=True,
-        rescale_factor=1 / 255,
-        do_normalize=True,
-        image_mean=(0.48145466, 0.4578275, 0.40821073),
-        image_std=(0.26862954, 0.26130258, 0.27577711),
-    )
-
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert actual.is_contiguous()
-
-
-def test_numba_unavailable_falls_back_to_hf(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(mistral3_processor, "_NUMBA_AVAILABLE", False)
-    images = torch.randint(0, 256, (2, 3, 32, 48), dtype=torch.uint8)
-    kwargs = {
-        "do_rescale": True,
-        "rescale_factor": 1 / 255,
-        "do_normalize": True,
-        "image_mean": (0.48145466, 0.4578275, 0.40821073),
-        "image_std": (0.26862954, 0.26130258, 0.27577711),
-    }
-
-    actual = Mistral3ImageProcessor().rescale_and_normalize(images, **kwargs)
-    expected = PixtralImageProcessor().rescale_and_normalize(images, **kwargs)
-
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_numba_rescale_and_normalize_broadcasts_scalar_statistics():
-    images = torch.randint(0, 256, (2, 24, 32, 3), dtype=torch.uint8).permute(
-        0, 3, 1, 2
-    )
-    kwargs = {
-        "do_rescale": True,
-        "rescale_factor": 1 / 255,
-        "do_normalize": True,
-        "image_mean": 0.5,
-        "image_std": 0.25,
-    }
-
-    actual = Mistral3ImageProcessor().rescale_and_normalize(images, **kwargs)
-    expected = PixtralImageProcessor().rescale_and_normalize(images, **kwargs)
-
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_rescale_and_normalize_float_falls_back_to_hf():
-    image_processor = Mistral3ImageProcessor()
-    images = torch.rand(2, 3, 32, 48)
-    kwargs = {
-        "do_rescale": False,
-        "rescale_factor": 1 / 255,
-        "do_normalize": True,
-        "image_mean": (0.48145466, 0.4578275, 0.40821073),
-        "image_std": (0.26862954, 0.26130258, 0.27577711),
-    }
-
-    actual = image_processor.rescale_and_normalize(images, **kwargs)
-    expected = PixtralImageProcessor().rescale_and_normalize(images, **kwargs)
-
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_numba_full_preprocess_matches_hf():
-    expected_processor = PixtralImageProcessor()
-    actual_processor = Mistral3ImageProcessor.from_dict(expected_processor.to_dict())
-    images = [
-        Image.new("RGB", (31, 47), color=(17, 89, 231)),
-        Image.new("RGB", (48, 32), color=(201, 13, 127)),
-    ]
-
-    actual = actual_processor(images=images, return_tensors="pt")
-    expected = expected_processor(images=images, return_tensors="pt")
-
-    torch.testing.assert_close(
-        actual["pixel_values"], expected["pixel_values"], rtol=0, atol=0
-    )
-    torch.testing.assert_close(
-        actual["image_sizes"], expected["image_sizes"], rtol=0, atol=0
-    )
 
 
 def _processed_pixel_values(
@@ -217,8 +112,7 @@ def test_processor_size_override(
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {} if kwargs_on_init else mm_processor_kwargs
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    assert isinstance(hf_processor, Mistral3Processor)
-    assert isinstance(hf_processor.image_processor, Mistral3ImageProcessor)
+    assert isinstance(hf_processor, PixtralProcessor)
 
     dummy_image = Image.new("RGB", image_size, color=(127, 127, 127))
     images = [dummy_image] * num_imgs
@@ -233,6 +127,37 @@ def test_processor_size_override(
     )
     assert expected_from_pixel_values == expected_toks_per_img
     assert image_token_count == expected_from_pixel_values * num_imgs
+
+
+def test_mm_device_do_normalize():
+    ctx = build_model_context(
+        _MODEL_ID,
+        limit_mm_per_prompt={"image": 2},
+        model_config_kwargs=_MODEL_CONFIG_KWARGS,
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [
+        Image.new("RGB", (31, 47), color=(17, 89, 231)),
+        Image.new("RGB", (48, 32), color=(201, 13, 127)),
+    ]
+    prompt = [processor.info.get_hf_config().image_token_index] * len(images)
+    mm_items = processor.info.parse_mm_data({"image": images})
+
+    normalized_inputs = processor(prompt, mm_items=mm_items)
+    normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    raw_inputs = processor(prompt, mm_items=mm_items)
+    raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert all(value.dtype == torch.uint8 for value in raw_values)
+
+    input_norm = FusedInputNorm.from_model_config(ctx.model_config)
+    for raw, normalized in zip(raw_values, normalized_values):
+        output = input_norm(raw, normalized.dtype)
+        torch.testing.assert_close(output, normalized, rtol=1e-5, atol=1e-6)
 
 
 def test_lightonocr_keeps_vision_config_image_size():

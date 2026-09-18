@@ -547,3 +547,18 @@ def test_fused_input_norm_identity_passthrough():
     pixel_values = torch.randn(8, 3 * 196, dtype=torch.float32)
     out = norm(pixel_values, visual_dtype=torch.bfloat16)
     torch.testing.assert_close(out, pixel_values.to(torch.bfloat16))
+
+
+def test_fused_input_norm_chw_matches_reference():
+    image_mean = [0.48145466, 0.4578275, 0.40821073]
+    image_std = [0.26862954, 0.26130258, 0.27577711]
+    rescale_factor = 1.0 / 255.0
+    pixel_values = torch.randint(0, 256, (3, 31, 47), dtype=torch.uint8)
+
+    norm = FusedInputNorm(image_mean, image_std, rescale_factor)
+    output = norm(pixel_values, visual_dtype=torch.bfloat16)
+
+    mean = torch.tensor(image_mean).view(3, 1, 1)
+    std = torch.tensor(image_std).view(3, 1, 1)
+    expected = (pixel_values.to(torch.float32) * rescale_factor - mean) / std
+    torch.testing.assert_close(output, expected.to(torch.bfloat16), rtol=0, atol=0)

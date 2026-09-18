@@ -1435,6 +1435,7 @@ class PixtralHFVisionModel(nn.Module):
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
         *,
+        input_norm: nn.Module | None = None,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
@@ -1442,6 +1443,7 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+        self.input_norm = input_norm
 
         self.patch_conv = Conv2dLayer(
             in_channels=config.num_channels,
@@ -1498,6 +1500,12 @@ class PixtralHFVisionModel(nn.Module):
 
         """
         # pass images through initial convolution independently
+        if self.input_norm is not None:
+            pixel_values = [
+                self.input_norm(img.to(device=self.device), self.dtype)
+                for img in pixel_values
+            ]
+
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in pixel_values
         ]

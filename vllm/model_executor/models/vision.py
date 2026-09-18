@@ -703,14 +703,20 @@ class FusedInputNorm(nn.Module):
 
     def forward(
         self,
-        grid_thw: torch.Tensor,
+        pixel_values: torch.Tensor,
         visual_dtype: torch.dtype,
     ) -> torch.Tensor:
         if self.is_identity:
-            return grid_thw.to(visual_dtype)
+            return pixel_values.to(visual_dtype)
 
-        assert grid_thw.ndim == 2
-        patches, size = grid_thw.shape
+        if pixel_values.ndim == 3:
+            assert pixel_values.shape[0] == self.channel
+            x = pixel_values.to(self.dtype)
+            x = x * self.weight[:, None, None] + self.bias[:, None, None]
+            return x.to(visual_dtype)
+
+        assert pixel_values.ndim == 2
+        patches, size = pixel_values.shape
         patch_size = size // self.channel
 
         # On XPU, fuse the whole rescale + normalize into a single custom
@@ -720,11 +726,11 @@ class FusedInputNorm(nn.Module):
         # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
         if (
             current_platform.is_xpu()
-            and grid_thw.dtype == torch.uint8
+            and pixel_values.dtype == torch.uint8
             and self.weight.dtype == torch.float32
         ):
             return torch.ops.vllm.xpu_fused_input_norm(
-                grid_thw, self.weight, self.bias, visual_dtype
+                pixel_values, self.weight, self.bias, visual_dtype
             )
 
         # Apply the per-channel affine transform directly instead of via
@@ -735,7 +741,7 @@ class FusedInputNorm(nn.Module):
         # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
         # broadcasted multiply-add is numerically identical and has no such
         # limit.
-        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+        x = pixel_values.to(self.dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )

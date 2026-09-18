@@ -10,6 +10,7 @@ import torch.nn as nn
 import transformers
 from packaging.version import Version
 from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
+from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -38,9 +39,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.mistral3 import (
-    Mistral3Processor,
-)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -59,6 +57,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import FusedInputNorm
 
 TRANSFORMERS_SUPPORTS_PIXTRAL_IMAGE_ONLY = Version(transformers.__version__) >= Version(
     "5.15.0"
@@ -232,8 +231,8 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         image_size = size["longest_edge"]
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
-    def get_hf_processor(self, **kwargs: object) -> Mistral3Processor:
-        return self.ctx.get_hf_processor(Mistral3Processor, **kwargs)
+    def get_hf_processor(self, **kwargs: object) -> PixtralProcessor:
+        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -393,6 +392,7 @@ def init_vision_tower_for_mistral3(
     hf_config: Mistral3Config,
     quant_config: QuantizationConfig | None,
     *,
+    input_norm: nn.Module | None = None,
     require_post_norm: bool | None = None,
     prefix: str = "",
 ) -> PixtralHFVisionModel:
@@ -406,6 +406,7 @@ def init_vision_tower_for_mistral3(
     return PixtralHFVisionModel(
         vision_config,
         quant_config=quant_config,
+        input_norm=input_norm,
         num_hidden_layers_override=num_hidden_layers,
         require_post_norm=require_post_norm,
         prefix=prefix,
@@ -425,6 +426,8 @@ class Mistral3ForConditionalGeneration(
     SupportsEagle,
     SupportsEagle3,
 ):
+    supports_mm_device_do_normalize = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -479,6 +482,7 @@ class Mistral3ForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
+                input_norm=FusedInputNorm.from_model_config(vllm_config.model_config),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
