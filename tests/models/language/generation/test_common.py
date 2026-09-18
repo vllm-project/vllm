@@ -26,7 +26,7 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "TitanML/tiny-mixtral",
+    "axolotl-ai-co/tiny-mixtral-30m",
     "Qwen/Qwen3-8B",
 ]
 
@@ -95,7 +95,7 @@ AITER_MODEL_LIST = [
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
-            "TitanML/tiny-mixtral",  # mixtral
+            "axolotl-ai-co/tiny-mixtral-30m",  # mixtral
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
@@ -125,12 +125,6 @@ def test_models(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if current_platform.is_rocm() and model == "TitanML/tiny-mixtral":
-        # Its single-token router selects LLMM1, whose low-precision
-        # accumulation can change the top-2 experts. Keep the optimized kernel
-        # enabled generally, but use the reference GEMM for this accuracy test.
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
