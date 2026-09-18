@@ -29,8 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/cleonard530/DeepGEMM.git")
-  # NOTE: This is currently targeting nv-dev branch due to sm120 support
-  set(_DEEPGEMM_UPSTREAM_TAG "043dbdab90685351185774bd74cfb4c24c716f4e")
+  # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
+  set(_DEEPGEMM_UPSTREAM_TAG "84774729f5b208e42f34c92fa0577e61e44e3512")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
