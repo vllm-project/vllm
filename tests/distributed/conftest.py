@@ -18,13 +18,13 @@ DP_RANK = 0
 
 @pytest.fixture
 def random_port():
-    """Generate a random port number for testing"""
+    """Generate a random port number for testing."""
     return random.randint(10000, 59900)
 
 
 @pytest.fixture
 def publisher_config(random_port, request):
-    """Create a publisher config with inproc transport"""
+    """Create a publisher config with inproc transport."""
     how = request.param if hasattr(request, "param") else "inproc"
 
     if how == "inproc":
@@ -47,7 +47,7 @@ def publisher_config(random_port, request):
 
 @pytest.fixture
 def publisher(publisher_config):
-    """Create and return a publisher instance"""
+    """Create and return a publisher instance."""
     pub = EventPublisherFactory.create(publisher_config, DP_RANK)
     yield pub
     pub.shutdown()
@@ -55,7 +55,7 @@ def publisher(publisher_config):
 
 @pytest.fixture
 def subscriber(publisher_config):
-    """Create and return a subscriber for testing"""
+    """Create and return a subscriber for testing."""
     endpoint = publisher_config.endpoint
     replay_endpoint = publisher_config.replay_endpoint
 
@@ -74,7 +74,7 @@ def subscriber(publisher_config):
 
 
 class MockSubscriber:
-    """Helper class to receive and verify published events"""
+    """Helper class to receive and verify published events."""
 
     def __init__(
         self,
@@ -113,7 +113,7 @@ class MockSubscriber:
         self.decoder = msgspec.msgpack.Decoder(type=decode_type)
 
     def receive_one(self, timeout=1000) -> tuple[int, SampleBatch] | None:
-        """Receive a single message with timeout"""
+        """Receive a single message with timeout."""
         if not self.sub.poll(timeout):
             return None
 
@@ -127,7 +127,7 @@ class MockSubscriber:
         return seq, data
 
     def request_replay(self, start_seq: int, socket_idx: int = 0) -> None:
-        """Request replay of messages starting from start_seq"""
+        """Request replay of messages starting from start_seq."""
         if not self.replay_sockets:
             raise ValueError("Replay sockets not initialized")
         if socket_idx >= len(self.replay_sockets):
@@ -138,7 +138,7 @@ class MockSubscriber:
         )
 
     def receive_replay(self, socket_idx: int = 0) -> list[tuple[int, SampleBatch]]:
-        """Receive replayed messages from a specific replay socket"""
+        """Receive replayed messages from a specific replay socket."""
         if not self.replay_sockets:
             raise ValueError("Replay sockets not initialized")
         if socket_idx >= len(self.replay_sockets):
@@ -170,7 +170,7 @@ class MockSubscriber:
         return replayed
 
     def close(self):
-        """Clean up resources"""
+        """Clean up resources."""
         self.sub.close()
         for replay in self.replay_sockets:
             replay.close()
