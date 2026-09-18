@@ -31,9 +31,8 @@ from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 
@@ -234,7 +233,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
             assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
+        mamba_groups = get_mamba_groups(self.kv_cache_config)
+        mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
             mamba_group_id
@@ -314,14 +314,15 @@ def get_fake_process_mamba_fn(
         action: tuple[int, int],
         kv_cache_config: KVCacheConfig,
         forward_context: dict[str, Any],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
     ):
         assert copy_info is not None
         if action == (-1, -1):
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
         else:
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
-            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
             mamba_group_id = mamba_group_ids[0]
             mamba_layer_name = kv_cache_config.kv_cache_groups[
                 mamba_group_id
@@ -369,7 +370,7 @@ def get_fake_process_mamba_fn(
         kv_cache_config: KVCacheConfig,
         cache_config: CacheConfig,
         mamba_state_idx: dict[str, int],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
         requests: dict[str, CachedRequestState],
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
@@ -835,7 +836,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     560 * 10,
                     4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
@@ -936,12 +937,12 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
@@ -975,11 +976,12 @@ def _run_mamba_prefix_cache_mrv2(
         forward_context = (
             model_state.vllm_config.compilation_config.static_forward_context
         )
-        group_ids, _ = get_mamba_groups(kv_cache_config)
-        for group_id in group_ids:
-            block_table = block_tables[group_id]
-            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
-                yield forward_context[layer_name].kv_cache[-1], block_table
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        for group_ids in mamba_groups.values():
+            for group_id in group_ids:
+                block_table = block_tables[group_id]
+                for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                    yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
         # Resolving the block id for assertions is a deliberate D2H.

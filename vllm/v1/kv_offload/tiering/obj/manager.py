@@ -7,6 +7,8 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
+import numpy as np
+
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
@@ -111,19 +113,19 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
     ):
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            store_config: Object store connection parameters (see ObjStoreConfig).
-            prefix: Key prefix prepended to all object keys.
-            io_threads: Number of NIXL I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        store_config: Object store connection parameters (see ObjStoreConfig).
+        prefix: Key prefix prepended to all object keys.
+        io_threads: Number of NIXL I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         self.locality = Locality(locality) if locality is not None else None
@@ -217,12 +219,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def _submit_transfer(
         self,
         job_id: int,
-        block_ids: Iterable[int],
+        block_ids: np.ndarray,
         obj_keys: Iterable[str],
         op: str,
     ) -> None:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
-        block_ids_list = [int(bid) for bid in block_ids]
+        # NIXL takes indices as int32; a wider dtype silently costs a conversion.
+        assert block_ids.dtype == np.int32
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
         nixl_files = [
@@ -247,9 +250,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         xfer_handle = self._agent.make_prepped_xfer(
             op,
             self._dram_prepped_handle,
-            block_ids_list,
+            block_ids,
             obj_handle,
-            list(range(len(nixl_files))),
+            np.arange(len(nixl_files), dtype=np.int32),
         )
         if not xfer_handle:
             logger.warning("make_prepped_xfer failed for job %d", job_id)
@@ -284,14 +287,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ
         )
 
     def on_request_finished(self, req_context: ReqContext) -> None:
