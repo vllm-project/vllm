@@ -157,6 +157,7 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
     use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, Tokenizer};
     use xgrammar_structural_tag::ToolChoice;
+    use xgrammar_structural_tag::builders::ReasoningMode;
     use xgrammar_structural_tag::format::Format;
 
     use super::CombinedParser;
@@ -210,39 +211,66 @@ mod tests {
         R: ReasoningParser + 'static,
         T: ToolParser + 'static,
     {
-        let tools = test_tools();
-        let tool_choice = ToolChoice::required();
-        let ctx = OutputGrammarContext {
-            tools: &tools,
-            tool_choice: &tool_choice,
-            tool_strict_level: Default::default(),
-        };
-        let tool = T::create(&tools).unwrap();
-        let expected =
-            full_format_from_builder_for_test(tool.structural_tag_builder().unwrap(), &ctx)
+        // All builders' reasoning=true forms begin inside a reasoning block.
+        // Auto starts outside reasoning and allows a generated reasoning block.
+        for (mode, prompt) in [
+            (ReasoningMode::Enabled, &[256][..]),
+            (ReasoningMode::Auto, &[][..]),
+        ] {
+            for tool_choice in [
+                ToolChoice::required(),
+                ToolChoice::function("get_weather"),
+                ToolChoice::auto(),
+            ] {
+                let mut tools = test_tools();
+                if tool_choice == ToolChoice::auto() {
+                    tools[0].strict = Some(true);
+                }
+                let ctx = OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice: &tool_choice,
+                    tool_strict_level: Default::default(),
+                };
+                let tool = T::create(&tools).unwrap();
+                let expected = full_format_from_builder_for_test(
+                    tool.structural_tag_builder().unwrap(),
+                    &ctx,
+                    mode,
+                )
                 .unwrap()
                 .unwrap();
-        let reasoning = R::create(Arc::new(tokenizer()) as DynTokenizer).unwrap();
-        let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
+                let reasoning = R::create(Arc::new(tokenizer()) as DynTokenizer).unwrap();
+                let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
+                parser.initialize(prompt).unwrap();
+                let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
 
-        // All builders' reasoning=true forms begin inside a reasoning block.
-        parser.initialize(&[256]).unwrap();
-        let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
-
-        assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero, "{name}");
-        assert_eq!(
-            normalize_builder_parity(actual.format),
-            normalize_builder_parity(expected),
-            "{name}"
-        );
+                assert_eq!(
+                    actual.coverage,
+                    GrammarCoverage::FromTokenZero,
+                    "{name} {mode:?} {tool_choice:?}"
+                );
+                assert_eq!(
+                    normalize_builder_parity(actual.format),
+                    normalize_builder_parity(expected),
+                    "{name} {mode:?} {tool_choice:?}"
+                );
+            }
+        }
     }
 
     fn normalize_builder_parity(format: Format) -> Format {
         match format {
-            Format::AnyText(_) => Format::any_text(),
+            Format::AnyText(mut text) => {
+                text.excludes.clear();
+                Format::AnyText(text)
+            }
             Format::Tag(mut tag) => {
                 tag.content = Box::new(normalize_builder_parity(*tag.content));
                 Format::Tag(tag)
+            }
+            Format::Optional(mut optional) => {
+                optional.content = Box::new(normalize_builder_parity(*optional.content));
+                Format::Optional(optional)
             }
             Format::Sequence(sequence) => {
                 let mut elements = Vec::new();

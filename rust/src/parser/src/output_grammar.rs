@@ -185,11 +185,12 @@ fn format_from_builder(
 pub(crate) fn full_format_from_builder_for_test(
     builder: &dyn StructuralTagBuilder,
     ctx: &OutputGrammarContext<'_>,
+    reasoning: xgrammar_structural_tag::builders::ReasoningMode,
 ) -> Result<Option<Format>> {
     format_from_builder(
         builder,
         ctx,
-        StructuralTagOptions::default().with_reasoning(true),
+        StructuralTagOptions::default().with_reasoning(reasoning),
     )
 }
 
