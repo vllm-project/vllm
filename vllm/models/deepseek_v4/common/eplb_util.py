@@ -24,6 +24,8 @@ def collect_moe_layers(
     layers: Iterable[nn.Module],
     config: object,
     *,
+    decoder_layer_type: type[nn.Module],
+    moe_type: type[nn.Module],
     skip_pp_missing: bool = False,
 ) -> None:
     """Populate ``MixtureOfExperts`` fields from decoder layers for EPLB.
@@ -39,15 +41,13 @@ def collect_moe_layers(
     for layer in layers:
         if skip_pp_missing and isinstance(layer, PPMissingLayer):
             continue
-        ffn = getattr(layer, "ffn", None)
-        if ffn is None:
+        if not isinstance(layer, decoder_layer_type):
             continue
-        experts = getattr(ffn, "experts", None)
-        if experts is None:
+        if not isinstance(layer.ffn, moe_type):
             continue
-        example_moe = ffn
-        moe_model.moe_mlp_layers.append(ffn)
-        moe_model.moe_layers.append(experts)
+        example_moe = layer.ffn
+        moe_model.moe_mlp_layers.append(layer.ffn)
+        moe_model.moe_layers.append(layer.ffn.experts)
 
     moe_model.num_moe_layers = len(moe_model.moe_layers)
     moe_model.extract_moe_parameters(example_moe)

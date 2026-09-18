@@ -1968,7 +1968,14 @@ class DeepseekV4ForCausalLM(
         self.set_moe_parameters()
 
     def set_moe_parameters(self) -> None:
-        collect_moe_layers(self, self.model.layers, self.config, skip_pp_missing=True)
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+            skip_pp_missing=True,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

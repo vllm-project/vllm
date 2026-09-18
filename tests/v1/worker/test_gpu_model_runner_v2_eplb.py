@@ -90,6 +90,15 @@ def _make_runner(**overrides: Any) -> Any:
     runner.execute_model_state = None
     for key, value in overrides.items():
         setattr(runner, key, value)
+    spec_config = runner.speculative_config
+    runner._draft_workspace_lane = int(
+        spec_config is not None
+        and (
+            spec_config.use_dspark()
+            if hasattr(spec_config, "use_dspark")
+            else getattr(spec_config, "method", None) == "dspark"
+        )
+    )
     return runner
 
 

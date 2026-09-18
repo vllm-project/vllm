@@ -16,10 +16,6 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
-    _get_dspark_parallel_config,
-    dspark_draft_supports_eplb,
-)
 
 
 def get_model_args(
@@ -148,22 +144,6 @@ def _build_dspark_draft(vllm_config, monkeypatch: pytest.MonkeyPatch):
         return DSparkDeepseekV4ForCausalLM(vllm_config=vllm_config)
 
 
-def test_dspark_parallel_config_preserves_eplb_for_dsv4(dspark_vllm_config):
-    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
-    assert dspark_draft_supports_eplb(draft_model_config)
-
-    draft_parallel_config = _get_dspark_parallel_config(
-        dspark_vllm_config.parallel_config,
-        tensor_parallel_size=2,
-        draft_model_config=draft_model_config,
-    )
-    assert draft_parallel_config.enable_eplb
-    assert (
-        draft_parallel_config.eplb_config.num_redundant_experts
-        == dspark_vllm_config.parallel_config.eplb_config.num_redundant_experts
-    )
-
-
 def _make_moe_topology(
     *,
     num_routed_experts: int = 8,
@@ -244,11 +224,15 @@ def test_eplb_skips_dsv41_dspark_registration(
         "vllm.v1.worker.gpu.eplb_utils.EplbState",
         FakeEplbState,
     )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
 
-    draft = _build_dspark_draft(dspark_vllm_config, monkeypatch)
     dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
         "deepseek_v41"
     )
+    draft = SimpleNamespace()
     controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
     controller.prepare_load()
     speculator = SimpleNamespace(model=draft, eplb_state=None)

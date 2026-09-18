@@ -14,9 +14,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import dspark_draft_supports_eplb
 
 logger = init_logger(__name__)
+
+
+def _dspark_draft_shares_target_eplb_topology(draft_model_config: ModelConfig) -> bool:
+    """Return whether a DSpark draft can share EPLB state with the target.
+
+    Only DeepSeek-V4 DSpark drafts reuse the target expert layout. V4.1 drafts
+    use a smaller routed-expert count and cannot share EPLB state.
+    """
+    return getattr(draft_model_config.hf_config, "model_type", None) == "deepseek_v4"
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:
@@ -77,10 +85,11 @@ class EPLBController:
         )
         assert speculative_config is not None
         assert speculative_config.draft_model_config is not None
-        if getattr(
-            speculative_config, "method", None
-        ) == "dspark" and not dspark_draft_supports_eplb(
-            speculative_config.draft_model_config
+        if (
+            getattr(speculative_config, "method", None) == "dspark"
+            and not _dspark_draft_shares_target_eplb_topology(
+                speculative_config.draft_model_config
+            )
         ):
             return False
         assert self.state is not None

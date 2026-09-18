@@ -5360,15 +5360,34 @@ class GPUModelRunner(
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
+                    drafter_moe_model = None
+                    if self.parallel_config.enable_eplb and hasattr(
+                        self.drafter, "model"
+                    ):
+                        drafter_moe_model = get_mixture_of_experts_model(
+                            self.drafter.model
+                        )
+                        spec_config = self.vllm_config.speculative_config
+                        if (
+                            drafter_moe_model is not None
+                            and spec_config is not None
+                            and spec_config.draft_model_config is not None
+                            # Match the v2 EPLB gate in gpu/eplb_utils.py: only
+                            # DeepSeek-V4 DSpark drafts share the target topology.
+                            and getattr(spec_config, "method", None) == "dspark"
+                            and getattr(
+                                spec_config.draft_model_config.hf_config,
+                                "model_type",
+                                None,
+                            )
+                            != "deepseek_v4"
+                        ):
+                            drafter_moe_model = None
+
                     if (
                         self.parallel_config.enable_eplb
                         and hasattr(self.drafter, "model")
-                        and (
-                            drafter_moe_model := get_mixture_of_experts_model(
-                                self.drafter.model
-                            )
-                        )
-                        is not None
+                        and drafter_moe_model is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
