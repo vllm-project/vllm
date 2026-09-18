@@ -579,15 +579,23 @@ class Scheduler(SchedulerInterface):
                     demand += min(req_demand, threshold) if threshold > 0 else req_demand
 
         # 2. Add demand from WAITING requests
-        for req in self.waiting:
+        num_concurrent_prefills = len(self._inflight_prefills)
+
+        for req in self.skipped_waiting + self.waiting:
+            if self.max_concurrent_prefills > 0 and num_concurrent_prefills >= self.max_concurrent_prefills:
+                break
+
             req_demand = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
             if req_demand > 0:
-                demand += min(req_demand, threshold) if threshold > 0 else req_demand
-                
-        for req in self.skipped_waiting:
-            req_demand = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
-            if req_demand > 0:
-                demand += min(req_demand, threshold) if threshold > 0 else req_demand
+                # Heuristic: WAITING requests haven't had their cache lookups yet. 
+                # To prevent massive over-reservation, we scale down their assumed 
+                # demand (e.g., 50% cache hit rate) if there is no concurrency cap.
+                if self.max_concurrent_prefills <= 0:
+                    req_demand = req_demand // 2
+                    
+                if req_demand > 0:
+                    demand += min(req_demand, threshold) if threshold > 0 else req_demand
+                num_concurrent_prefills += 1
 
         return demand
 
