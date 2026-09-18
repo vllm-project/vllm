@@ -2,13 +2,58 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import torch
+from torch.distributed import ProcessGroup
+
+
+@dataclass(frozen=True)
+class EplbTopology:
+    num_groups: int
+    num_nodes: int
+    num_ranks: int
+
+
+@dataclass(frozen=True)
+class EplbRebalanceContext:
+    """CPU inputs shared by built-in and out-of-tree EPLB policies.
+
+    Loads are a nonempty, oldest-to-newest ``[samples, layers, experts]``
+    tensor; the current placement is ``[layers, physical_experts]``.
+    """
+
+    load_window_cpu: torch.Tensor
+    physical_to_logical_map_cpu: torch.Tensor
+    topology: EplbTopology
+    num_replicas: int
+    cpu_group: ProcessGroup
+
+
+@dataclass(frozen=True)
+class EplbPlan:
+    """CPU integer ``[layers, physical_experts]`` target from an EPLB policy."""
+
+    physical_to_logical_map: torch.Tensor
 
 
 class AbstractEplbPolicy(ABC):
-    @classmethod
     @abstractmethod
+    def plan_rebalance(self, context: EplbRebalanceContext) -> EplbPlan:
+        raise NotImplementedError
+
+    def _plan_from_legacy(self, context: EplbRebalanceContext) -> EplbPlan:
+        physical_to_logical_map = self.rebalance_experts(
+            context.load_window_cpu.sum(dim=0),
+            context.num_replicas,
+            context.topology.num_groups,
+            context.topology.num_nodes,
+            context.topology.num_ranks,
+            context.physical_to_logical_map_cpu,
+        )
+        return EplbPlan(physical_to_logical_map)
+
+    @classmethod
     def rebalance_experts(
         cls,
         weight: torch.Tensor,

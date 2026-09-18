@@ -41,7 +41,6 @@ from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
     get_eplb_group,
-    get_node_count,
     in_the_same_node_as,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -55,7 +54,13 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
-from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
+from .policy import (
+    EPLB_POLICIES,
+    AbstractEplbPolicy,
+    EplbPlan,
+    EplbRebalanceContext,
+    EplbTopology,
+)
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     move_from_buffer,
@@ -82,7 +87,8 @@ class EplbStats:
     global_expert_load_window: torch.Tensor
     """
     Experts load window.
-    Shape: (window_size, num_moe_layers, num_physical_experts)
+    Shape: (num_samples, num_moe_layers, num_logical_experts), oldest-to-newest.
+    An all-empty window is represented by one zero sample.
     """
     num_replicas: int
     """
@@ -100,25 +106,6 @@ class EplbStats:
     """
     Number of GPUs.
     """
-
-
-@dataclass(frozen=True)
-class EplbTopology:
-    """Accelerator-independent topology used for rebalance planning."""
-
-    num_groups: int
-    num_nodes: int
-    num_ranks: int
-
-
-@dataclass(frozen=True)
-class EplbRebalanceContext:
-    """CPU inputs needed to plan an expert rebalance."""
-
-    load_window_cpu: torch.Tensor
-    physical_to_logical_map_cpu: torch.Tensor
-    topology: EplbTopology
-    num_replicas: int
 
 
 @dataclass
@@ -234,6 +221,7 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
+    policy: AbstractEplbPolicy
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -261,16 +249,11 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
-        """
-        Selected EPLB algorithm class
-        """
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.
 
-        Different from `expert_rearrangement_step`, 
-        each EP rank may have its own `expert_load_window_step`.
+        All EP ranks advance this cursor together, including on dummy steps.
         """
         self.expert_load_window_size: int = 0
         """
@@ -393,6 +376,10 @@ class EplbState:
         """Create the runtime EPLB state stored in each MoE layer."""
         return EplbLayerState()
 
+    def create_policy(self) -> AbstractEplbPolicy:
+        policy_type = self.parallel_config.eplb_config.policy
+        return EPLB_POLICIES[policy_type]()
+
     def _create_model_layer_states(self, model: MixtureOfExperts) -> None:
         for layer in model.moe_layers:
             if getattr(layer, "eplb_state", None) is None:
@@ -405,17 +392,24 @@ class EplbState:
 
     def plan_rebalance(
         self,
+        model_state: EplbModelState,
         context: EplbRebalanceContext,
-    ) -> torch.Tensor:
-        """Calculate a new layout on CPU; subclasses may choose another policy."""
-        return self.policy.rebalance_experts(
-            context.load_window_cpu,
-            context.num_replicas,
-            context.topology.num_groups,
-            context.topology.num_nodes,
-            context.topology.num_ranks,
-            context.physical_to_logical_map_cpu,
-        )
+    ) -> EplbPlan:
+        plan = model_state.policy.plan_rebalance(context)
+        target = plan.physical_to_logical_map
+        valid_dtype = target.dtype in (torch.int32, torch.int64)
+        if target.device.type != "cpu" or not valid_dtype:
+            raise ValueError("EPLB policy target must be a CPU int32 or int64 tensor")
+        return plan
+
+    def _ordered_load_window(self, load_window: torch.Tensor) -> torch.Tensor:
+        return load_window.roll(-self.expert_load_window_step, dims=0)
+
+    @staticmethod
+    def _nonempty_load_window(load_window: torch.Tensor) -> torch.Tensor:
+        active = load_window.sum(dim=(1, 2)) != 0
+        active[0] |= ~active.any()
+        return load_window[active]
 
     def _commit_rebalance(
         self,
@@ -552,10 +546,6 @@ class EplbState:
         )
         self.expert_rearrangement_step_interval = eplb_step_interval
 
-        policy_type = self.parallel_config.eplb_config.policy
-        self.policy = EPLB_POLICIES[policy_type]
-        logger.debug("Selected EPLB policy: %s", policy_type)
-
         # num_ubatches is 0 when DBO is disabled.
         num_ubatches = max(1, self.parallel_config.num_ubatches)
         num_unpadded_tokens_tensors = [
@@ -591,6 +581,7 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            policy=self.create_policy(),
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -713,20 +704,19 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
-        # Update the expert load sliding window
-        if not is_dummy:
-            should_record = self._should_record_current_step(log_stats=log_stats)
-            for eplb_model_state in self.model_states.values():
-                if should_record:
-                    eplb_model_state.expert_load_window[
-                        self.expert_load_window_step
-                    ].copy_(eplb_model_state.expert_load_pass)
-                    eplb_model_state.expert_load_pass.zero_()
-
+        # Dummy ranks record zero so every rank keeps the same time axis.
+        should_record = self._should_record_current_step(log_stats=log_stats)
+        for eplb_model_state in self.model_states.values():
             if should_record:
-                self.expert_load_window_step += 1
-                if self.expert_load_window_step >= self.expert_load_window_size:
-                    self.expert_load_window_step = 0
+                eplb_model_state.expert_load_window[self.expert_load_window_step].copy_(
+                    eplb_model_state.expert_load_pass
+                )
+                eplb_model_state.expert_load_pass.zero_()
+
+        if should_record:
+            self.expert_load_window_step += 1
+            if self.expert_load_window_step >= self.expert_load_window_size:
+                self.expert_load_window_step = 0
 
         # Step the expert rearrangement step
         # Note that even if this is a dummy step, we still increment the
@@ -864,11 +854,13 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window
+            expert_load_window = self._ordered_load_window(
+                eplb_model_state.expert_load_window
+            )
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
-                self.expert_load_window_size,
+                expert_load_window.shape[0],
                 eplb_model_state.model.num_moe_layers,
                 invalid_idx + 1,
                 dtype=eplb_model_state.expert_load_window.dtype,
@@ -885,10 +877,13 @@ class EplbState:
                 src=expert_load_window,
             )
 
-            global_expert_load_window = logical_expert_load_window[..., :-1].sum(dim=0)
+            global_expert_load_window = logical_expert_load_window[..., :-1]
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+        global_expert_load_windows = [
+            self._nonempty_load_window(window) for window in global_expert_load_windows
+        ]
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -909,16 +904,11 @@ class EplbState:
                 num_replicas // ep_group.size() * num_gpus
             )  # handle num replicas change
         else:
-            num_nodes = get_node_count()
-            num_gpus = ep_group.size()
-
-        if num_gpus % num_nodes != 0:
-            num_nodes = 1
-            logger.warning_once(
-                f"num_gpus % num_nodes != 0, "
-                "not using hierarchical rearrangement algorithm.\n"
-                f"{num_gpus=}, {num_nodes=}"
+            num_nodes = _node_count_with_rank_mapping(
+                get_eplb_group().cpu_group,
+                {rank: rank for rank in range(ep_group.size())},
             )
+            num_gpus = ep_group.size()
 
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
@@ -939,8 +929,10 @@ class EplbState:
                             num_ranks=num_gpus,
                         ),
                         num_replicas=num_replicas,
+                        cpu_group=get_eplb_group().cpu_group,
                     )
-                    new_physical_to_logical_map = self.plan_rebalance(context)
+                    plan = self.plan_rebalance(eplb_model_state, context)
+                    new_physical_to_logical_map = plan.physical_to_logical_map
 
                 skip_rearrange = False
                 if (
@@ -949,7 +941,7 @@ class EplbState:
                     and rank_mapping is None
                     and bool((eplb_model_state.physical_to_logical_map >= 0).all())
                 ):
-                    logical_loads = global_expert_load_window.float()
+                    logical_loads = global_expert_load_window.sum(dim=0).float()
                     ep_size = ep_group.size()
 
                     def rank_load_imbalance(
@@ -1119,31 +1111,17 @@ class EplbState:
         return int(flag.item()) == device_group.size()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
-        """
-        All-reduce a list of tensors.
-        """
         ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
-        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
-        assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
-            "All tensors must have the same shape[1]."
-        )
-        # Concatenate, all_reduce, then unpack to original shapes.
-        # We assume all tensors are 2D and shape[1] (num_physical_experts)
-        # is the same across all models.
-        shapes = [t.shape for t in tensor_list]
-        concat_tensor = torch.cat(tensor_list, dim=0)
+
+        layer_dim = tensor_list[0].dim() - 2
+        split_sizes = [tensor.shape[layer_dim] for tensor in tensor_list]
+        concat_tensor = torch.cat(tensor_list, dim=layer_dim)
 
         all_reduce(concat_tensor, group=ep_group)
-
-        all_reduce_list = []
-        offset = 0
-        for shape in shapes:
-            all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
-            offset += shape[0]
-        return all_reduce_list
+        return list(concat_tensor.split(split_sizes, dim=layer_dim))
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
         """
@@ -1218,6 +1196,7 @@ class EplbState:
     ) -> None:
         """Replace physical_to_logical_map and expert_load_pass with views
         covering the new active size.
+        An EEP topology change resets every model's load history and policy state.
         """
         model_state = self.model_states[model_config.compute_hash()]
         old_num_physical_experts = model_state.model.num_physical_experts
@@ -1237,6 +1216,10 @@ class EplbState:
         model_state.expert_load_window = torch.nn.functional.pad(
             model_state.expert_load_window, (0, pad_size)
         )
+        for model_state_to_reset in self.model_states.values():
+            model_state_to_reset.expert_load_window.zero_()
+            model_state_to_reset.policy = self.create_policy()
+        self.expert_load_window_step = 0
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
@@ -1296,6 +1279,7 @@ def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
 ) -> int:
+    """Return count for equal contiguous node blocks in new-rank order; else one."""
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)
     else:
@@ -1326,7 +1310,18 @@ def _node_count_with_rank_mapping(
             if is_same_node and node_assignment[other_rank] == 0:
                 node_assignment[other_rank] = next_node_id
 
-    return next_node_id
+    node_ids_by_new_rank = [
+        node_assignment[old_rank]
+        for old_rank, new_rank in sorted(rank_mapping.items(), key=lambda item: item[1])
+        if new_rank >= 0
+    ]
+    assert next_node_id, "rank mapping must retain at least one rank"
+    ranks_per_node, remainder = divmod(len(node_ids_by_new_rank), next_node_id)
+    has_uniform_contiguous_blocks = all(
+        len(set(node_ids_by_new_rank[start : start + ranks_per_node])) == 1
+        for start in range(0, len(node_ids_by_new_rank), ranks_per_node)
+    )
+    return next_node_id if not remainder and has_uniform_contiguous_blocks else 1
 
 
 def compute_logical_maps(

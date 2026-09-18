@@ -4,7 +4,12 @@ from typing import get_args
 
 from vllm.config.parallel import EPLBPolicyOption
 
-from .abstract import AbstractEplbPolicy
+from .abstract import (
+    AbstractEplbPolicy,
+    EplbPlan,
+    EplbRebalanceContext,
+    EplbTopology,
+)
 from .default import DefaultEplbPolicy
 
 EPLB_POLICIES = {"default": DefaultEplbPolicy}
@@ -15,5 +20,8 @@ assert set(EPLB_POLICIES.keys()) == set(get_args(EPLBPolicyOption))
 __all__ = [
     "AbstractEplbPolicy",
     "DefaultEplbPolicy",
+    "EplbPlan",
+    "EplbRebalanceContext",
+    "EplbTopology",
     "EPLB_POLICIES",
 ]

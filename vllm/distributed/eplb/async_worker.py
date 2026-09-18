@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent
+from .policy import EplbPlan, EplbRebalanceContext, EplbTopology
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -52,9 +53,7 @@ def run_rebalance_experts(
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
     cuda_stream: torch.cuda.Stream,
-) -> torch.Tensor:
-    from .eplb_state import EplbRebalanceContext, EplbTopology
-
+) -> EplbPlan:
     assert model_state.eplb_stats is not None
     stats = model_state.eplb_stats
     with torch.cuda.stream(cuda_stream):
@@ -68,11 +67,11 @@ def run_rebalance_experts(
             num_ranks=stats.num_gpus,
         ),
         num_replicas=stats.num_replicas,
+        cpu_group=get_eplb_group().cpu_group,
     )
-    new_physical_to_logical_map = eplb_state.plan_rebalance(context)
-    assert new_physical_to_logical_map.device == torch.device("cpu")
+    plan = eplb_state.plan_rebalance(model_state, context)
 
-    return new_physical_to_logical_map
+    return plan
 
 
 def transfer_run_periodically(
@@ -99,9 +98,10 @@ def transfer_run_periodically(
             with torch.cuda.stream(cuda_stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
-            new_physical_to_logical_map = run_rebalance_experts(
+            plan = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
+            new_physical_to_logical_map = plan.physical_to_logical_map
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration
             # of this loop will copy the new set of expert weights into
