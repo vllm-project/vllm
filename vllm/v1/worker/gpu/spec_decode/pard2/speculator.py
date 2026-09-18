@@ -234,10 +234,27 @@ class Pard2Speculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
+    def _last_accepted_rows(
+        self,
+        input_batch: InputBatch,
+        num_rejected: torch.Tensor,
+        num_reqs: int,
+    ) -> torch.Tensor:
+        """Row index of each request's last accepted token.
+
+        The batch keeps the target's shape, so a request's span still carries
+        its rejected positions as a tail; those rows are forwarded but must not
+        be treated as real features.
+        """
+        return (
+            input_batch.query_start_loc[1 : num_reqs + 1] - 1 - num_rejected[:num_reqs]
+        ).to(torch.int64)
+
     def _fill_context_hidden_states(
         self,
         input_batch: InputBatch,
         target_hidden_states: torch.Tensor,
+        last_accepted_rows: torch.Tensor,
         num_reqs: int,
         num_tokens: int,
     ) -> None:
@@ -273,12 +290,11 @@ class Pard2Speculator(DraftModelSpeculator):
             is_span_start.unsqueeze(1), carried
         )
 
-        # Carry this span's last real feature into the next step.
-        last_rows = (input_batch.query_start_loc[1 : num_reqs + 1] - 1).to(torch.int64)
+        # Carry this span's last accepted feature into the next step.
         self.prev_last_hidden.index_copy_(
             0,
             idx_mapping.to(torch.int64),
-            target_hidden_states.index_select(0, last_rows),
+            target_hidden_states.index_select(0, last_accepted_rows),
         )
 
     @torch.inference_mode()
@@ -334,6 +350,10 @@ class Pard2Speculator(DraftModelSpeculator):
         # --- Pass 1: absorb the confirmed tokens into the draft's KV cache. ---
         # Same shape as the target's batch, so its metadata and slot mappings
         # apply unchanged.
+        last_accepted_rows = self._last_accepted_rows(
+            input_batch, num_rejected, num_reqs
+        )
+
         if not (dummy_run and skip_attn_for_dummy_run):
             self.input_buffers.input_ids[:num_target_tokens].copy_(
                 self.target_input_buffers.input_ids[:num_target_tokens]
@@ -342,7 +362,11 @@ class Pard2Speculator(DraftModelSpeculator):
                 self.target_input_buffers.positions[:num_target_tokens]
             )
             self._fill_context_hidden_states(
-                input_batch, target_hidden_states, num_reqs, num_target_tokens
+                input_batch,
+                target_hidden_states,
+                last_accepted_rows,
+                num_reqs,
+                num_target_tokens,
             )
             self._prepare_eplb_forward(num_target_tokens)
             self._run_model(
@@ -394,10 +418,9 @@ class Pard2Speculator(DraftModelSpeculator):
             )
 
         # Repeat-last-feat: no new real features exist past the context, so all K
-        # rows reuse the span's last one.
-        last_rows = (input_batch.query_start_loc[1 : num_reqs + 1] - 1).to(torch.int64)
+        # rows reuse the last accepted one.
         self.hidden_states[:num_query_tokens].copy_(
-            target_hidden_states.index_select(0, last_rows).repeat_interleave(
+            target_hidden_states.index_select(0, last_accepted_rows).repeat_interleave(
                 self.num_query_per_req, dim=0
             )
         )
