@@ -7,6 +7,8 @@ preparation.
   the paged cache.
 - dequantize_and_gather_k_cache: gather and dequantize FP8 K from the paged
   cache for sparse/SWA prefill.
+- dequantize_and_gather_k_cache_fp8: gather and requantize the paged cache for
+  SM90 Q8KV8 sparse prefill.
 - compute_global_topk_indices_and_lens: map local topk indices to global KV
   cache slots and count valid entries.
 - combine_topk_swa_indices: concatenate topk compressed indices with SWA
@@ -242,6 +244,7 @@ class DequantizeAndGatherKCacheKernel(
         use_fnuz: bool
         has_gather_lens: bool
         offset: int
+        output_fp8: bool = False
 
     @staticmethod
     @triton.jit
@@ -267,6 +270,7 @@ class DequantizeAndGatherKCacheKernel(
         fp8_max: tl.constexpr,
         n_quant_blocks: tl.constexpr,  # 7 real blocks
         use_fnuz: tl.constexpr = False,
+        output_fp8: tl.constexpr = False,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -346,10 +350,11 @@ class DequantizeAndGatherKCacheKernel(
                     # Dequantize: bf16_value = fp8_value * scale
                     x_dequant = x_float * scale
 
-                    # Store as bf16
-                    tl.store(
-                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
-                    )
+                    if output_fp8:
+                        x_out = x_dequant.to(tl.float8e4nv)
+                    else:
+                        x_out = x_dequant.to(tl.bfloat16)
+                    tl.store(output_row_ptr + offsets, x_out, mask=mask)
 
             # ========== Copy BF16 portion directly ==========
             bf16_output_offset = fp8_dim  # After 448 elements in output
@@ -361,6 +366,8 @@ class DequantizeAndGatherKCacheKernel(
             for j in tl.static_range(bf16_dim // 16):
                 chunk_offsets = j * 16 + tl.arange(0, 16)
                 bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+                if output_fp8:
+                    bf16_vals = bf16_vals.to(tl.float8e4nv)
                 tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
     def dispatch(  # type: ignore[override]
@@ -435,6 +442,13 @@ class DequantizeAndGatherKCacheKernel(
             ),
             max_model_len=max_model_len,
             block_table_block_size=block_size,
+            output_fp8=(
+                [False, True]
+                if getattr(
+                    vllm_config.attention_config, "use_deepseek_v4_q8kv8_prefill", False
+                )
+                else False
+            ),
             _when=lambda *, enabled: enabled,
         )
 
@@ -442,7 +456,7 @@ class DequantizeAndGatherKCacheKernel(
         int32_ptr = TritonWarmupTensor(torch.int32)
         return dict(
             out=TritonWarmupTensor(
-                torch.bfloat16,
+                torch.float8_e4m3fn if compile_key.output_fp8 else torch.bfloat16,
                 shape=(1, 1, 512),
                 strides=(512, 512, 1),
             ),
@@ -460,6 +474,7 @@ class DequantizeAndGatherKCacheKernel(
             block_size=compile_key.cache_block_size,
             offset=compile_key.offset,
             use_fnuz=compile_key.use_fnuz,
+            output_fp8=compile_key.output_fp8,
         )
 
     @kernel_launcher
@@ -474,6 +489,7 @@ class DequantizeAndGatherKCacheKernel(
         offset: int,
         *,
         use_fnuz: bool = False,
+        output_fp8: bool = False,
     ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
         return (num_reqs, self.NUM_WORKERS), dict(
@@ -491,6 +507,31 @@ class DequantizeAndGatherKCacheKernel(
             fp8_max=448.0,
             n_quant_blocks=7,
         )
+
+
+def dequantize_and_gather_k_cache_fp8(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    """Gather a paged DSv4 cache and requantize it to OCP E4M3."""
+    if out.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"out must be float8_e4m3fn, got {out.dtype}")
+    _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL(
+        out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+        use_fnuz=False,
+        output_fp8=True,
+    )
 
 
 def dequantize_and_gather_k_cache(
@@ -760,6 +801,7 @@ def combine_topk_swa_indices(
     left_visible: torch.Tensor | None = None,
     right_visible: torch.Tensor | None = None,
     max_image_tokens: int = 0,
+    padding_value: int = -1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     # max_image_tokens widens the SWA column region for in-image
@@ -773,7 +815,7 @@ def combine_topk_swa_indices(
     if out is None:
         combined_indices = torch.full(
             (num_tokens, combined_topk),
-            fill_value=-1,
+            fill_value=padding_value,
             dtype=torch.int32,
             device=topk_indices.device,
         )
@@ -782,7 +824,7 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
-        combined_indices.fill_(-1)
+        combined_indices.fill_(padding_value)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -799,6 +841,7 @@ def combine_topk_swa_indices(
         left_visible=left_visible,
         right_visible=right_visible,
         max_image_tokens=max_image_tokens,
+        padding_value=padding_value,
     )
     return combined_indices, combined_lens
 
@@ -826,6 +869,7 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int
         IMAGE_WIDTH: int
         PADDED_TOP_K: int
+        FILL_PADDING: bool
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -835,6 +879,7 @@ class CombineTopkSwaIndicesKernel(
             "topk_indices_stride",
             "M",
             "N",
+            "padding_value",
         ]
     )
     def kernel(
@@ -850,11 +895,13 @@ class CombineTopkSwaIndicesKernel(
         right_visible_ptr,
         M,
         N,
+        padding_value,
         TOP_K: tl.constexpr,
         COMPRESS_RATIO: tl.constexpr,
         WINDOW_SIZE: tl.constexpr,
         IMAGE_WIDTH: tl.constexpr,
         PADDED_TOP_K: tl.constexpr,
+        FILL_PADDING: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -898,13 +945,20 @@ class CombineTopkSwaIndicesKernel(
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
-            topk_indices = tl.load(
+            raw_topk_indices = tl.load(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            topk_indices = raw_topk_indices + M * batch_idx
+            if FILL_PADDING:
+                topk_indices = tl.where(
+                    raw_topk_indices < 0,
+                    padding_value,
+                    topk_indices,
+                )
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                topk_indices,
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)
@@ -924,6 +978,23 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
+            if FILL_PADDING:
+                output_width: tl.constexpr = (
+                    (TOP_K + WINDOW_SIZE + IMAGE_WIDTH + 127) // 128 * 128
+                )
+                for start in tl.static_range(0, output_width, 256):
+                    padding_offsets = start + tl.arange(0, 256)
+                    padding_mask = (padding_offsets >= combined_len) & (
+                        padding_offsets < output_width
+                    )
+                    tl.store(
+                        combined_indices_ptr
+                        + token_idx * combined_indices_stride
+                        + padding_offsets,
+                        padding_value,
+                        mask=padding_mask,
+                    )
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -937,6 +1008,7 @@ class CombineTopkSwaIndicesKernel(
         active_topk_width: int,
         WINDOW_SIZE: int,
         image_width: int = 0,
+        fill_padding: bool = False,
     ) -> CompileKey:
         topk_width = active_topk_width if compress_ratio == 128 else index_topk
         topk = 0 if compress_ratio == 1 else topk_width
@@ -953,6 +1025,7 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
             IMAGE_WIDTH=image_width,
             PADDED_TOP_K=padded_topk,
+            FILL_PADDING=fill_padding,
             input_variant=input_variant,
         )
 
@@ -986,6 +1059,9 @@ class CombineTopkSwaIndicesKernel(
         # Warm both the plain-window variant (batches without image spans)
         # and the in-image bidirectional variant.
         image_widths = [0, image_width] if image_width > 0 else [0]
+        use_q8kv8 = getattr(
+            vllm_config.attention_config, "use_deepseek_v4_q8kv8_prefill", False
+        )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -1012,6 +1088,7 @@ class CombineTopkSwaIndicesKernel(
             active_topk_width=active_topk_widths,
             WINDOW_SIZE=window_size,
             image_width=image_widths,
+            fill_padding=[False, True] if use_q8kv8 else False,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -1037,6 +1114,7 @@ class CombineTopkSwaIndicesKernel(
             left_visible=(int32_ptr if has_image else None),
             right_visible=(int32_ptr if has_image else None),
             max_image_tokens=compile_key.IMAGE_WIDTH,
+            padding_value=1 if compile_key.FILL_PADDING else -1,
         )
 
     @kernel_launcher
@@ -1057,6 +1135,7 @@ class CombineTopkSwaIndicesKernel(
         left_visible: torch.Tensor | None = None,
         right_visible: torch.Tensor | None = None,
         max_image_tokens: int = 0,
+        padding_value: int = -1,
     ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
         has_image = left_visible is not None
@@ -1071,6 +1150,7 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
             IMAGE_WIDTH=image_width,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
+            FILL_PADDING=padding_value >= 0,
         )
 
 
