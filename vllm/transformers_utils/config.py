@@ -634,8 +634,8 @@ def iter_rope_parameters(config: PretrainedConfig) -> Iterator[dict[str, Any]]:
         return
 
     if is_rope_parameters_nested(rope_parameters):
-        yield from (p for p in rope_parameters.values() if isinstance(p, dict))
-    else:
+        yield from (p for p in rope_parameters.values() if isinstance(p, dict) and p)
+    elif rope_parameters:
         yield rope_parameters
 
 
