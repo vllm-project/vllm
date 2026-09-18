@@ -19,6 +19,8 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -38,7 +40,7 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        # draft_max_seq_len is read by parent's _build_draft_attn_metadata.
+        # draft_max_seq_len is read by the parent's attention metadata builder.
         # Plain draft model doesn't do per-batch adjustment; cap at max.
         self.draft_max_seq_len = self.max_model_len
 
@@ -204,7 +206,7 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
             qsl_np = input_batch.query_start_loc_np
             query_start_loc_cpu_expanded = (
                 torch.from_numpy(qsl_np[: num_reqs + 1]).int()
-                + self.arange[: num_reqs + 1]
+                + torch.from_numpy(self.arange_np[: num_reqs + 1]).int()
             )
             max_query_len = (
                 int((qsl_np[1 : num_reqs + 1] - qsl_np[:num_reqs]).max()) + 1
@@ -308,10 +310,15 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 step_slot_maps_by_layer = build_slot_mappings_by_layer(
                     step_slot_mappings, kv_cache_config
                 )
-                decode_attn_md = self._build_draft_attn_metadata(
+                decode_attn_md = self._build_uniform_attn_metadata(
+                    batch_desc=BatchExecutionDescriptor(
+                        cg_mode=CUDAGraphMode.NONE,
+                        num_tokens=num_reqs,
+                        num_reqs=num_reqs,
+                        uniform_token_count=1,
+                    ),
                     num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs,
-                    num_tokens_padded=num_reqs,
+                    num_query_per_req=1,
                     seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
                     # Include the correction token inserted during prefill.
                     step=step + 1,
@@ -349,7 +356,7 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -359,6 +366,9 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
 
         num_reqs = input_batch.num_reqs
         skip_attn = dummy_run and skip_attn_for_dummy_run
+        num_tokens_across_dp = (
+            dp_sync.num_tokens_across_dp if dp_sync is not None else None
+        )
 
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
         # buffers so sample_draft can read them without extra slicing.
@@ -411,8 +421,7 @@ def _prepare_prefill_inputs_kernel(
     max_model_len,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Per-request step-0 input preparation for the plain draft-model speculator.
+    """Per-request step-0 input preparation for the plain draft-model speculator.
 
     Output layout for request i (out_start = query_start_loc[i] + i):
         [out_start,              out_start + num_valid)      accepted tokens
