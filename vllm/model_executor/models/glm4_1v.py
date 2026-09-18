@@ -1650,17 +1650,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
-            swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_kwargs),
             dict(text=prompt_text, **hf_data),
             hf_kwargs,
         )
-        if swap_video_frame_tokens:
-            input_ids = processed_data["input_ids"]
-            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_data["input_ids"] = input_ids
+        input_ids = processed_data["input_ids"]
+        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+        processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
         return self._finalize_hf_mm_data(
