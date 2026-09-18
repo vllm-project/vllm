@@ -14,9 +14,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     is_fp8_marlin_supported,
     prepare_fp8_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8Static128BlockSym,
-)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -46,14 +43,28 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        return True, None
+        group_shape = c.weight_quant_key.scale.group_shape
+        if (
+            group_shape.is_per_tensor()
+            or group_shape.is_per_channel()
+            or group_shape.is_per_token()
+        ):
+            return True, None
+        if group_shape.is_per_block():
+            if group_shape.col == 128:
+                return True, None
+            else:
+                return False, (
+                    f"FP8 Marlin requires K group size 128, got {group_shape.col}."
+                )
+        return False, f"Unsupported weight group shape: {group_shape}."
 
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c, layer_param_names)
         self.marlin_input_dtype = None
-        self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}
+        self.block_quant = self.config.weight_quant_key.scale.group_shape.is_per_block()
         self.size_k_first = not self.block_quant
 
     @staticmethod
