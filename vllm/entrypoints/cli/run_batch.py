@@ -8,7 +8,7 @@ import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import configure_logging_from_args, init_logger
+from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -44,9 +44,6 @@ class RunBatchSubcommand(CLISubcommand):
             logger.info("Prometheus metrics disabled")
 
         asyncio.run(run_batch_main(args))
-
-    def post_parse(self, args: argparse.Namespace) -> None:
-        configure_logging_from_args(args)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction

@@ -79,6 +79,8 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "disable_existing_loggers": False,
 }
 
+_last_configured_logging_config: "LoggingConfig | None" = None
+
 
 @lru_cache
 def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
@@ -241,6 +243,14 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
 def configure_logging(config: "LoggingConfig") -> None:
     """Apply a logging configuration in the current process."""
     _configure_vllm_root_logger(config)
+    global _last_configured_logging_config
+    _last_configured_logging_config = config
+
+
+def configure_logging_if_needed(config: "LoggingConfig") -> None:
+    """Apply a logging configuration unless it is already active in this process."""
+    if config != _last_configured_logging_config:
+        configure_logging(config)
 
 
 def configure_logging_from_args(args: Any) -> "LoggingConfig":
@@ -260,9 +270,7 @@ def configure_logging_from_args(args: Any) -> "LoggingConfig":
 
 
 def init_logger(name: str) -> _VllmLogger:
-    """The main purpose of this function is to ensure that loggers are
-    retrieved in such a way that we can be sure the root vllm logger has
-    already been configured."""
+    """Retrieve a logger and add vLLM's convenience logging methods."""
     logger = logging.getLogger(name)
 
     for method_name, method in _METHODS_TO_PATCH.items():
@@ -291,11 +299,6 @@ def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
         lgr = lgr.parent
     return None
 
-
-# The root logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-_configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
