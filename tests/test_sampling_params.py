@@ -118,12 +118,18 @@ def test_diffusion_read_only_ends_after_one_canvas(max_tokens, expected, flag):
 
 @pytest.mark.parametrize(
     "width, match",
-    [(0, "positive integer"), ("4", "positive integer"), (True, "positive integer"), (9, "no larger")],
+    [
+        (0, "positive integer"),
+        ("4", "positive integer"),
+        (True, "positive integer"),
+        (9, "no larger"),
+    ],
 )
 def test_diffusion_rejects_bad_canvas_length(width, match):
     with pytest.raises(VLLMValidationError, match=match):
         _verify_diffusion(
-            SamplingParams(extra_args={"diffusion_canvas_length": width}), canvas_length=8
+            SamplingParams(extra_args={"diffusion_canvas_length": width}),
+            canvas_length=8,
         )
 
 

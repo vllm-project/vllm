@@ -1087,7 +1087,9 @@ class SamplingParams(
         if not extra:
             return
 
-        canvas_length = None if diffusion_config is None else diffusion_config.canvas_length
+        canvas_length = (
+            None if diffusion_config is None else diffusion_config.canvas_length
+        )
         width = extra.get("diffusion_canvas_length")
         if width is not None and (
             not isinstance(width, int)
