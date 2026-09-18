@@ -31,8 +31,8 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) V1 Attention Shard %N"
-  key: v1-attention-b200
+- label: ":nvidia: (B200) V1 Attention / Sparse MLA"
+  key: v1-attention-b200-sparse-mla
   timeout_in_minutes: 45
   device: b200-k8s
   source_file_dependencies:
@@ -41,15 +41,65 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - |
-      set -eu
-      # Run correlated folders and flat backend wrappers as whole units.
-      case "$$BUILDKITE_PARALLEL_JOB" in
-        0) pytest -v -s v1/attention/sparse_mla ;;
-        1) pytest -v -s v1/attention/mla/correctness/test_rocm_aiter_fa.py v1/attention/mla/correctness/test_trtllm_ragged.py v1/attention/rocm ;;
-        2) pytest -v -s v1/attention/mla/correctness/test_flash_attn_deepseek.py v1/attention/mla/correctness/test_tokenspeed_mla.py ;;
-        3) pytest -v -s v1/attention/mla/backends v1/attention/mla/correctness/test_flash_attn_glm.py v1/attention/mla/correctness/test_flashinfer.py ;;
-        4) pytest -v -s v1/attention/dcp v1/attention/dense v1/attention/ssm ;;
-        *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2; exit 1 ;;
-      esac
-  parallelism: 5
+    - pytest -v -s v1/attention/sparse_mla
+
+- label: ":nvidia: (B200) V1 Attention / MLA Backends"
+  key: v1-attention-b200-mla-backends
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/mla/backends
+
+- label: ":nvidia: (B200) V1 Attention / MLA Correctness Shard %N"
+  key: v1-attention-b200-mla-correctness
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/mla/correctness --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 3
+
+- label: ":nvidia: (B200) V1 Attention / Dense and SSM"
+  key: v1-attention-b200-dense-ssm
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/dense v1/attention/ssm
+
+- label: ":nvidia: (B200) V1 Attention / Decode Context Parallelism"
+  key: v1-attention-b200-dcp
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/dcp
+
+- label: ":nvidia: (B200) V1 Attention / ROCm Compatibility"
+  key: v1-attention-b200-rocm-compatibility
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention/rocm
