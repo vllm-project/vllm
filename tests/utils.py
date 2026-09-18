@@ -87,23 +87,7 @@ def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
             )
 
 
-if current_platform.is_rocm():
-    from amdsmi import (
-        amdsmi_init,
-        amdsmi_shut_down,
-    )
-
-    _amdsmi_lock = threading.Lock()
-
-    @contextmanager
-    def _nvml():
-        with _amdsmi_lock:
-            try:
-                amdsmi_init()
-                yield
-            finally:
-                amdsmi_shut_down()
-elif current_platform.is_cuda():
+if current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
         nvmlDeviceGetHandleByUUID,
@@ -593,16 +577,18 @@ class RemoteVLLMServer:
         return members
 
     def _get_gpu_memory_used(self) -> float | None:
-        """Get total GPU memory used across all visible devices in bytes."""
+        """Get device-wide usage across visible devices in bytes.
+
+        On ROCm this initializes HIP in the caller; subsequent multiprocessing
+        GPU workers must use spawn, as the ROCm server helpers already do.
+        """
         try:
             if current_platform.is_rocm():
-                # HIP/torch is partition-scoped (one NPS2 vGPU, ~144 GiB).
-                # amdsmi/rocm-smi on DPX gpu-0 reports the parent card
-                # (~288 GiB) and includes the sibling job's VRAM, so the
-                # teardown wait false-fails when the other partition loads.
+                # Use HIP logical devices. On MI355 DPX/NPS2, the primary
+                # AMD SMI device can expose whole-card memory counters.
                 total_used = 0
                 for i in range(current_platform.device_count()):
-                    free, total = torch.cuda.mem_get_info(i)
+                    free, total = torch.accelerator.get_memory_info(i)
                     total_used += total - free
                 return float(total_used)
             elif current_platform.is_cuda():
@@ -642,8 +628,7 @@ class RemoteVLLMServer:
             # Can't query GPU memory - nothing to do
             return
 
-        # Allow leftover driver/context state between server instances.
-        # ROCm often keeps ~2.5–4 GiB resident (see wait_for_gpu_memory_to_clear).
+        # Allow aggregate driver/context growth above the baseline.
         headroom_bytes = (
             4 * 1024 * 1024 * 1024
             if current_platform.is_rocm()
@@ -1604,12 +1589,15 @@ def record_gpu_memory_usage_stats(
     *,
     devices: list[int],
 ) -> dict[int, tuple[float, float]]:
+    """Return device-wide used/total GiB; ROCm IDs are HIP logical devices.
+
+    ROCm queries initialize HIP in the caller and include other processes'
+    allocations on the same memory partition.
+    """
     output: dict[int, tuple[float, float]] = {}
     for device in devices:
         if current_platform.is_rocm():
-            # Logical HIP device. amdsmi is not HIP_VISIBLE_DEVICES-aware and
-            # on DPX partition 0 reports full-card VRAM (~288 GiB).
-            free, total = torch.cuda.mem_get_info(device)
+            free, total = torch.accelerator.get_memory_info(device)
             gb_used = (total - free) / 2**30
             gb_total = total / 2**30
         elif current_platform.is_xpu():
@@ -1639,8 +1627,7 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    # HIP already applies HIP/CUDA_VISIBLE_DEVICES. Remapping to amdsmi
-    # physical ids is wrong on DPX (gpu-0 = full card).
+    # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
         devices = get_physical_device_indices(devices)
     if isinstance(threshold_bytes, int):
@@ -1664,8 +1651,6 @@ def wait_for_gpu_memory_to_clear(
                 threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
             )
 
-    # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
     start_time = time.time()
     stable_since: float | None = None
     stable_used_bytes: dict[int, int] | None = None
