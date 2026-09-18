@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import (
     custom_tool_to_function_dict,
     flat_namespace_tool_name,
@@ -99,15 +100,57 @@ def register_vllm_structural_tag(
     return decorator
 
 
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
+
+
+def _with_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": strict})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": strict})}
+        )
+    return tool
+
+
+def _resolve_tool_strictness(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+    strict_level: ToolStrictLevel,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
+    """Decide whether a structural tag applies and pin each tool's ``strict``.
+
+    A tool without an explicit ``strict`` is treated as non-strict: its call
+    envelope is still constrained, but its arguments stay free unless the
+    server level is PARAMETER. ``None`` means no structural tag.
+    """
+    if (
+        tool_choice == "auto"
+        and strict_level == ToolStrictLevel.AUTO
+        and not _any_tool_strict(tools)
+    ):
+        return None
+    return [
+        _with_tool_strict(
+            tool, strict_level >= ToolStrictLevel.PARAMETER or _tool_is_strict(tool)
+        )
+        for tool in tools
+    ]
 
 
 def get_model_structural_tag(
@@ -116,12 +159,14 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    tools = _resolve_tool_strictness(tools, tool_choice, strict_level)
+    if tools is None:
         return None
 
     dumped_tools: list[dict[str, Any]] = []
