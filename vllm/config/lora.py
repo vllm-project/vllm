@@ -85,7 +85,8 @@ class LoRAConfig:
     factors are broadcast to the expert count at kernel time. Only meaningful for
     MoE models whose adapters use this layout; ignored otherwise."""
     max_lora_num_labels: int | None = Field(default=None, ge=1)
-    """TODO"""
+    """Maximum output size for LoRA classification heads. Defaults to the
+    base classification head size."""
 
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
