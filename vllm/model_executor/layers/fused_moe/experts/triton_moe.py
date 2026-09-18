@@ -557,6 +557,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 B_bias=self.w2_bias,
             )
 
+        intermediate_cache3.zero_()
         if lora_context is not None and lora_context.aux_stream is not None:
             lora_delta_w2 = torch.zeros_like(intermediate_cache3)
 

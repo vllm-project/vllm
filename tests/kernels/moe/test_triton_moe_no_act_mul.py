@@ -125,6 +125,7 @@ def make_test_tensors(
 @pytest.mark.parametrize("k", K_SIZES)
 @pytest.mark.parametrize("topk", TOPK_VALUES)
 @pytest.mark.parametrize("activation", NO_MUL_ACTIVATIONS)
+@pytest.mark.parametrize("use_expert_map", [False, True])
 @torch.inference_mode()
 def test_triton_experts_no_mul_activation(
     m: int,
@@ -132,9 +133,16 @@ def test_triton_experts_no_mul_activation(
     k: int,
     topk: int,
     activation: MoEActivation,
+    use_expert_map: bool,
 ):
     hidden_states, w1, w2, topk_weights, topk_ids = make_test_tensors(
         m, n, k, NUM_EXPERTS, topk
+    )
+    topk_ids[::2, 0] = -1
+    expert_map = (
+        torch.arange(NUM_EXPERTS, dtype=torch.int32, device=hidden_states.device)
+        if use_expert_map
+        else None
     )
 
     experts = TritonExperts(
@@ -171,8 +179,9 @@ def test_triton_experts_no_mul_activation(
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
-    workspace2 = torch.empty(
-        ws2_shape[0] * ws2_shape[1] * ws2_shape[2],
+    workspace2 = torch.full(
+        (ws2_shape[0] * ws2_shape[1] * ws2_shape[2],),
+        float("nan"),
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
@@ -187,7 +196,7 @@ def test_triton_experts_no_mul_activation(
         topk_ids=topk_ids,
         activation=activation,
         global_num_experts=NUM_EXPERTS,
-        expert_map=None,
+        expert_map=expert_map,
         a1q_scale=None,
         a2_scale=None,
         workspace13=workspace1,
@@ -196,10 +205,14 @@ def test_triton_experts_no_mul_activation(
         apply_router_weight_on_input=False,
     )
 
-    assert output.shape == (m, k), f"Expected shape {(m, k)}, got {output.shape}"
-    assert not torch.isnan(output).any(), "Output contains NaN"
-    assert not torch.isinf(output).any(), "Output contains Inf"
-    assert output.abs().sum() > 0, "Output is all zeros"
+    expected = torch.zeros_like(output)
+    for expert in range(NUM_EXPERTS):
+        projected = hidden_states @ w1[expert].T
+        activated = torch.empty_like(projected)
+        apply_moe_activation(activation, activated, projected)
+        weights = (topk_weights * (topk_ids == expert)).sum(dim=1, keepdim=True)
+        expected += (activated @ w2[expert].T) * weights.to(output.dtype)
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 @torch.inference_mode()
