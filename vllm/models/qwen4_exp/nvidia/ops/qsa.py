@@ -482,7 +482,8 @@ def _select_sm120_config(
     """(block_n, target_splits, num_warps) retuned on sm_120 (RTX PRO 6000
     Blackwell), split by cache dtype: bf16 and fp8 favour different configs on
     sm_120, most visibly on the large-prefill region. Each entry is the fastest
-    config that stays correct on its own path; the main win is more warps."""
+    config that stays correct on its own path; the main win is more warps.
+    """
     if is_fp8:
         if base_programs > 2048:
             return (32, 2, 1) if use_prefill_config else (64, 1, 2)
