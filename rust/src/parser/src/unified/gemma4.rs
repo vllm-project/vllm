@@ -15,7 +15,7 @@ use crate::reasoning::last_reasoning_boundary;
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::recursion::ParserRecursionGuard;
-use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
+use crate::utils::{incomplete, max_partial_prefix_len, parse_buffered_event, safe_text_len_mul};
 
 const REASONING_START: &str = "<|channel>thought\n";
 const CHANNEL_START: &str = "<|channel>";
@@ -368,12 +368,7 @@ fn gemma4_raw_args_until_tool_call_end<'i>(
 
 /// Return the scan length while holding back a split marker prefix.
 fn safe_scan_len(text: &str, start: usize, markers: &[&str]) -> usize {
-    let max_partial = markers
-        .iter()
-        .map(|marker| partial_prefix_len(&text[start..], marker))
-        .max()
-        .unwrap_or(0);
-    text.len() - max_partial
+    text.len() - max_partial_prefix_len(&text[start..], markers)
 }
 
 /// Parse complete Gemma4 custom key-value arguments.
@@ -523,6 +518,7 @@ mod tests {
         UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
     };
     use crate::tool::Tool;
+    use crate::unified::test_utils::UnifiedParserTestExt;
     use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
     use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
@@ -535,25 +531,6 @@ mod tests {
             .with_special_token(CHANNEL_START, CHANNEL_START_ID)
             .with_special_token(CHANNEL_END, CHANNEL_END_ID)
             .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
-    }
-
-    trait UnifiedParserTestExt {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput>;
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput>;
-    }
-
-    impl UnifiedParserTestExt for Gemma4UnifiedParser {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = UnifiedParserOutput::default();
-            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
-            Ok(output)
-        }
-
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = self.parse_chunk(text)?;
-            output.append(self.finish()?);
-            Ok(output)
-        }
     }
 
     trait UnifiedOutputTestExt {

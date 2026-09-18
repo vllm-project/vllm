@@ -795,7 +795,14 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    selection.resolve_reasoning_name(model).map(str::to_owned)
+    let unified = vllm_chat::UnifiedParserFactory::global();
+    selection
+        .resolve_reasoning_name(model)
+        // A unified parser whose whole-generation structural tag must apply
+        // from token 0 opts out of the engine-side reasoner, which would
+        // withhold the grammar until it reports a reasoning end.
+        .filter(|name| unified.forwards_engine_reasoning_parser(name))
+        .map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

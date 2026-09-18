@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 pub use vllm_parser::unified::{
     Gemma4UnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser,
-    KimiK3UnifiedParser, UnifiedParser,
+    KimiK3UnifiedParser, MuseGlimmerUnifiedParser, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -21,14 +21,23 @@ pub mod names {
     pub const HY_V4: &str = "hy_v4";
     pub const INKLING: &str = "inkling";
     pub const KIMI_K3: &str = "kimi_k3";
+    pub const MUSE_GLIMMER: &str = "muse_glimmer";
 }
 
 /// Constructor signature for one registered unified parser implementation.
 type UnifiedParserCreator =
     fn(&[ChatTool], DynTokenizer) -> vllm_parser::unified::Result<Box<dyn UnifiedParser>>;
 
+/// One registered unified parser implementation.
+#[derive(Clone)]
+pub struct UnifiedParserEntry {
+    create: UnifiedParserCreator,
+    /// See [`UnifiedParser::forwards_engine_reasoning_parser`].
+    forwards_engine_reasoning_parser: bool,
+}
+
 /// Registry and model matcher for unified parsers.
-pub type UnifiedParserFactory = ParserFactory<UnifiedParserCreator>;
+pub type UnifiedParserFactory = ParserFactory<UnifiedParserEntry>;
 
 impl UnifiedParserFactory {
     /// Get the global unified parser factory with built-in registrations and
@@ -48,6 +57,7 @@ impl UnifiedParserFactory {
         factory.register_parser::<HyV4UnifiedParser>(names::HY_V4);
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
+        factory.register_parser::<MuseGlimmerUnifiedParser>(names::MUSE_GLIMMER);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
@@ -56,7 +66,9 @@ impl UnifiedParserFactory {
             .register_pattern("hy4", names::HY_V4)
             .register_pattern("inkling", names::INKLING)
             .register_pattern("kimi-k3", names::KIMI_K3)
-            .register_pattern("kimi_k3", names::KIMI_K3);
+            .register_pattern("kimi_k3", names::KIMI_K3)
+            .register_pattern("muse-glimmer", names::MUSE_GLIMMER)
+            .register_pattern("muse_glimmer", names::MUSE_GLIMMER);
 
         factory
     }
@@ -66,7 +78,20 @@ impl UnifiedParserFactory {
     where
         T: UnifiedParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(
+            name,
+            UnifiedParserEntry {
+                create: T::create,
+                forwards_engine_reasoning_parser: T::forwards_engine_reasoning_parser(),
+            },
+        )
+    }
+
+    /// Whether `name` may be forwarded to the engine as its reasoning parser.
+    /// Names outside this registry are the engine's own reasoning parsers and
+    /// are always forwarded.
+    pub fn forwards_engine_reasoning_parser(&self, name: &str) -> bool {
+        self.creator(name).is_none_or(|entry| entry.forwards_engine_reasoning_parser)
     }
 
     /// Construct a parser from an exact name.
@@ -82,7 +107,7 @@ impl UnifiedParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
+        (creator.create)(tools, tokenizer).map_err(|error| crate::Error::ParserInitialization {
             kind: "unified",
             name: name.to_string(),
             error: error.into(),
@@ -149,6 +174,31 @@ mod tests {
             Some(names::KIMI_K3)
         );
         factory.create(names::KIMI_K3, &[], Arc::new(tokenizer)).unwrap();
+    }
+
+    #[test]
+    fn factory_registers_muse_glimmer() {
+        let factory = UnifiedParserFactory::new();
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<|start|>", 1001)
+            .with_regular_token("<|message|>", 1002)
+            .with_regular_token("<|eom|>", 1003)
+            .with_regular_token("<|eot|>", 1004);
+
+        assert!(factory.contains(names::MUSE_GLIMMER));
+        assert_eq!(
+            factory.resolve_name_for_model("meta-models/Muse-Glimmer-30B"),
+            Some(names::MUSE_GLIMMER)
+        );
+        factory.create(names::MUSE_GLIMMER, &[], Arc::new(tokenizer)).unwrap();
+    }
+
+    #[test]
+    fn factory_forwards_engine_reasoning_parser_per_parser() {
+        let factory = UnifiedParserFactory::new();
+
+        assert!(!factory.forwards_engine_reasoning_parser(names::MUSE_GLIMMER));
+        assert!(factory.forwards_engine_reasoning_parser(names::KIMI_K3));
     }
 
     #[test]

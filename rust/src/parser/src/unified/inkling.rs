@@ -425,6 +425,7 @@ mod tests {
 
     use super::{CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE, InklingUnifiedParser, MESSAGE_MODEL};
     use crate::tool::Tool;
+    use crate::unified::test_utils::{UnifiedOutputTestExt, UnifiedParserTestExt};
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer};
@@ -486,63 +487,6 @@ mod tests {
 
         fn is_special_id(&self, token_id: u32) -> bool {
             (199999..=200057).contains(&token_id)
-        }
-    }
-
-    trait UnifiedParserTestExt {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput>;
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput>;
-    }
-
-    impl<T: UnifiedParser + ?Sized> UnifiedParserTestExt for T {
-        fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = UnifiedParserOutput::default();
-            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
-            Ok(output)
-        }
-
-        fn parse_complete(&mut self, text: &str) -> super::Result<UnifiedParserOutput> {
-            let mut output = self.parse_chunk(text)?;
-            output.append(self.finish()?);
-            Ok(output)
-        }
-    }
-
-    trait UnifiedParserOutputTestExt {
-        fn normal_text(&self) -> String;
-        fn reasoning_text(&self) -> String;
-        fn calls(&self) -> Vec<crate::tool::ToolCallDelta>;
-    }
-
-    impl UnifiedParserOutputTestExt for UnifiedParserOutput {
-        fn normal_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn reasoning_text(&self) -> String {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn calls(&self) -> Vec<crate::tool::ToolCallDelta> {
-            self.events
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .collect()
         }
     }
 

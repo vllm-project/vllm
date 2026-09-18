@@ -8,12 +8,16 @@ mod gemma4;
 mod hy;
 mod inkling;
 mod kimi_k3;
+mod muse_glimmer;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
+pub use muse_glimmer::MuseGlimmerUnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
@@ -223,6 +227,42 @@ mod tests {
     }
 }
 
+/// Tool choice handed to a [`ScopedStructuralTagBuilder`], mirrored from the
+/// chat request's effective tool choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedToolChoice {
+    /// The model may answer or call any of the given tools.
+    Auto,
+    /// At least one tool call is required.
+    Required,
+    /// Exactly the named tool must be called.
+    Function(String),
+}
+
+/// Builds a whole-generation xgrammar structural tag: the model's channel
+/// framing plus its tool channels, with an optional caller-provided JSON
+/// schema (from `response_format`) scoped to the answer channel.
+///
+/// Unlike [`StructuralTagBuilder`], which constrains tool channels only, this
+/// covers the entire generation from the first channel header, so a caller
+/// constraint can neither suppress the framing nor leak into a tool channel.
+pub trait ScopedStructuralTagBuilder: Send + Sync {
+    /// Build the structural tag. `tool_choice` is `None` when tools are absent
+    /// or disabled (`"none"`), in which case no tool channels are generated.
+    ///
+    /// Every error but [`Serialize`](xgrammar_structural_tag::Error::Serialize)
+    /// rejects request data the grammar cannot express (a tool name the channel
+    /// framing cannot carry, an unknown named tool) and is reported to the
+    /// caller as a request validation failure.
+    fn build_scoped(
+        &self,
+        tools: &[Tool],
+        tool_choice: Option<ScopedToolChoice>,
+        caller_schema: Option<&serde_json::Value>,
+        options: &xgrammar_structural_tag::builders::StructuralTagOptions,
+    ) -> xgrammar_structural_tag::Result<xgrammar_structural_tag::format::StructuralTag>;
+}
+
 /// Incremental parser that extracts reasoning and tool-call events from assistant output.
 pub trait UnifiedParser: Send {
     /// Construct a boxed parser instance for one request stream.
@@ -243,6 +283,25 @@ pub trait UnifiedParser: Send {
     /// Return the xgrammar structural-tag builder used for strict tool calling.
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
+    }
+
+    /// Return the whole-generation structural-tag builder, if the parser
+    /// provides one. Takes precedence over [`Self::structural_tag_builder`]
+    /// and additionally scopes a caller-provided response schema into the
+    /// answer channel.
+    fn scoped_structural_tag_builder(&self) -> Option<&dyn ScopedStructuralTagBuilder> {
+        None
+    }
+
+    /// Return whether this parser's name may be forwarded to the engine as
+    /// its reasoning parser. A parser whose whole-generation structural tag
+    /// must apply from token 0 returns `false`: an engine-side reasoner would
+    /// withhold the grammar until it reports a reasoning end.
+    fn forwards_engine_reasoning_parser() -> bool
+    where
+        Self: Sized,
+    {
+        true
     }
 
     /// Return the parser-provided ID for a tool call by index, if the model emitted one.

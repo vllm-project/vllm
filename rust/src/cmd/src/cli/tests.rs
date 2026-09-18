@@ -2203,3 +2203,36 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     let engine = args.to_managed_engine_config(1234);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }
+
+#[test]
+fn unified_only_parser_is_never_forwarded_as_engine_reasoning_parser() {
+    use super::effective_engine_reasoning_parser;
+
+    // Auto resolves `muse_glimmer` via the unified factory's model pattern,
+    // but a unified-only parser must not reach the engine: its
+    // whole-generation structural tags have to apply from token 0.
+    assert_eq!(
+        effective_engine_reasoning_parser(&ParserSelection::Auto, "meta-models/Muse-Glimmer-30B"),
+        None
+    );
+    assert_eq!(
+        effective_engine_reasoning_parser(
+            &ParserSelection::Explicit("muse_glimmer".to_string()),
+            "meta-models/Muse-Glimmer-30B",
+        ),
+        None
+    );
+    // Real engine-side reasoning parsers are still forwarded, by name or by
+    // model pattern.
+    assert_eq!(
+        effective_engine_reasoning_parser(
+            &ParserSelection::Explicit("deepseek_r1".to_string()),
+            "deepseek-ai/DeepSeek-R1",
+        ),
+        Some("deepseek_r1".to_string())
+    );
+    assert_eq!(
+        effective_engine_reasoning_parser(&ParserSelection::Auto, "deepseek-ai/DeepSeek-R1-0528"),
+        Some("deepseek_r1".to_string())
+    );
+}
