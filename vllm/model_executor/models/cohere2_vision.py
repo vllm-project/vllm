@@ -61,14 +61,13 @@ from .utils import (
 
 
 class Cohere2VisionImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - c: Number of channels
-        - h: Height of each image patch
-        - w: Width of each image patch
-        - bn: Batch size * number of images
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - c: Number of channels
+    - h: Height of each image patch
+    - w: Width of each image patch
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"]
@@ -134,6 +133,7 @@ class Cohere2VisionMultiModalProjector(nn.Module):
 
         Returns:
             Downsampled tensor with increased channel dimension
+
         """
         height = width = int(image_features.shape[1] ** 0.5)
         x = image_features.reshape(image_features.shape[0], width, height, -1)
@@ -175,8 +175,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         processor: Cohere2VisionProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> int:
-        """
-        Calculate the number of image patches for a given image.
+        """Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
         image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
@@ -223,7 +222,7 @@ class Cohere2VisionDummyInputsBuilder(
 class Cohere2VisionMultiModalProcessor(
     BaseMultiModalProcessor[Cohere2VisionProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -372,16 +371,18 @@ class Cohere2VisionForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _process_image_input(
-        self, image_input: Cohere2VisionImagePixelInputs, **kwargs
+        self, image_input: Cohere2VisionImagePixelInputs, **kwargs: object
     ) -> list[torch.Tensor]:
         """Process image pixels through vision tower and projector.
 
         Args:
             image_input: Validated image input containing pixel values and
                          patch counts
+            **kwargs: Unused; accepted for interface compatibility.
 
         Returns:
             List of flattened image embeddings, one per image
+
         """
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]

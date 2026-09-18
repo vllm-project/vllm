@@ -29,6 +29,8 @@ else:
 
 logger = init_logger(__name__)
 
+FP8_DTYPE = current_platform.fp8_dtype()
+
 
 @functools.cache
 def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
@@ -58,6 +60,7 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
@@ -69,6 +72,8 @@ def _get_aiter_top_k_kernel(
     compress_ratio: int,
     num_rows: int,
     max_valid_seq_len: int | None = None,
+    num_columns: int | None = None,
+    topk_tokens: int = 1024,
     on_gfx950: bool = _ON_GFX950,
 ) -> Callable[..., None] | None:
     if compress_ratio <= 1 or not on_gfx950:
@@ -76,6 +81,13 @@ def _get_aiter_top_k_kernel(
 
     if not is_prefill:
         assert max_valid_seq_len is not None
+        if (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns is not None
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        ):
+            return None
         # AITER v0.1.19 decode is one-block only. This measured gfx950
         # FP32/k=1024 compressed-row boundary is independent of the native
         # split-count boundary in sampler.cu.
@@ -250,8 +262,7 @@ def indexer_k_quant_and_cache_triton(
     # In real layout, we store the first portion as kv cache value
     # and second portion as kv cache scale
     kv_cache = kv_cache.view(num_blocks, -1)
-    fp8_dtype = current_platform.fp8_dtype()
-    kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
+    kv_cache_value = kv_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
     layout = "NORMAL" if block_size == 1 else "SHUFFLE"
@@ -269,7 +280,7 @@ def indexer_k_quant_and_cache_triton(
         layout,
         block_tile_size,
         head_tile_size,
-        IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
+        IS_FNUZ=torch.float8_e4m3fnuz == FP8_DTYPE,
         USE_UE8M0=scale_fmt == "ue8m0",
     )
 
@@ -455,8 +466,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     num_blocks = k_cache.shape[0]
     # we assume the kv cache already been split to 2 portion
     k_cache = k_cache.view(num_blocks, -1)
-    fp8_dtype = current_platform.fp8_dtype()
-    k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
+    k_cache_value = k_cache[:, : block_size * head_dim].view(FP8_DTYPE)
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
@@ -506,7 +516,6 @@ def fp8_paged_mqa_logits_torch(
 ):
     from vllm.utils.math_utils import cdiv
 
-    fp8_dtype = current_platform.fp8_dtype()
     batch_size, next_n, _, dim = q.size()
     if next_n == 1:
         block_size = kv_cache.shape[1]
@@ -530,7 +539,7 @@ def fp8_paged_mqa_logits_torch(
             cache = kv_cache_flat[pages]
             scale_offset = block_size * dim
             cache_value = (
-                cache[..., :scale_offset].view(dtype=fp8_dtype).to(torch.float32)
+                cache[..., :scale_offset].view(dtype=FP8_DTYPE).to(torch.float32)
             )
             cache_scale = (
                 cache[..., scale_offset:].view(dtype=torch.float32).contiguous()
@@ -548,7 +557,7 @@ def fp8_paged_mqa_logits_torch(
     kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
     scale = scale.contiguous().view(torch.float)
     q = q.float()
-    kv_cache = kv_cache.view(fp8_dtype).float() * scale
+    kv_cache = kv_cache.view(FP8_DTYPE).float() * scale
     num_block, block_size, _, dim = kv_cache.size()
     logits = torch.full(
         [batch_size * next_n, max_model_len],
@@ -644,6 +653,7 @@ def rocm_fp8_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -727,6 +737,7 @@ def fp8_mqa_logits_torch(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
@@ -795,8 +806,8 @@ def rocm_fp8_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
-    """
 
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     k_fp8, scale = kv
@@ -1009,7 +1020,6 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
     from vllm.utils.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -1025,7 +1035,7 @@ def rocm_aiter_sparse_attn_indexer(
         # Prefill k_fp8 and k_scale buffers, used by
         # rocm_aiter_sparse_attn_indexer's prefill path
         workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, head_dim), FP8_DTYPE),
             ((total_seq_lens, 4), torch.uint8),
         )
 
@@ -1105,7 +1115,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         workspace_manager = current_workspace_manager()
         k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, head_dim), FP8_DTYPE),
             ((total_seq_lens, 4), torch.uint8),
         )
         for chunk in prefill_metadata.chunks:
@@ -1261,6 +1271,8 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+            num_columns=logits.shape[1],
+            topk_tokens=topk_tokens,
         )
         if aiter_topk_kernel is not None:
             _launch_aiter_top_k_per_row_decode(

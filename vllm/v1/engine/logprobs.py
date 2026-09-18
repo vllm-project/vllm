@@ -81,7 +81,6 @@ class LogprobsProcessor:
           logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
 
         """
-
         assert self.num_logprobs is not None
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
@@ -134,7 +133,6 @@ class LogprobsProcessor:
                                    tensors.
 
         """
-
         # Prompt logprobs are enabled.
         assert self.num_prompt_logprobs is not None
         assert self.prompt_logprobs is not None
@@ -196,7 +194,7 @@ class LogprobsProcessor:
         self.prompt_token_id_logprobs = scores.numpy()
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
-        """Pop and return all request prompt logprobs
+        """Pop and return all request prompt logprobs.
 
         The logprobs processor aggregates prompt chunk logprobs
         over one or more prefill chunks. This method returns
@@ -208,6 +206,7 @@ class LogprobsProcessor:
         Returns:
           None if prompt logprobs are disabled for this request.
           List of all prompt logprobs, otherwise.
+
         """
         plp = self.prompt_logprobs
         if plp:
@@ -238,6 +237,7 @@ class LogprobsProcessor:
 
         Returns:
             List of sampled token IDs, oldest first, most recent last.
+
         """
         if not logprobs_source:
             return []
@@ -280,6 +280,7 @@ class LogprobsProcessor:
         Returns:
             The corrected decoded string, or empty string if the byte
             sequence is genuinely incomplete at this point.
+
         """
         assert self.tokenizer is not None
 
@@ -340,6 +341,7 @@ class LogprobsProcessor:
             context_token_ids: Preceding sampled token IDs providing
                 sequential context. If None, extracted from
                 self.logprobs.
+
         """
         if context_token_ids is None:
             context_token_ids = self._get_sampled_context_ids(self.logprobs)
