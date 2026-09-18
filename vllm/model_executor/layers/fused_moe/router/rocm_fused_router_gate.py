@@ -11,11 +11,113 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import gl, gluon, tl, triton
 
 # (hidden_size, num_experts): DeepSeek-V4.1-Flash.
 ROCM_FUSED_ROUTER_GATE_SUPPORTED_SHAPES = frozenset({(7168, 384)})
 _MAX_TOKENS = 1536
+
+
+@triton.jit
+def _router_gate_softplus_sqrt(logits):
+    exp_value = tl.exp(-tl.abs(logits))
+    rounded_sum = 1.0 + exp_value
+    # Recover exp_value when adding it to one rounds away a negative tail.
+    correction = exp_value - (rounded_sum - 1.0)
+    softplus_tail = tl.log(rounded_sum) + correction / rounded_sum
+    return tl.sqrt(tl.maximum(logits, 0.0) + softplus_tail)
+
+
+@gluon.jit
+def _router_gate_softplus_sqrt_gluon(logits):
+    exp_value = gl.exp(-gl.abs(logits))
+    rounded_sum = 1.0 + exp_value
+    correction = exp_value - (rounded_sum - 1.0)
+    softplus_tail = gl.log(rounded_sum) + correction / rounded_sum
+    return gl.sqrt(gl.maximum(logits, 0.0) + softplus_tail)
+
+
+@gluon.jit
+def _router_gate_reduce_topk_gluon(
+    partial_logits_ptr,
+    correction_bias_ptr,
+    topk_weights_ptr,
+    topk_ids_ptr,
+    routed_scaling_factor,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    SPLIT_K: gl.constexpr,
+    TOPK: gl.constexpr,
+    HAS_BIAS: gl.constexpr,
+    RENORMALIZE: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+    BLOCK_S: gl.constexpr,
+    BLOCK_TOPK: gl.constexpr,
+):
+    gl.static_assert(TOPK == 6 or TOPK == 8)
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 64], [1, 1], [1, 0])
+    row = gl.program_id(0)
+    experts = gl.arange(0, BLOCK_N, layout=gl.SliceLayout(0, layout))
+    splits = gl.arange(0, BLOCK_S, layout=gl.SliceLayout(1, layout))
+    partial = gl.load(
+        partial_logits_ptr + splits[:, None] * M * N + row * N + experts[None, :],
+        mask=(splits[:, None] < SPLIT_K) & (experts[None, :] < N),
+        other=0.0,
+    )
+    logits = gl.sum(partial, axis=0)
+    scores = _router_gate_softplus_sqrt_gluon(logits)
+    ranked = scores
+    if HAS_BIAS:
+        ranked += gl.load(correction_bias_ptr + experts, experts < N, 0.0)
+    ranked = gl.where(experts < N, ranked, -float("inf"))
+    ranked = gl.where(ranked == 0.0, 0.0, ranked)
+    bits = ranked.to(gl.uint32, bitcast=True)
+    ordered = gl.where(bits & 0x80000000 != 0, ~bits, bits ^ 0x80000000)
+    keys = (ordered.to(gl.uint64) << 32) | (BLOCK_N - experts).to(gl.uint64)
+
+    slots = gl.arange(0, BLOCK_TOPK, layout=gl.SliceLayout(0, layout))
+    selected_ids = gl.full((BLOCK_TOPK,), 0, gl.int32, layout=gl.SliceLayout(0, layout))
+    for slot in gl.static_range(TOPK):
+        selected_key = gl.max(keys, axis=0)
+        expert = BLOCK_N - (selected_key & 0xFFFFFFFF).to(gl.int32)
+        selected_ids = gl.where(slots == slot, expert, selected_ids)
+        keys = gl.where(experts == expert, 0, keys)
+
+    selected_weights = gl.gather(scores, selected_ids, axis=0)
+    selected_weights = gl.where(slots < TOPK, selected_weights, 0.0)
+    scale = routed_scaling_factor
+    if RENORMALIZE:
+        weight_sum = gl.sum(selected_weights, axis=0)
+        scale = scale / gl.where(weight_sum > 0.0, weight_sum, 1.0)
+    gl.store(
+        topk_weights_ptr + row * TOPK + slots,
+        selected_weights * scale,
+        mask=slots < TOPK,
+    )
+    gl.store(
+        topk_ids_ptr + row * TOPK + slots,
+        selected_ids,
+        mask=slots < TOPK,
+    )
+
+
+@triton.jit
+def _router_gate_gemv(
+    hidden_states_ptr,
+    router_weight_ptr,
+    logits_ptr,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    row = tl.program_id(0) % M
+    expert = tl.program_id(0) // M
+    offsets = tl.arange(0, BLOCK_K)
+    hidden = tl.load(hidden_states_ptr + row * K + offsets, offsets < K, 0.0)
+    weight = tl.load(router_weight_ptr + expert * K + offsets, offsets < K, 0.0)
+    logits = tl.sum(hidden.to(tl.float32) * weight.to(tl.float32), axis=0)
+    tl.store(logits_ptr + row * N + expert, logits)
 
 
 @triton.jit
@@ -30,10 +132,28 @@ def _router_gate_gemm(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     CHUNK_K: tl.constexpr,
+    XCD_SWIZZLE: tl.constexpr,
 ):
-    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    experts = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
-    split = tl.program_id(2)
+    if XCD_SWIZZLE:
+        num_m = tl.cdiv(M, BLOCK_M)
+        num_n = tl.cdiv(N, BLOCK_N)
+        num_blocks = num_m * num_n * tl.cdiv(K, CHUNK_K)
+        pid = tl.program_id(0)
+        # Assign adjacent expert tiles to the same XCD's L2 cache.
+        pid = (pid % 8) * tl.cdiv(num_blocks, 8) + pid // 8
+        if pid >= num_blocks:
+            return
+        split = pid // (num_m * num_n)
+        tile = pid % (num_m * num_n)
+        row_block, expert_block = tile // num_n, tile % num_n
+    else:
+        row_block, expert_block, split = (
+            tl.program_id(0),
+            tl.program_id(1),
+            tl.program_id(2),
+        )
+    rows = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    experts = expert_block * BLOCK_N + tl.arange(0, BLOCK_N)
     offsets_k = split * CHUNK_K + tl.arange(0, BLOCK_K)
     logits = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in range(tl.cdiv(CHUNK_K, BLOCK_K)):
@@ -82,9 +202,7 @@ def _router_gate_reduce_topk(
         other=0.0,
     )
     logits = tl.sum(partial, axis=0)
-    scores = tl.sqrt(
-        tl.maximum(logits, 0.0) + tl.extra.libdevice.log1p(tl.exp(-tl.abs(logits)))
-    )
+    scores = _router_gate_softplus_sqrt(logits)
     ranked = scores
     if HAS_BIAS:
         ranked += tl.load(correction_bias_ptr + experts, mask=experts < N, other=0.0)
@@ -202,43 +320,67 @@ def rocm_fused_router_gate(
         return topk_weights, topk_ids
 
     block_n, block_k = 64, 128
+    num_warps, num_stages, matrix_instr_nonkdim = 4, 2, 16
+    target_splits = 14 if num_tokens <= 64 else 7
     if num_tokens <= 16:
-        block_m, target_splits = 16, 14
-    elif num_tokens <= 64:
-        block_m, target_splits = 32, 14
+        block_m = 16
     elif num_tokens <= 128:
-        block_m, target_splits = 32, 7
-    elif num_tokens <= 256:
-        block_m, target_splits = 64, 7
-    elif num_tokens <= 512:
-        block_m, target_splits = 32, 4
+        block_m = 32
+    elif num_tokens <= 256 or 512 < num_tokens <= 768:
+        block_m = 64
     else:
-        block_m, block_k, target_splits = 64, 64, 7
-        if num_tokens > 768:
-            block_n = 128
+        block_m = 128
+        num_warps, num_stages, matrix_instr_nonkdim = 8, 3, 32
+    xcd_swizzle = num_tokens > 768
+    if xcd_swizzle:
+        block_n, block_k = 128, 64
     chunk_k = triton.cdiv(hidden_states.shape[1], target_splits * block_k) * block_k
     split_k = triton.cdiv(hidden_states.shape[1], chunk_k)
+    if num_tokens <= 2:
+        split_k = 1
     partial_logits = hidden_states.new_empty(
         (split_k, num_tokens, num_experts), dtype=torch.float32
     )
-    _router_gate_gemm[
-        (triton.cdiv(num_tokens, block_m), triton.cdiv(num_experts, block_n), split_k)
-    ](
-        hidden_states,
-        router_weight,
-        partial_logits,
-        M=num_tokens,
-        K=hidden_states.shape[1],
-        N=num_experts,
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        BLOCK_K=block_k,
-        CHUNK_K=chunk_k,
-        num_warps=4,
-        num_stages=2,
-        matrix_instr_nonkdim=16,
+    if num_tokens <= 2:
+        _router_gate_gemv[(num_tokens * num_experts,)](
+            hidden_states,
+            router_weight,
+            partial_logits,
+            M=num_tokens,
+            K=hidden_states.shape[1],
+            N=num_experts,
+            BLOCK_K=triton.next_power_of_2(hidden_states.shape[1]),
+            num_warps=4,
+        )
+    else:
+        num_m = triton.cdiv(num_tokens, block_m)
+        num_n = triton.cdiv(num_experts, block_n)
+        grid = (
+            (triton.cdiv(num_m * num_n * split_k, 8) * 8,)
+            if xcd_swizzle
+            else (num_m, num_n, split_k)
+        )
+        _router_gate_gemm[grid](
+            hidden_states,
+            router_weight,
+            partial_logits,
+            M=num_tokens,
+            K=hidden_states.shape[1],
+            N=num_experts,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            CHUNK_K=chunk_k,
+            XCD_SWIZZLE=xcd_swizzle,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            matrix_instr_nonkdim=matrix_instr_nonkdim,
+        )
+    use_gluon = num_tokens >= 128 and topk in (6, 8)
+    select_kernel = (
+        _router_gate_reduce_topk_gluon if use_gluon else _router_gate_reduce_topk
     )
-    _router_gate_reduce_topk[(num_tokens,)](
+    select_kernel[(num_tokens,)](
         partial_logits,
         correction_bias,
         topk_weights,
@@ -253,6 +395,6 @@ def rocm_fused_router_gate(
         BLOCK_N=triton.next_power_of_2(num_experts),
         BLOCK_S=triton.next_power_of_2(split_k),
         BLOCK_TOPK=triton.next_power_of_2(topk),
-        num_warps=4,
+        num_warps=1 if use_gluon else 4,
     )
     return topk_weights, topk_ids
