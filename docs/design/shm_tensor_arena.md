@@ -2,9 +2,16 @@
 
 This document describes an optimization to vLLM's engine→worker IPC path for
 multimodal serving under tensor parallelism, implemented in
-`vllm/distributed/device_communicators/shm_broadcast.py`. It **builds on the
-existing out-of-band tensor channel** (`_reduce_tensor` / `_rebuild_tensor`),
-which already keeps CPU-tensor bytes out of the pickle stream.
+`vllm/distributed/device_communicators/shm_tensor_arena.py` and wired into
+`shm_broadcast.py`'s `MessageQueue`. It **builds on the existing out-of-band
+tensor channel** (`_reduce_tensor` / `_rebuild_tensor`, still in
+`shm_broadcast.py`), which already keeps CPU-tensor bytes out of the pickle
+stream.
+
+> **Status: experimental, opt-in.** This lands as an increment over the
+> existing out-of-band channel, not a replacement for it. vLLM also has an
+> existing multimodal-tensor shm caching mechanism; reconciling the two is
+> intentionally left as follow-up work rather than blocking this PR.
 
 ## TL;DR
 
@@ -85,7 +92,9 @@ byte-copies, not the transport choice.
 
 ## 2. The arena
 
-All changes are contained in `shm_broadcast.py`.
+The arena itself (`ShmTensorArena`, `_ArenaPickler`, `_rebuild_arena_tensor`)
+lives in `shm_tensor_arena.py`; `shm_broadcast.py`'s `MessageQueue` creates
+and wires it in but otherwise treats it as an internal implementation detail.
 
 ### 2.1 `ShmTensorArena`
 
@@ -142,30 +151,51 @@ structurally impossible.
 The stub unpickles through a module-level rebuild function:
 
 ```python
-def _rebuild_arena_tensor(slot_idx, nbytes, dtype_str, shape):
-    arena = _TENSOR_ARENA                         # this process's attached arena
+def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
+    arena = _TENSOR_ARENAS[arena_name]             # this process's registry of attached arenas
     return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
     # get_tensor: torch.frombuffer over the mapped slot — zero bytes copied
 ```
+
+The registry is keyed by arena shm name (`_TENSOR_ARENAS: dict[str,
+ShmTensorArena]`) rather than a single per-process slot, since nothing
+guarantees a process only ever attaches to one arena-bearing queue — only
+that this happens to be true today. `MessageQueue.shutdown()` drops a
+queue's entry from the registry so the arena (and its pinned mapping) can be
+garbage-collected instead of being held for the rest of the process's life.
 
 The rebuilt tensor *is* the shared memory — no transport copy and no deserialize
 on any rank.
 
 **Slot lifecycle.** The rebuilt tensor is the *source* of an async H2D
 (`x.to(device, non_blocking=True)`) while the worker executes that step, so the
-reader must not release the slot at unpickle time. Releases are deferred to the
-reader's **next `dequeue`** and gated on H2D completion. On the pinned fast path
-(§2.4) the H2D is a true async DMA that can outlive `execute_model` — under
-`--async-scheduling` no device sync covers it — so a step-count deferral alone is
-*not* sufficient: the writer could reclaim the slot while the DMA is still reading
-it. At `flush_releases` the reader records a CUDA event on the compute stream
-(ordered after the previous step's H2D) and only sets its done flag for a slot
-once that event has completed (non-blocking `event.query()`; a slot not yet done
-simply waits one more dequeue). When the mapping is *not* pinned,
-`cudaMemcpyAsync` from pageable host memory stages the copy synchronously before
-returning, so the slot is released immediately. The writer requires all readers'
-done flags before reusing a slot, so a slot is never overwritten while any
-reader's DMA is in flight.
+reader must not release the slot at unpickle time. Release is tied to the
+**garbage collection of the returned tensor object** (`weakref.finalize` in
+`get_tensor`), not to a fixed "next dequeue" schedule — this matters for
+callers that retain the tensor across many `dequeue` calls (e.g.
+`prompt_embeds`, which the worker re-slices on the CPU every step of a
+chunked prefill: a fixed next-dequeue release would let the writer reclaim
+the slot, and silently corrupt the tensor, while the worker is still reading
+it several steps later). Once queued for release, the pinned fast path
+(§2.4) adds a second gate: the H2D is a true async DMA that can outlive
+`execute_model` — under `--async-scheduling` no device sync covers it — so
+"the tensor was collected" alone is not sufficient. At `flush_releases` the
+reader records a CUDA event on the compute stream (ordered after the
+previous step's H2D) and only sets its done flag for a slot once that event
+has completed (non-blocking `event.query()`; a slot not yet done simply
+waits one more dequeue). When the mapping is *not* pinned, `cudaMemcpyAsync`
+from pageable host memory stages the copy synchronously before returning, so
+the slot is released as soon as it's queued. The writer requires all
+readers' done flags before reusing a slot, so a slot is never overwritten
+while any reader's DMA is in flight.
+
+> **Known residual limitation.** `weakref.finalize` tracks the garbage
+> collection of the *specific* tensor object `get_tensor` returns. A caller
+> that takes a view/slice of that tensor and drops the original object —
+> instead of keeping the base tensor alive, as vLLM's current callers do —
+> would not delay the release, since PyTorch views keep the underlying
+> storage alive via the C++ refcount independent of this (Python-object-
+> level) finalizer.
 
 > Assumes the multimodal H2D is issued on the worker's current/default compute
 > stream (true today: mm inputs are copied eagerly, outside the decode CUDA
@@ -238,16 +268,26 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
   ≥2 node-local readers *and* carries tensors ≥ `MIN_MB`; at TP=1, or for small
   payloads, it adds nothing and everything takes the out-of-band path.
 - **Shared-memory reservation.** The arena reserves `slots × slot_bytes` of
-  `/dev/shm` (default 2 GB, lazily paged). Like `ShmRingBuffer`, it should guard
-  creation with a free-space check (`check_shm_free_space`) and surface a clear
-  error rather than failing late.
+  `/dev/shm` (default 2 GB, lazily paged). Like `ShmRingBuffer`, creation is
+  guarded by a free-space check (`check_shm_free_space`), so an undersized
+  `/dev/shm` fails fast with a clear error instead of a `SIGBUS` the first
+  time a tensor is copied into pages beyond tmpfs capacity.
 - **Relationship to `_reduce_tensor`.** This is strictly additive: the arena is
   an opt-in fast path for the large-multimodal-tensor case; declining it (or
   disabling via env) reverts to the merged out-of-band behavior.
-- **Slot release granularity**: releases are gated on a per-slot CUDA event
-  recorded after the consuming H2D (§2.3), which closes the async-DMA reuse
-  window on the pinned path. Bursts deeper than the slot count safely fall back
-  to the out-of-band path when the arena is exhausted.
+- **Relationship to existing mm tensor shm caching.** vLLM already has a
+  separate shared-memory caching path for multimodal tensors; this arena is
+  not yet unified with it (see the experimental note in §1). Reconciling the
+  two is follow-up work.
+- **Slot release granularity**: releases are tied to the returned tensor's
+  garbage collection and, on the pinned path, further gated on a per-slot
+  CUDA event recorded after the consuming H2D (§2.3), which closes both the
+  multi-step-retention and the async-DMA reuse windows. Bursts deeper than
+  the slot count safely fall back to the out-of-band path when the arena is
+  exhausted. The one case this does *not* cover is a caller that drops the
+  base tensor while still holding a view into it (see the residual-
+  limitation callout in §2.3) — that remains a real, if currently
+  theoretical, hazard.
 - **Fallback observability**: arena exhaustion / oversize fallbacks are
   rate-limited log lines today; a counter metric would be better.
 - **Scope**: the arena activates only when every queue reader is node-local.
