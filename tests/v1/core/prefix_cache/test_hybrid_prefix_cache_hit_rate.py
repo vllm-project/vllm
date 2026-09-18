@@ -97,13 +97,13 @@ def server(request):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "server, max_uncached_blocks",
+    "server, re_prefill_blocks",
     # MTP re-prefills an extra block.
-    [pytest.param(False, 1, id="base"), pytest.param(True, 2, id="mtp")],
+    [pytest.param(False, 0, id="base"), pytest.param(True, 1, id="mtp")],
     indirect=["server"],
 )
 async def test_prefix_cache_hit_rate(
-    server: RemoteOpenAIServer, max_uncached_blocks: int
+    server: RemoteOpenAIServer, re_prefill_blocks: int
 ) -> None:
     # Isolate sessions so another conversation cannot hide a cache miss.
     salts = [uuid4().hex for _ in range(NUM_CONVERSATIONS)]
@@ -144,10 +144,15 @@ async def test_prefix_cache_hit_rate(
                 if not replay and turn == 0:
                     assert cached == 0, context
                 else:
-                    uncached = prompt - cached
-                    assert uncached <= max_uncached_blocks * cache_block_size, (
-                        f"{context}, {uncached=}, {cache_block_size=}, "
-                        f"{max_uncached_blocks=}"
+                    reusable_prompt = (
+                        prompt if replay else prompt_lengths[session][turn - 1]
+                    )
+                    expected_cached = (
+                        reusable_prompt // cache_block_size - re_prefill_blocks
+                    ) * cache_block_size
+                    assert cached >= expected_cached, (
+                        f"{context}, {reusable_prompt=}, {cache_block_size=}, "
+                        f"{re_prefill_blocks=}, {expected_cached=}"
                     )
                 if replay:
                     assert prompt == prompt_lengths[session][turn], context
