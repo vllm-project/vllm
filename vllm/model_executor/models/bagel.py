@@ -58,12 +58,11 @@ logger = init_logger(__name__)
 
 
 class BagelImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -175,12 +174,12 @@ class PositionEmbedding(nn.Module):
         return emb
 
     def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             position_ids: Flattened position IDs, shape (N,) where each ID
                          corresponds to a position in the flattened grid
         Returns:
             Position embeddings of shape (N, hidden_size)
+
         """
         # Ensure position_ids are on the same device as pos_embed
         position_ids = position_ids.to(self.pos_embed.device)
@@ -273,15 +272,6 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
 class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
     """Multimodal processor for BAGEL model."""
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -331,21 +321,15 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
 class BagelForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):
-    """
-    BAGEL: A unified multimodal model for image understanding and generation.
+    """BAGEL: A unified multimodal model for image understanding and generation.
 
     For vLLM, we focus on the image understanding (vision-to-text) capabilities.
     The image generation part is not supported in vLLM.
     """
 
-    # Weight mapping from HF to vLLM
+    # pos_embed is handled by the PositionEmbedding module
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "language_model.": "language_model.",
-            "vit_model.": "vit_model.",
-            "connector.": "connector.",
-            "vit_pos_embed.": "vit_pos_embed.",
-        }
+        orig_to_new_prefix={"vit_pos_embed.pos_embed": None}
     )
 
     @classmethod
@@ -521,6 +505,9 @@ class BagelForConditionalGeneration(
             positions: Flattened (concatenated) position ids corresponding to a batch.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -580,6 +567,5 @@ class BagelForConditionalGeneration(
 
             filtered_weights.append((name, tensor))
 
-        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
-        loader = AutoWeightsLoader(self, skip_prefixes=["vit_pos_embed.pos_embed"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)

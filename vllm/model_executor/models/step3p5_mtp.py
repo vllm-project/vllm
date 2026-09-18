@@ -305,9 +305,8 @@ class Step3p5MTP(nn.Module):
             )
         return loaded_params
 
-    def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+    def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
@@ -324,6 +323,7 @@ class Step3p5MTP(nn.Module):
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
+            assert spec_layer is not None
             name = name.replace(
                 f"model.layers.{spec_layer}.", f"model.layers.{spec_layer}.mtp_block."
             )

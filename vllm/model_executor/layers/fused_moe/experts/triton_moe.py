@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     is_deep_gemm_e8m0_used,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
@@ -129,10 +130,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # INT8 requires at least 7.5 (Turing) on CUDA. ROCm CDNA GPUs
         # (e.g. MI2xx/MI3xx/gfx950) provide native INT8 matrix-core support and
         # the Triton int8_w8a8 fused MoE kernel handles them.
+        # XPU reaches the same Triton kernel through the same launcher, and both
+        # int8 activation-quant paths work there: per-token uses the Triton
+        # `per_token_quant_int8`, per-tensor resolves to the XPU branch of
+        # `scaled_int8_quant`, which is plain elementwise arithmetic.
         device_supports_int8 = (
-            current_platform.is_cuda()
-            and current_platform.has_device_capability((7, 5))
-        ) or current_platform.is_rocm()
+            (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability((7, 5))
+            )
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
@@ -153,6 +162,19 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 (kFp8StaticTensorSym, kFp8StaticTensorSym),
                 (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             ]
+            # Block-quantized FP8 with arbitrary block shape: the Triton
+            # kernels take the block shape as a runtime argument.
+            if (
+                weight_key is not None
+                and activation_key == kFp8Dynamic128Sym
+                and weight_key.dtype == FP8_DTYPE
+                and weight_key.symmetric
+                and weight_key.scale.static
+                and weight_key.scale.dtype == torch.float32
+                and weight_key.scale.group_shape.row > 1
+                and weight_key.scale.group_shape.col > 1
+            ):
+                return True
         return (weight_key, activation_key) in supported
 
     @staticmethod
@@ -582,9 +604,9 @@ class TritonWNA16Experts(TritonExperts):
     ) -> bool:
         SUPPORTED_W = [
             kInt4Static,
+            kInt4StaticAsym,
             kInt8Static,
             kInt4Static32,
-            kInt4StaticAsym,
             kInt4Static32Asym,
             # other group sizes?
         ]

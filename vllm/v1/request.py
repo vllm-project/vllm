@@ -20,7 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -211,6 +211,11 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Per-request speculative-decoding acceptance accumulator. Populated by
+        # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
+        # add_request, then observed each verify step); stays None otherwise.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
@@ -343,8 +348,7 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
+        """Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:

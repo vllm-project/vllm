@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -46,10 +46,6 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -64,6 +60,9 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear import _KernelT
 
 logger = init_logger(__name__)
 
@@ -148,6 +147,28 @@ ROCM_ENGINE_KWARGS: dict = (
 _TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
     "tilelang", "3rdparty", "tvm", "python"
 )
+_SENSITIVE_CLI_ARG_NARGS = {"--api-key": "+", "--hf-token": "?"}
+
+
+def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
+    redacted_args = list(args)
+    index = 0
+    while index < len(args):
+        name, separator, _ = args[index].partition("=")
+        nargs = _SENSITIVE_CLI_ARG_NARGS.get(name.replace("_", "-"))
+        if nargs is None:
+            index += 1
+            continue
+        if separator:
+            redacted_args[index] = f"{name}=***"
+        index += 1
+        if not separator or nargs == "+":
+            while index < len(args) and not args[index].startswith("-"):
+                redacted_args[index] = "***"
+                index += 1
+                if nargs == "?":
+                    break
+    return redacted_args
 
 
 def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
@@ -224,7 +245,7 @@ class RemoteVLLMServer:
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
-        """Subclasses override this method to customize server process launch"""
+        """Subclasses override this method to customize server process launch."""
         raise NotImplementedError
 
     def _pre_download_model(self, model: str, args) -> None:
@@ -682,7 +703,7 @@ class RemoteVLLMServer:
         )
 
     def _poll(self) -> int | None:
-        """Subclasses override this method to customize process polling"""
+        """Subclasses override this method to customize process polling."""
         return self.proc.poll()
 
     def _wait_for_server(self, *, url: str, timeout: float):
@@ -785,8 +806,8 @@ class RemoteOpenAIServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(f"Launching RemoteOpenAIServer with: {' '.join(redacted_serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -813,7 +834,10 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
-        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(
+            f"Launching RemoteLaunchRenderServer with: {' '.join(redacted_serve_cmd)}"
+        )
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -842,7 +866,7 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
-    """Launch test server with custom child process"""
+    """Launch test server with custom child process."""
 
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
@@ -1189,8 +1213,7 @@ def compare_two_settings(
     include_seeded_sampling: bool = True,
     force_v1_runner: bool = False,
 ) -> None:
-    """
-    Launch API server with two different sets of arguments/environments
+    """Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
 
     Args:
@@ -1204,8 +1227,8 @@ def compare_two_settings(
         force_v1_runner: Whether to pin all compared settings to the v1 model
             runner to avoid mixing model runner differences into correctness
             tests.
-    """
 
+    """
     compare_all_settings(
         model,
         [arg1, arg2],
@@ -1227,9 +1250,9 @@ def compare_all_settings(
     include_seeded_sampling: bool = True,
     force_v1_runner: bool = False,
 ) -> None:
-    """
-    Launch API server with several different sets of arguments/environments
+    """Launch API server with several different sets of arguments/environments
     and compare the results of the API calls with the first set of arguments.
+
     Args:
         model: The model to test.
         all_args: A list of argument lists to pass to the API server.
@@ -1239,8 +1262,8 @@ def compare_all_settings(
         force_v1_runner: Whether to pin all compared settings to the v1 model
             runner to avoid mixing model runner differences into correctness
             tests.
-    """
 
+    """
     if force_v1_runner:
         all_envs = [
             {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
@@ -1370,6 +1393,7 @@ def ensure_current_vllm_config():
         with ensure_current_vllm_config():
             init_distributed_environment(...)
             ensure_model_parallel_initialized(...)
+
     """
     from vllm.config import (
         VllmConfig,
@@ -1392,6 +1416,8 @@ def init_test_distributed_environment(
     rank: int,
     distributed_init_port: str,
     local_rank: int = -1,
+    data_parallel_size: int = 1,
+    data_parallel_master_port: int | None = None,
 ) -> None:
     # Note: This function is often called from Ray worker processes, so we
     # can't rely on pytest fixtures to set the config. We check if the config
@@ -1403,6 +1429,29 @@ def init_test_distributed_environment(
     )
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if data_parallel_size > 1:
+        # For DP we need to set a common DP master port
+        from vllm.config.parallel import ParallelConfig
+
+        assert data_parallel_master_port is not None, (
+            "data_parallel_master_port is required when data_parallel_size > 1"
+        )
+        tp_pp_world = tp_size * pp_size
+        parallel_config = ParallelConfig(
+            data_parallel_size=data_parallel_size,
+            data_parallel_rank=rank // tp_pp_world,
+            _data_parallel_master_port_list=[int(data_parallel_master_port)],
+        )
+        with set_current_vllm_config(VllmConfig(parallel_config=parallel_config)):
+            init_distributed_environment(
+                world_size=tp_pp_world,
+                rank=rank % tp_pp_world,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank if local_rank >= 0 else rank,
+            )
+            ensure_model_parallel_initialized(tp_size, pp_size)
+        return
 
     if get_current_vllm_config_or_none() is not None:
         # Config already set, use it directly
@@ -1430,6 +1479,7 @@ def multi_process_parallel(
     tp_size: int,
     pp_size: int,
     test_target: Any,
+    data_parallel_size: int = 1,
 ) -> None:
     import ray
 
@@ -1450,18 +1500,34 @@ def multi_process_parallel(
     )
 
     distributed_init_port = get_open_port()
+    # Separate port for the DP master group; only used when data_parallel_size > 1.
+    data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
+    world_size = data_parallel_size * tp_size * pp_size
     try:
         refs = []
-        for rank in range(tp_size * pp_size):
-            refs.append(
-                test_target.remote(
-                    monkeypatch,
-                    tp_size,
-                    pp_size,
-                    rank,
-                    distributed_init_port,
-                ),
-            )
+        for rank in range(world_size):
+            if data_parallel_size > 1:
+                refs.append(
+                    test_target.remote(
+                        monkeypatch,
+                        tp_size,
+                        pp_size,
+                        rank,
+                        distributed_init_port,
+                        data_parallel_size,
+                        data_parallel_master_port,
+                    ),
+                )
+            else:
+                refs.append(
+                    test_target.remote(
+                        monkeypatch,
+                        tp_size,
+                        pp_size,
+                        rank,
+                        distributed_init_port,
+                    ),
+                )
         ray.get(refs)
     finally:
         ray.shutdown()
@@ -1509,8 +1575,7 @@ def assert_rocm_custom_allreduce_backend_state_on_worker(
 
 @contextmanager
 def error_on_warning(category: type[Warning] = Warning):
-    """
-    Within the scope of this context manager, tests will fail if any warning
+    """Within the scope of this context manager, tests will fail if any warning
     of the given category is emitted.
     """
     with warnings.catch_warnings():
@@ -1963,6 +2028,7 @@ def create_new_process_for_each_test(
 
     Returns:
         A decorator to run test functions in separate processes.
+
     """
     if method is None:
         method = "spawn" if requires_spawn_multiprocessing() else "fork"
@@ -1976,8 +2042,7 @@ def create_new_process_for_each_test(
 
 
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
-    """
-    Get a pytest mark, which skips the test if the GPU doesn't meet
+    """Get a pytest mark, which skips the test if the GPU doesn't meet
     a minimum memory requirement in GB.
 
     This can be leveraged via `@large_gpu_test` to skip tests in environments
@@ -2012,8 +2077,7 @@ requires_fp8 = pytest.mark.skipif(
 
 
 def large_gpu_test(*, min_gb: int):
-    """
-    Decorate a test to be skipped if no GPU is available or it does not have
+    """Decorate a test to be skipped if no GPU is available or it does not have
     sufficient memory.
 
     Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
@@ -2038,9 +2102,7 @@ def multi_gpu_marks(*, num_gpus: int):
 
 
 def multi_gpu_test(*, num_gpus: int):
-    """
-    Decorate a test to be run only when multiple GPUs are available.
-    """
+    """Decorate a test to be run only when multiple GPUs are available."""
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
@@ -2054,13 +2116,13 @@ def multi_gpu_test(*, num_gpus: int):
 
 
 def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
-    """
-    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+    """Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
 
     Examples:
         @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+
     """
     gpu_count = current_platform.device_count()
     marks = []
@@ -2128,8 +2190,8 @@ async def completions_with_server_args(
 
     Returns:
       OpenAI Completion instance
-    """
 
+    """
     if isinstance(max_tokens, int):
         max_tokens = [max_tokens] * len(prompts)
 
@@ -2187,9 +2249,7 @@ def get_client_text_logprob_generations(
 
 
 def has_module_attribute(module_name, attribute_name):
-    """
-    Helper function to check if a module has a specific attribute.
-    """
+    """Helper function to check if a module has a specific attribute."""
     try:
         module = importlib.import_module(module_name)
         return hasattr(module, attribute_name)
@@ -2261,14 +2321,15 @@ def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
 
 
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
-    """
-    Generate prompts which a bunch of assignments,
+    """Generate prompts which a bunch of assignments,
     then asking for the value of one of them.
     The prompt is just under 10k tokens; sliding window is 4k
     so the answer is outside sliding window, but should still be correct.
+
     Args:
         batch_size: number of prompts to generate
         ln_range: an argument to control the length of the prompt
+
     """
     prompts: list[str] = []
     answer: list[int] = []
@@ -2308,8 +2369,7 @@ def check_answers(
 
 
 def flat_product(*iterables: Iterable[Any]):
-    """
-    Flatten lists of tuples of the cartesian product.
+    """Flatten lists of tuples of the cartesian product.
     Useful when we want to avoid nested tuples to allow
     test params to be unpacked directly from the decorator.
 
@@ -2321,6 +2381,7 @@ def flat_product(*iterables: Iterable[Any]):
       (3, 4, "a"),
       (3, 4, "b"),
     ]
+
     """
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
@@ -2328,8 +2389,7 @@ def flat_product(*iterables: Iterable[Any]):
 
 
 class TestFP8Layer(torch.nn.Module):
-    """
-    Test helper for FP8 linear operations. Creates random weights and scales
+    """Test helper for FP8 linear operations. Creates random weights and scales
     based on quantization configuration.
 
     Args:
@@ -2338,6 +2398,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key: Weight quantization configuration.
         out_dtype: Output dtype. Defaults to current default dtype.
         force_kernel: Optional kernel to force use of specific implementation.
+
     """
 
     def __init__(
@@ -2349,9 +2410,11 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[_KernelT] | None = None,
+        force_kernel: "type[_KernelT] | None" = None,
     ):
         super().__init__()
+        from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+
         self.input_size_per_partition = weight_shape[1]
         self.output_size_per_partition = weight_shape[0]
         self.logical_widths = [self.output_size_per_partition]

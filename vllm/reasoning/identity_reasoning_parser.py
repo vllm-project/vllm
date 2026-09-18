@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
@@ -15,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class IdentityReasoningParser(ReasoningParser):
-    """
-    Identity reasoning parser.
+    """Identity reasoning parser.
 
     This parser does not attempt to parse or strip out reasoning tokens.
     It treats the entire model output as content and ignores reasoning.
