@@ -1061,19 +1061,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @contextmanager
     def preserve_serving_state(self) -> Iterator[None]:
         """Keep the elastic EP warmup out of the request pool and the KV cache."""
-        assert not self.req_states.req_id_to_index, (
-            "MRV2 warmup requires an empty request pool, found "
-            f"{len(self.req_states.req_id_to_index)} live requests"
-        )
+        # After the commit drain only parked streaming sessions still hold a
+        # slot, and those are re-added from NewRequestData on their next chunk.
+        self._remove_all_requests()
         self.block_tables.redirect_writes_to_null_block = True
         try:
             yield
         finally:
-            for req_id in list(self.req_states.req_id_to_index):
-                self._remove_request(req_id)
+            self._remove_all_requests()
             self.block_tables.redirect_writes_to_null_block = False
             if self.kv_block_zeroer is not None:
                 self.kv_block_zeroer.zero_block_ids([0])
+
+    def _remove_all_requests(self) -> None:
+        for req_id in list(self.req_states.req_id_to_index):
+            self._remove_request(req_id)
 
     def warm_up_workspace(self) -> None:
         self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
