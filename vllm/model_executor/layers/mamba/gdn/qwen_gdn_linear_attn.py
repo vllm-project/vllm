@@ -374,6 +374,18 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    @property
+    def mamba_type(self):
+        from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+        return MambaAttentionBackendEnum.QWEN_GDN_ATTN
+
+    def get_kv_cache_spec(self, vllm_config):
+        spec = super().get_kv_cache_spec(vllm_config)
+        if spec is not None and envs.VLLM_BATCH_INVARIANT:
+            import dataclasses
+            spec = dataclasses.replace(spec, non_causal=True)
+        return spec
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -938,8 +950,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             "VLLM_BATCH_INVARIANT is not supported with "
                             "speculative decoding on GDN_ATTN."
                         )
-                    if _meta.non_spec_query_start_loc is not None:
-                        _bi_cu = _meta.non_spec_query_start_loc.tolist()
+                    if _meta.non_spec_query_start_loc_cpu is not None:
+                        _bi_cu = _meta.non_spec_query_start_loc_cpu
         if _bi_cu is not None:
             mixed_qkvz = torch.cat(
                 [self.in_proj_qkvz(hidden_states[_bi_cu[i] : _bi_cu[i + 1]])[0]
@@ -1589,7 +1601,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             if envs.VLLM_BATCH_INVARIANT:
                 assert non_spec_state_indices_tensor is not None
-                device_sd = query_decode.device
                 sd_outputs: list[torch.Tensor] = []
                 # Each decode sequence has 1 token; index _i == token position _i.
                 # Use tensor-index (no .item()) for CUDA-graph-capture compatibility.
