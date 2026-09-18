@@ -47,3 +47,42 @@ batch = await client.completions.create(
 
 !!! note
     `vllm_xargs` is assigned to `SamplingParams.extra_args` under the hood, so code which uses `SamplingParams.extra_args` is compatible with both offline and online scenarios.
+
+## Built-in no-repeat n-gram argument
+
+The GPU model runner recognizes `no_repeat_ngram_size` without requiring a
+custom logits processor. A positive integer prevents the generated output from
+repeating an n-gram of that size; an omitted value disables the feature. Prompt
+tokens are not included in the n-gram history. `window_size` limits how many
+recent output tokens are searched, and `whitelist_token_ids` exempts tokens
+which must remain available, such as OCR grounding markers. The `ngram_size`
+alias is accepted for compatibility with existing OCR model integrations. The
+legacy alias preserves the existing OCR processor's `ngram_size=1` no-op;
+canonical `no_repeat_ngram_size=1` applies the standard unigram constraint.
+
+``` python
+SamplingParams(
+    extra_args={
+        "no_repeat_ngram_size": 100,
+        "window_size": 100,
+        "whitelist_token_ids": [128821, 128822],
+    }
+)
+```
+
+The equivalent online request uses:
+
+``` json
+{
+    "vllm_xargs": {
+        "no_repeat_ngram_size": 100,
+        "window_size": 100,
+        "whitelist_token_ids": [128821, 128822]
+    }
+}
+```
+
+This native path applies the constraint to the whole persistent batch on the
+GPU. It avoids the per-request Python processing and model-runner fallback that
+would result from loading a custom logits processor. Speculative decoding is
+not currently supported with this argument.

@@ -60,6 +60,21 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
         pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
         pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),
+        pytest.param(
+            SamplingParams(extra_args={"no_repeat_ngram_size": 3}),
+            True,
+            id="no-repeat-ngram",
+        ),
+        pytest.param(
+            SamplingParams(extra_args={"no_repeat_ngram_size": 1}),
+            True,
+            id="canonical-unigram",
+        ),
+        pytest.param(
+            SamplingParams(extra_args={"ngram_size": 1}),
+            False,
+            id="legacy-unigram-noop",
+        ),
         pytest.param(SamplingParams(temperature=0.7), True, id="temperature"),
         pytest.param(SamplingParams(min_p=0.1), True, id="min-p"),
         pytest.param(SamplingParams(top_k=10), True, id="top-k"),
@@ -81,6 +96,14 @@ def test_logits_processing_cache_matches_request_features(
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
     sampler = _make_sampler()
     sampler.add_request(3, SamplingParams.for_sampler_warmup())
+    sampler.add_request(3, SamplingParams())
+
+    assert not sampler.needs_logits_processing[3]
+
+
+def test_no_repeat_ngram_state_is_cleared_when_slot_is_reused():
+    sampler = _make_sampler()
+    sampler.add_request(3, SamplingParams(extra_args={"no_repeat_ngram_size": 3}))
     sampler.add_request(3, SamplingParams())
 
     assert not sampler.needs_logits_processing[3]

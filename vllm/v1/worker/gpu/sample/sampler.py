@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
+from vllm.v1.worker.gpu.sample.no_repeat_ngram import NoRepeatNGramState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
@@ -63,6 +64,7 @@ class Sampler:
         self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
         logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
         bad_words_state = BadWordsState(vllm_config, lp_req_state)
+        no_repeat_ngram_state = NoRepeatNGramState(vllm_config, lp_req_state)
 
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.
@@ -70,6 +72,7 @@ class Sampler:
             logit_bias_state,
             self.penalties_state,
             bad_words_state,
+            no_repeat_ngram_state,
             *custom_logits_processors,
         ]
 
