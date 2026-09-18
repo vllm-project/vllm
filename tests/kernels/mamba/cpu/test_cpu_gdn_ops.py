@@ -1024,7 +1024,18 @@ def test_batch_memcpy_cpu_fallback() -> None:
     copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
     argument order against ctypes.memmove(dst, src, size).
     """
-    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+    from vllm.model_executor.triton_dispatcher import (
+        KernelOverride,
+        register_kernels,
+    )
+    from vllm.utils.cpu_triton_utils import _batch_memcpy_impl
+
+    register_kernels(
+        {"vllm.v1.worker.mamba_utils.batch_memcpy_kernel": _batch_memcpy_impl}
+    )
+    from vllm.v1.worker.mamba_utils import batch_memcpy_kernel
+
+    assert isinstance(batch_memcpy_kernel, KernelOverride)
 
     # Varied byte sizes, including a non-power-of-two run.
     sizes_bytes = [256, 1024, 17 * 4, 4096]
