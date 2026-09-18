@@ -943,9 +943,6 @@ def test_concat_and_cache_ds_mla(
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
-    uses_e8m0_scale = current_platform.is_device_capability_family(
-        100, device_id=torch.device(device).index or 0
-    )
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
@@ -963,16 +960,14 @@ def test_concat_and_cache_ds_mla(
             tile_end = (tile_idx + 1) * 128
             tile_data[:] = kv_c_data[tile_start:tile_end]
 
-            # tile_scale = tile_data.amax().to(torch.float32) / 448.
-            # NOTE: Using torch's amax() gives different results,
-            # so this must be manually computed.
+            # Using torch's amax() gives different results, so this must be
+            # manually computed.
             tile_data_float = tile_data.to(torch.float32)
             manual_max = abs(tile_data_float[0])
             for j in range(1, 128):
                 manual_max = max(manual_max, abs(tile_data_float[j]))
-            tile_scale = manual_max / 448.0
-            if uses_e8m0_scale:
-                tile_scale = torch.exp2(torch.ceil(torch.log2(tile_scale)))
+            raw_scale = torch.clamp(manual_max / 448.0, min=1e-4)
+            tile_scale = torch.exp2(torch.ceil(torch.log2(raw_scale)))
 
             ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
 
@@ -1013,11 +1008,7 @@ def test_concat_and_cache_ds_mla(
         ref_rope = ref_cache_slice.view(dtype)[kv_lora_rank // 2 + 8 :]
 
         torch.testing.assert_close(kv_nope, ref_nope, atol=0.001, rtol=0.1)
-        torch.testing.assert_close(kv_scales, ref_scales, atol=0.001, rtol=0.1)
-        if uses_e8m0_scale:
-            torch.testing.assert_close(
-                torch.log2(kv_scales), torch.log2(kv_scales).round()
-            )
+        torch.testing.assert_close(kv_scales, ref_scales, atol=0, rtol=0)
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 

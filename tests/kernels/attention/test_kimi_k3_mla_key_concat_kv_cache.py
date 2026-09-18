@@ -253,7 +253,8 @@ def test_ds_mla_cache_insert_bit_compatible_with_reference(decode: bool) -> None
     else:
         fused_mla_key_concat_ds_mla_insert(q, k_nope, k_pe, kv_c, got, slots)
     assert torch.equal(ref, got)
-    if current_platform.is_device_capability_family(100):
-        rows = got.view(-1, DS_MLA_CACHE_ENTRY)[slots[slots >= 0]]
-        scales = rows[:, KV_LORA_RANK : KV_LORA_RANK + 16].view(torch.float32)
-        torch.testing.assert_close(torch.log2(scales), torch.log2(scales).round())
+    rows = got.view(-1, DS_MLA_CACHE_ENTRY)[slots[slots >= 0]]
+    scales = rows[:, KV_LORA_RANK : KV_LORA_RANK + 16].view(torch.float32)
+    torch.testing.assert_close(
+        torch.log2(scales), torch.log2(scales).round(), rtol=0, atol=0
+    )

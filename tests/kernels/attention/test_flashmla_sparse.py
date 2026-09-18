@@ -109,10 +109,9 @@ def test_sparse_flashmla_metadata_smoke():
     assert num_splits is None
 
 
-def test_sparse_flashmla_decode_matches_cache_writer_scale_format():
+def test_sparse_flashmla_decode_matches_cache_writer_scales():
     import vllm.v1.attention.ops.flashmla as fm
     from vllm import _custom_ops as ops
-    from vllm.platforms import current_platform
 
     ok, reason = fm.is_flashmla_sparse_supported()
     if not ok:
@@ -151,9 +150,11 @@ def test_sparse_flashmla_decode_matches_cache_writer_scale_format():
     cache_rows = torch.zeros(
         (1, page_block_size, bytes_per_token), dtype=torch.uint8, device=device
     )
-    # 336 / 448 = 0.75, which is exact in BF16 but not representable in E8M0.
+    # 336 / 448 = 0.75 distinguishes arbitrary FP32 from power-of-two scales.
+    kv_c = torch.full((1, 512), 336.0, dtype=torch.bfloat16, device=device)
+    kv_c[:, -128:] = 0
     ops.concat_and_cache_mla(
-        torch.full((1, 512), 336.0, dtype=torch.bfloat16, device=device),
+        kv_c,
         torch.zeros((1, 64), dtype=torch.bfloat16, device=device),
         cache_rows,
         torch.zeros(1, dtype=torch.int64, device=device),
@@ -161,10 +162,8 @@ def test_sparse_flashmla_decode_matches_cache_writer_scale_format():
         torch.ones(1, dtype=torch.float32, device=device),
     )
     scales = cache_rows[0, 0].view(torch.float32)[128:132]
-    expected_scale = 1.0 if current_platform.is_device_capability_family(100) else 0.75
-    torch.testing.assert_close(
-        scales, torch.full_like(scales, expected_scale), rtol=0, atol=0
-    )
+    expected_scales = torch.tensor([1.0, 1.0, 1.0, 2**-13], device=device)
+    torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
     cached_nope = cache_rows[0, 0, :512].view(torch.float8_e4m3fn).float()
     expected = (cached_nope * scales.repeat_interleave(128)).to(torch.bfloat16)
 
