@@ -45,6 +45,7 @@ def mhc_pre_delayed_overlap(
     norm_eps: float = 1e-6,
     *,
     stream: torch.cuda.Stream,
+    layer_input: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Prepare the input on the caller stream and coefficients on another stream.
 
@@ -67,7 +68,11 @@ def mhc_pre_delayed_overlap(
     post = torch.empty((n, hc), device=residual.device, dtype=torch.float32)
     comb = torch.empty((n, hc * hc), device=residual.device, dtype=torch.float32)
     next_pre = torch.empty_like(post)
-    layer_input = torch.empty((n, hidden), device=residual.device, dtype=torch.bfloat16)
+    compute_input = layer_input is None
+    if layer_input is None:
+        layer_input = torch.empty(
+            (n, hidden), device=residual.device, dtype=torch.bfloat16
+        )
     outputs = post.unsqueeze(-1), comb.view(n, hc, hc), layer_input, next_pre
     if n == 0:
         return outputs
@@ -104,7 +109,7 @@ def mhc_pre_delayed_overlap(
     )
     main = torch.cuda.current_stream()
     # Prioritize input readiness for small batches before releasing statistics.
-    if n <= 8:
+    if compute_input and n <= 8:
         epilogue(split_mode="input")
     stream.wait_stream(main)
     with torch.cuda.stream(stream):
@@ -112,6 +117,6 @@ def mhc_pre_delayed_overlap(
         epilogue(split_mode="stats")
     for tensor in (x, mix, sqr):
         tensor.record_stream(stream)
-    if n > 8:
+    if compute_input and n > 8:
         epilogue(split_mode="input")
     return outputs

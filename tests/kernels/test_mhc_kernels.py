@@ -523,6 +523,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.rms_norm_eps = 1e-20
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
     decoder.mhc_stream = None
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -597,7 +598,15 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         return post, res, decoder.attn_norm(collapsed), pre
 
     def fused_reference(
-        x, residual, post_mix, res_mix, *args, capture_aux=False, stream=None, **kw
+        x,
+        residual,
+        post_mix,
+        res_mix,
+        *args,
+        capture_aux=False,
+        stream=None,
+        reduce_results=False,
+        **kw,
     ):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
         aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
@@ -638,6 +647,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.rms_norm_eps = 1e-6
     decoder.hc_post_alpha = 2.0
     decoder.use_sequence_parallel = False
+    decoder.fuse_mhc_all_reduce = False
     decoder.mhc_stream = None
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -15,6 +16,9 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
     mega_mhc,
 )
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 
 
 @functools.cache
@@ -109,6 +113,7 @@ def mhc_shifted_post_pre(
     capture_aux: bool = False,
     *,
     stream: torch.cuda.Stream | None = None,
+    reduce_results: bool = False,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
@@ -116,10 +121,40 @@ def mhc_shifted_post_pre(
 
     When stream is supplied, join it before consuming the returned coefficients.
     """
+    layer_input = None
+    if reduce_results:
+        from vllm.distributed import get_tp_group
+
+        tp = get_tp_group()
+        if stream is not None and 0 < x.shape[0] <= 16:
+            comm = cast("CudaCommunicator", tp.device_communicator).ca_comm
+            assert comm is not None and comm.mnnvl_lamport_epochs is not None
+            output = torch.empty_like(residual)
+            layer_input = torch.empty_like(x)
+            torch.ops._C_custom_ar.all_reduce_mhc(
+                x,
+                residual,
+                post_layer_mix,
+                comb_res_mix,
+                pre_mix,
+                norm_weight,
+                output,
+                layer_input,
+                comm.mnnvl_lamport_ag_local_ptr,
+                comm.mnnvl_lamport_ag_multicast_ptr,
+                comm.mnnvl_lamport_epochs[0],
+                comm.rank,
+                comm.mnnvl_buffer_size,
+                norm_eps,
+            )
+            residual = output
+        else:
+            x = tp.all_reduce(x)
     if stream is not None:
         from .mhc import mhc_pre_delayed_overlap
 
-        residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
+        if layer_input is None:
+            residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         aux = residual.mean(dim=1) if capture_aux else x.new_empty(0, x.shape[1])
         pre_outputs = mhc_pre_delayed_overlap(
             residual,
@@ -135,6 +170,7 @@ def mhc_shifted_post_pre(
             norm_weight=norm_weight,
             norm_eps=norm_eps,
             stream=stream,
+            layer_input=layer_input,
         )
         return residual, *pre_outputs, aux
 
