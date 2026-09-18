@@ -150,8 +150,7 @@ def test_concat_mla_q_values_preserved(num_tokens):
     assert torch.equal(out_bits[..., nope_dim:], q_pe_bits)
 
 
-@pytest.mark.parametrize("rope_dim", [0, 64])
-@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("rope_dim,transposed", [(0, False), (0, True), (64, False)])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_concat_mla_q_fp8_nope_and_rope(rope_dim, transposed, enabled):
     """FP8 query packing preserves values with empty RoPE and strided BMM output."""

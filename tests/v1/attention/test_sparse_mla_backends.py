@@ -1648,9 +1648,12 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# Cover power-of-two, padded single-tile, GLM's capacity, and atomic fallback.
-@pytest.mark.parametrize("num_topk_tokens", [128, 384, 2176, 4224])
-def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
+# Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.
+@pytest.mark.parametrize(
+    "num_topk_tokens,reuse_buffers",
+    [(128, False), (2176, False), (2176, True), (4224, False), (4224, True)],
+)
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers: bool):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
@@ -1663,8 +1666,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries: half the row,
-    # a quarter of it, the whole row, then a single valid entry -- twice over.
+    # Include partly valid, fully valid, and empty selections for each request.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
@@ -1686,6 +1688,15 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         expected_valid, dtype=torch.int32, device=device
     )
 
+    buffers = {}
+    if reuse_buffers:
+        buffers = dict(
+            out=torch.full_like(token_indices, -99),
+            valid_counts_out=torch.full(
+                (num_tokens,), 99, dtype=torch.int32, device=device
+            ),
+        )
+
     # Test with return_valid_counts=True
     result, valid_counts = triton_convert_req_index_to_global_index(
         req_id,
@@ -1694,6 +1705,7 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         BLOCK_SIZE=block_size,
         NUM_TOPK_TOKENS=num_topk_tokens,
         return_valid_counts=True,
+        **buffers,
     )
 
     torch.testing.assert_close(valid_counts, expected_valid_tensor, rtol=0, atol=0)

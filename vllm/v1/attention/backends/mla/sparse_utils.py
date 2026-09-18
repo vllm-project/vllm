@@ -696,3 +696,46 @@ def triton_filter_and_convert_dcp_index(
 
 
 _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def sparse_mla_prepare_safe_lengths_kernel(
+    indices_ptr,
+    counts_ptr,
+    safe_lengths_ptr,
+    num_tokens,
+    index_stride0: tl.constexpr,
+    count_stride: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    count = tl.load(counts_ptr + token * count_stride, token < num_tokens, other=1)
+    tl.store(safe_lengths_ptr + token, tl.maximum(count, 1), token < num_tokens)
+    # TRTLLM's NoPE sparse kernel requires at least one valid KV-cache entry.
+    tl.store(
+        indices_ptr + token * index_stride0, 0, (token < num_tokens) & (count == 0)
+    )
+
+
+def prepare_sparse_mla_safe_lengths(
+    physical_indices: torch.Tensor, valid_counts: torch.Tensor
+) -> torch.Tensor:
+    """Install dummy slots for empty queries and return nonzero kernel lengths.
+
+    Preserve the raw counts so empty outputs and LSE can be neutralized later.
+    """
+    num_tokens = valid_counts.numel()
+    safe_lengths = torch.empty(
+        (num_tokens,), dtype=valid_counts.dtype, device=valid_counts.device
+    )
+    if num_tokens:
+        sparse_mla_prepare_safe_lengths_kernel[(triton.cdiv(num_tokens, 256),)](
+            physical_indices,
+            valid_counts,
+            safe_lengths,
+            num_tokens,
+            physical_indices.stride(0),
+            valid_counts.stride(0),
+            BLOCK=256,
+        )
+    return safe_lengths

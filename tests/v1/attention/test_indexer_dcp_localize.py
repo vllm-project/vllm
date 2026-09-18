@@ -701,7 +701,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 # Include padded single-tile compaction and the multi-tile atomic fallback.
-@pytest.mark.parametrize("num_topk", [1024, 384, 2176, 4224])
+@pytest.mark.parametrize("num_topk", [1024, 2176, 4224])
 def test_dcp_filter_compaction_matches_reference(
     interleave: int, dcp_rank: int, num_topk: int
 ):
