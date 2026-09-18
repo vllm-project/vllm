@@ -112,8 +112,11 @@ makes lookup and pinning atomic across processes. A slot is published only after
 its store completes and cannot be reused while another engine is loading it.
 No collective operations run on the per-request offload path.
 
-The initial implementation supports fixed DP topologies with TP=PP=DCP=PCP=1
-and no LoRA adapters. The backend must be `cpu`. All replicas
+The shared implementation supports tensor parallelism: each TP rank shares its
+own KV shard with the corresponding TP rank in local DP replicas. Pipeline and
+context parallelism are currently unsupported (`PP=DCP=PCP=1`) because their
+KV ownership and block-coordinate semantics require a separate design. There
+are no LoRA adapter support guarantees. The backend must be `cpu`. All replicas
 must agree on the model, KV layout, capacity, prefix hash algorithm, and hash
 seed. SHA-256 variants work with the default seed; xxHash variants require the
 same numeric `PYTHONHASHSEED` on every replica. Incompatible configurations fail

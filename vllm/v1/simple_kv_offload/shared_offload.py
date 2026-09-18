@@ -50,12 +50,11 @@ def validate_shared_config(
     if not config.cache_config.enable_prefix_caching:
         raise ValueError("cpu_offload_shared requires prefix caching.")
     if (
-        parallel.tensor_parallel_size != 1
-        or parallel.pipeline_parallel_size != 1
+        parallel.pipeline_parallel_size != 1
         or parallel.decode_context_parallel_size != 1
         or parallel.prefill_context_parallel_size != 1
     ):
-        raise ValueError("cpu_offload_shared currently requires TP=PP=DCP=PCP=1.")
+        raise ValueError("cpu_offload_shared currently requires PP=DCP=PCP=1.")
     if parallel.enable_elastic_ep:
         raise ValueError("cpu_offload_shared requires a fixed DP topology.")
     # Adapter IDs are assigned independently by each engine and are part of
