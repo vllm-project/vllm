@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -121,6 +121,7 @@ class DeepseekV32Indexer(nn.Module):
 class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
+    supports_pcp_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -236,7 +237,9 @@ class DeepseekV32Attention(MLAAttention):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
-        self._fp8_kv_needs_view = fp8_attention and self.kv_cache_dtype != "fp8_ds_mla"
+        self._fp8_kv_needs_view = fp8_attention and not self.kv_cache_dtype.endswith(
+            "_ds_mla"
+        )
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
@@ -569,8 +572,9 @@ class DeepseekV32Attention(MLAAttention):
             seq_lens: torch.Tensor | None
             query_start_loc: torch.Tensor | None
             if self.use_pcp:
-                if attn_metadata.decode is not None:
-                    seq_lens = attn_metadata.decode.seq_lens
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if decode_metadata is not None:
+                    seq_lens = decode_metadata.seq_lens
                 else:
                     all_seq_lens = cast(
                         torch.Tensor,
@@ -585,12 +589,23 @@ class DeepseekV32Attention(MLAAttention):
                 # PCP-only empty-shard metadata is needed.
                 seq_lens = None
                 query_start_loc = None
-            attn_out = self.dcp_manager.combine(
-                attn_out,
-                lse,
-                seq_lens=seq_lens,  # type: ignore[arg-type]
-                query_start_loc=query_start_loc,  # type: ignore[arg-type]
-            )
+            # Under PCP+DCP the prefill rows attended over the gathered KV, so
+            # only the decode rows carry an LSE and take part in the merge.
+            num_merge_rows = lse.shape[0]
+            if num_merge_rows == attn_out.shape[0]:
+                attn_out = self.dcp_manager.combine(
+                    attn_out,
+                    lse,
+                    seq_lens=seq_lens,  # type: ignore[arg-type]
+                    query_start_loc=query_start_loc,  # type: ignore[arg-type]
+                )
+            elif num_merge_rows > 0:
+                attn_out[:num_merge_rows] = self.dcp_manager.combine(
+                    attn_out[:num_merge_rows],
+                    lse,
+                    seq_lens=seq_lens,  # type: ignore[arg-type]
+                    query_start_loc=query_start_loc,  # type: ignore[arg-type]
+                )
             if self.use_pcp:
                 attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
