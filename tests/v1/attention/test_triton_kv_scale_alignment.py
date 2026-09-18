@@ -144,7 +144,8 @@ def test_attention_layer_forwarding_supports_inline_scales():
     backend = MockGatherAttentionBackend()
     impl_cls = backend.get_impl_cls()
     sig = inspect.signature(impl_cls.__init__)
-    extra_impl_args = {}
+    from typing import Any
+    extra_impl_args: dict[str, Any] = {}
     if (
         hasattr(backend, "supports_inline_scales")
         and "supports_inline_scales" in sig.parameters
