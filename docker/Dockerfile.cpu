@@ -139,7 +139,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
-        git checkout "270e696d"; \
+        git checkout "v3.8.0"; \
         if [ ! -f third_party/sleef/CMakeLists.txt ]; then \
             echo "sleef submodule empty after shallow fetch; retrying unshallow"; \
             git submodule foreach --recursive 'git fetch --unshallow origin || true'; \
