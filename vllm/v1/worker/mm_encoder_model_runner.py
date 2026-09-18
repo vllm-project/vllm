@@ -118,10 +118,7 @@ class MMEncoderModelRunner(GPUModelRunner):
                 num_reqs=None,
             )
             self.prepare_inputs(
-                scheduler_output,
-                batch_req_state,
-                batch_desc,
-                num_active_loras=0,
+                scheduler_output, batch_req_state, batch_desc, num_active_loras=0
             )
 
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
