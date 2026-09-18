@@ -43,6 +43,24 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
+### Request metrics
+
+The Rust frontend batches inter-token latency (ITL) histogram updates per
+request. It publishes pending observations after 32 generated tokens by
+default, and flushes any remainder when the generation stream completes,
+errors, or is dropped. Set `VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS` to a positive
+integer to change the interval; invalid values warn and use 32. The setting is
+read once when the first request creates its metrics tracker.
+
+The interval counts tokens, including the first output. A multi-token update
+that reaches or crosses the interval causes one flush after that update; the
+next interval starts there. It still contributes only the original single ITL
+observation, and the first output contributes none. Generated-token counters
+and TTFT remain live. Metric names, labels, buckets, and timestamps are unchanged.
+Token-based flushing does not bound elapsed reporting delay when generation
+stalls. Process failure can lose pending observations, and floating-point sums
+can differ slightly due to addition order.
+
 ### RL weight synchronization
 
 With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer
