@@ -114,13 +114,19 @@ def _fill_short_context_topk_indices(
     )
 
 
-# Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
-# DeepSeek's V4.1 record -- all 512 dims (RoPE included) as fp8 e4m3 with one
-# UE8M0 scale per 32 dims, 512 data bytes + 16 scale bytes per token, pages
-# rounded to the kernel's 512 B TMA stride -- only in its SM100 sparse-decode
-# kernels. Every other arch keeps the V4 record: 448 fp8 NoPE + 64 bf16 RoPE
-# plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
+# Which packed fp8_ds_mla record a V4.1 layer writes. DeepSeek's V4.1 record --
+# all 512 dims (RoPE included) as fp8 e4m3 with one UE8M0 scale per 32 dims,
+# 512 data bytes + 16 scale bytes per token, pages rounded to 512 B -- is
+# decoded by FlashMLA's SM100 sparse-decode kernels and by the ROCm sparse
+# decode on gfx950. The archs without one of those keep the V4 record: 448 fp8
+# NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a pad byte (584 B,
+# 576 B pages). Both the attention layer and the indexer spec read this, and
+# they share a block, so it has to be one answer for the whole layer.
 def _use_v41_mxfp8_kv_record() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return _ON_GFX950
     return current_platform.is_device_capability_family(100)
 
 
