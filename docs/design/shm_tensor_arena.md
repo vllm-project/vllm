@@ -211,7 +211,7 @@ while any reader's DMA is in flight.
 > would not delay the release, since PyTorch views keep the underlying
 > storage alive via the C++ refcount independent of this (Python-object-
 > level) finalizer.
-
+>
 > Assumes the multimodal H2D is issued on the worker's current/default compute
 > stream (true today: mm inputs are copied eagerly, outside the decode CUDA
 > graph). If a future vLLM issues that copy on a dedicated side stream, the event
@@ -235,7 +235,7 @@ A single CLI flag toggles the arena; the slot count/size and divert threshold
 are internal constants (no env vars).
 
 | Flag (`ParallelConfig` field) | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
 
 Internal constants in `shm_tensor_arena.py`: **8 slots × 256 MB**; tensors larger
@@ -262,7 +262,7 @@ than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
    low qps so individual images decompose cleanly (~1.2k aligned requests):
 
    | TTFT (ms) | p50 | p90 | p99 | max | >1 s | >1.5 s |
-   |---|---:|---:|---:|---:|---:|---:|
+   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
    | in-band pickle (old baseline) | 93 | 401 | 1321 | 2139 | 30 | 9 |
    | + bigger MQ chunk (config lever) | 91 | 368 | 1287 | 2027 | 22 | 5 |
    | **arena + pinning** | **89** | **241** | **862** | **1375** | **7** | **0** |
