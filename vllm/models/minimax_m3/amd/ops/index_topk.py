@@ -237,7 +237,6 @@ def _index_block_score_kernel(
         padding_option="zero",
     )
 
-    # 2. Perform the load by providing the multi-dimensional offset directly
     q = q_desc.load([pid_q * BLOCK_SIZE_Q, 0])
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 

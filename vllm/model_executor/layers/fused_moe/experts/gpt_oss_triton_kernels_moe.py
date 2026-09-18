@@ -1311,14 +1311,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 gammas=gammas if apply_router_weight_on_input else None,
             )
 
-            # LoRA. `inter` is laid out in the ragged expert-sorted order that
-            # make_routing_data builds (argsort of the flat topk expert ids), which
-            # is the same expert-sort punica's moe-lora-align uses, so `inter` can
-            # serve directly as the sorted-layout w13 output the kernel writes into
-            # (mirrors the 3.6 path's `intermediate_cache1[gather_indx.dst_indx]`).
             lora_context = self._lora_context
-            s_ids = e_ids = n_pad = t_map = None
             if lora_context is not None:
+                s_ids = e_ids = n_pad = t_map = None
                 s_ids, e_ids, n_pad, t_map = self.apply_w13_lora(
                     lora_context,
                     y=inter,
