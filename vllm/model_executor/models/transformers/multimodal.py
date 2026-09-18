@@ -369,12 +369,10 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             )
         if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
             num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
-            target_width, target_height = self.info.get_video_size_with_most_features(
-                num_frames
-            )
+            width, height = self.info.get_video_size_with_most_features(num_frames)
             data["video"] = self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=width,
+                height=height,
                 num_frames=num_frames,
                 num_videos=num_videos,
                 overrides=mm_options.get("video"),
@@ -407,8 +405,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             overrides=overrides,
         )
         if not self.info._video_needs_metadata:
-            return list(videos)
-        videos = [v.copy() for v in videos]
+            return videos
 
         video_processor = self.info.get_hf_processor().video_processor
         fps = getattr(video_processor, "fps", None)
