@@ -24,6 +24,10 @@ The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
 
+The `vllm-base` stage links the wheel's bundled `vllm-rs` executable into
+`/usr/local/bin` and checks that `vllm-rs --help` runs. This makes the Rust CLI
+available on `PATH` in the serving images derived from this stage.
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>

@@ -8,6 +8,17 @@ toc_depth: 2
 
 --8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
 
+## Run the Rust frontend CLI
+
+The CUDA image includes `vllm-rs` on `PATH`. To invoke it directly, override
+the default `vllm serve` entrypoint:
+
+```bash
+docker run --rm --entrypoint vllm-rs vllm/vllm-openai:latest --help
+```
+
+It is also available when starting a shell with `--entrypoint /bin/bash`.
+
 ## Run a vLLM Recipes configuration
 
 [vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
