@@ -22,6 +22,7 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
+    _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
     DeepseekSparseSWAMetadataBuilder,
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
@@ -138,7 +139,7 @@ def run_swa_kernel(
     width = window + (max_image_tokens if with_image else 0)
     swa_indices = torch.zeros(num_tokens, 1, width, dtype=torch.int32, device=device)
     swa_lens = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    is_valid = slot_mapping >= 0
+    is_valid = torch.empty_like(slot_mapping, dtype=torch.bool)
 
     if with_image:
         lefts, rights = ref_left_right(
@@ -161,6 +162,7 @@ def run_swa_kernel(
         seq_lens_t,
         token_to_req,
         is_valid,
+        slot_mapping,
         block_table,
         block_table.stride(0),
         BLOCK_SIZE,
@@ -168,6 +170,7 @@ def run_swa_kernel(
         HAS_IMAGE=with_image,
         TRITON_BLOCK_SIZE=1024,
     )
+    assert torch.equal(is_valid, slot_mapping >= 0)
     return swa_indices[:, 0], swa_lens
 
 
@@ -653,3 +656,64 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
         assert absolute_keys.tolist() == list(range(lo, hi))
         assert paged_lens[token] == hi - lo
         assert paged_indices[token, 0, : hi - lo].tolist() == list(range(lo, hi))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("batch_size", [1, 32, 128, 256])
+def test_decode_validity_and_lens_are_derived_per_group(batch_size):
+    """Each group derives validity from its own slot_mapping inside the kernel.
+
+    Regression guard for dropping the eager ``slot_mapping >= 0`` / copy and the
+    ``swa_lens`` tail fill: replays reuse persistent buffers, so a shrunk batch
+    must never read back a previous, larger batch's rows, and groups that
+    invalidate different slots must not see each other's validity.
+    """
+    device = torch.device("cuda")
+    capacity = 256
+    groups = [
+        {
+            "indices": torch.full(
+                (capacity, 1, WINDOW), 7, dtype=torch.int32, device=device
+            ),
+            "lens": torch.full((capacity,), 7, dtype=torch.int32, device=device),
+            "valid": torch.zeros(capacity, dtype=torch.bool, device=device),
+        }
+        for _ in range(3)
+    ]
+    # Full batch, shrink, then grow back; each step changes seq_lens and the
+    # invalid slots so stale buffer contents would be visible.
+    for step, n in enumerate((batch_size, max(batch_size // 4, 1), batch_size)):
+        seq_lens = [3 + ((i + 7 * step) * 5) % 40 for i in range(n)]
+        query_lens = [1] * n
+        qsl, seq, t2r, slots, table = make_batch(seq_lens, query_lens, device)
+        rows, lens = ref_swa_slot_rows(
+            seq_lens, query_lens, [[]] * n, table, WINDOW, 0, WINDOW
+        )
+        for g, buf in enumerate(groups):
+            slot_mapping = slots.clone()
+            slot_mapping[(g + step) % 3 :: 3] = -1
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
+                buf["indices"][:n],
+                buf["lens"],
+                WINDOW,
+                WINDOW,
+                buf["lens"],  # unused (HAS_IMAGE=False)
+                buf["lens"],  # unused (HAS_IMAGE=False)
+                qsl,
+                seq,
+                t2r,
+                buf["valid"],
+                slot_mapping,
+                table,
+                BLOCK_SIZE,
+                num_tokens=n,
+                token_offset=0,
+            )
+            valid = (slot_mapping[:n] >= 0).cpu().tolist()
+            assert buf["valid"][:n].cpu().tolist() == valid
+            assert buf["lens"][:n].cpu().tolist() == [
+                length if ok else 0 for length, ok in zip(lens, valid)
+            ]
+            assert buf["indices"][:n, 0].cpu().tolist() == [
+                row if ok else [-1] * WINDOW for row, ok in zip(rows, valid)
+            ]
