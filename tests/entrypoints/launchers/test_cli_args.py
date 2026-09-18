@@ -74,8 +74,15 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     assert args.port == 9000
 
 
-def test_log_config_file_cli_field_is_propagated(serve_parser):
-    args = serve_parser.parse_args(["--log-config-file", "/tmp/logging.json"])
+def test_log_config_file_cli_field_is_deprecated_and_propagated(serve_parser):
+    with pytest.warns(
+        UserWarning,
+        match=(
+            "--log-config-file is deprecated and will be removed in v0.33.0. "
+            "Use --logging-config.pylogging_config_file instead."
+        ),
+    ):
+        args = serve_parser.parse_args(["--log-config-file", "/tmp/logging.json"])
 
     logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
 
@@ -109,14 +116,15 @@ def test_logging_config_accepts_json_and_dotted_args(serve_parser):
 
 
 def test_log_config_file_cli_field_overrides_json(serve_parser):
-    args = serve_parser.parse_args(
-        [
-            "--logging-config",
-            '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
-            "--log-config-file",
-            "/tmp/flat.json",
-        ]
-    )
+    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
+        args = serve_parser.parse_args(
+            [
+                "--logging-config",
+                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--log-config-file",
+                "/tmp/flat.json",
+            ]
+        )
 
     logging_config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
 

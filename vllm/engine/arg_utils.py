@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -443,6 +444,20 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     cached version.
     """
     return copy.deepcopy(_compute_kwargs(cls))
+
+
+_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
+    "--log-config-file is deprecated and will be removed in v0.33.0. "
+    "Use --logging-config.pylogging_config_file instead."
+)
+
+
+class DeprecatedLogConfigFileAction(argparse.Action):
+    """Warn when the legacy ``--log-config-file`` option is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
+        setattr(namespace, self.dest, values)
 
 
 @dataclass
@@ -1579,11 +1594,11 @@ class EngineArgs:
             dest="log_config_file",
             default=argparse.SUPPRESS,
             metavar="PYLOGGING_CONFIG_FILE",
-            help=(
-                "Legacy alias for --logging-config.pylogging_config_file. "
-                "Overrides that field if both are specified."
-            ),
+            action=DeprecatedLogConfigFileAction,
+            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
         )
+        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
+        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
