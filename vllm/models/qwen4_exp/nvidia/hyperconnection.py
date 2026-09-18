@@ -139,13 +139,13 @@ class GatedResidual(nn.Module):
             # produce injection logits for combine
             split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
         else:
-            lora = self.input_mix_weight_down(xn)
+            lowrank = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank = hc_silu(lowrank, self.hc_count)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
@@ -176,13 +176,13 @@ class GatedResidual(nn.Module):
             # produce injection logits for combine
             split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
         else:
-            lora = self.input_mix_weight_down(xn)
+            lowrank = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank = hc_silu(lowrank, self.hc_count)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
