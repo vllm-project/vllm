@@ -418,7 +418,7 @@ validate_ci_build_context_source() {
 
 describe_ci_revision() {
     git -C "$1" describe --tags --long --abbrev=10 \
-        --match '*[0-9]*' "$2" 2>/dev/null
+        --match 'v[0-9]*' "$2" 2>/dev/null
 }
 
 write_ci_git_archival_metadata() {
