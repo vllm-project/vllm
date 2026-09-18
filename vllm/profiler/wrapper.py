@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import torch
@@ -193,6 +193,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         local_rank: int,
         activities: list[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(profiler_config)
 
@@ -244,15 +245,21 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self.profiler = torch.profiler.profile(
-            activities=[TorchProfilerActivityMap[activity] for activity in activities],
-            schedule=profiler_schedule,
-            record_shapes=profiler_config.torch_profiler_record_shapes,
-            profile_memory=profiler_config.torch_profiler_with_memory,
-            with_stack=profiler_config.torch_profiler_with_stack,
-            with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=trace_handler,
-        )
+        profile_args: dict[str, Any] = {
+            "activities": [
+                TorchProfilerActivityMap[activity] for activity in activities
+            ],
+            "schedule": profiler_schedule,
+            "record_shapes": profiler_config.torch_profiler_record_shapes,
+            "profile_memory": profiler_config.torch_profiler_with_memory,
+            "with_stack": profiler_config.torch_profiler_with_stack,
+            "with_flops": profiler_config.torch_profiler_with_flops,
+            "on_trace_ready": trace_handler,
+        }
+        if profiler_kwargs:
+            profile_args.update(profiler_kwargs)
+
+        self.profiler = torch.profiler.profile(**profile_args)
 
         # Track if we're using a schedule (need to call step())
         self._uses_schedule = profiler_schedule is not None
