@@ -18,7 +18,7 @@ USER_RECIPIENT = "user"
 # All parts except <|message|> are optional. The bare form is used for public
 # chain-of-thought or untagged content.
 # A recipient name longer than this can never be a real channel header (the
-# Rust port caps candidates identically); it degrades to body text.
+# Rust port caps candidates identically): the whole candidate stays text.
 _MAX_RECIPIENT_LEN = 1024
 _RECIPIENT_CHAR = r"A-Za-z0-9_.\-"
 _RECIPIENT = rf"[{_RECIPIENT_CHAR}]{{1,{_MAX_RECIPIENT_LEN}}}"
@@ -29,8 +29,12 @@ MSG_HEADER_RE = re.compile(
     rf"(?:to=(?P<recipient>{_RECIPIENT}))?<\|message\|>"
 )
 MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
-# A channel terminator at the very end of the text (framing, not content).
-TRAILING_MSG_END_RE = re.compile(r"(?:<\|eom\|>|<\|eot\|>)\s*$")
+# A run of channel terminators at the very end of the text (framing, not
+# content). One pass strips the whole run: stripping a single marker per
+# substitution is quadratic on a repetition-derailed <|eom|> flood.
+TRAILING_MSG_END_RE = re.compile(
+    r"(?:<\|eom\|>|<\|eot\|>)(?:\s*(?:<\|eom\|>|<\|eot\|>))*\s*$"
+)
 
 # Whitespace handling must match MSG_HEADER_RE exactly. If this pattern were
 # stricter, a header it rejected but MSG_HEADER_RE accepted would be recognised
@@ -70,6 +74,8 @@ _OPEN_TAIL_HEADER_RE = re.compile(rf"\s+(?:t|to|to={_RECIPIENT_PARTIAL})$")
 _TRAILING_BARE_HEADER_RE = re.compile(
     rf"(?<=\s)to=(?!(?:self|user)<\|message\|>){_RECIPIENT}<\|message\|>\Z"
 )
+# The start of an invoke block, word-boundaried like the boundary pattern.
+_ATEM_INVOKE_OPEN_RE = re.compile(r"<atem:invoke(?=[\s>])")
 
 
 def current_assistant_turn(text: str) -> str:
@@ -99,6 +105,9 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
 
     A body ends at an explicit end marker, a fully framed assistant header, or
     a bare recipient header immediately followed by ATEM tool-call markup.
+    Bare ``to=self``/``to=user`` headers never bound a body (they are streamed
+    as text), and a bare header must start at a word boundary -- glued to a
+    preceding word it is ordinary text.
     """
     pos = 0
     while pos < len(text):
@@ -127,18 +136,19 @@ def iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
         body = text[body_start:body_end]
         # Hold back only a trailing prefix of a framed header, and only while
         # the body can still grow: a literal <|start|> inside a closed body is
-        # user text and must be preserved.
+        # user text and must be preserved. Only the LAST <|start|> can begin a
+        # trailing partial header (a partial match must consume to end of
+        # string, and nothing in the header pattern can absorb a second
+        # <|start|>), so checking it alone is equivalent to scanning them all.
         if not closed:
-            start_token = body.find("<|start|>")
-            while start_token != -1:
+            start_token = body.rfind("<|start|>")
+            if start_token != -1:
                 candidate = body[start_token:]
                 partial_header = re.fullmatch(
                     FRAMED_HEADER_PATTERN, candidate, partial=True
                 )
                 if partial_header is not None and partial_header.partial:
                     body = body[:start_token]
-                    break
-                start_token = body.find("<|start|>", start_token + 1)
 
         yield header.group("recipient"), body, closed
         pos = next_pos
@@ -164,12 +174,14 @@ def _trailing_live_marker_len(text: str) -> int:
 def safe_open_body(body: str) -> str:
     """Trim a growing body's suffix until it is safe to emit.
 
-    A marker strip can expose a header fragment (``… to=skill<``) and a
-    header strip can expose a marker, so the two alternate once. Each side
-    strips only its last possible start: in a run of marker prefixes, only
-    the last ``<`` is still live; and a header fragment with more text after
-    it can never complete a header. Longer chains are derailment debris and
-    self-heal at the next delta.
+    Three suffixes are unsafe to emit from a body that can still grow: a live
+    partial marker, a ` to=…` header fragment, and a partial channel boundary
+    (e.g. a half-written framed header). A strip of one kind can expose
+    another (``… to=skill<``), so a marker strip follows the header/boundary
+    strips once more. Each strip anchors at its last possible start: in a run
+    of marker prefixes only the last ``<`` is still live, and a fragment with
+    more text after it can never complete. Longer chains are derailment
+    debris and self-heal at the next delta.
     """
     partial_marker = _trailing_live_marker_len(body)
     if partial_marker:
@@ -205,16 +217,23 @@ def safe_unframed_tail(text: str) -> str:
     # whitespace trim would leak it (the marker is framing, not content).
     # Fixpoint with safe_open_body: its partial-marker/header strip can expose
     # a complete end marker at the tail ("ok<|eom|><" -> "ok<|eom|>").
+    # Bounded: this runs per delta over the full text, so a derailment flood
+    # of strippable fragments must not multiply the scan cost. Holding back
+    # too much is always safe -- finish flushes it as text.
     body = text
-    while True:
+    converged = False
+    for _ in range(4):
         stripped = TRAILING_MSG_END_RE.sub("", body)
         if stripped != body:
             body = stripped
             continue
         trimmed = safe_open_body(body)
         if trimmed == body:
+            converged = True
             break
         body = trimmed
+    if not converged:
+        return ""
     tail = re.search(r"\s+$", body)
     if tail is not None:
         body = body[: tail.start()]
@@ -230,9 +249,15 @@ def flush_open_body(body: str) -> str:
     real text and must flush, while a trailing partial marker (cut by the
     token limit) is framing and stays dropped. A trailing COMPLETE bare tool
     header (``to=…<|message|>`` with nothing after it) is framing too -- its
-    body never arrived -- so it is stripped as well. The partial marker goes
-    first: a complete header ends with ``<|message|>``, so none can follow one.
+    body never arrived -- so it is stripped as well. Trailing end markers are
+    likewise framing. The strips alternate to a fixpoint: stripping one layer
+    can expose another ("ans<|eom|> to=x<|message|>" -> "ans").
+
+    The partial-marker strip fires at most once: after it fires, a further
+    live-looking suffix was followed by the stripped fragment in the true
+    text, so it is dead text, not a cut marker ("a<|<|" keeps "a<|").
     """
+    marker_stripped = False
     while True:
         # A trailing run of end markers is framing, not content (the
         # streaming path never surfaces them either).
@@ -243,10 +268,12 @@ def flush_open_body(body: str) -> str:
 
         # A lone "<" is ordinary text; only a marker actually in progress
         # ("<|…") is framing cut by the token limit.
-        partial = _trailing_live_marker_len(body)
-        if partial >= 2:
-            body = body[: len(body) - partial]
-            continue
+        if not marker_stripped:
+            partial = _trailing_live_marker_len(body)
+            if partial >= 2:
+                body = body[: len(body) - partial]
+                marker_stripped = True
+                continue
 
         header = _TRAILING_BARE_HEADER_RE.search(body)
         if header is not None:
@@ -260,7 +287,8 @@ def has_channel_framing(text: str) -> bool:
     """Whether the text contains channel framing or a possible start of it.
 
     ATEM markup alone does not count: a bare ``<atem:…`` block with no header
-    is quoted text (the parser never scans headerless markup).
+    is quoted text (no streaming path scans headerless markup; only the
+    finish-time salvage and the non-streaming fallback do).
     """
     return MSG_HEADER_RE.search(text) is not None or "<|start|>" in text
 
@@ -313,12 +341,15 @@ def visible_channels(
             if recipient is None:
                 # An untagged body carrying ATEM markup is a tool channel
                 # whose ``to=`` never arrived: keep only the prefix before
-                # the markup; the markup itself is never surfaced.
+                # the markup; the markup itself is never surfaced. The word
+                # boundary matches the boundary pattern: "<atem:invokeful"
+                # is ordinary text.
+                invoke_open = _ATEM_INVOKE_OPEN_RE.search(body)
                 atem_starts = [
                     i
                     for i in (
                         body.find(FUNCTION_CALLS_OPEN),
-                        body.find("<atem:invoke"),
+                        invoke_open.start() if invoke_open is not None else -1,
                     )
                     if i != -1
                 ]

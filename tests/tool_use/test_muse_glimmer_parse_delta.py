@@ -594,7 +594,7 @@ def test_bare_tool_header_with_whitespace_before_atem_stays_reasoning(tokenizer)
 
 def test_finish_drops_complete_bare_header(tokenizer):
     # A trailing COMPLETE bare header (a channel that never got a body) is
-    # framing and drops; partial fragments (` to`) still flush as text.
+    # framing and drops.
     reasoning, content, tools = drive(
         tokenizer,
         [" to=self<|message|>thinking to=calc<|message|>"],
@@ -712,9 +712,10 @@ def test_finish_keeps_trailing_self_user_bare_header(tokenizer):
     assert tools == []
 
 
-def test_overlong_recipient_name_degrades_to_text(tokenizer):
-    # A >1KB recipient can never be a real channel header; the cap degrades it
-    # instead of losing the body.
+def test_overlong_recipient_name_never_forms_a_header(tokenizer):
+    # A >1KB recipient can never be a real channel header: the cap keeps the
+    # body instead of losing it (the over-long name itself is pre-header junk
+    # here and drops).
     name = "a" * 2048
     parser = ParserManager.get_parser(reasoning_parser_name="muse_glimmer")(tokenizer)
     request = SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True)
@@ -791,6 +792,17 @@ def test_muse_kimi_mixed_pairing_rejected(tokenizer):
         )(tokenizer)
 
 
+def test_muse_foreign_reasoning_pairing_rejected(tokenizer):
+    # The reverse mix is rejected too: a foreign reasoning parser reports a
+    # boundary the composite's stream ownership does not expect.
+    with pytest.raises(VLLMValidationError, match="reasoning-parser"):
+        ParserManager.get_parser(
+            reasoning_parser_name="qwen3",
+            tool_parser_name="muse_glimmer",
+            enable_auto_tools=True,
+        )(tokenizer)
+
+
 def test_unframed_to_framed_transition_loses_nothing(tokenizer):
     # A header arriving in pieces (no leading space, so the first delta is a
     # bare `to`) must not wedge the content cursor: once framing completes,
@@ -845,6 +857,60 @@ def test_headerless_complete_atem_salvaged_at_finish(tokenizer):
     assert reasoning == ""
     assert content == text
     assert tool_names(tools) == ["weather.get"]
+
+
+def test_headerless_atem_with_stray_start_marker_salvaged_once(tokenizer):
+    # A stray <|start|> activates the framed path before any channel
+    # completes: the headerless call must not fire mid-stream (a later header
+    # could retroactively reclassify the markup as quoted text) and must
+    # salvage exactly once at finish, matching non-streaming.
+    text = '<|start|><atem:invoke name="weather.get"></atem:invoke>'
+    _reasoning, _content, tools = drive_tokenwise(tokenizer, text)
+    assert tool_names(tools) == ["weather.get"]
+
+
+def test_headerless_atem_before_a_completed_header_is_quoted_text(tokenizer):
+    # Once a channel header completes, markup before it is pre-header text:
+    # no call fires mid-stream or at finish, matching non-streaming.
+    text = '<|start|><atem:invoke name="weather.get"></atem:invoke><|message|>x<|eot|>'
+    _reasoning, content, tools = drive_tokenwise(tokenizer, text)
+    assert content == "x"
+    assert tool_names(tools) == []
+
+
+def test_salvage_respects_tool_choice_none(tokenizer):
+    # tool_choice="none" suppresses the finish-time salvage too, matching the
+    # streaming and non-streaming paths.
+    request = SimpleNamespace(tools=None, tool_choice="none", include_reasoning=True)
+    _reasoning, _content, tools = drive_tokenwise(
+        tokenizer, '<atem:invoke name="weather.get"></atem:invoke>', request=request
+    )
+    assert tool_names(tools) == []
+
+
+def test_unframed_prefix_then_open_untagged_channel_flushes(tokenizer):
+    # The untagged body is withheld the whole stream (it may still grow ATEM
+    # markup); it must still flush at finish even though the stream began
+    # unframed. The held-back whitespace before the header drops with the
+    # pre-header text.
+    text = "prose <|start|>assistant<|message|>the answer"
+    for with_tool_parser in (True, False):
+        reasoning, content, tools = drive_tokenwise(
+            tokenizer, text, with_tool_parser=with_tool_parser
+        )
+        assert reasoning == ""
+        assert content == "prosethe answer"
+        assert tools == []
+
+
+def test_unframed_framing_flip_is_chunking_independent(tokenizer):
+    # A framed body whose prefix coincides with the already-emitted unframed
+    # text must stream identically under any chunking: the cursor reset at
+    # the flip is unconditional.
+    text = "the<|start|>assistant to=user<|message|>the answer<|eot|>"
+    _r1, charwise, _t1 = drive_tokenwise(tokenizer, text)
+    _r2, chunked, _t2 = drive(tokenizer, ["the", text[3:]])
+    assert charwise == chunked == "thethe answer"
 
 
 def test_unframed_stream_recovers_quoted_framing_at_finish(tokenizer):

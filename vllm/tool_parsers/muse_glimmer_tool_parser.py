@@ -70,6 +70,7 @@ from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     flush_open_body,
     has_channel_framing,
+    has_complete_channel,
     iter_messages,
     safe_open_body,
     safe_unframed_tail,
@@ -98,7 +99,7 @@ def _decode_value(raw: str):
     """
     try:
         return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return raw
 
 
@@ -124,9 +125,12 @@ class MuseGlimmerToolParser(ToolParser):
         self._emitted_reasoning = ""
         self._emitted_tool_calls: int = 0
         # Set while the unframed fallback has emitted content: the segmenter
-        # drops pre-header text, so the framed path must re-anchor the cursor
-        # instead of wedging on it.
+        # drops pre-header text once framing arrives, so the framed path
+        # resets the cursor rather than wedging on the unframed prefix. The
+        # pre-flip cursor is kept for the finish-time unframed flush, which
+        # works in whole-text coordinates.
         self._content_unframed = False
+        self._emitted_content_pre_flip: str | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -167,10 +171,14 @@ class MuseGlimmerToolParser(ToolParser):
     def _tool_channel_text(cls, text: str) -> str:
         """Concatenate the bodies of messages addressed to a tool.
 
-        Falls back to the whole text when no message header is present at all --
-        that means the framing never reached us (``skip_special_tokens`` was on,
-        or the chunk carrying the header was dropped upstream), and scanning
-        everything is strictly better than returning nothing.
+        Falls back to the whole text when no message header is present at
+        all: either the framing never reached us (``skip_special_tokens`` was
+        on, or the chunk carrying the header was dropped upstream) or the
+        model derailed and emitted markup with no channel -- scanning
+        everything is strictly better than returning nothing. Streaming
+        callers must gate on a complete channel first: applied to a transient
+        buffer, this fallback would emit calls from markup that a later
+        header retroactively reclassifies as quoted text.
         """
         bodies = [
             body
@@ -184,9 +192,9 @@ class MuseGlimmerToolParser(ToolParser):
         if _MSG_HEADER_RE.search(text) is None and (
             _FUNCTION_CALLS_OPEN in text or "<atem:invoke" in text
         ):
-            logger.warning(
-                "MuseGlimmer: ATEM markup with no channel framing; "
-                "is skip_special_tokens enabled upstream?"
+            logger.warning_once(
+                "MuseGlimmer: ATEM markup with no channel framing (model "
+                "derailment, or skip_special_tokens enabled upstream?)"
             )
             return text
         return ""
@@ -199,10 +207,13 @@ class MuseGlimmerToolParser(ToolParser):
         names: set[str] = set()
         tools = getattr(request, "tools", None) if request is not None else None
         for t in tools or []:
-            fn = getattr(t, "function", None) or t
-            name = getattr(fn, "name", None)
-            if name is None and isinstance(fn, dict):
-                name = fn.get("name")
+            if isinstance(t, dict):
+                fn = t.get("function")
+            else:
+                fn = getattr(t, "function", None)
+            if fn is None:
+                fn = t
+            name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
             if name:
                 names.add(name)
         return names
@@ -227,7 +238,7 @@ class MuseGlimmerToolParser(ToolParser):
         head, sep, tail = emitted.partition(".")
         if sep and head == tail and head in registered:
             return head
-        logger.warning(
+        logger.warning_once(
             "MuseGlimmer: emitted tool name %r does not match any registered tool; "
             "passing through unchanged.",
             emitted,
@@ -269,9 +280,8 @@ class MuseGlimmerToolParser(ToolParser):
         )
         if content:
             return content
-        # No framing at all -> the whole thing is plain content. Strip a
-        # trailing end marker: it is framing, and the streaming path never
-        # surfaces it.
+        # No framing at all -> the whole thing is plain content, minus the
+        # trailing framing debris the streaming path never surfaces either.
         if not reasoning and _MSG_HEADER_RE.search(text) is None:
             trimmed = flush_open_body(text)
             return trimmed or None
@@ -355,6 +365,7 @@ class MuseGlimmerToolParser(ToolParser):
             self._emitted_reasoning = ""
             self._emitted_tool_calls = 0
             self._content_unframed = False
+            self._emitted_content_pre_flip = None
 
         if not has_channel_framing(current_text):
             # No channel framing anywhere (e.g. a grammar-constrained answer
@@ -369,23 +380,34 @@ class MuseGlimmerToolParser(ToolParser):
 
         try:
             registered = self._registered_names(request)
-            calls = self._parse_tool_calls(current_text, registered)
+            # Parse calls only once a complete channel exists: before that,
+            # _tool_channel_text would scan headerless ATEM markup on a
+            # transient buffer and emit a call a later header retroactively
+            # reclassifies as quoted text. Headerless invokes are salvaged at
+            # finish instead (MuseGlimmerParser.finalize_generation).
+            calls = (
+                self._parse_tool_calls(current_text, registered)
+                if has_complete_channel(current_text)
+                else []
+            )
             content, reasoning, content_open, reasoning_open = visible_channels(
                 current_text, withhold_open_untagged=True
             )
 
             # Trim the tail of a channel that is still growing, so the emitted
             # prefix never shrinks between deltas.
-            if self._content_unframed and content:
-                if not content.startswith(self._emitted_content):
-                    # The segmenter dropped the pre-header text the fallback
-                    # already emitted; re-anchor the cursor rather than wedge.
-                    self._emitted_content = ""
-                self._content_unframed = False
             if content_open:
                 content = safe_open_body(content)
             if reasoning_open:
                 reasoning = safe_open_body(reasoning)
+            if self._content_unframed:
+                # The segmenter drops pre-header text, so framed content never
+                # continues the unframed cursor (a shared prefix is
+                # coincidence): reset unconditionally, keeping the output
+                # chunking-independent.
+                self._emitted_content_pre_flip = self._emitted_content
+                self._emitted_content = ""
+                self._content_unframed = False
 
             content_delta, self._emitted_content = advance_emitted(
                 self._emitted_content, content
@@ -418,6 +440,9 @@ class MuseGlimmerToolParser(ToolParser):
             if content_delta:
                 message.content = content_delta
             if reasoning_delta:
+                # With no reasoning parser paired, this is the only place a
+                # to=self channel can surface (non-streaming has no slot for
+                # it -- a documented stream/non-stream asymmetry).
                 message.reasoning = reasoning_delta
             if tool_deltas:
                 message.tool_calls = tool_deltas

@@ -189,16 +189,29 @@ class MuseGlimmerParser(DelegatingParser):
             # This also recovers text the streaming side held while a stray
             # marker (e.g. a quoted `<|start|>`) never completed a header.
             content, reasoning = flush_open_body(state.previous_text), ""
-            if "<atem:invoke" in state.previous_text:
+            # If the stream flipped unframed->framed without any channel ever
+            # completing, framed content stayed empty and this whole-text
+            # flush must resume from the pre-flip (unframed) cursor.
+            content_cursor = (
+                tool_parser._emitted_content_pre_flip
+                if tool_parser._emitted_content_pre_flip is not None
+                else tool_parser._emitted_content
+            )
+            if (
+                "<atem:invoke" in state.previous_text
+                and getattr(request, "tool_choice", None) != "none"
+            ):
                 # A derailed/headerless ATEM block never formed a channel:
                 # salvage its complete calls at finish, like the non-streaming
-                # fallback does.
-                for i, call in enumerate(
-                    tool_parser._parse_tool_calls(
-                        state.previous_text,
-                        tool_parser._registered_names(request),
-                    )
-                ):
+                # fallback does. The streaming side parses calls only with a
+                # complete channel in view, so a headerless call was never
+                # emitted mid-stream; skip anything that was, all the same.
+                calls = tool_parser._parse_tool_calls(
+                    state.previous_text,
+                    tool_parser._registered_names(request),
+                )
+                for i in range(tool_parser._emitted_tool_calls, len(calls)):
+                    call = calls[i]
                     if delta_message is None:
                         delta_message = DeltaMessage()
                     delta_message.tool_calls = delta_message.tool_calls or []
@@ -217,9 +230,8 @@ class MuseGlimmerParser(DelegatingParser):
             content, reasoning, _content_open, _reasoning_open = visible_channels(
                 state.previous_text, flush_growing=True
             )
-        content_remainder, emitted_content = advance_emitted(
-            tool_parser._emitted_content, content
-        )
+            content_cursor = tool_parser._emitted_content
+        content_remainder, emitted_content = advance_emitted(content_cursor, content)
         reasoning_remainder, emitted_reasoning = advance_emitted(
             tool_parser._emitted_reasoning, reasoning
         )

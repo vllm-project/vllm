@@ -120,9 +120,11 @@ class ParserManager:
             return HarmonyParser
 
         # MuseGlimmer first: the composite validates its parser pairing, so a
-        # muse-involving mix must never reach the other composites. Test the
-        # resolved classes, not the names: with auto tools off the tool parser
-        # resolves to None and there is nothing to pair.
+        # muse-involving mix must never reach the kimi/cohere composites. Test
+        # the resolved classes, not the names: with auto tools off the tool
+        # parser resolves to None and there is nothing to pair. (The harmony
+        # branch above still wins for a gpt_oss model; that combination is a
+        # contradictory config, not a pairing to validate.)
         from vllm.parser.muse_glimmer import MuseGlimmerParser
         from vllm.reasoning.muse_glimmer_reasoning_parser import (
             MuseGlimmerReasoningParser,

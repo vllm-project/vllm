@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
+    REASONING_RECIPIENT,
     advance_emitted,
     current_assistant_turn,
     flush_open_body,
@@ -29,9 +30,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning = ""
         self._emitted_content = ""
         # Set while the unframed fallback has emitted content: the segmenter
-        # drops pre-header text, so the framed path must re-anchor the cursor
-        # instead of wedging on it.
+        # drops pre-header text once framing arrives, so the framed path
+        # resets the cursor rather than wedging on the unframed prefix. The
+        # pre-flip cursor is kept for the finish-time unframed flush, which
+        # works in whole-text coordinates.
         self._content_unframed = False
+        self._emitted_content_pre_flip: str | None = None
         self._initial_recipient: str | None = None
 
     def adjust_request(
@@ -48,7 +52,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         except Exception:
             return False
         recipient = open_recipient(current_assistant_turn(text))
-        return recipient not in (None, "self")
+        return recipient not in (None, REASONING_RECIPIENT)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -96,16 +100,17 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             # This also recovers text the streaming side held while a stray
             # marker (e.g. a quoted `<|start|>`) never completed a header.
             content = flush_open_body(seeded)
-            remainder, self._emitted_content = advance_emitted(
-                self._emitted_content, content
-            )
+            cursor = self._emitted_content
+            if self._emitted_content_pre_flip is not None:
+                # The stream flipped unframed->framed without any channel
+                # ever completing: framed content stayed empty, so the
+                # whole-text flush resumes from the pre-flip cursor.
+                cursor = self._emitted_content_pre_flip
+            remainder, self._emitted_content = advance_emitted(cursor, content)
             return remainder or None
         content, _reasoning, _content_open, _reasoning_open = visible_channels(
             seeded, flush_growing=True
         )
-        if self._content_unframed:
-            self._emitted_content = ""
-            self._content_unframed = False
         remainder, self._emitted_content = advance_emitted(
             self._emitted_content, content
         )
@@ -162,11 +167,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
             content = safe_open_body(content)
         if reasoning_open:
             reasoning = safe_open_body(reasoning)
-        if self._content_unframed and content:
-            if not content.startswith(self._emitted_content):
-                # The segmenter dropped the pre-header text the fallback
-                # already emitted; re-anchor the cursor rather than wedge.
-                self._emitted_content = ""
+        if self._content_unframed:
+            # The segmenter drops pre-header text, so framed content never
+            # continues the unframed cursor (a shared prefix is coincidence):
+            # reset unconditionally, keeping the output chunking-independent.
+            self._emitted_content_pre_flip = self._emitted_content
+            self._emitted_content = ""
             self._content_unframed = False
 
         reasoning_delta, self._emitted_reasoning = advance_emitted(
