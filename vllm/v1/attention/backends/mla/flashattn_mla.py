@@ -50,7 +50,6 @@ class FlashAttnMLABackend(MLACommonBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         if current_platform.is_xpu():
-            # Xe h576 paged decode only fits in SLM with block_size=64.
             return [MultipleOf(64)]
         return [MultipleOf(16)]
 
@@ -79,7 +78,6 @@ class FlashAttnMLABackend(MLACommonBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         if current_platform.is_xpu():
-            # MLA combined QK head dim = kv_lora_rank (512) + rope dim (64).
             return [576]
         return super().get_supported_head_sizes()
 
@@ -116,13 +114,16 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        if current_platform.is_xpu()
+        else AttentionCGSupport.UNIFORM_BATCH
+    )
     query_len_support: ClassVar[QueryLenSupport] = (
         QueryLenSupport.SINGLE_ONLY
         if current_platform.is_xpu()
         else QueryLenSupport.VARLEN
     )
-    # XPU paged decode currently supports single-token decode only.
     reorder_batch_threshold: int = 1 if current_platform.is_xpu() else 512
 
     def __init__(
@@ -324,6 +325,13 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
 
+        if current_platform.is_xpu() and self.num_heads > 8:
+            raise NotImplementedError(
+                f"FlashAttnMLA on XPU supports at most 8 query heads per "
+                f"rank at head_size=576 (got num_heads={self.num_heads}); "
+                f"increase tensor parallel size."
+            )
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -350,13 +358,14 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
             cache = kv_c_and_k_pe_cache
             if cache.dim() == 3:
-                cache = cache.unsqueeze(-2)  # add num_heads_kv=1 dim
+                cache = cache.unsqueeze(-2)
             assert cache.dim() == 4 and cache.size(-2) == 1, (
                 "kv_c_and_k_pe_cache must be [num_blocks, block_size, "
                 "(num_heads_kv=1)?, kv_lora_rank+qk_rope_head_dim]"
             )
 
-            q = torch.cat([q_nope, q_pe], dim=-1)
+            if type(q) is tuple:
+                q = torch.cat([q_nope, q_pe], dim=-1)
             if not q.is_contiguous():
                 q = q.contiguous()
 

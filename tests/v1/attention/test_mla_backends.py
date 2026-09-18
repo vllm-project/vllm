@@ -37,7 +37,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
@@ -367,10 +367,6 @@ MLA_DIMENSIONS_TO_TEST = [
     ("glm", 192, 256),
 ]
 
-# DeepSeek-R1 has 128 query heads. FlashAttnMLA on XPU caps at 8 query heads per
-# rank at head_size=576 (Xe SLM capacity), so only the TP shard that reaches that
-# limit is representative there. Tests always run physically at TP=1 and simulate
-# sharding via hf_config_override.
 TENSOR_PARALLEL_SIZES_TO_TEST = [16] if current_platform.is_xpu() else [1, 4, 8, 16]
 
 
@@ -391,9 +387,6 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            # Platforms without a compute capability (e.g. XPU) are still
-            # supported: select_mla_prefill_backend() falls back to FLASH_ATTN,
-            # and supports_compute_capability() ignores the argument there.
             try:
                 invalid_reasons = prefill_backend.get_class().validate_configuration(
                     device_capability,
@@ -1134,11 +1127,13 @@ def test_flashattn_mla_xpu_gating_matches_slm_limits(monkeypatch):
     assert backend.get_supported_head_sizes() == [576]
     assert backend.supports_block_size(64)
     assert not backend.supports_block_size(32)
-    # Xe exposes no CUDA-style compute capability, so it must not gate on one.
     assert backend.supports_compute_capability(DeviceCapability(1, 0))
 
 
-def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(monkeypatch):
+@pytest.mark.parametrize("q_is_tuple", [True, False])
+def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(
+    monkeypatch, q_is_tuple
+):
     """XPU decode sends one 576-wide query per request against a 512-wide value."""
     flashattn_mla_module = _import_flashattn_mla()
     monkeypatch.setattr(flashattn_mla_module, "current_platform", _ForceXPUPlatform())
@@ -1157,36 +1152,55 @@ def test_flashattn_mla_xpu_decode_packs_query_and_narrows_value(monkeypatch):
     query_start_loc = torch.tensor([0, 1, 2, 4], dtype=torch.int32)
     seq_lens = torch.tensor([9, 17], dtype=torch.int32)
     block_table = torch.tensor([[0], [1]], dtype=torch.int32)
-    # Two decode requests followed by a prefill request.
     attn_metadata = SimpleNamespace(
         num_decodes=2,
         query_start_loc=query_start_loc,
         decode=SimpleNamespace(
-            max_seq_len=17, seq_lens=seq_lens, block_table=block_table
+            max_seq_len=17,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            query_start_loc=query_start_loc[:3],
         ),
     )
-    impl = SimpleNamespace(
-        kv_cache_dtype="auto", kv_lora_rank=512, qk_rope_head_dim=64, scale=0.125
+    impl = flashattn_mla_module.FlashAttnMLAImpl.__new__(
+        flashattn_mla_module.FlashAttnMLAImpl
     )
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = 0.125
 
-    out, lse = flashattn_mla_module.FlashAttnMLAImpl.forward_mqa(
-        impl,
-        (torch.randn(2, 4, 512), torch.randn(2, 4, 64)),
+    q_nope, q_pe = torch.randn(2, 4, 512), torch.randn(2, 4, 64)
+    q = (q_nope, q_pe) if q_is_tuple else torch.cat([q_nope, q_pe], dim=-1)
+
+    out, lse = impl.forward_mqa(
+        q,
         torch.randn(3, 64, 576),
         attn_metadata,
         SimpleNamespace(),
     )
 
     assert out is expected_out
-    # The XPU kernel cannot emit LSE, so DCP combination must be skipped.
     assert lse is None
     assert captured["q"].shape == (2, 4, 576)
+    torch.testing.assert_close(captured["q"], torch.cat([q_nope, q_pe], dim=-1))
+    if not q_is_tuple:
+        assert captured["q"] is q
     assert captured["k"].shape == (3, 64, 1, 576)
     assert captured["v"].shape == (3, 64, 1, 512)
-    # Only the decode prefix of a mixed batch may reach the MQA kernel.
     torch.testing.assert_close(captured["cu_seqlens_q"], query_start_loc[:3])
     assert captured["max_seqlen_q"] == 1
     assert captured["causal"] is False
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU-only builder config")
+def test_flashattn_mla_xpu_builder_is_single_token_decode_only():
+    """``_forward_mqa_xpu`` hardcodes ``max_seqlen_q=1``; the builder must agree."""
+    builder = _import_flashattn_mla().FlashAttnMLAMetadataBuilder
+
+    assert builder.query_len_support == QueryLenSupport.SINGLE_ONLY
+    assert builder.reorder_batch_threshold == 1
+    assert builder._cudagraph_support == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
 
 def test_xpu_platform_routes_mla_to_flash_attn_mla():
@@ -1225,16 +1239,30 @@ def test_xpu_platform_routes_mla_to_flash_attn_mla():
             attn_selector_config=selector_config,
         )
 
-    # More than 8 query heads per rank exceeds Xe SLM capacity at head_size=576,
-    # so auto-selection must degrade to TritonMLA instead of failing later.
     assert (
         XPUPlatform.get_attn_backend_cls(
             selected_backend=None,
             attn_selector_config=selector_config,
             num_heads=16,
         )
-        == AttentionBackendEnum.TRITON_MLA.get_path()
+        == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
     )
+
+    assert (
+        XPUPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.FLASH_ATTN_MLA,
+            attn_selector_config=selector_config,
+            num_heads=16,
+        )
+        == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
+    )
+
+    with pytest.raises(ValueError, match="Invalid attention backend"):
+        XPUPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.FLASH_ATTN,
+            attn_selector_config=selector_config,
+            num_heads=16,
+        )
 
 
 def test_xpu_varlen_attn_allocates_output_with_value_head_size(monkeypatch):
@@ -1675,10 +1703,6 @@ def _run_backend_correctness(
         hf_config_override=hf_config_override,
     )
     if hf_config_override and current_platform.is_xpu():
-        # create_vllm_config applies hf_config_override only after ModelConfig has
-        # derived model_arch_config, so the simulated head partitioning above is
-        # otherwise dropped. XPU needs it honoured to stay within the 8 query
-        # heads per rank that FlashAttnMLA supports at head_size=576.
         vllm_config.model_config.model_arch_config.total_num_attention_heads = (
             hf_config_override["num_attention_heads"]
         )
