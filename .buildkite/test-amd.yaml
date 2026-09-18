@@ -3580,12 +3580,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
 
-- label: ":amd: (MI355) Entrypoints Integration (Pooling)" # TBD
+- label: ":amd: (MI355) Entrypoints Integration (Pooling) Shard %N" # TBD
   timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
   fast_check: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3593,7 +3594,7 @@ steps:
   optional: true
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/pooling
+  - pytest -v -s entrypoints/pooling --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #-----------------------------------------------------------  mi355 · evals  -----------------------------------------------------------#
 
