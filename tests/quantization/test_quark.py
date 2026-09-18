@@ -11,6 +11,7 @@ import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 import huggingface_hub
@@ -1143,7 +1144,6 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
     scheme = QuarkW8A8Fp8.__new__(QuarkW8A8Fp8)
     scheme.weight_qscheme = "per_channel"
     scheme.is_static_input_scheme = False
-    scheme.input_qscheme = "per_channel"
     scheme.activation_quant_key = kFp8DynamicTokenSym
     scheme.weight_quant_key = kFp8StaticChannelSym
     scheme.out_dtype = dtype
@@ -2136,7 +2136,7 @@ class TestQuarkInt4Format:
                     None,
                     quant_config.quant_config["global_quant_config"]["weight"],
                     quant_config.pack_method,
-                    moe_config,
+                    cast(FusedMoEConfig, moe_config),
                 )
 
             layer = _FakeLayer(moe_config)
@@ -2147,7 +2147,9 @@ class TestQuarkInt4Format:
                 torch.zeros(1, 16, 8 // tp_size, dtype=torch.uint8),
                 requires_grad=False,
             )
-            loader = method.get_weight_loader(layer, weight_loader=None)
+            loader = method.get_weight_loader(
+                cast(RoutedExperts, layer), weight_loader=None
+            )
             loader(
                 param,
                 raw_zp.clone(),
