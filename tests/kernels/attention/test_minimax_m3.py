@@ -997,17 +997,23 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     ],
 )
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
+@pytest.mark.parametrize("longest_seq_len", [1025, 8193])
 def test_decode_index_topk_correctness(
     decode_query_len: int,
     max_decode_query_len: int,
     num_padded_reqs: int,
+    longest_seq_len: int,
 ):
+    """Production BF16 inputs preserve strict oracle ranks without TF32 rounding."""
+    set_random_seed(149)
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
-    active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
+    active_seq_lens = torch.tensor(
+        (7, 129, longest_seq_len), device="cuda", dtype=torch.int32
+    )
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
     prefix_lens = active_seq_lens - decode_query_len
     active_batch = active_seq_lens.numel()
@@ -1029,8 +1035,10 @@ def test_decode_index_topk_correctness(
     block_table[:active_batch] = active_block_table
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        torch.bfloat16
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
 
     actual = minimax_m3_index_decode(
         idx_q,
