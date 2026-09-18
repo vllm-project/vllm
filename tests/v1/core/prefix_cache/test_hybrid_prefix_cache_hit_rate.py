@@ -51,6 +51,20 @@ async def _prefix_cache_counters(
     return counters[names[0]], counters[names[1]]
 
 
+async def _cache_block_size(client: httpx.AsyncClient) -> int:
+    response = await client.get("/metrics")
+    response.raise_for_status()
+    block_sizes = {
+        int(sample.labels["block_size"])
+        for family in text_string_to_metric_families(response.text)
+        if family.name == "vllm:cache_config_info"
+        for sample in family.samples
+        if "block_size" in sample.labels
+    }
+    assert len(block_sizes) == 1, f"expected one cache block size, got {block_sizes}"
+    return block_sizes.pop()
+
+
 async def _wait_for_counters(
     client: httpx.AsyncClient, expected: tuple[float, float]
 ) -> None:
@@ -83,13 +97,13 @@ def server(request):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "server, min_hit_rate",
-    # MTP re-prefills an extra block; both floors reject one more missed block.
-    [pytest.param(False, 0.90, id="base"), pytest.param(True, 0.75, id="mtp")],
+    "server, max_uncached_blocks",
+    # MTP re-prefills an extra block.
+    [pytest.param(False, 1, id="base"), pytest.param(True, 2, id="mtp")],
     indirect=["server"],
 )
 async def test_prefix_cache_hit_rate(
-    server: RemoteOpenAIServer, min_hit_rate: float
+    server: RemoteOpenAIServer, max_uncached_blocks: int
 ) -> None:
     # Isolate sessions so another conversation cannot hide a cache miss.
     salts = [uuid4().hex for _ in range(NUM_CONVERSATIONS)]
@@ -102,6 +116,7 @@ async def test_prefix_cache_hit_rate(
         server.get_async_client() as client,
         httpx.AsyncClient(base_url=server.url_root, timeout=METRICS_TIMEOUT) as metrics,
     ):
+        cache_block_size = await _cache_block_size(metrics)
 
         async def run_conversation(session: int, *, replay: bool) -> tuple[int, int]:
             history = histories[session]
@@ -129,8 +144,10 @@ async def test_prefix_cache_hit_rate(
                 if not replay and turn == 0:
                     assert cached == 0, context
                 else:
-                    assert cached / prompt >= min_hit_rate, (
-                        f"{context}, {min_hit_rate=}"
+                    uncached = prompt - cached
+                    assert uncached <= max_uncached_blocks * cache_block_size, (
+                        f"{context}, {uncached=}, {cache_block_size=}, "
+                        f"{max_uncached_blocks=}"
                     )
                 if replay:
                     assert prompt == prompt_lengths[session][turn], context
