@@ -54,13 +54,9 @@ def _load_reference_case(case_id: int):
 
 def _render_reference_case(case_id: int, **kwargs):
     messages, tools = _load_reference_case(case_id)
-    conversation, _, _ = parse_chat_messages(
-        messages,
-        _model_config(),
-        content_format="string",
-    )
+    # Preserve content blocks for encoding without fetching fixture media.
     return _tokenizer().apply_chat_template(
-        conversation=conversation,
+        conversation=messages,
         messages=messages,
         tools=tools,
         tokenize=False,
