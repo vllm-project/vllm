@@ -12,4 +12,12 @@ pub enum Error {
     EmptyPromptTokenIds { request_id: String },
     #[error("engine-core error")]
     EngineCoreClient(#[from] vllm_engine_core_client::Error),
+    #[error(
+        "sampling mask for request `{request_id}` has {row_count} rows for {token_count} generated tokens"
+    )]
+    SamplingMaskTokenCountMismatch {
+        request_id: String,
+        token_count: usize,
+        row_count: usize,
+    },
 }
