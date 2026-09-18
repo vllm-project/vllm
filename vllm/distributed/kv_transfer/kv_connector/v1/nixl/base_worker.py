@@ -1873,8 +1873,7 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. Returns an Nx3 uint64 array.
-        """
+        the P rank. Returns an Nx3 uint64 array."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
@@ -2657,8 +2656,7 @@ class NixlBaseConnectorWorker:
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
         """Device KV caches of attention layers (mamba states excluded),
-        as consumed by the receive post-process.
-        """
+        as consumed by the receive post-process."""
         assert self.device_kv_caches, (
             "_attention_kv_caches accessed before register_kv_caches"
         )
@@ -3280,7 +3278,8 @@ class NixlBaseConnectorWorker:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
 
         if num_computed_blocks is not None:
             assert num_remote_blocks is not None

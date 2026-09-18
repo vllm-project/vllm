@@ -72,8 +72,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
     """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
     trust_remote_code modules would otherwise fetch from third-party CDNs
-    (often unreachable from US-based CI).
-    """
+    (often unreachable from US-based CI)."""
     if HF_HUB_OFFLINE:
         return
     for repo_id, filename in assets:
@@ -893,8 +892,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         max_wait_seconds: float | None = None,
     ) -> None:
         """Store custom child process function then invoke superclass
-        constructor which will indirectly launch it.
-        """
+        constructor which will indirectly launch it."""
         self.child_process_fxn = child_process_fxn
         super().__init__(
             model=model,

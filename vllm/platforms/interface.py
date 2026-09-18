@@ -42,8 +42,7 @@ def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
     Idempotent: a second call with the same value is a no-op.
     Raises RuntimeError if called again with a different value.
 
-    This is expected to run during single-threaded worker initialization.
-    """
+    This is expected to run during single-threaded worker initialization."""
     global _assigned_physical_gpu_ids
     if _assigned_physical_gpu_ids is not None:
         if _assigned_physical_gpu_ids != ids:

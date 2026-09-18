@@ -856,8 +856,7 @@ class KVCacheManager:
         self, request_id: str, start_token: int, end_token: int
     ) -> list[int]:
         """The request's block ids covering [start_token, end_token), from
-        the groups whose new blocks are zeroed by the worker.
-        """
+        the groups whose new blocks are zeroed by the worker."""
         ids: list[int] = []
         for mgr in self.coordinator.single_type_managers:
             if mgr.records_new_block_ids:

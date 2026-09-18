@@ -141,8 +141,7 @@ class WeightTransferTrainerFactory:
         class_name: str | None = None,
     ) -> None:
         """Register a trainer engine. Same conventions as
-        `WeightTransferEngineFactory.register_engine`.
-        """
+        `WeightTransferEngineFactory.register_engine`."""
         if name in cls._registry:
             raise ValueError(
                 f"Weight transfer trainer engine '{name}' is already registered."

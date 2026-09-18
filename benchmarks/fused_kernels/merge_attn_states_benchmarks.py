@@ -84,8 +84,7 @@ def make_inputs(
 
 def build_configs(head_configs, num_tokens_list, input_dtypes, tp_sizes):
     """Build (num_tokens, num_heads, head_size, dtype_str) config tuples,
-    applying TP division to num_heads and skipping invalid combos.
-    """
+    applying TP division to num_heads and skipping invalid combos."""
     configs = []
     for (_, nh, hs), nt, dtype, tp in itertools.product(
         head_configs, num_tokens_list, input_dtypes, tp_sizes

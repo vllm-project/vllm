@@ -323,8 +323,7 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_system_message(self, parse_function):
         """Test parsing system messages, which are parsed into developer messages
-        with DeveloperContent.
-        """
+        with DeveloperContent."""
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",

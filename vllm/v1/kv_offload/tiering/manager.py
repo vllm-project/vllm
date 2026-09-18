@@ -143,8 +143,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
 class _SecondaryTierFacingParent(ParentManager):
     """Wrapper that implements ParentManager by delegating to the
-    TieringOffloadingManager with exclude_tier_idx set to the origin tier.
-    """
+    TieringOffloadingManager with exclude_tier_idx set to the origin tier."""
 
     __slots__ = ("_m", "_origin_idx")
 

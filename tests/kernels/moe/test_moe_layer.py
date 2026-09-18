@@ -315,8 +315,7 @@ def tp_chunk_gate_up(
     device: torch.device | int | None = None,
 ) -> torch.Tensor:
     """TP-chunk a combined [gate; up] weight, splitting each half separately
-    so every rank gets a portion of both gate and up.
-    """
+    so every rank gets a portion of both gate and up."""
     half = w.shape[dim] // 2
     gate = chunk_by_rank(
         w.narrow(dim, 0, half), tp_rank, tp_size, dim=dim, device=device

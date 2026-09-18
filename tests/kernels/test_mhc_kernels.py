@@ -132,6 +132,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
 
     monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
     draft = SimpleNamespace(
+        use_mega_moe=False,
         use_sequence_parallel=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
@@ -452,7 +453,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -536,7 +537,7 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
         device=DEVICE, dtype=torch.bfloat16
     )
     decoder.attn = lambda positions, x, _: x * 0.5
-    decoder.ffn = lambda x, input_ids: x * 0.25
+    decoder.ffn = lambda x, input_ids, mega_gate_metadata=None: x * 0.25
     with torch.device(DEVICE):
         decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
         decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
@@ -1372,8 +1373,7 @@ def _patch_first_rank_pp_group(monkeypatch):
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     """First finalize (at the end of load_weights) allocates
-    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams.
-    """
+    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1388,8 +1388,7 @@ def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
 def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     """Re-finalizing after a weight refit must copy into the existing
     broadcast tensor so its address stays stable for captured CUDA graphs,
-    while picking up the new hc_attn_fn values.
-    """
+    while picking up the new hc_attn_fn values."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])

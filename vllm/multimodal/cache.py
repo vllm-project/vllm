@@ -606,8 +606,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """Touch the item in shared memory cache to prevent eviction.
-        Increments writer_flag on sender side.
-        """
+        Increments writer_flag on sender side."""
         self._shm_cache.touch(mm_hash)
 
     @override
@@ -822,8 +821,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.
-        Increments reader_count on receiver side.
-        """
+        Increments reader_count on receiver side."""
         assert mm_item is not None
         if "address" in mm_item:
             address = cast(int, mm_item["address"].data)

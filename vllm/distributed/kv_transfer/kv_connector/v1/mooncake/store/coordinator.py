@@ -73,8 +73,7 @@ class ExternalCachedBlockPool:
 
 class MooncakeStoreCoordinator:
     """Mirror of ``HybridKVCacheCoordinator.find_longest_cache_hit`` over an
-    ``ExternalCachedBlockPool``.
-    """
+    ``ExternalCachedBlockPool``."""
 
     def __init__(
         self,

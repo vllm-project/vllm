@@ -108,8 +108,7 @@ class TestDeepseekOCREmptyImagesCrop:
 
     def test_mismatched_image_size_raises(self, processor):
         """Deliberately wrong image_size binding should still be caught
-        by TensorSchema validation.
-        """
+        by TensorSchema validation."""
         small_image = Image.new("RGB", (100, 100), color="green")
 
         result = processor(
@@ -143,8 +142,7 @@ class TestDeepseekOCRInputValidation:
     def test_mismatched_image_count_raises_value_error(self, processor):
         """Two ``<image>`` tokens with one image must raise ValueError, not
         AssertionError (which would yield HTTP 500 and, under ``-O``, silently
-        drop the middle text segment).
-        """
+        drop the middle text segment)."""
         image = Image.new("RGB", (100, 100), color="red")
         with pytest.raises(ValueError, match="does not match number of images"):
             processor(prompt="<image> and <image>", images=[image])

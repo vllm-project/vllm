@@ -1214,8 +1214,7 @@ def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_torchcodec_backend_cuda_decodes_on_gpu(dummy_video_path):
     """With device="cuda", torchcodec decodes via NVDEC and keeps the frames
-    on the GPU instead of returning a host-side numpy array.
-    """
+    on the GPU instead of returning a host-side numpy array."""
     pytest.importorskip("torchcodec")
 
     with open(dummy_video_path, "rb") as f:
@@ -1508,8 +1507,7 @@ def test_glm46v_duration_estimation_from_fps():
 class TestGLMGASamplingCaps:
     """Regression tests for GHSA-58v5-2m8f-94pr: request-controlled fps
     and max_frames must not create intermediate allocations larger than
-    the actual frame count.
-    """
+    the actual frame count."""
 
     @staticmethod
     def _source(
@@ -1563,8 +1561,7 @@ def test_glm5next_backend_selected_for_processor():
     """Glm5NextVideoProcessor maps to the glm5next loader so only the
     sampled frames are decoded instead of the whole container. Both the
     borrowed-config spelling and the dedicated Glm5next class name (landing
-    with the new checkpoint) must resolve.
-    """
+    with the new checkpoint) must resolve."""
     for name in ("Glm5NextVideoProcessor", "Glm5nextVideoProcessor"):
         assert VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(name) == "glm5next"
 
@@ -1586,8 +1583,7 @@ def test_glm5next_backend_indices_match_sampler(
     total_frames, original_fps, duration, fps, max_frames
 ):
     """The loader must select exactly the frames the processor's sampler
-    would, with target.fps mapping onto the raw-fps override.
-    """
+    would, with target.fps mapping onto the raw-fps override."""
     from vllm.transformers_utils.processors.glm5next import (
         glm_sample_frame_indices,
     )
@@ -1615,8 +1611,7 @@ def test_glm5next_backend_indices_match_sampler(
 
 def test_glm5next_backend_metadata_contract():
     """create_hf_metadata reports the subset so the processor skips
-    re-sampling (do_sample_frames=False) and keeps the original totals.
-    """
+    re-sampling (do_sample_frames=False) and keeps the original totals."""
     source = VideoSourceMetadata(total_frames_num=900, original_fps=30.0, duration=30.0)
     target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
     indices = Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
@@ -1645,8 +1640,7 @@ def test_glm5next_backend_metadata_contract():
 
 def _write_gray_video(tmp_path, total_frames, fps, size=(32, 32)):
     """Synthetic clip whose frame i is flat gray level i (near-lossless under
-    mp4v), so a decoded frame's level maps back to its source index.
-    """
+    mp4v), so a decoded frame's level maps back to its source index."""
     cv2 = pytest.importorskip("cv2")
 
     path = tmp_path / f"gray_{total_frames}_{fps}.mp4"
@@ -1687,8 +1681,7 @@ class _CountingCap:
 def test_glm5next_backend_codec_parity(tmp_path, backend):
     """Every codec samples the same GLM indices and decodes the same
     frames; the OpenCV seek reader and torchcodec batched index-exact decode
-    must agree.
-    """
+    must agree."""
     if backend == "torchcodec":
         pytest.importorskip("torchcodec")
 
@@ -1718,8 +1711,7 @@ def test_glm5next_backend_codec_parity(tmp_path, backend):
 
 def test_glm5next_backend_decodes_only_sampled_frames(tmp_path):
     """End to end over a synthetic clip: load_bytes returns exactly the
-    sampler's frame count, with the right frame content at each index.
-    """
+    sampler's frame count, with the right frame content at each index."""
     pytest.importorskip("cv2")
 
     total_frames, fps = 60, 10
@@ -1745,8 +1737,7 @@ def test_glm5next_backend_decodes_only_sampled_frames(tmp_path):
 
 def test_glm5next_read_frames_seeks_past_large_gaps(tmp_path):
     """Sparse targets must not walk the container: the stock reader grabs
-    every frame up to the last index; the GLM reader seeks instead.
-    """
+    every frame up to the last index; the GLM reader seeks instead."""
     cv2 = pytest.importorskip("cv2")
 
     total_frames, fps = 200, 10
@@ -1773,8 +1764,7 @@ def test_glm5next_read_frames_seeks_past_large_gaps(tmp_path):
 
 def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
     """Dense targets keep the sequential walk (seeking would be slower) and
-    return the same frames as the stock reader.
-    """
+    return the same frames as the stock reader."""
     cv2 = pytest.importorskip("cv2")
 
     total_frames, fps = 120, 10

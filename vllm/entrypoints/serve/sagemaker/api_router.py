@@ -30,8 +30,7 @@ EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 def _snapshot_handler_levels() -> list[tuple[logging.Handler, int]]:
     """Snapshot handler levels for loggers that may be affected by third-party
     logging configuration side effects (e.g. model_hosting_container_standards
-    calling configure_root_logger() at import time).
-    """
+    calling configure_root_logger() at import time)."""
     loggers = [logging.getLogger(), logging.getLogger("vllm")]
     seen: set[int] = set()
     snapshot: list[tuple[logging.Handler, int]] = []
@@ -74,8 +73,7 @@ def _attach_router(
     model_config: ModelConfig | None = None,
 ):
     """Register the SageMaker hosting routes (/ping, /invocations) on the
-    app.
-    """
+    app."""
     import model_hosting_container_standards.sagemaker as sagemaker_standards
 
     router = APIRouter()

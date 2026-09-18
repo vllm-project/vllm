@@ -70,8 +70,7 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
 )
 def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
     """Both dynamic-activation INT8 MoE schemes (per-channel + per-tensor
-    weights) select the Triton backend.
-    """
+    weights) select the Triton backend."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key

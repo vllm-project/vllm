@@ -84,8 +84,7 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
-        encoder-only and encoder-decoder attention.
-        """
+        encoder-only and encoder-decoder attention."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,

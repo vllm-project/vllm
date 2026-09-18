@@ -36,8 +36,7 @@ logger = init_logger(__name__)
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
-    model.
-    """
+    model."""
 
     NONE = 0
     """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
@@ -337,8 +336,7 @@ class PassConfig:
 class DynamicShapesType(str, enum.Enum):
     """Types of dynamic shapes handling in torch.compile().
     see  Dynamic shapes and vllm guard dropping in torch_compile.md
-    for more details.
-    """
+    for more details."""
 
     BACKED = "backed"
     """Use backed dynamic shapes. torch.compile() guards on backed dynamic

@@ -63,8 +63,7 @@ _SPLIT_OCCUPANCY_MULTIPLIER = 2
 
 def _compute_num_kv_splits(max_seq_len: int, num_threads: int) -> int:
     """Mirrors TritonMLAImpl's _compute_num_kv_splits, using the CPU thread
-    count in place of SM count.
-    """
+    count in place of SM count."""
     ideal_splits = 1
     while ideal_splits < max(1, max_seq_len // _MIN_WORK_PER_SPLIT):
         ideal_splits *= 2

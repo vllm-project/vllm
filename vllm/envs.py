@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
+    FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
@@ -142,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
@@ -841,6 +843,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
     # Standard unix flag for disabling ANSI color codes
     "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
+    # De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)
+    "FORCE_COLOR": lambda: os.getenv("FORCE_COLOR", "0") != "0",
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL": lambda: (
@@ -1302,6 +1306,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Whether to use aiter fp4 gemm asm.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -2256,8 +2265,7 @@ def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
     Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers.
-    """
+    hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",
@@ -2343,6 +2351,7 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
+        "FORCE_COLOR",
     }
 
     from vllm.config.utils import normalize_value

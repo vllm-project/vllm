@@ -4,9 +4,10 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 from torch._ops import OpOverload
 
 import vllm.envs as envs
@@ -34,6 +35,63 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+KB = 1024
+MB = 1024 * KB
+
+
+def _get_or_create_aiter_qr_rmsnorm_comm(
+    device_comm: Any,
+) -> tuple[int, int, bool] | None:
+    """Create the AITER QR communicator used by fused QR+RMSNorm.
+
+    vLLM's normal QuickReduce communicator owns vLLM C++ QR buffers. The fused
+    QR+RMSNorm kernel added in AITER needs an AITER DeviceComms instance, so we
+    lazily create one on the same TP CPU group and keep it on the vLLM device
+    communicator for reuse.
+    """
+    existing = getattr(device_comm, "_aiter_qr_rmsnorm_comm", None)
+    if existing is False:
+        return None
+    if existing is not None:
+        return existing
+
+    try:
+        import aiter
+    except Exception:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    if not hasattr(aiter, "qr_all_reduce_rmsnorm"):
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    group = getattr(device_comm, "cpu_group", None)
+    if group is None:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    world_size = dist.get_world_size(group=group)
+    rank = dist.get_rank(group=group)
+    if world_size not in (2, 4, 8):
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    qr_max_size_mb = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
+    qr_max_size = None if qr_max_size_mb is None else qr_max_size_mb * MB
+
+    try:
+        ptr = aiter.init_custom_qr(rank, world_size, qr_max_size)
+        handle = aiter.qr_get_handle(ptr)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+        aiter.qr_open_handles(ptr, handles)
+    except Exception:
+        device_comm._aiter_qr_rmsnorm_comm = False
+        return None
+
+    comm = (ptr, world_size, envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16)
+    device_comm._aiter_qr_rmsnorm_comm = comm
+    return comm
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -175,26 +233,18 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    csv_path: str,
-    filters: tuple[tuple[str, object], ...],
-    key_cols: tuple[str, ...] = ("N", "K", "M"),
-) -> set[tuple[int, ...]]:
+    q_dtype_w: torch.dtype, csv_path: str
+) -> set[tuple[int, int, int]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        for col, val in filters:
-            if col not in df.columns:
-                continue
-            if isinstance(val, int):
-                df = df[df[col].astype(int) == val]
-            else:
-                df = df[df[col].astype(str) == str(val)]
-        return set(zip(*(df[c].astype(int) for c in key_cols)))
+        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
     except Exception:
         return set()
 
 
 def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(csv_path, (("q_dtype_w", q_dtype_w),))
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -999,6 +1049,53 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     ca = aiter_ar.aiter_ca
     use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
+    if not use_1stage:
+        from vllm.distributed import get_tp_group
+
+        device_comm = get_tp_group().device_communicator
+        qr_comm = getattr(device_comm, "qr_comm", None)
+        hidden_dim = input_.shape[-1]
+        row_size = hidden_dim * input_.element_size()
+        fused_qr_rmsnorm_ok = (
+            qr_comm is not None
+            and not getattr(qr_comm, "disabled", True)
+            and hasattr(qr_comm, "should_quick_allreduce")
+            and qr_comm.should_quick_allreduce(input_)
+            and input_.shape == residual.shape
+            and input_.dtype in (torch.bfloat16, torch.float16)
+            and input_.dtype == residual.dtype
+            and input_.dtype == weight.dtype
+            and weight.dim() == 1
+            and weight.numel() == hidden_dim
+            and input_.numel() % hidden_dim == 0
+            and row_size > 0
+            and row_size <= 32 * KB
+            and (32 * KB) % row_size == 0
+        )
+        if fused_qr_rmsnorm_ok:
+            assert qr_comm is not None
+            aiter_qr_comm = _get_or_create_aiter_qr_rmsnorm_comm(device_comm)
+            if aiter_qr_comm is not None:
+                import aiter
+
+                ptr, _, cast_bf2half = aiter_qr_comm
+                quant_level = qr_comm._get_qr_quant_level(input_)
+                out = torch.empty_like(input_)
+                residual_out = torch.empty_like(residual)
+                aiter.qr_all_reduce_rmsnorm(
+                    ptr,
+                    input_,
+                    residual,
+                    residual_out,
+                    out,
+                    weight,
+                    epsilon,
+                    hidden_dim,
+                    quant_level,
+                    cast_bf2half,
+                )
+                return out, residual_out
+
     result = ca.custom_fused_ar_rms(
         input_,
         residual,
@@ -1796,6 +1893,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
+        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
@@ -1863,6 +1961,8 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+    # TODO: Consolidate under _LINEAR_ENABLED
+    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -1892,6 +1992,7 @@ class rocm_aiter_ops:
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
@@ -1974,8 +2075,7 @@ class rocm_aiter_ops:
         enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
         so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
         and gates only the Triton paths rdna4 uses. The gfx12 analog of
-        `is_enabled()`.
-        """
+        `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
         from vllm.platforms.rocm import on_rdna4
@@ -2134,7 +2234,7 @@ class rocm_aiter_ops:
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
-        return cls._AITER_ENABLED and on_gfx950()
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -3329,20 +3429,6 @@ class rocm_aiter_ops:
 
         csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
         return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
-
-    @staticmethod
-    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
-        if not current_platform.is_rocm():
-            return False
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-        gfx = aiter_gemm_a8w8_ops.get_gfx()
-        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
-        return (n, k) in _load_gemm_tuned_configs(
-            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
-        )
 
     @staticmethod
     def shuffle_weight(

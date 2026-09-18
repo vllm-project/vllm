@@ -67,8 +67,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_system_message(self):
         """System messages carry developer instructions and must be rendered
-        as developer messages with DeveloperContent.
-        """
+        as developer messages with DeveloperContent."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "system", "content": "Be helpful."},
             prev_responses=[],
@@ -90,8 +89,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_developer_message_gets_instructions_prefix(self):
         """Developer messages must use DeveloperContent which adds the
-        '# Instructions' header the model was trained on.
-        """
+        '# Instructions' header the model was trained on."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "developer", "content": "Be concise."},
             prev_responses=[],
@@ -121,8 +119,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_developer_message_array_content_concatenated(self):
         """Array content in developer messages is flattened and rendered
-        via DeveloperContent with the '# Instructions' header.
-        """
+        via DeveloperContent with the '# Instructions' header."""
         msg = response_input_to_harmony(
             {
                 "type": "message",
@@ -213,8 +210,7 @@ class TestResponseInputToHarmonyMessage:
 
     def test_function_call_output_uses_most_recent_matching_call(self):
         """When multiple prev_responses share a call_id, the last one wins
-        because the search is reversed.
-        """
+        because the search is reversed."""
         earlier = ResponseFunctionToolCall(
             id="fc_old",
             call_id="call_test",

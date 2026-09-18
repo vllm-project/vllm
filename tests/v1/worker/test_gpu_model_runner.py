@@ -73,8 +73,7 @@ DEVICE_TYPE = current_platform.device_type
 def _restore_default_dtype():
     """Several tests here set the process-wide default dtype to float16 and
     previously leaked it, corrupting later float-sensitive tests in the same
-    pytest process (torch.randn silently produced fp16).
-    """
+    pytest process (torch.randn silently produced fp16)."""
     old = torch.get_default_dtype()
     yield
     torch.set_default_dtype(old)
@@ -173,6 +172,20 @@ def test_freeze_gc_disables_and_restores_automatic_gc(
             gc.enable()
         else:
             gc.disable()
+
+
+def test_prepare_padding_mask_marks_sequence_parallel_padding():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_padding = torch.empty(8, dtype=torch.bool)
+
+    mask = runner._prepare_padding_mask(1, 8)
+
+    assert mask.tolist() == [False, True, True, True, True, True, True, True]
+    assert mask.data_ptr() == runner.is_padding.data_ptr()
+
+    mask = runner._prepare_padding_mask(0, 8)
+
+    assert mask.all()
 
 
 @pytest.fixture
@@ -1454,8 +1467,7 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
 
 def test_hybrid_block_table_initialization():
     """Test hybrid block table with different kernel and kvcache_manager block
-    sizes.
-    """
+    sizes."""
     from vllm.v1.worker.block_table import BlockTable
 
     # Test configuration: kvcache_manager block size = 32,

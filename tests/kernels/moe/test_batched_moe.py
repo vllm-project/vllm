@@ -129,8 +129,7 @@ def test_batched_mm(
     per_act_token_quant: bool,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
-    and those tests will be skipped on unsupported hardware.
-    """
+    and those tests will be skipped on unsupported hardware."""
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -269,8 +268,7 @@ def test_fused_moe_batched_experts(
     workspace_init,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
-    and those tests will be skipped on unsupported hardware.
-    """
+    and those tests will be skipped on unsupported hardware."""
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -651,8 +649,7 @@ def test_batched_experts_masked_activation_end_to_end(
 def test_batched_experts_end_to_end(m, n, k, e, topk):
     """End-to-end BatchedTritonExperts via the reference (no-comms)
     BatchedPrepareAndFinalize, validated against a torch reference. Exercises
-    the device-enablement path.
-    """
+    the device-enablement path."""
     from vllm.v1.worker.workspace import init_workspace_manager
 
     set_random_seed(7)

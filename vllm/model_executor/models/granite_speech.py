@@ -462,8 +462,7 @@ class GraniteSpeechConformerConvModule(nn.Module):
 
 class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
-    attention, and convolutional layers.
-    """
+    attention, and convolutional layers."""
 
     def __init__(self, config: PretrainedConfig, prefix: str = ""):
         super().__init__()

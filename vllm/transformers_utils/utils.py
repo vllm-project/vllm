@@ -116,8 +116,7 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
 
 def convert_model_repo_to_path(model_repo: str) -> str:
     """When VLLM_USE_MODELSCOPE is True convert a model
-    repository string to a Path str.
-    """
+    repository string to a Path str."""
     if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
         return model_repo
     from modelscope.utils.file_utils import get_model_cache_root

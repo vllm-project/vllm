@@ -858,8 +858,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
     """Match HF (transformers v5.7+) parameter naming: pre_norm/linear_1/
-    act/linear_2 (instead of pre_norm + Sequential(mlp.0/mlp.2)).
-    """
+    act/linear_2 (instead of pre_norm + Sequential(mlp.0/mlp.2))."""
 
     def __init__(
         self,

@@ -126,8 +126,7 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
     """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
-    these tests, so callers don't have to pass it at every site.
-    """
+    these tests, so callers don't have to pass it at every site."""
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -326,7 +325,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
+    """Restore the final host page when completing an indexer-only import."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -361,11 +360,15 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    # The local prefix is adopted from shadow pages (GPU-resident), while the
-    # externally imported page stays host-backed until its tail allocation.
     assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
+    assert not resident[2].is_null
     assert not resident[3].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+    coordinator.finish_host_import(resumed.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1 and transfers[0].restore
+    assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
 
 def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
@@ -466,7 +469,8 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     )
     allocated = manager.get_blocks(resumed.request_id).blocks
     assert len(allocated[0]) == host_blocks
-    assert allocated[2][1].is_null == (external > 0)
+    assert allocated[2][1].is_null == (host_blocks > 2)
+    assert not allocated[2][-1].is_null
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
@@ -489,6 +493,85 @@ def allocate_external_prefix(
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
     )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])
+def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
+    """Import every real token and restore the page used by last-token replay."""
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
+    connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    request.kv_transfer_params = {"do_remote_prefill": True}
+    count, is_async = connector.get_num_new_matched_tokens(request, 0)
+    assert count == num_tokens and is_async
+    assert allocate_external_prefix(manager, request, count) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    assert len(source) == len(resident) == (num_tokens + 15) // 16
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1
+    restore = transfers[0]
+    assert restore.restore and not restore.after_forward
+    assert restore.host_block_id == source[-1].block_id
+    assert restore.resident_block_ids == (resident[-1].block_id,)
+    request.num_computed_tokens = count
+    scheduler = SimpleNamespace(
+        connector=connector,
+        kv_cache_manager=manager,
+        failed_recving_kv_req_ids=set(),
+        finished_recving_kv_req_ids={request.request_id},
+    )
+    Scheduler._update_waiting_for_remote_kv(scheduler, request)
+    assert request.num_tokens - request.num_computed_tokens == 1
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+    assert coordinator.build_row_mirrors([(request.request_id, num_tokens - 1, 1)])
+    # A pending restore must not expose uninitialized GPU copies to prefix hits.
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 2
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 1
+    assert coordinator.request_states[request.request_id].valid_pages == set(
+        range(num_tokens // HISPARSE_BLOCK_SIZE)
+    )
+    if num_tokens % HISPARSE_BLOCK_SIZE:
+        assert source[-1].block_hash is None
+    else:
+        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+
+
+def test_hisparse_aborted_tail_restore_retains_both_endpoints():
+    """An abort cannot recycle storage still used by a queued tail restore."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    request = make_request("import", list(range(17)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, 17) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    host_tail, gpu_tail = source[-1], resident[-1]
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    restore = coordinator.build_offload_command().page_transfers[0]
+    manager.free(request)
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
@@ -670,7 +753,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
-        11,
+        12,
         16,
         transfer_device_cache=True,
     )
@@ -1128,9 +1211,10 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
     assert len(resident) == num_prompt_blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
-    assert manager.block_pool.get_num_free_blocks() == 1
+    assert manager.block_pool.get_num_free_blocks() == 0
 
 
 def test_hisparse_external_import_survives_capacity_retry():
@@ -1150,7 +1234,8 @@ def test_hisparse_external_import_survives_capacity_retry():
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
 
 
@@ -3330,8 +3415,7 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_stored_event_group_idx(group_id: int):
     """Test BlockStored events emitted by cache_full_blocks carry the correct
-    group_idx.
-    """
+    group_idx."""
     block_size = 4
     num_tokens = block_size * 2
 
@@ -3624,8 +3708,7 @@ def test_block_removed_event_group_idx(group_id: int):
 def test_emit_cached_block_events():
     """emit_cached_block_events emits one BlockStored for already-cached
     (reused) prefix blocks, carrying the correct group_idx /
-    parent_block_hash / token_ids, and without mutating block state.
-    """
+    parent_block_hash / token_ids, and without mutating block state."""
     block_size = 4
     num_cached_blocks = 3
     kv_cache_group_id = 1
@@ -3738,8 +3821,7 @@ def test_emit_cached_block_events_zero_cached():
 
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
-    length is divisible by block size.
-    """
+    length is divisible by block size."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=10),
@@ -4142,8 +4224,7 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
     (its right-to-left scan stops once a contiguous match is found). Blocks
     earlier in the segment can never serve a hit, so
     ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
-    polluting the prefix-cache hash map.
-    """
+    polluting the prefix-cache hash map."""
     block_size = 8
     # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
     # tail = ceil(7/8) = 1; per_segment = 32/8 = 4.
@@ -4214,8 +4295,7 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     Chunks past the last lcm-aligned boundary can never participate in a
     cache hit (find_longest_cache_hit always returns lcm-aligned hits), so
     caching them only pollutes the prefix-cache hash map and keeps blocks
-    on the LRU list that could otherwise return to the free pool.
-    """
+    on the LRU list that could otherwise return to the free pool."""
     block_size = 16
     # Full attn block_size=32, SWA block_size=16 -> lcm=32.
     kv_cache_config = KVCacheConfig(
@@ -4350,8 +4430,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
 )
 def test_hybrid_local_kv_retention_interval_rejects_invalid(interval, expected_match):
     """A retention interval that is negative or not a multiple of
-    scheduler_block_size errors out at construction time.
-    """
+    scheduler_block_size errors out at construction time."""
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -4821,8 +4900,7 @@ def test_block_lookup_cache_multi_blocks_per_key():
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     """Hybrid full+SWA model with a pool sized at the startup minimum should
     admit a prompt longer than the SWA cap, because SlidingWindowManager
-    recycles blocks during chunked prefill (issue #39734).
-    """
+    recycles blocks during chunked prefill (issue #39734)."""
     block_size = 16
     sliding_window = 4 * block_size  # 64 tokens
     max_num_batched_tokens = 8 * block_size  # 128 tokens
@@ -4917,8 +4995,7 @@ def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
 
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     """The cap only loosens the SWA group; a prompt that exceeds the
-    full-attention pool capacity must still be rejected.
-    """
+    full-attention pool capacity must still be rejected."""
     block_size = 16
     sliding_window = 4 * block_size
     max_num_batched_tokens = 8 * block_size
@@ -5037,8 +5114,7 @@ def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheB
     without removing them. These ref_cnt==0 blocks stand in for evictable
     cache-hit blocks left behind by a previous (e.g. preempted) request, and
     sitting at the head guarantees a later group's external ``get_new_blocks``
-    would contend for them on unpatched code (issue #33775).
-    """
+    would contend for them on unpatched code (issue #33775)."""
     blocks: list[KVCacheBlock] = []
     head = manager.block_pool.free_block_queue.fake_free_list_head
     for _ in range(num_blocks):
@@ -5049,8 +5125,7 @@ def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheB
 
 def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
     """No physical block may be handed out twice across groups, and every
-    block referenced by the request must have a live ref_cnt.
-    """
+    block referenced by the request must have a live ref_cnt."""
     block_ids = manager.get_blocks(req_id).get_block_ids()
     flat = [block_id for group in block_ids for block_id in group]
     assert len(set(flat)) == len(flat), "Block IDs are not unique across groups"
@@ -5077,8 +5152,7 @@ def _cross_group_cache_hit(
 ) -> Request:
     """Allocate ``req_id`` with a per-group local prefix hit plus external
     (connector) computed tokens, driving the coordinator's two-phase path.
-    Returns the allocated request so callers can free it (e.g. to preempt).
-    """
+    Returns the allocated request so callers can free it (e.g. to preempt)."""
     block_size = _two_phase_block_size(manager)
     hit_blocks = _take_free_blocks(manager, num_groups * local_blocks_per_group)
     cache_hit = KVCacheBlocks(
@@ -5173,8 +5247,7 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
     """Dense retention: freeing an SWA request must place its
     uncached scratch blocks at the front of the free queue (recycled first)
     and keep its cached checkpoint blocks at the back (retained for prefix
-    hits). This split is always-on, independent of the retention interval.
-    """
+    hits). This split is always-on, independent of the retention interval."""
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -5285,8 +5358,7 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
 def test_pure_swa_retention_interval_caches_sparse_tails():
     """Sparse retention must work for a pure-SWA single-group model, not just
     hybrid models: only the per-interval tails plus the latest replay tail are
-    cached, and a replay still hits the latest replayable boundary.
-    """
+    cached, and a replay still hits the latest replayable boundary."""
     block_size = 16
     manager = _make_pure_swa_manager(
         block_size, sliding_window=block_size, retention_interval=64
@@ -5358,8 +5430,7 @@ def test_pure_swa_retention_latest_only():
 
 def test_pure_swa_dense_retention_caches_all():
     """With retention set to ``None``, a pure-SWA model keeps dense behavior:
-    every block boundary is a potential hit, so all blocks are cached.
-    """
+    every block boundary is a potential hit, so all blocks are cached."""
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
 
@@ -5388,8 +5459,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     """Mamba state-snapshot retention: with a configured retention interval,
     the manager keeps one cached state per interval-sized segment (plus the
     latest replay boundary) instead of a snapshot per block, which is what
-    lets a small attention block_size avoid Mamba dominating the KV pool.
-    """
+    lets a small attention block_size avoid Mamba dominating the KV pool."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
@@ -5427,8 +5497,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
     ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
     pin the single state block ending on that boundary so sparse retention does
-    not defeat cross-request shared-prefix reuse.
-    """
+    not defeat cross-request shared-prefix reuse."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
@@ -5476,8 +5545,7 @@ def test_mamba_shared_prefix_survives_zero_retention():
     detection) keeps its Mamba state block cached under
     ``prefix_cache_retention_interval=0``, which otherwise retains only the
     end-of-prompt replay boundary. Without this, a shared prefix (junction
-    before ``num_prompt``) would be recomputed by every sharing request.
-    """
+    before ``num_prompt``) would be recomputed by every sharing request."""
     block_size = 16
 
     # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
@@ -5519,8 +5587,7 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     detecting request must stay reusable by a later request under
     ``prefix_cache_retention_interval=0``. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
-    is preserved.
-    """
+    is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):
@@ -5603,8 +5670,7 @@ def test_swa_reachable_block_mask_final_partial_segment():
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single
-    block), so a windowed hit can land there under sparse retention.
-    """
+    block), so a windowed hit can land there under sparse retention."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
     block_size = 16
@@ -5649,8 +5715,7 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
 def test_swa_reachable_block_mask_with_dcp_scaling():
     """DCP shards each block's KV across ranks, scaling the effective block size.
     Verify that dcp_world_size > 1 scales block size in reachability calculations,
-    producing different masks than dcp_world_size=1.
-    """
+    producing different masks than dcp_world_size=1."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
     block_size = 16
@@ -5709,8 +5774,7 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
     multiple of the DCP-scaled block size) cannot be represented exactly. This
     happens for hybrid offloading (e.g. Gemma), where alignment_tokens is the
     full-attention chunk size and need not divide the SWA block size. The mask
-    must fall back to dense (None) rather than raise.
-    """
+    must fall back to dense (None) rather than raise."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
     spec = SlidingWindowSpec(
@@ -5738,8 +5802,7 @@ def test_mamba_reachable_block_mask_ignores_dcp():
     """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
     state block spans kv_cache_spec.block_size tokens regardless of DCP. The
     mask must not scale by dcp_world_size, so retention granularity is
-    identical for any DCP world size.
-    """
+    identical for any DCP world size."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     spec = MambaSpec(
@@ -5773,8 +5836,7 @@ def test_mamba_reachable_block_mask_ignores_dcp():
 
 def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
     """A large DCP world size must not scale the Mamba block size, so it can
-    never collapse sparse retention into dense caching.
-    """
+    never collapse sparse retention into dense caching."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     spec = MambaSpec(
@@ -5809,8 +5871,7 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``prefix_cache_retention_interval=0``. Without
     the pin the junction window is masked out and a later request misses; with
-    it (and under dense) reuse is preserved.
-    """
+    it (and under dense) reuse is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):

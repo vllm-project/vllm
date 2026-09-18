@@ -51,8 +51,7 @@ async def generate_mock_outputs(
     num_turns, prompt_token_counts, output_token_counts, cached_token_counts=None
 ):
     """Generate a sequence of mock RequestOutput objects to simulate multiple
-    turns.
-    """
+    turns."""
     if cached_token_counts is None:
         cached_token_counts = [0] * num_turns
 
@@ -72,8 +71,8 @@ async def generate_mock_outputs(
 class FakeHarmonyParser(HarmonyParser):
     def __init__(self):
         # Skip HarmonyParser initialization and script outputs directly.
-        self.reasoning_parser = None
-        self.tool_parser = None
+        self._reasoning_parser = None
+        self._tool_parser = None
         self._chunk_results: list[ChunkResult] = []
         self._flush_results: list[list[Segment]] = []
         self.processed_chunks: list[list[int]] = []
@@ -271,8 +270,7 @@ def test_reasoning_tokens_counting():
 
 def test_preamble_tokens_not_counted_as_reasoning():
     """Preambles (commentary with no recipient) are visible user text,
-    not hidden reasoning. They must NOT inflate num_reasoning_tokens.
-    """
+    not hidden reasoning. They must NOT inflate num_reasoning_tokens."""
     context, parser = make_harmony_context()
     parser.enqueue_chunk_result(reasoning_token_count=0)
 
@@ -289,8 +287,7 @@ def test_preamble_tokens_not_counted_as_reasoning():
 
 def test_commentary_with_recipient_counted_as_reasoning():
     """Commentary directed at a tool (recipient != None) is hidden from
-    the user, so it should still count as reasoning tokens.
-    """
+    the user, so it should still count as reasoning tokens."""
     context, parser = make_harmony_context()
     parser.enqueue_chunk_result(reasoning_token_count=3)
 
@@ -349,8 +346,7 @@ async def test_single_turn_no_tool_output():
 @pytest.mark.asyncio
 async def test_negative_tool_tokens_edge_case():
     """Test edge case where calculation could result in negative tool
-    tokens. We should log an error and clamp the value to 0.
-    """
+    tokens. We should log an error and clamp the value to 0."""
     # Use patch to check if logger.error was called
     with patch("vllm.entrypoints.openai.responses.context.logger.error") as mock_log:
         context, _ = make_harmony_context(available_tools=["browser"])
@@ -686,12 +682,12 @@ def create_simple_context_output(
     prompt="Test prompt",
     prompt_token_ids=None,
     num_cached_tokens=0,
+    num_cache_creation_tokens=None,
     logprobs=None,
     finished=True,
 ):
     """Helper to create a RequestOutput with customizable text for
-    SimpleContext tests.
-    """
+    SimpleContext tests."""
     if token_ids is None:
         token_ids = []
     return RequestOutput(
@@ -712,6 +708,7 @@ def create_simple_context_output(
         ],
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -832,6 +829,7 @@ def test_simple_context_token_counting():
             token_ids=[10, 11],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
     context.append_output(
@@ -840,12 +838,14 @@ def test_simple_context_token_counting():
             token_ids=[12],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
 
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
+    assert context.num_cache_creation_tokens == 3
 
 
 def test_simple_context_final_output():
@@ -875,8 +875,7 @@ def test_simple_context_final_output():
 
 def test_simple_context_output_messages_empty_text_with_tokens():
     """output_messages should be returned when tokens exist even if text is
-    empty (e.g. special tokens).
-    """
+    empty (e.g. special tokens)."""
     context = SimpleContext()
     context.append_output(
         create_simple_context_output(
@@ -894,8 +893,7 @@ def test_simple_context_output_messages_empty_text_with_tokens():
 
 def test_simple_context_output_messages_no_mutation():
     """Each call to output_messages returns a fresh list; callers can't
-    corrupt internal state.
-    """
+    corrupt internal state."""
     context = SimpleContext()
     context.append_output(
         create_simple_context_output(

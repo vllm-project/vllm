@@ -131,8 +131,7 @@ def test_has_cache_item_false_when_not_consumer(monkeypatch):
 
 def test_connector_keys_on_identifier_not_mm_hash(monkeypatch):
     """The connector must key the encoder cache on feature.identifier (what
-    has_cache_item is called with), NOT feature.mm_hash.
-    """
+    has_cache_item is called with), NOT feature.mm_hash."""
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("PROC_KEY", length=1, identifier="ENC_KEY")])
     s.update_state_after_alloc(req, 0)
@@ -202,8 +201,7 @@ def test_loads_only_serves_hashes_touched_this_step(monkeypatch):
 
 def test_repeated_reload_same_step_loads_once(monkeypatch):
     """The same mm_hash requested twice in one step must appear in
-    meta.loads exactly once.
-    """
+    meta.loads exactly once."""
     s = _make_scheduler(monkeypatch)
     _seed_cached(s, "a", n_blocks=2)
 
@@ -226,8 +224,7 @@ def test_load_not_emitted_for_uncached_entry(monkeypatch):
 def test_load_pin_protects_blocks_until_completion(monkeypatch):
     """Loaded blocks stay pinned until the worker reports the load memcpy
     complete. Observable: a save that needs eviction cannot reclaim a
-    still-pinned loaded entry, but can once the completion report arrives.
-    """
+    still-pinned loaded entry, but can once the completion report arrives."""
     # 2 blocks, both occupied by "a" (ready).
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "a", n_blocks=2)
@@ -254,8 +251,7 @@ def test_load_pin_protects_blocks_until_completion(monkeypatch):
 
 def _can_evict(s: ECCPUScheduler, mm_hash: str, n_blocks: int) -> bool:
     """Whether a new save of `mm_hash` can claim `n_blocks`, i.e. whether the
-    blocks currently held by other entries are reclaimable.
-    """
+    blocks currently held by other entries are reclaimable."""
     s.update_state_after_alloc(_Request([_Feature(mm_hash, length=n_blocks)]), 0)
     meta = s.build_connector_meta(scheduler_output=None)
     return mm_hash in meta.saves
@@ -315,8 +311,7 @@ def test_late_report_does_not_release_a_later_load_of_same_hash(monkeypatch):
 
 def test_region_full_skips_save_and_never_blocks(monkeypatch):
     """When the region is fully occupied by pinned entries, new saves are
-    silently skipped and ensure_cache_available never blocks.
-    """
+    silently skipped and ensure_cache_available never blocks."""
     s = _make_scheduler(monkeypatch, num_blocks=1)
     _seed_cached(s, "pinned", n_blocks=1)
     s._cache.pin("pinned")
@@ -335,8 +330,7 @@ def test_region_full_skips_save_and_never_blocks(monkeypatch):
 
 def test_producer_only_never_emits_loads(monkeypatch):
     """A producer-only scheduler must never populate meta.loads, even when
-    entries are ready.
-    """
+    entries are ready."""
     s = _make_scheduler(monkeypatch, ec_role="ec_producer")
     req = _Request([_Feature("h1", length=1)])
 
@@ -378,8 +372,7 @@ def test_consumer_only_has_cache_item(monkeypatch):
 
 def test_save_not_emitted_for_already_cached_entry(monkeypatch):
     """An entry already in the cache (from a prior save) must not trigger
-    a second allocation or appear in meta.saves again.
-    """
+    a second allocation or appear in meta.saves again."""
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("h1", length=1)])
 
@@ -400,8 +393,7 @@ def test_save_not_emitted_for_already_cached_entry(monkeypatch):
 
 def test_update_connector_output_ignores_foreign_meta(monkeypatch):
     """A worker output whose payload is not an ECCPUWorkerMetadata is a
-    no-op — no cache mutation, no crash.
-    """
+    no-op — no cache mutation, no crash."""
     s = _make_scheduler(monkeypatch)
     _seed_cached(s, "a", n_blocks=1)
 
@@ -415,8 +407,7 @@ def test_update_connector_output_ignores_foreign_meta(monkeypatch):
 
 def test_update_connector_output_ignores_unknown_report(monkeypatch):
     """Reports for a never-seen save hash or a transfer id this scheduler never
-    dispatched are dropped rather than mutating unrelated state.
-    """
+    dispatched are dropped rather than mutating unrelated state."""
     s = _make_scheduler(monkeypatch)
     s.update_connector_output(_WorkerOutput(saves=["gone"], loads=[4242]))
     assert s.has_cache_item("gone") is False
@@ -428,8 +419,7 @@ def test_update_connector_output_ignores_unknown_report(monkeypatch):
 
 def test_has_pending_push_work_tracks_inflight_save(monkeypatch):
     """A dispatched-but-unconfirmed save keeps push work pending until the
-    completion report marks it ready.
-    """
+    completion report marks it ready."""
     s = _make_scheduler(monkeypatch)
     assert s.has_pending_push_work() is False
 
@@ -444,8 +434,7 @@ def test_has_pending_push_work_tracks_inflight_save(monkeypatch):
 
 def test_has_pending_push_work_tracks_inflight_load(monkeypatch):
     """A dispatched-but-unconfirmed load keeps push work pending until the
-    unpin completion report arrives.
-    """
+    unpin completion report arrives."""
     s = _make_scheduler(monkeypatch)
     _seed_cached(s, "a", n_blocks=1)
     assert s.has_pending_push_work() is False  # ready + unpinned
@@ -464,8 +453,7 @@ def test_has_pending_push_work_tracks_inflight_load(monkeypatch):
 
 def test_shutdown_disables_roles_and_cleans_region(monkeypatch):
     """After shutdown the scheduler serves no items and the region is
-    cleaned up.
-    """
+    cleaned up."""
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "a", n_blocks=2)
     assert s.has_cache_item("a") is True
