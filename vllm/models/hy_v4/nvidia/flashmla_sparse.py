@@ -255,10 +255,10 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             if out is None:
                 q_padded = q.new_zeros((q.shape[0], padded_num_heads, q.shape[2]))
             else:
-                buffers = current_workspace_manager().get_simultaneous(
+                *_, q_padded, _, _ = current_workspace_manager().get_simultaneous(
                     *self.workspace_specs
                 )
-                q_padded = buffers[self.prefill_buffer_index][:num_tokens]
+                q_padded = q_padded[:num_tokens]
                 q_padded[:, actual_num_heads:].zero_()
             q_padded[:, :actual_num_heads, :] = q
             q = q_padded

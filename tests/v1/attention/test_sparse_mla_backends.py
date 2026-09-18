@@ -125,9 +125,6 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
 )
-SPARSE_BACKEND_BATCH_SPECS["multi_chunk_prefill"] = BatchSpec(
-    seq_lens=[256] * 2, query_lens=[256] * 2
-)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -426,13 +423,12 @@ def test_sparse_backend_decode_correctness(
     k_scale: float,
     monkeypatch,
 ):
-    if batch_name == "multi_chunk_prefill":
-        if (
-            backend_cls != FlashMLASparseBackend
-            or kv_cache_dtype != "fp8_ds_mla"
-            or tensor_parallel_size != 4
-        ):
-            pytest.skip("Exercises FlashMLA's separate FP8 prefill chunks")
+    if (
+        batch_name == "large_q_pure_prefill"
+        and backend_cls == FlashMLASparseBackend
+        and kv_cache_dtype == "fp8_ds_mla"
+        and tensor_parallel_size == 4
+    ):
         monkeypatch.setattr(
             "vllm.v1.attention.backends.mla.flashmla_sparse.split_prefill_chunks",
             lambda rows, capacity: [(i, i + 1) for i in range(len(rows))],
