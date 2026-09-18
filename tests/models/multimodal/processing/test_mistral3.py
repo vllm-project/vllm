@@ -8,7 +8,10 @@ from PIL import Image
 from transformers import BatchFeature
 from transformers.models.pixtral import PixtralProcessor
 
-from vllm.model_executor.models.lightonocr import LightOnOCRProcessingInfo
+from vllm.model_executor.models.lightonocr import (
+    LightOnOCRForConditionalGeneration,
+    LightOnOCRProcessingInfo,
+)
 from vllm.model_executor.models.mistral3 import Mistral3HFEncoderInfo
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.model_executor.models.vision import FusedInputNorm
@@ -161,6 +164,8 @@ def test_mm_device_do_normalize():
 
 
 def test_lightonocr_keeps_vision_config_image_size():
+    assert not LightOnOCRForConditionalGeneration.supports_mm_device_do_normalize
+
     ctx = build_model_context(
         _LIGHTON_MODEL_ID,
         mm_processor_kwargs={"size": {"longest_edge": 1008}},
