@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
+    VLLM_MAX_VIDEO_DECODE_FRAMES: int = 36_000
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
@@ -989,6 +990,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum size in MB for a single remote media download. The limit is
     # enforced while streaming the response body so oversized or infinite
     # responses cannot grow the API server heap without bound. Default is 256.
+    "VLLM_MAX_VIDEO_DECODE_FRAMES": lambda: int(
+        os.getenv("VLLM_MAX_VIDEO_DECODE_FRAMES", "36000")
+    ),
     "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB", "256")
     ),
@@ -2449,6 +2453,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_MAX_EMBED_DECODE_BYTES",
         "VLLM_MAX_IMAGE_PIXELS",
+        "VLLM_MAX_VIDEO_DECODE_FRAMES",
         "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
         "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB",
         "VLLM_VIDEO_LOADER_BACKEND",

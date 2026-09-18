@@ -152,6 +152,23 @@ def test_opencv_video_metadata_matches_sampled_frame_timeline(tmp_path):
     assert metadata["total_num_frames"] == 4
 
 
+def test_video_media_io_decode_frame_limit_rejected(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """VideoMediaIO rejects videos whose OpenCV walk exceeds the frame cap."""
+    monkeypatch.setattr(envs, "VLLM_MAX_VIDEO_DECODE_FRAMES", 5)
+    image_path = f"{tmp_path}/test_limit_image.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/test_limit_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=20, fps=10.0)
+
+    video_io = VideoMediaIO(ImageMediaIO())
+    with open(video_path, "rb") as f:
+        data = f.read()
+    with pytest.raises(ValueError, match="VLLM_MAX_VIDEO_DECODE_FRAMES"):
+        video_io.load_bytes(data)
+
+
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
