@@ -51,21 +51,30 @@ def is_pin_memory_available() -> bool:
     return current_platform.is_pin_memory_available()
 
 
+_uva_available: bool | None = None
+
+
 def is_uva_available() -> bool:
     """Check if Unified Virtual Addressing (UVA) is available."""
+    global _uva_available
+    if _uva_available is not None:
+        return _uva_available
+
     from vllm.platforms import current_platform
 
     if current_platform.is_cpu():
-        return True
+        _uva_available = True
     # UVA requires pinned memory.
-    if not is_pin_memory_available():
-        return False
-    if not _accelerator_is_initialized():
-        # The coherence probe needs a live context. Callers that run before the
-        # worker sets its device get the optimistic answer, uncached; the
-        # worker-side call decides, and every consumer falls back safely.
+    elif not is_pin_memory_available():
+        _uva_available = False
+    elif _accelerator_is_initialized():
+        _uva_available = _uva_alias_is_coherent()
+    else:
+        # No accelerator context to probe with yet. Answer optimistically
+        # without caching; the worker-side call resolves it, and every consumer
+        # falls back safely if it says no.
         return True
-    return _uva_alias_is_coherent()
+    return _uva_available
 
 
 def _accelerator_is_initialized() -> bool:
@@ -78,7 +87,6 @@ def _accelerator_is_initialized() -> bool:
     return False
 
 
-@cache
 def _uva_alias_is_coherent() -> bool:
     """Check that a device view of pinned host memory tracks later host writes.
 

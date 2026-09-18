@@ -221,9 +221,9 @@ def test_staged_write_inflight(uva_target, dtype):
 
 @pytest.fixture
 def uncached_uva_probe():
-    platform_utils._uva_alias_is_coherent.cache_clear()
+    platform_utils._uva_available = None
     yield
-    platform_utils._uva_alias_is_coherent.cache_clear()
+    platform_utils._uva_available = None
 
 
 @pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
