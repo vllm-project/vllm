@@ -47,7 +47,7 @@ steps:
       label: ":amd: (MI300) Spec Decode Eagle 1: DeepSeek + Qwen"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 25
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -74,7 +74,7 @@ steps:
       label: ":amd: (MI300) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 25
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -174,7 +174,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model"
   key: spec-decode-draft-model
-  timeout_in_minutes: 45
+  timeout_in_minutes: 60
   device: h200_18gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -187,7 +187,7 @@ steps:
       label: ":amd: (MI300) Spec Decode Draft Model"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -233,6 +233,9 @@ steps:
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load"
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
@@ -280,6 +283,8 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/model_executor/models/qwen3_5.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
@@ -290,6 +295,8 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
+      commands:
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -362,6 +369,33 @@ steps:
     # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
     # separate shards and put the remaining tests in shard 0, where new tests
     # land by default.
-    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
-    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
-    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
+    - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+    - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
+    - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+  mirror:
+    amd:
+      label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/sample/
+      - vllm/v1/worker/gpu/
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/models/gemma4.py
+      - vllm/model_executor/models/gemma4_mm.py
+      - vllm/model_executor/models/gemma4_mtp.py
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/llama_eagle3.py
+      - vllm/model_executor/models/medusa.py
+      - vllm/model_executor/models/registry.py
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py

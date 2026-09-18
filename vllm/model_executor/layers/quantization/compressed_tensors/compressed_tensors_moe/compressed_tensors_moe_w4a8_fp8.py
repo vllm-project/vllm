@@ -47,7 +47,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.symmetric, (
             "Only symmetric quantization is supported for W4A8 MoE"
         )
-        assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
