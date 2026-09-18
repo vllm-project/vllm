@@ -83,6 +83,59 @@ def create_scheduler() -> Scheduler:
 
 
 class TestStreamingScheduler(unittest.TestCase):
+    def test_stop_reason_does_not_leak_to_next_chunk(self):
+        """A continuation must not inherit the prior chunk's stop reason."""
+        for continuation_queued in (False, True):
+            with self.subTest(continuation_queued=continuation_queued):
+                scheduler = create_scheduler()
+                session = DummyRequest(
+                    "session", prompt_token_ids=[1, 2, 3], max_tokens=1
+                )
+                scheduler.add_request(session)
+                first_step = scheduler.schedule()
+
+                continuation = DummyRequest(
+                    "session", prompt_token_ids=[4, 5], max_tokens=1
+                )
+                if continuation_queued:
+                    scheduler.add_request(continuation)
+
+                first_outputs = scheduler.update_from_output(
+                    first_step,
+                    ModelRunnerOutput(
+                        req_ids=[session.request_id],
+                        req_id_to_index={session.request_id: 0},
+                        sampled_token_ids=[[STOP_TOKEN]],
+                        logprobs=None,
+                        prompt_logprobs_dict={},
+                        pooler_output=[],
+                    ),
+                )
+                [first_output] = first_outputs[session.client_index].outputs
+                assert first_output.finish_reason == FinishReason.STOP
+                assert first_output.stop_reason == STOP_TOKEN
+
+                if not continuation_queued:
+                    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+                    scheduler.add_request(continuation)
+                assert session.status == RequestStatus.WAITING
+
+                second_step = scheduler.schedule()
+                second_outputs = scheduler.update_from_output(
+                    second_step,
+                    ModelRunnerOutput(
+                        req_ids=[session.request_id],
+                        req_id_to_index={session.request_id: 0},
+                        sampled_token_ids=[[42]],
+                        logprobs=None,
+                        prompt_logprobs_dict={},
+                        pooler_output=[],
+                    ),
+                )
+                [second_output] = second_outputs[session.client_index].outputs
+                assert second_output.finish_reason == FinishReason.LENGTH
+                assert second_output.stop_reason is None
+
     def test_add_request(self):
         scheduler = create_scheduler()
 
