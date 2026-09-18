@@ -128,6 +128,7 @@ async def test_prefix_cache_hit_rate(
         httpx.AsyncClient(base_url=server.url_root, timeout=METRICS_TIMEOUT) as metrics,
     ):
         block_size = await _scheduler_block_size(metrics)
+        print(f"{block_size=}")
 
         async def run_conversation(session: int, *, replay: bool) -> tuple[int, int]:
             history = histories[session]
@@ -165,6 +166,10 @@ async def test_prefix_cache_hit_rate(
                 # Every token below the last reachable boundary must be reused.
                 floor = max(
                     0, round_down(computed, block_size) - dropped_blocks * block_size
+                )
+                print(
+                    f"{session=} {turn=} {replay=} {prompt=} {cached=} {floor=} "
+                    f"hit_rate={cached / prompt:.4f}"
                 )
                 assert cached >= floor, (
                     f"{context}, {computed=}, {block_size=}, "
