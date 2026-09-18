@@ -1367,11 +1367,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 **common_kwargs,
                 sliding_window=self.sliding_window,
             )
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             **common_kwargs,
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
+        if (page_rows := self.attn_backend.get_kernel_page_rows()) is not None:
+            spec = replace(
+                spec,
+                block_stride_alignment=page_rows * spec.state_content_size_bytes,
+            )
+        return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)

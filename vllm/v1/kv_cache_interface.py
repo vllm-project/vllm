@@ -647,8 +647,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     """Required alignment, in bytes, of the distance between consecutive
     blocks of this cache. In block-major layouts that distance is the whole
     block (all layers' pages), so the allocator rounds the block up to it.
-    DeepGEMM's paged sparse MQA-logits kernels address pages as
-    ``base + page * stride`` and need it 512B-aligned."""
+    Kernels that re-page manager blocks set this to their page size in bytes;
+    DeepGEMM's paged sparse MQA-logits kernels require 512B alignment."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -682,7 +682,8 @@ class MLAAttentionSpec(FullAttentionSpec):
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size and block stride alignment."
+            "index-sharing role, storage block size, and "
+            "block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -964,32 +965,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and spec.sliding_window == self.sliding_window
             for spec in kv_cache_specs.values()
         )
-
-
-@dataclass(frozen=True, kw_only=True)
-class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
 
 
 @dataclass(frozen=True)

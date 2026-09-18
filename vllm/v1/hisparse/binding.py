@@ -96,16 +96,13 @@ def allocate_hisparse_kv_caches(
             if isinstance(host_spec, UniformTypeKVCacheSpecs)
             else host_spec
         )
-        kernel_block_size = kernel_block_sizes[host_group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
         views = create_kv_cache_views(
             backing,
             spec,
             kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=kernel_block_sizes[host_group_id],
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches

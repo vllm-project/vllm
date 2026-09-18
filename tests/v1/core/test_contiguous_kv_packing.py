@@ -20,7 +20,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _get_packed_kv_cache_groups,
-    _pool_bytes_per_block,
     generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
@@ -535,7 +534,9 @@ class TestDensePacking:
             _mock_vllm_config("BLNHC"), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
+        assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
+            groups
+        )
 
         views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)

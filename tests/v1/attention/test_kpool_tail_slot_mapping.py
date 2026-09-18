@@ -3,15 +3,16 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``KpoolTailSpec`` / ``KpoolTailManager``: exactly one block
-allocated per request, never grown, so only column 0 of its block table is
-ever written; the rest stays zero-initialized).
+``pos % ring_size``. The ring is one kpool without speculation and expands by
+whole kpools to preserve speculative rows. ``CircularBufferSpec`` /
+``CircularBufferManager`` still allocate exactly one block per request, so only
+column 0 of its block table is ever written; the rest stays zero-initialized.
 
 The generic per-group slot kernel cannot express that layout: it maps
 ``pos -> bt[req][pos // bs] * bs + pos % bs`` (``_compute_slot_mappings_kernel``
-in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= kpool``
+in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= ring_size``
 reads a zero column and collapses onto physical tail block 0. All concurrent
-requests then share one ``kpool``-slot ring and corrupt each other's pool
+requests then share one tail ring and corrupt each other's pool
 compression.
 
 These tests pin that defect's arithmetic, verify the circular replacement
@@ -30,43 +31,58 @@ from vllm.v1.attention.backends.mla.indexer import (
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
-from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
-from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
 from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
-    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
-    spec = KpoolTailSpec(
+    layout, *_ = KpoolTailBackend.supported_kv_cache_layouts()
+    spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
 
-    assert layout is KVCacheLayout.LBHNC
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
+
+
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "expected_capacity"),
+    [(0, 4), (3, 8), (4, 8), (5, 12)],
+)
+def test_tail_spec_reserves_complete_pools_for_speculation(
+    num_speculative_tokens, expected_capacity
+):
+    from vllm.models.glm5next.common.attention import Glm5NextTailCache
+
+    cache = SimpleNamespace(_index_kpool=KPOOL, head_dim=128)
+    spec = Glm5NextTailCache.get_kv_cache_spec(
+        cache, SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+    )
+
+    assert isinstance(spec, CircularBufferSpec)
+    assert spec.block_size == expected_capacity
+    assert spec.max_num_blocks_per_req(SimpleNamespace(), 10_000) == 1
 
 
 def test_tail_spec_opts_out_of_generic_slot_mapping():
     """The tail row is one block wide (padded to the block-table alignment), so
     the generic kernel's ``pos // kpool`` column index runs off the end of the
     allocation for long prompts. The spec must opt out of it entirely."""
-    spec = KpoolTailSpec(
+    spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
     max_len = 1 << 20
     width = get_block_table_width(
@@ -81,7 +97,7 @@ def test_tail_spec_opts_out_of_generic_slot_mapping():
 
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
-    request's single KpoolTailManager block, the remaining columns are never
+    request's single CircularBufferManager block, the remaining columns are never
     written and stay zero."""
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
