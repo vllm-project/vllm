@@ -146,6 +146,15 @@ RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
             ln -sfn "${ROCM_PATH}/lib/${bn}" "$f"; \
         fi; \
     done \
+    && for f in librocprofiler-sdk.so.1 librocprofiler-register.so.0 \
+              librocprofiler-sdk-roctx.so.1; do \
+        if [ -e "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}" ] \
+           && [ -e "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" ]; then \
+            rm -f "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
+            ln -sfn "${SITE_PACKAGES}/_rocm_sdk_devel/lib/${f}" \
+                "${SITE_PACKAGES}/_rocm_sdk_core/lib/${f}"; \
+        fi; \
+    done \
     && ldconfig
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)

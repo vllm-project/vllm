@@ -166,6 +166,8 @@ class KVBlockZeroer:
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
+                if kv.device.type != self.device.type:
+                    continue
                 dp = kv.data_ptr()
 
                 assert kv.shape[0] % num_blocks == 0, (
@@ -329,8 +331,7 @@ def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
 ) -> int:
-    """
-    Select a block size that is supported by all backends and is a factor of
+    """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
 
     If kv_manager_block_size is supported by all backends, return it directly.
@@ -345,6 +346,7 @@ def select_common_block_size(
 
     Raises:
         ValueError: If no valid block size found.
+
     """
 
     def block_size_is_supported(
@@ -366,32 +368,22 @@ def select_common_block_size(
                 return False
         return True
 
-    # Case 1: if the block_size of kv cache manager is supported by all backends,
-    # return it directly.
     if block_size_is_supported(backends, kv_manager_block_size):
         return kv_manager_block_size
 
-    # Case 2: otherwise, the block_size must be an `int`-format supported size of
-    # at least one backend. Iterate over all `int`-format supported sizes in
-    # descending order and return the first one that is supported by all backends.
-    # Simple proof:
-    # If the supported size b is in MultipleOf(x_i) format for all attention
-    # backends i, and b a factor of kv_manager_block_size, then
-    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
-    # return kv_manager_block_size in case 1.
-    all_int_supported_sizes = set(
-        supported_size
+    # MultipleOf constraints also accept the manager size if they accept a divisor.
+    # Any remaining candidate must therefore be an explicit size from a backend.
+    candidates = {
+        size
         for backend in backends
-        for supported_size in backend.get_supported_kernel_block_sizes()
-        if isinstance(supported_size, int)
-    )
+        for size in backend.get_supported_kernel_block_sizes()
+        if isinstance(size, int) and kv_manager_block_size % size == 0
+    }
 
-    for supported_size in sorted(all_int_supported_sizes, reverse=True):
-        if kv_manager_block_size % supported_size != 0:
-            continue
-        if block_size_is_supported(backends, supported_size):
-            return supported_size
-    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
+    for size in sorted(candidates, reverse=True):
+        if block_size_is_supported(backends, size):
+            return size
+    raise ValueError(f"No common block size for {kv_manager_block_size}.")
 
 
 def allocate_kv_cache(
@@ -440,7 +432,11 @@ def allocate_kv_cache(
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]
 
-        num_blocks = kv_cache_config.num_blocks
+        if not spec.has_layer_views:
+            kv_caches.update((name, buf) for name in tensor.layers)
+            continue
+
+        num_blocks = kv_cache_config.num_blocks_of(tensor)
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
@@ -462,8 +458,7 @@ def allocate_kv_cache(
 def prepare_kernel_block_sizes(
     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
 ) -> list[int]:
-    """
-    Generate kernel_block_sizes that matches each block_size.
+    """Generate kernel_block_sizes that matches each block_size.
 
     For attention backends that support virtual block splitting,
     use the supported block sizes from the backend.
@@ -475,6 +470,7 @@ def prepare_kernel_block_sizes(
 
     Returns:
         List of kernel block sizes for each cache group.
+
     """
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -485,7 +481,9 @@ def prepare_kernel_block_sizes(
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             continue
-        if isinstance(kv_cache_spec, AttentionSpec):
+        if not kv_cache_spec.has_layer_views:
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
@@ -507,8 +505,7 @@ def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
 ) -> None:
-    """
-    Perform sanity checks for the result of
+    """Perform sanity checks for the result of
     [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
@@ -534,8 +531,7 @@ def sanity_check_mm_encoder_outputs(
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
-    """
-    Calculate the amount of memory required by vLLM, then validate
+    """Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
     requested_memory = math.ceil(
@@ -561,8 +557,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     runner_only_attn_layers: set[str] | None = None,
 ) -> None:
-    """
-    Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
+    """Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
     for layers that do not allocate its own KV cache, based on the mapping in
     `shared_kv_cache_layers`. Adds these layers to the corresponding KV cache
     group, which is needed to ensure that attention metadata is assigned later.
@@ -573,6 +568,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
+        runner_only_attn_layers: Attention layers handled by the runner only,
+            which are excluded from the KV cache groups.
+
     """
     if not shared_kv_cache_layers:
         return
@@ -597,8 +595,7 @@ def bind_kv_cache(
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
-    """
-    Bind the allocated KV cache to both ModelRunner and forward context so
+    """Bind the allocated KV cache to both ModelRunner and forward context so
     that the KV cache can be used in the forward pass.
 
     This function:
@@ -609,9 +606,13 @@ def bind_kv_cache(
 
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
+        num_attn_module: Number of attention modules per layer entry.
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
+        kv_cache_groups: The KV cache groups of the model, used to resolve
+            layers that share a KV cache.
+
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
@@ -621,7 +622,6 @@ def bind_kv_cache(
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
-    ordered_layer_names: list[str] = []
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
         if len(layer_names) > 1:
@@ -635,8 +635,19 @@ def bind_kv_cache(
             current_platform.check_runner_kv_caches_multi_layer()
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
-            ordered_layer_names.append(layer_name)
 
+    bind_kv_cache_to_layers(
+        kv_caches, forward_context, num_attn_module, kv_cache_groups
+    )
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Bind layer caches and share ReplaySSM trackers in model-layer order."""
     # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
     # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
@@ -644,6 +655,9 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
+    ordered_layer_names = sorted(
+        kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
+    )
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
