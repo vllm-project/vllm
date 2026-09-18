@@ -135,7 +135,7 @@ pub struct RenderArgs {
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
-    /// Server-side floor for structural-tag based tool calling: `off`,
+    /// Server-side floor for structural-tag based tool calling: `auto`,
     /// `function`, or `parameter`.
     #[arg(long, default_value_t)]
     tool_strict_level: ToolStrictLevel,
@@ -248,8 +248,8 @@ pub struct SharedRuntimeArgs {
     #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
     /// Server-side floor for structural-tag based tool calling, applied on
-    /// top of the per-tool `strict` field: `off` constrains a
-    /// `tool_choice = "auto"` request only when a tool sets `strict: true`,
+    /// top of the per-tool `strict` field: `auto` follows the request's
+    /// tool choice and per-tool strictness,
     /// `function` constrains the tool-call envelope for every request with
     /// tools, `parameter` additionally pins argument schemas.
     #[arg(long, default_value_t)]

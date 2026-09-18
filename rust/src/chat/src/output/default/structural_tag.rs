@@ -160,7 +160,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -188,7 +188,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -219,7 +219,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -236,7 +236,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag decision should succeed");
 
@@ -255,7 +255,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -274,7 +274,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -295,7 +295,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -319,7 +319,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag should build");
 
@@ -336,7 +336,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag decision should succeed");
 
@@ -355,7 +355,7 @@ mod tests {
         apply_structural_tag_constraint(
             &mut request,
             parser.structural_tag_builder(),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .expect("structural tag decision should succeed");
 
@@ -394,17 +394,17 @@ mod tests {
         let unset = build(
             ChatToolChoice::Required,
             vec![chat_tool("search", None)],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
         let non_strict = build(
             ChatToolChoice::Required,
             vec![chat_tool("search", Some(false))],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
         let strict = build(
             ChatToolChoice::Required,
             vec![chat_tool("search", Some(true))],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
 
         assert_eq!(tag_string(&unset), tag_string(&non_strict));
@@ -416,7 +416,7 @@ mod tests {
         let mixed = build(
             ChatToolChoice::Auto,
             vec![chat_tool("weather", Some(true)), chat_tool("search", None)],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
         let explicit = build(
             ChatToolChoice::Auto,
@@ -424,7 +424,7 @@ mod tests {
                 chat_tool("weather", Some(true)),
                 chat_tool("search", Some(false)),
             ],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
 
         assert_eq!(tag_string(&mixed), tag_string(&explicit));
@@ -440,7 +440,7 @@ mod tests {
         let strict = build(
             ChatToolChoice::Auto,
             vec![chat_tool("search", Some(true))],
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         );
         let envelope_only = build(
             ChatToolChoice::Auto,
@@ -454,6 +454,7 @@ mod tests {
 
     #[test]
     fn tool_strict_level_parses_case_insensitively() {
+        assert_eq!("AUTO".parse::<ToolStrictLevel>(), Ok(ToolStrictLevel::Auto));
         assert_eq!(
             "PARAMETER".parse::<ToolStrictLevel>(),
             Ok(ToolStrictLevel::Parameter)
@@ -462,7 +463,16 @@ mod tests {
             "function".parse::<ToolStrictLevel>(),
             Ok(ToolStrictLevel::Function)
         );
-        assert_eq!(ToolStrictLevel::default(), ToolStrictLevel::Off);
+        assert_eq!(ToolStrictLevel::default(), ToolStrictLevel::Auto);
+        assert_eq!(
+            serde_json::to_value(ToolStrictLevel::Auto).unwrap(),
+            json!("auto")
+        );
+        assert_eq!(
+            serde_json::from_value::<ToolStrictLevel>(json!("auto")).unwrap(),
+            ToolStrictLevel::Auto
+        );
+        assert!("off".parse::<ToolStrictLevel>().is_err());
         assert!("strict".parse::<ToolStrictLevel>().is_err());
     }
 }

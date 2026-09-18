@@ -157,7 +157,7 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: ToolStrictLevel::Off,
+                tool_strict_level: ToolStrictLevel::Auto,
                 model: "test-model".to_string(),
                 revision: None,
                 hf_overrides: Default::default(),

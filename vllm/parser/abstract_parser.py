@@ -97,7 +97,7 @@ class Parser:
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
     # Server-side floor for tool-call structural tags (--tool-strict-level).
-    tool_strict_level: ToolStrictLevel = ToolStrictLevel.OFF
+    tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
 
     def __init__(
         self,

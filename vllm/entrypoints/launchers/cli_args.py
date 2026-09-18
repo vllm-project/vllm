@@ -117,10 +117,10 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
-    tool_strict_level: ToolStrictLevelName = "off"
+    tool_strict_level: ToolStrictLevelName = "auto"
     """Server-side floor for structural-tag based tool calling, applied on top
-    of the per-tool `strict` field. `off` constrains a `tool_choice="auto"`
-    request only when a tool sets `strict: true`; `function` constrains the
+    of the per-tool `strict` field. `auto` follows the request's tool choice
+    and per-tool strictness; `function` constrains the
     tool-call envelope (markup and function name) for every request with
     tools; `parameter` additionally pins argument schemas, as if every tool
     were `strict: true`."""

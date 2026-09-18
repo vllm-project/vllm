@@ -4,20 +4,20 @@
 import enum
 from typing import Literal
 
-ToolStrictLevelName = Literal["off", "function", "parameter"]
+ToolStrictLevelName = Literal["auto", "function", "parameter"]
 
 
 class ToolStrictLevel(enum.IntEnum):
     """Server-side floor for tool-call structural tags (``--tool-strict-level``).
 
-    OFF:       constrain a ``tool_choice="auto"`` request only when a tool sets
-               ``strict: true``.
+    AUTO:      derive call constraints from ``tool_choice`` and argument-schema
+               enforcement from each tool's explicit ``strict`` field.
     FUNCTION:  constrain the tool-call envelope for every request with tools.
     PARAMETER: additionally pin argument schemas, as if every tool were
                ``strict: true``.
     """
 
-    OFF = 0
+    AUTO = 0
     FUNCTION = 1
     PARAMETER = 2
 

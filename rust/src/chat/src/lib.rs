@@ -87,7 +87,7 @@ impl ChatRequestProcessor {
             model_dtype: Some(model_dtype),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Off,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 
@@ -98,7 +98,7 @@ impl ChatRequestProcessor {
             model_dtype: None,
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
-            tool_strict_level: ToolStrictLevel::Off,
+            tool_strict_level: ToolStrictLevel::Auto,
         }
     }
 

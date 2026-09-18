@@ -71,9 +71,9 @@ impl ParserSelection {
     SerializeDisplay,
 )]
 pub enum ToolStrictLevel {
-    /// Constrain a `tool_choice = "auto"` request only when a tool sets `strict: true`.
+    /// Derive tool constraints from the request's tool choice and per-tool strictness.
     #[default]
-    Off,
+    Auto,
     /// Constrain the tool-call envelope for every request with tools.
     Function,
     /// Additionally pin argument schemas, as if every tool were `strict: true`.
@@ -81,7 +81,7 @@ pub enum ToolStrictLevel {
 }
 
 impl ToolStrictLevel {
-    pub const OFF_LITERAL: &str = "off";
+    pub const AUTO_LITERAL: &str = "auto";
     pub const FUNCTION_LITERAL: &str = "function";
     pub const PARAMETER_LITERAL: &str = "parameter";
 }
@@ -90,8 +90,8 @@ impl FromStr for ToolStrictLevel {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.eq_ignore_ascii_case(Self::OFF_LITERAL) {
-            Ok(Self::Off)
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
         } else if value.eq_ignore_ascii_case(Self::FUNCTION_LITERAL) {
             Ok(Self::Function)
         } else if value.eq_ignore_ascii_case(Self::PARAMETER_LITERAL) {
@@ -99,7 +99,7 @@ impl FromStr for ToolStrictLevel {
         } else {
             Err(format!(
                 "unknown tool strict level {value:?}; expected one of {}, {}, {}",
-                Self::OFF_LITERAL,
+                Self::AUTO_LITERAL,
                 Self::FUNCTION_LITERAL,
                 Self::PARAMETER_LITERAL
             ))
@@ -110,7 +110,7 @@ impl FromStr for ToolStrictLevel {
 impl fmt::Display for ToolStrictLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Off => Self::OFF_LITERAL,
+            Self::Auto => Self::AUTO_LITERAL,
             Self::Function => Self::FUNCTION_LITERAL,
             Self::Parameter => Self::PARAMETER_LITERAL,
         })

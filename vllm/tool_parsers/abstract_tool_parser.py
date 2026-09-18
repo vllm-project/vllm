@@ -169,7 +169,7 @@ class ToolParser:
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-        strict_level: ToolStrictLevel = ToolStrictLevel.OFF,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ):
         if self.structural_tag_model is None:
             return None

@@ -78,7 +78,7 @@ class ParserManager:
         enable_auto_tools: bool = False,
         model_name: str | None = None,
         is_harmony: bool = False,
-        tool_strict_level: str = "off",
+        tool_strict_level: str = "auto",
     ) -> type[Parser] | None:
         """Get a Parser that handles both reasoning and tool parsing.
 

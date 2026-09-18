@@ -136,7 +136,7 @@ def _resolve_tool_strictness(
     """
     if (
         tool_choice == "auto"
-        and strict_level == ToolStrictLevel.OFF
+        and strict_level == ToolStrictLevel.AUTO
         and not _any_tool_strict(tools)
     ):
         return None
@@ -154,7 +154,7 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
-    strict_level: ToolStrictLevel = ToolStrictLevel.OFF,
+    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
     if not tools or tool_choice == "none":

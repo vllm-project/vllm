@@ -879,7 +879,7 @@ def _dumped(tag: StructuralTag) -> str:
     return json.dumps(tag.model_dump(), ensure_ascii=False)
 
 
-def test_tool_strict_level_off_is_the_default(
+def test_tool_strict_level_auto_is_the_default(
     sample_tools: list[ChatCompletionToolsParam],
 ):
     """Auto + no strict tool gets no tag unless the operator raises the floor."""
@@ -1069,6 +1069,9 @@ def test_tool_strict_level_parameter_overrides_client_strict_false():
 
 
 def test_tool_strict_level_from_name():
+    assert ToolStrictLevel.from_name("AUTO") is ToolStrictLevel.AUTO
     assert ToolStrictLevel.from_name("Parameter") is ToolStrictLevel.PARAMETER
-    with pytest.raises(ValueError, match="expected one of off, function, parameter"):
+    with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("strict")
+    with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
+        ToolStrictLevel.from_name("off")

@@ -995,7 +995,7 @@ class HYV4ToolParser(ToolParser):
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-        strict_level: ToolStrictLevel = ToolStrictLevel.OFF,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 

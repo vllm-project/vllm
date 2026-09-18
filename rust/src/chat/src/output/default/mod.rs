@@ -218,7 +218,7 @@ mod tests {
             tokenizer(),
             &selection,
             &selection,
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .unwrap();
     }
@@ -233,7 +233,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Auto,
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         )
         .unwrap();
     }
@@ -251,7 +251,7 @@ mod tests {
                 tokenizer(),
                 tool,
                 reasoning,
-                ToolStrictLevel::Off,
+                ToolStrictLevel::Auto,
             )
             .unwrap();
         }
@@ -266,7 +266,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
-            ToolStrictLevel::Off,
+            ToolStrictLevel::Auto,
         ) {
             Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
             Err(error) => error,

@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
         },
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
-        tool_strict_level: ToolStrictLevel::Off,
+        tool_strict_level: ToolStrictLevel::Auto,
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,

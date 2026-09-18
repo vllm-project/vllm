@@ -118,7 +118,7 @@ Structural-tag parsers resolve call obligation, grammar activation, and argument
 | `"auto"` | Tool calls are optional | When at least one tool sets `strict: true`, or `--tool-strict-level` is `function` or `parameter` |
 | `"none"` | Tool calling is disabled | Disabled |
 
-When a structural tag applies, each tool's declared parameter schema is enforced only when that tool sets `strict: true` or the server uses `--tool-strict-level parameter`. Tools with omitted or false `strict` receive broad argument-syntax constraints at levels `off` and `function`, including for required and named calls.
+When a structural tag applies, each tool's declared parameter schema is enforced only when that tool sets `strict: true` or the server uses `--tool-strict-level parameter`. Tools with omitted or false `strict` receive broad argument-syntax constraints at levels `auto` and `function`, including for required and named calls.
 
 For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
@@ -144,7 +144,7 @@ Most OpenAI-compatible clients and agent frameworks never set `strict` on their 
 
 | Value | Behavior |
 | --- | --- |
-| `off` (default) | With `tool_choice="auto"`, structural tags apply only when a tool sets `strict: true`. |
+| `auto` (default) | Follow the request's tool choice and per-tool strictness. Required/named choices activate structural tags; `tool_choice="auto"` activates them when at least one tool sets `strict: true`. |
 | `function` | Constrain the tool-call envelope (markup and the function name) for every request with tools, leaving argument contents free unless the client marked the tool `strict: true`. |
 | `parameter` | Additionally pin argument schemas for every tool, as if every tool had `strict: true`. |
 

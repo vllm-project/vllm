@@ -344,7 +344,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
-                tool_strict_level: crate::ToolStrictLevel::Off,
+                tool_strict_level: crate::ToolStrictLevel::Auto,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },
