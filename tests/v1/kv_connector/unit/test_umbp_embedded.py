@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     UMBPRuntimeConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
+    _configure_dram,
     _MoriWorkerHandle,
 )
 
@@ -62,6 +63,38 @@ def _scheduler_output(request: SimpleNamespace) -> SimpleNamespace:
     )
 
 
+def test_embedded_runtime_maps_dram_options_to_mori_config():
+    dram = SimpleNamespace()
+    config = SimpleNamespace(dram=dram)
+
+    _configure_dram(
+        config,
+        {
+            "capacity_bytes": 1024,
+            "dram_use_shared_memory": True,
+            "dram_shm_name": "umbp-test",
+            "dram_high_watermark": 0.9,
+            "dram_low_watermark": 0.7,
+            "dram_use_hugepages": True,
+            "dram_hugepage_size": 2 * 1024**2,
+            "dram_numa_node": 1,
+            "dram_prefault": True,
+        },
+    )
+
+    assert vars(dram) == {
+        "capacity_bytes": 1024,
+        "use_shared_memory": True,
+        "shm_name": "umbp-test",
+        "high_watermark": 0.9,
+        "low_watermark": 0.7,
+        "use_hugepages": True,
+        "hugepage_size": 2 * 1024**2,
+        "numa_node": 1,
+        "prefault": True,
+    }
+
+
 def test_embedded_round_trip_restores_all_layer_ranges():
     kv_config = _kv_cache_config()
     vllm_config = _vllm_config(
@@ -79,9 +112,7 @@ def test_embedded_round_trip_restores_all_layer_ranges():
             + index
         )
 
-    scheduler = UMBPStoreConnector(
-        vllm_config, KVConnectorRole.SCHEDULER, kv_config
-    )
+    scheduler = UMBPStoreConnector(vllm_config, KVConnectorRole.SCHEDULER, kv_config)
     worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_config)
     worker.register_kv_caches(source)
 
@@ -206,9 +237,7 @@ def test_embedded_scheduler_clear_removes_published_objects():
     plan = BlockTransferPlan(
         "clear-key",
         0,
-        ranges=(
-            KVRange("layer0", 0, 0, source.data_ptr(), 16, 16, 0),
-        ),
+        ranges=(KVRange("layer0", 0, 0, source.data_ptr(), 16, 16, 0),),
     )
     job = worker.wait(worker.store([plan]))
     worker.publish(job)

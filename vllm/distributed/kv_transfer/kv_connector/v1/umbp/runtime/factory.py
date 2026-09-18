@@ -4,12 +4,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from vllm.config import VllmConfig
 
 from .base import IUMBPRuntime
+
+_EMBEDDED_DRAM_BOOL_OPTIONS = {
+    "dram_use_shared_memory",
+    "dram_use_hugepages",
+    "dram_prefault",
+}
+_EMBEDDED_DRAM_POSITIVE_INT_OPTIONS = {
+    "capacity_bytes",
+    "dram_hugepage_size",
+}
+_EMBEDDED_DRAM_FLOAT_OPTIONS = {
+    "dram_high_watermark",
+    "dram_low_watermark",
+}
 
 
 @dataclass(frozen=True)
@@ -20,7 +35,7 @@ class UMBPRuntimeConfig:
     options: dict[str, Any]
 
     @classmethod
-    def from_vllm(cls, vllm_config: VllmConfig) -> "UMBPRuntimeConfig":
+    def from_vllm(cls, vllm_config: VllmConfig) -> UMBPRuntimeConfig:
         transfer_config = vllm_config.kv_transfer_config
         if transfer_config is None:
             raise ValueError("UMBP requires kv_transfer_config")
@@ -29,15 +44,15 @@ class UMBPRuntimeConfig:
         if mode not in {"embedded", "standalone", "distributed"}:
             raise ValueError(f"unknown UMBP mode: {mode!r}")
         namespace = options.get("key_namespace", "auto")
-        if namespace != "auto" and (
-            not isinstance(namespace, str) or not namespace
-        ):
+        if namespace != "auto" and (not isinstance(namespace, str) or not namespace):
             raise ValueError("key_namespace must be a non-empty string or 'auto'")
         for name in ("capacity_bytes", "ranged_scratch_size"):
             if name in options and (
                 type(options[name]) is not int or options[name] <= 0
             ):
                 raise ValueError(f"{name} must be a positive integer")
+        if mode == "embedded":
+            cls._validate_embedded_dram_options(options)
         if mode == "standalone" and not options.get("endpoint"):
             raise ValueError("standalone UMBP requires endpoint")
         if mode == "distributed":
@@ -47,15 +62,10 @@ class UMBPRuntimeConfig:
                 if not options.get(name)
             ]
             if missing:
-                raise ValueError(
-                    "distributed UMBP requires " + ", ".join(missing)
-                )
-            if (
-                "peer_service_port" in options
-                and (
-                    type(options["peer_service_port"]) is not int
-                    or options["peer_service_port"] <= 0
-                )
+                raise ValueError("distributed UMBP requires " + ", ".join(missing))
+            if "peer_service_port" in options and (
+                type(options["peer_service_port"]) is not int
+                or options["peer_service_port"] <= 0
             ):
                 raise ValueError("peer_service_port must be a positive integer")
         local_only = {
@@ -65,10 +75,37 @@ class UMBPRuntimeConfig:
             "peer_service_port",
         }
         if mode != "distributed" and local_only.intersection(options):
-            raise ValueError(
-                f"{mode} UMBP cannot configure distributed-only options"
-            )
+            raise ValueError(f"{mode} UMBP cannot configure distributed-only options")
         return cls(mode=mode, options=options)
+
+    @staticmethod
+    def _validate_embedded_dram_options(options: dict[str, Any]) -> None:
+        for name in _EMBEDDED_DRAM_BOOL_OPTIONS:
+            if name in options and type(options[name]) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        for name in _EMBEDDED_DRAM_POSITIVE_INT_OPTIONS - {"capacity_bytes"}:
+            if name in options and (
+                type(options[name]) is not int or options[name] <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+        for name in _EMBEDDED_DRAM_FLOAT_OPTIONS:
+            if name in options and (
+                type(options[name]) not in (int, float) or not 0 < options[name] <= 1
+            ):
+                raise ValueError(f"{name} must be in (0, 1]")
+        low = options.get("dram_low_watermark")
+        high = options.get("dram_high_watermark")
+        if low is not None and high is not None and low > high:
+            raise ValueError("dram_low_watermark must not exceed dram_high_watermark")
+        if "dram_numa_node" in options and (
+            type(options["dram_numa_node"]) is not int or options["dram_numa_node"] < -1
+        ):
+            raise ValueError("dram_numa_node must be an integer >= -1")
+        if "dram_shm_name" in options and (
+            not isinstance(options["dram_shm_name"], str)
+            or not options["dram_shm_name"]
+        ):
+            raise ValueError("dram_shm_name must be a non-empty string")
 
 
 RuntimeBuilder = Callable[[UMBPRuntimeConfig], IUMBPRuntime]

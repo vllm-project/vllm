@@ -335,6 +335,39 @@ def test_runtime_config_requires_distributed_identity():
         UMBPRuntimeConfig.from_vllm(_vllm_config({"mode": "distributed"}))
 
 
+def test_runtime_config_validates_embedded_dram_options():
+    config = UMBPRuntimeConfig.from_vllm(
+        _vllm_config(
+            {
+                "mode": "embedded",
+                "capacity_bytes": 1024,
+                "dram_high_watermark": 0.9,
+                "dram_low_watermark": 0.7,
+                "dram_use_hugepages": True,
+                "dram_hugepage_size": 2 * 1024**2,
+                "dram_numa_node": -1,
+                "dram_prefault": True,
+            }
+        )
+    )
+
+    assert config.options["dram_high_watermark"] == 0.9
+
+
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        ({"dram_low_watermark": 0.9, "dram_high_watermark": 0.7}, "must not"),
+        ({"dram_use_hugepages": 1}, "boolean"),
+        ({"dram_numa_node": -2}, ">= -1"),
+        ({"dram_hugepage_size": 0}, "positive integer"),
+    ],
+)
+def test_runtime_config_rejects_invalid_embedded_dram_options(options, error):
+    with pytest.raises(ValueError, match=error):
+        UMBPRuntimeConfig.from_vllm(_vllm_config({"mode": "embedded", **options}))
+
+
 def test_runtime_factory_builds_embedded_adapter():
     config = UMBPRuntimeConfig("embedded", {"backend": "memory"})
     runtime = UMBPRuntimeFactory.build(config)
@@ -1069,9 +1102,7 @@ def test_builtin_embedded_runtime_register_store_and_load():
     scheduler_connector = UMBPStoreConnector(
         vllm_config, KVConnectorRole.SCHEDULER, config
     )
-    worker_connector = UMBPStoreConnector(
-        vllm_config, KVConnectorRole.WORKER, config
-    )
+    worker_connector = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
     worker_connector.register_kv_caches(source_caches)
     producer = SimpleNamespace(
         request_id="builtin-producer",
@@ -1207,9 +1238,7 @@ def test_builtin_embedded_tp2_pp2_dcp2_rank_store_completeness():
                     vllm_config, KVConnectorRole.WORKER, config
                 )
                 worker_connector.register_kv_caches(caches)
-                metadata = scheduler_connector.build_connector_meta(
-                    scheduler_output
-                )
+                metadata = scheduler_connector.build_connector_meta(scheduler_output)
                 worker_connector.bind_connector_metadata(metadata)
                 worker_connector.wait_for_save()
 

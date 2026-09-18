@@ -632,15 +632,32 @@ class EmbeddedRuntime(IUMBPRuntime):
             ) from exc
 
         client_config = UMBPConfig()
-        client_config.dram.capacity_bytes = config.options.get(
-            "capacity_bytes", 64 * 1024**3
-        )
+        _configure_dram(client_config, config.options)
         return _MoriEmbeddedRuntime(
             UMBPClient(client_config),
             config.options.get("lookup_dir", "/tmp"),
             int(config.options.get("num_workers", 4)),
             float(config.options.get("timeout_ms", 30000)) / 1000,
         )
+
+
+def _configure_dram(client_config: Any, options: dict[str, Any]) -> None:
+    """Apply embedded-only host-DRAM options to MORI's client config."""
+    dram = client_config.dram
+    dram.capacity_bytes = options.get("capacity_bytes", 64 * 1024**3)
+    option_fields = {
+        "dram_use_shared_memory": "use_shared_memory",
+        "dram_shm_name": "shm_name",
+        "dram_high_watermark": "high_watermark",
+        "dram_low_watermark": "low_watermark",
+        "dram_use_hugepages": "use_hugepages",
+        "dram_hugepage_size": "hugepage_size",
+        "dram_numa_node": "numa_node",
+        "dram_prefault": "prefault",
+    }
+    for option, field in option_fields.items():
+        if option in options:
+            setattr(dram, field, options[option])
 
 
 class _MoriEmbeddedRuntime(IUMBPRuntime):
