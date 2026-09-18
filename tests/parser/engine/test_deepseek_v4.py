@@ -119,6 +119,35 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter("", partial=False))
         assert result == {}
 
+    def _bare(self, name: str, value: str) -> str:
+        return f'<｜DSML｜parameter name="{name}">{value}{_PARAM_CLOSE}'
+
+    def test_missing_string_attribute_keeps_literal(self):
+        """The model sometimes omits ``string``; the parameter must survive."""
+        raw = self._bare("name", "alpha")
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {"name": "alpha"}
+
+    def test_missing_string_attribute_parses_json(self):
+        raw = self._bare("count", "7") + self._bare("opts", '{"k": [1]}')
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {
+            "count": 7,
+            "opts": {"k": [1]},
+        }
+
+    def test_missing_string_attribute_alongside_annotated(self):
+        raw = self._bare("a", "x") + _param("b", "true", "42")
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {
+            "a": "x",
+            "b": "42",
+        }
+
+    def test_missing_string_attribute_partial_value(self):
+        raw = _param("a", "true", "x") + '<｜DSML｜parameter name="n">12'
+        assert json.loads(_dsml_arg_converter(raw, partial=True)) == {
+            "a": "x",
+            "n": 12,
+        }
+
     def test_invalid_json_fallback(self):
         raw = self._raw(("data", "false", "[broken"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))
@@ -228,6 +257,47 @@ class TestImplicitParameterClose:
         assert "<｜DSML｜param" not in arguments
         assert json.loads(arguments) == {
             "location": "Paris a<b>",
+            "date": "tomorrow",
+        }
+
+
+class TestMissingStringAttribute:
+    def test_non_streaming_keeps_parameter(self, mock_tokenizer, mock_request):
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f'<｜DSML｜parameter name="location">Paris{_PARAM_CLOSE}\n'
+            f"{_param('date', 'true', 'tomorrow')}\n"
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "Paris",
+            "date": "tomorrow",
+        }
+
+    def test_streaming_keeps_parameter(self, mock_tokenizer, mock_request):
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
+            '<｜DSML｜parameter name="loc',
+            'ation">Par',
+            "is",
+            _PARAM_CLOSE,
+            f"\n{_param('date', 'true', 'tomorrow')}\n",
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "location": "Paris",
             "date": "tomorrow",
         }
 
