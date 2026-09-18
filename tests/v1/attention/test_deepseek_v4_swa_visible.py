@@ -717,3 +717,89 @@ def test_decode_validity_and_lens_are_derived_per_group(batch_size):
             assert buf["indices"][:n, 0].cpu().tolist() == [
                 row if ok else [-1] * WINDOW for row, ok in zip(rows, valid)
             ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("query_len", [1, 5])
+def test_dflash_refresh_matches_eager_build_across_replays(query_len, tmp_path):
+    """A captured refresh must reproduce what build() writes, replay after replay.
+
+    Eager builds run in between, the batch shrinks and regrows, and each group
+    invalidates different slots, so a graph reusing another group's mapping or a
+    stale buffer would diverge. Rows past the live batch must read back as
+    padding, since the graph always refreshes the captured token count.
+    """
+    from transformers import LlamaConfig
+
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
+    batch = 4
+    qsl, seq, _, slots, table = make_batch([30] * batch, [query_len] * batch, "cuda")
+    LlamaConfig(max_position_embeddings=8192).save_pretrained(tmp_path)
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl,
+        query_start_loc_cpu=qsl.cpu(),
+        seq_lens=seq,
+        seq_lens_cpu_upper_bound=seq.cpu(),
+        num_reqs=batch,
+        num_actual_tokens=batch * query_len,
+        max_query_len=query_len,
+        max_seq_len=30,
+        block_table_tensor=table,
+        slot_mapping=slots,
+        causal=False,
+    )
+    builders = [make_builder(vision=False, model_name=str(tmp_path)) for _ in range(3)]
+    for builder in builders:
+        builder.is_dspark = True
+        builder.decode_threshold = query_len
+        builder.noncausal_index_width = get_dspark_swa_index_width(WINDOW, query_len)
+    inputs = [common.replace(slot_mapping=slots.clone()) for _ in builders]
+    metadata = [b.build(0, c) for b, c in zip(builders, inputs)]
+    refreshes = [
+        b.build_dflash_metadata_refresh(m, query_len)
+        for b, m in zip(builders, metadata)
+    ]
+    assert all(refresh is not None for refresh in refreshes)
+    for refresh in refreshes:
+        refresh()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for refresh in refreshes:
+            refresh()
+        outputs = [
+            (m.decode_swa_indices.clone(), m.decode_swa_lens.clone(), m.is_valid_token)
+            for m in metadata
+        ]
+
+    for step, active in enumerate((4, 1, 3, 4)):
+        qsl.copy_(torch.arange(batch + 1, device="cuda").clamp(max=active) * query_len)
+        seq.add_(1)
+        table.add_(1)
+        for group, (builder, cm, md, actual) in enumerate(
+            zip(builders, inputs, metadata, outputs)
+        ):
+            cm.query_start_loc_cpu.copy_(qsl.cpu())
+            cm.slot_mapping.fill_(-1)
+            cm.slot_mapping[: active * query_len] = 7
+            cm.slot_mapping[(group + step) % 3 : active * query_len : 3] = -1
+            cm._token_to_req_indices_cache = None
+            expected = builder.build(0, cm)
+            reference = [
+                expected.decode_swa_indices.clone(),
+                expected.decode_swa_lens.clone(),
+                expected.is_valid_token.clone(),
+            ]
+            builder.token_to_req_indices.fill_(99)
+            md.decode_swa_indices.fill_(99)
+            md.decode_swa_lens.fill_(99)
+            md.is_valid_token.fill_(True)
+            graph.replay()
+            for result, ref in zip(actual, reference):
+                torch.testing.assert_close(result, ref, atol=0, rtol=0)
+            padded = slice(active * query_len, batch * query_len)
+            assert not actual[2][padded].any()
+            assert not actual[1][padded].any()
+            assert (actual[0][padded] == -1).all()

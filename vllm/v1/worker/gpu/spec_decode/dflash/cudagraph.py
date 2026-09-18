@@ -85,6 +85,10 @@ class DFlashCudaGraphManager(CudaGraphManager):
         causal: bool | Mapping[int, bool],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
+        self._metadata_refreshes: dict[
+            BatchExecutionDescriptor, list[Callable[[], None]]
+        ] = {}
+
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
@@ -109,13 +113,41 @@ class DFlashCudaGraphManager(CudaGraphManager):
             )
             attn_metadata, slot_mappings = attn_state
 
-            return lambda cg_mode: forward_fn(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cg_mode,
-            )
+            refreshes = []
+            if attn_metadata is not None:
+                for groups in attn_groups:
+                    for group in groups:
+                        builder = group.get_metadata_builder(0)
+                        refreshes.append(
+                            builder.build_dflash_metadata_refresh(
+                                attn_metadata[group.layer_names[0]],
+                                num_tokens // num_reqs,
+                            )
+                        )
+            updates = [refresh for refresh in refreshes if refresh is not None]
+            # All or nothing: a group left on the eager path would still need
+            # the build, and then the refresh would be redundant work.
+            if updates and len(updates) == len(refreshes):
+                self._metadata_refreshes[desc] = updates
+            else:
+                updates = []
+
+            def forward(cg_mode: CUDAGraphMode) -> None:
+                for update in updates:
+                    update()
+                forward_fn(
+                    num_reqs,
+                    num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+
+            return forward
 
         super().capture(create_forward_fn, progress_bar_desc)
+
+    def has_metadata_refresh(self, desc: BatchExecutionDescriptor) -> bool:
+        """True when this descriptor's graph refreshes attention metadata itself."""
+        return desc in self._metadata_refreshes
