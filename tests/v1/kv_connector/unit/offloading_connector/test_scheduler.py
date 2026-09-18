@@ -679,6 +679,104 @@ def test_partial_lookup_and_load_address_each_group_block_size_under_dcp():
     assert req_status.partial_tail_boundary is None
 
 
+@pytest.mark.parametrize("num_tokens", [64, 70])
+def test_partial_lookup_keeps_earlier_tail_when_full_attention_prefix_grows(num_tokens):
+    # The tail at 44 sits inside the first 32-token chunk. Once a second
+    # complete chunk (h15) is also resident the anchor moves past it, and a
+    # probe floored on the anchor can no longer see it.
+    scheduler = _make_dcp_shaped_hybrid_scheduler()
+    request = _make_dcp_shaped_request(scheduler, num_tokens=num_tokens)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    mla_keys = {b"h10"}
+    hits = []
+    for full_chunk in [b"h7", b"h15"]:
+        mla_keys.add(full_chunk)
+        scheduler.manager.lookup.side_effect = _dcp_lookup({0: mla_keys, 1: {b"h10"}})
+        hits.append(scheduler._lookup(req_status))
+
+    assert hits == [44, 44]
+    assert req_status.partial_tail_boundary == 44
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(41),
+                ],
+            )
+        ),
+        num_external_tokens=44,
+    )
+    [job] = scheduler._current_batch_load_jobs.values()
+    assert isinstance(job.dst_spec, GPULoadStoreSpec)
+    assert [
+        (get_offload_group_idx(key), get_offload_block_hash(key))
+        for key in job.src_spec.offload_keys
+    ] == [(0, b"h7"), (0, b"h10"), (1, b"h10")]
+    assert job.dst_spec.block_ids.tolist() == [31, 32, 41]
+    assert job.dst_spec.group_sizes == [2, 1]
+    assert job.dst_spec.block_indices == [0, 2]
+    assert req_status.partial_tail_boundary is None
+
+
+@pytest.mark.parametrize(
+    "mla_result,checkpoint_result,has_complete_checkpoint,expected",
+    [
+        (LookupResult.HIT, LookupResult.MISS, False, 0),
+        (LookupResult.HIT, LookupResult.HIT_PENDING, False, None),
+        (LookupResult.HIT, LookupResult.RETRY, False, None),
+        (LookupResult.HIT, LookupResult.HIT_PENDING, True, 32),
+        (LookupResult.HIT_PENDING, LookupResult.MISS, False, 0),
+        (LookupResult.RETRY, LookupResult.MISS, False, 0),
+    ],
+)
+def test_partial_lookup_earlier_tail_requires_a_ready_checkpoint(
+    mla_result, checkpoint_result, has_complete_checkpoint, expected
+):
+    # Widening the probe range must not let it commit, or indefinitely defer on,
+    # a boundary whose companion state is not ready.
+    scheduler = _make_dcp_shaped_hybrid_scheduler()
+    _make_dcp_shaped_request(scheduler, num_tokens=70)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    ready_lookup = _dcp_lookup(
+        {
+            0: {b"h7", b"h10", b"h15"},
+            1: {b"h7"} if has_complete_checkpoint else set(),
+        }
+    )
+
+    def lookup(key, req_context):
+        if get_offload_block_hash(key) == b"h10":
+            return mla_result if get_offload_group_idx(key) == 0 else checkpoint_result
+        return ready_lookup(key, req_context)
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == expected
+    assert req_status.partial_tail_boundary is None
+    assert not scheduler._current_batch_load_jobs
+
+
+@pytest.mark.parametrize("group_idx", [0, 1])
+def test_partial_lookup_earlier_tail_defers_while_tail_is_loading(group_idx):
+    scheduler = _make_dcp_shaped_hybrid_scheduler()
+    request = _make_dcp_shaped_request(scheduler, num_tokens=70)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    scheduler.manager.lookup.side_effect = _dcp_lookup(
+        {0: {b"h7", b"h10", b"h15"}, 1: {b"h10"}}
+    )
+    scheduler._chunks_being_loaded.add(
+        scheduler._make_boundary_key(request, group_idx, 44, req_status.req_context)
+    )
+    assert scheduler._lookup(req_status) is None
+    assert req_status.partial_tail_boundary is None
+
+
 def test_partial_lookup_under_dcp_hits_tail_without_recurrent_state_at_chunk_boundary():
     # 46-token prompt, hash 4, full-attention chunk 32, recurrent block 16.
     # Stored: full-attention chunk [0,32) (h7), the partial tail @44 for both

@@ -1062,9 +1062,13 @@ class OffloadingConnectorScheduler:
                 return None if complete_hit == 0 else complete_hit
             anchor_hit = max(complete_hit, full_attention_hit)
 
-        complete_boundary = local_tokens + anchor_hit
+        # Floor on the all-groups complete hit, not on the anchor: the anchor is
+        # the largest *full-attention* prefix, and using it as the floor as well
+        # makes every tail below it unreachable, so a request holding two
+        # complete chunks never probes a resident pair inside the first one.
+        complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self._partial_tail_window
+        block_end = local_tokens + anchor_hit + self._partial_tail_window
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -1079,6 +1083,10 @@ class OffloadingConnectorScheduler:
 
         pending = False
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+            if boundary % self._partial_tail_window == 0:
+                # Now that the range can reach one, a window multiple's boundary
+                # key aliases the complete-chunk key.
+                continue
             boundary_pending = False
             boundary_missed = False
             boundary_keys = []
@@ -1094,10 +1102,14 @@ class OffloadingConnectorScheduler:
                 if result is LookupResult.MISS:
                     boundary_missed = True
                     break
-                if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
+                if result in (LookupResult.HIT_PENDING, LookupResult.RETRY) or (
+                    self._chunks_being_loaded and key in self._chunks_being_loaded
+                ):
                     boundary_pending = True
 
-            pending |= boundary_pending
+            # A boundary that also missed is a definite miss; a pending sibling
+            # key is no reason to defer the request for it.
+            pending |= boundary_pending and not boundary_missed
             if not boundary_missed and not boundary_pending:
                 for group_config, key in zip(
                     self.config.kv_group_configs, boundary_keys
