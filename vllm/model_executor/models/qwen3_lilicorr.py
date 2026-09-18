@@ -14,11 +14,17 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dflash2 import DFlash2Qwen3DecoderLayer
+from .utils import maybe_prefix
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,13 @@ class LiLiCorrRMSNorm(nn.Module):
 
 
 class LiLiCorrLatticeAttention(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         if hidden_size % num_heads != 0:
             raise ValueError(
@@ -85,15 +97,26 @@ class LiLiCorrLatticeAttention(nn.Module):
         self.hidden_size = int(hidden_size)
         self.num_heads = int(num_heads)
         self.head_dim = self.hidden_size // self.num_heads
-        self.in_proj_weight = nn.Parameter(torch.zeros(3 * hidden_size, hidden_size))
-        self.in_proj_bias = nn.Parameter(torch.zeros(3 * hidden_size))
-        self.out_proj = ReplicatedLinear(hidden_size, hidden_size, return_bias=False)
+        self.in_proj = ReplicatedLinear(
+            hidden_size,
+            3 * hidden_size,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "in_proj"),
+        )
+        self.out_proj = ReplicatedLinear(
+            hidden_size,
+            hidden_size,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "out_proj"),
+        )
 
     def forward(
         self, hidden_states: torch.Tensor, attention_bias: torch.Tensor
     ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
-        qkv = F.linear(hidden_states, self.in_proj_weight, self.in_proj_bias)
+        qkv = self.in_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
         shape = (bsz, seq_len, self.num_heads, self.head_dim)
         q = q.view(shape).transpose(1, 2)
@@ -112,17 +135,37 @@ class LiLiCorrLatticeAttention(nn.Module):
 
 class LiLiCorrLayer(nn.Module):
     def __init__(
-        self, hidden_size: int, num_heads: int, mlp_ratio: float, rms_norm_eps: float
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float,
+        rms_norm_eps: float,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.attn_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
-        self.attn = LiLiCorrLatticeAttention(hidden_size, num_heads)
+        self.attn = LiLiCorrLatticeAttention(
+            hidden_size, num_heads, quant_config, maybe_prefix(prefix, "attn")
+        )
         self.mlp_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
         mlp_hidden_size = int(hidden_size * mlp_ratio)
         self.mlp = nn.Sequential(
-            ReplicatedLinear(hidden_size, mlp_hidden_size, return_bias=False),
+            ReplicatedLinear(
+                hidden_size,
+                mlp_hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "mlp.0"),
+            ),
             nn.SiLU(),
-            ReplicatedLinear(mlp_hidden_size, hidden_size, return_bias=False),
+            ReplicatedLinear(
+                mlp_hidden_size,
+                hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "mlp.2"),
+            ),
         )
 
     def forward(
@@ -145,6 +188,8 @@ class LiLiCorrHead(nn.Module):
         block_size: int,
         rms_norm_eps: float,
         config: LiLiCorrConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         hidden_size = config.resolve_hidden_size(model_hidden_size=model_hidden_size)
@@ -160,18 +205,38 @@ class LiLiCorrHead(nn.Module):
         self.token_proj = (
             nn.Identity()
             if model_hidden_size == hidden_size
-            else ReplicatedLinear(model_hidden_size, hidden_size, return_bias=False)
+            else ReplicatedLinear(
+                model_hidden_size,
+                hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "token_proj"),
+            )
         )
         self.pass_hidden_proj = ReplicatedLinear(
-            model_hidden_size, hidden_size, return_bias=False
+            model_hidden_size,
+            hidden_size,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "pass_hidden_proj"),
         )
         self.feature_mlp = nn.Sequential(
             nn.LayerNorm(self.num_candidate_features),
             ReplicatedLinear(
-                self.num_candidate_features, hidden_size, return_bias=False
+                self.num_candidate_features,
+                hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "feature_mlp.1"),
             ),
             nn.SiLU(),
-            ReplicatedLinear(hidden_size, hidden_size, return_bias=False),
+            ReplicatedLinear(
+                hidden_size,
+                hidden_size,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "feature_mlp.3"),
+            ),
         )
         self.slot_embedding = nn.Parameter(
             torch.zeros(1, 1, self.num_candidate_slots, 1, hidden_size)
@@ -184,7 +249,11 @@ class LiLiCorrHead(nn.Module):
         )
         self.same_slot_bias = nn.Parameter(torch.zeros(self.num_heads))
         self.context_proj = ReplicatedLinear(
-            model_hidden_size, hidden_size, return_bias=False
+            model_hidden_size,
+            hidden_size,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "context_proj"),
         )
         self.layers = nn.ModuleList(
             [
@@ -193,26 +262,43 @@ class LiLiCorrHead(nn.Module):
                     num_heads=self.num_heads,
                     mlp_ratio=self.mlp_ratio,
                     rms_norm_eps=rms_norm_eps,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, f"layers.{i}"),
                 )
-                for _ in range(int(config.num_layers))
+                for i in range(int(config.num_layers))
             ]
         )
         self.output_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
         self.anchor_norm = LiLiCorrRMSNorm(hidden_size, eps=rms_norm_eps)
         self.factor_input_proj = ReplicatedLinear(
-            hidden_size * 3, hidden_size, return_bias=False
+            hidden_size * 3,
+            hidden_size,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "factor_input_proj"),
         )
         self.out_head = ReplicatedLinear(
-            hidden_size, self.factor_dim, return_bias=False
+            hidden_size,
+            self.factor_dim,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "out_head"),
         )
-        self.in_head = ReplicatedLinear(hidden_size, self.factor_dim, return_bias=False)
+        self.in_head = ReplicatedLinear(
+            hidden_size,
+            self.factor_dim,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "in_head"),
+        )
         self.anchor_out_head = ReplicatedLinear(
-            hidden_size, self.factor_dim, return_bias=False
+            hidden_size,
+            self.factor_dim,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "anchor_out_head"),
         )
         self._attn_bias: torch.Tensor | None = None
-        self._fused_edge_weight: torch.Tensor | None = None
-        self._fused_edge_bias: torch.Tensor | None = None
-        self._factor_input_splits: tuple[torch.Tensor, ...] | None = None
         self._rank_frac_col: torch.Tensor | None = None
         self._is_top1_col: torch.Tensor | None = None
 
@@ -222,23 +308,6 @@ class LiLiCorrHead(nn.Module):
     ) -> None:
         topk = self.candidate_topk
         self._attn_bias = self._build_attention_bias(device=device, dtype=dtype)
-        self._fused_edge_weight = (
-            torch.cat([self.out_head.weight, self.in_head.weight], dim=0)
-            .to(device=device, dtype=dtype)
-            .contiguous()
-        )
-        self._fused_edge_bias = (
-            torch.cat([self.out_head.bias, self.in_head.bias], dim=0)
-            .to(device=device, dtype=dtype)
-            .contiguous()
-        )
-        weight = self.factor_input_proj.weight
-        hdim = self.hidden_size
-        self._factor_input_splits = (
-            weight[:, :hdim].contiguous(),
-            weight[:, hdim : 2 * hdim].contiguous(),
-            weight[:, 2 * hdim :].contiguous(),
-        )
         if topk > 1:
             rank_frac = torch.arange(topk, device=device, dtype=torch.float32).view(
                 1, 1, 1, topk
@@ -294,7 +363,7 @@ class LiLiCorrHead(nn.Module):
             raise ValueError(
                 f"LiLiCorr expects candidate_topk={self.candidate_topk}, got {topk}."
             )
-        proj_dtype = self.pass_hidden_proj.weight.dtype
+        proj_dtype = self.slot_embedding.dtype
         if token_embeddings.dtype != proj_dtype:
             token_embeddings = token_embeddings.to(proj_dtype)
         if pass_hidden.dtype != proj_dtype:
@@ -336,16 +405,16 @@ class LiLiCorrHead(nn.Module):
             bsz, n_blocks, n_slots, topk, self.hidden_size
         )
         anchor_state = self.anchor_norm(anchor_state)
-        w_self, w_anchor, w_cross = self._factor_input_splits
-        anchor_row = anchor_state[:, :, None, None, :]
-        pre = F.linear(hidden_states, w_self, self.factor_input_proj.bias)
-        pre = pre + F.linear(anchor_row, w_anchor)
-        pre = pre + F.linear(hidden_states * anchor_row, w_cross)
-        factor_hidden = F.silu(pre)
-        edges = F.linear(factor_hidden, self._fused_edge_weight, self._fused_edge_bias)
-        out_vec, in_vec = F.normalize(
-            edges.unflatten(-1, (2, self.factor_dim)), dim=-1, eps=self.vector_eps
-        ).unbind(-2)
+        anchor_row = anchor_state[:, :, None, None, :].expand_as(hidden_states)
+        factor_hidden = F.silu(
+            self.factor_input_proj(
+                torch.cat(
+                    (hidden_states, anchor_row, hidden_states * anchor_row), dim=-1
+                )
+            )
+        )
+        out_vec = F.normalize(self.out_head(factor_hidden), dim=-1, eps=self.vector_eps)
+        in_vec = F.normalize(self.in_head(factor_hidden), dim=-1, eps=self.vector_eps)
         anchor_out = F.normalize(
             self.anchor_out_head(anchor_state), dim=-1, eps=self.vector_eps
         )
@@ -417,6 +486,8 @@ class LiLiCorrQwen3Model(DFlashQwen3Model):
                 block_size=block_size,
                 rms_norm_eps=config.rms_norm_eps,
                 config=head_config,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lilicorr"),
             )
 
 
@@ -426,8 +497,6 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         spec = vllm_config.speculative_config
         assert spec is not None
-        if spec.draft_model_config.quantization is not None:
-            raise ValueError("Quantized LiLiCorr draft weights are not supported.")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.draft_id_to_target_id is not None:
             raise ValueError("LiLiCorr candidates require the full target vocabulary.")
@@ -445,6 +514,12 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        quantized_prefixes = tuple(
+            name + "."
+            for name, module in self.model.named_modules()
+            if isinstance(module, LinearBase)
+            and not isinstance(module.quant_method, UnquantizedLinearMethod)
+        )
         expected = {
             name
             for name, _ in self.model.named_parameters()
@@ -457,6 +532,9 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         def normalized_weights():
             for name, value in weights:
                 name = name.removeprefix("model.")
+                if name.startswith("lilicorr."):
+                    name = name.replace(".attn.in_proj_weight", ".attn.in_proj.weight")
+                    name = name.replace(".attn.in_proj_bias", ".attn.in_proj.bias")
                 if (
                     name.startswith("lilicorr.")
                     or ".attention_conv." in name
@@ -466,6 +544,12 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
                 yield name, value
 
         super().load_weights(normalized_weights())
+        # Quantized linears may remap or synthesize parameters during loading.
+        # Keep strict coverage for norms, embeddings, and unquantized linears.
+        expected = {
+            name for name in expected if not name.startswith(quantized_prefixes)
+        }
+        seen = {name for name in seen if not name.startswith(quantized_prefixes)}
         if seen != expected:
             raise ValueError(
                 "LiLiCorr checkpoint coverage mismatch: "
@@ -473,7 +557,7 @@ class LiLiCorrQwen3ForCausalLM(DFlashQwen3ForCausalLM):
                 f"unexpected={sorted(seen - expected)}"
             )
         head = self.model.lilicorr
-        parameter = next(head.parameters())
+        parameter = head.slot_embedding
         head.materialize_inference_buffers(parameter.device, parameter.dtype)
 
 

@@ -78,7 +78,14 @@ def _reference_scores(head, embeddings, log_probs, hidden, anchor, valid):
             dtype=x.dtype,
             device=x.device,
         )
-        attention.load_state_dict(layer.attn.state_dict())
+        attention.load_state_dict(
+            {
+                name.replace("in_proj.weight", "in_proj_weight").replace(
+                    "in_proj.bias", "in_proj_bias"
+                ): value
+                for name, value in layer.attn.state_dict().items()
+            }
+        )
         normalized = layer.attn_norm(x)
         x = (
             x
@@ -127,9 +134,6 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
                     parameter.weight_loader(
                         parameter, torch.randn_like(parameter) * 0.1
                     )
-        for layer in head.layers:
-            layer.attn.in_proj_weight.normal_(std=0.1)
-            layer.attn.in_proj_bias.normal_(std=0.1)
         head.relative_slot_bias.normal_(std=0.1)
         head.same_slot_bias.normal_(std=0.1)
         head.slot_embedding.normal_(std=0.1)
@@ -299,12 +303,13 @@ def test_candidate_walk_preserves_conditional_scores_and_padding(probabilistic):
         assert cache[1].isneginf().all()
 
 
+@pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("convolution", [False, True])
 @pytest.mark.parametrize(
     "mismatch", [None, "missing_head", "extra_head", "missing_conv", "extra_conv"]
 )
 def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
-    monkeypatch, convolution, mismatch
+    monkeypatch, convolution, mismatch, quantized
 ):
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
     from vllm.model_executor.models.qwen3_lilicorr import LiLiCorrQwen3ForCausalLM
@@ -325,7 +330,20 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     if convolution:
         layer.attention_conv = nn.Linear(2, 2, bias=False)
     wrapper.model.layers = nn.ModuleList([layer])
-    weights = dict(wrapper.model.state_dict())
+    if quantized:
+        wrapper.model.quant_config = object()
+        # Simulate a quantized projection whose scale is synthesized at load.
+        projection = wrapper.model.lilicorr.pass_hidden_proj
+        projection.quant_method = object()
+        projection.register_parameter("weight_scale", nn.Parameter(torch.ones(1)))
+    weights = {
+        name.replace(".attn.in_proj.weight", ".attn.in_proj_weight").replace(
+            ".attn.in_proj.bias", ".attn.in_proj_bias"
+        ): value
+        for name, value in wrapper.model.state_dict().items()
+    }
+    if quantized:
+        del weights["lilicorr.pass_hidden_proj.weight_scale"]
     if mismatch == "missing_head":
         del weights["lilicorr.slot_embedding"]
     elif mismatch == "extra_head":
@@ -347,3 +365,77 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     else:
         wrapper.load_weights(supplied)
         assert wrapper.model.lilicorr._attn_bias is not None
+
+
+@pytest.mark.parametrize("head_width", [8, 16])
+def test_quantized_head_calls_methods_without_reading_packed_weights(
+    monkeypatch, head_width
+):
+    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    calls = []
+    configured = []
+    quant_config = object()
+
+    class PackedMethod(UnquantizedLinearMethod):
+        def apply(self, layer, x, bias=None):
+            calls.append(layer.prefix)
+            # Packed storage has a different name/dtype from the activations.
+            assert x.dtype == torch.float32
+            return F.linear(x, layer.packed_weight.float() * layer.weight_scale, bias)
+
+    def resolve(config, layer, prefix):
+        assert config is quant_config
+        configured.append(prefix)
+        return PackedMethod()
+
+    monkeypatch.setattr(linear, "resolve_quant_method", resolve)
+    with set_current_vllm_config(
+        VllmConfig(
+            device_config=DeviceConfig("cpu"),
+            compilation_config=CompilationConfig(mode=0),
+        )
+    ):
+        head = LiLiCorrHead(
+            model_hidden_size=16,
+            block_size=4,
+            rms_norm_eps=1e-6,
+            config=_config(hidden_size=head_width),
+            quant_config=quant_config,
+            prefix="model.lilicorr",
+        )
+    with torch.no_grad():
+        for module in head.modules():
+            if isinstance(module, ReplicatedLinear):
+                module.register_parameter(
+                    "packed_weight",
+                    nn.Parameter(
+                        torch.randint(-4, 5, module.weight.shape, dtype=torch.int8),
+                        requires_grad=False,
+                    ),
+                )
+                module.register_parameter(
+                    "weight_scale",
+                    nn.Parameter(
+                        torch.tensor(0.05),
+                        requires_grad=False,
+                    ),
+                )
+                del module.weight
+                module.bias.zero_()
+        head.materialize_inference_buffers(torch.device("cpu"), torch.float32)
+        result = head(
+            torch.randn(2, 3, 4, 16),
+            torch.randn(2, 3, 4).log_softmax(-1),
+            torch.randn(2, 3, 16),
+            torch.randn(2, 16),
+            torch.tensor([True, False]),
+        )
+    assert result.shape == (2, 3, 4, 4)
+    assert torch.isfinite(result).all()
+    assert set(calls) == set(configured)
+    assert len(configured) == len(set(configured))
+    for name, module in head.named_modules():
+        if isinstance(module, ReplicatedLinear):
+            assert module.prefix == f"model.lilicorr.{name}"
