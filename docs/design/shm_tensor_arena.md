@@ -128,7 +128,7 @@ class _ArenaPickler(pickle.Pickler):
             idx = self.arena.write_tensor(obj)        # ONE memcpy into a free slot
             if idx is not None:
                 return (_rebuild_arena_tensor,
-                        (idx, nbytes, dtype_str, shape))
+                        (self.arena.shared_memory.name, idx, nbytes, dtype_str, shape))
         return NotImplemented   # fall through to dispatch_table → _reduce_tensor
 ```
 
@@ -223,7 +223,7 @@ are internal constants (no env vars).
 |---|---|---|
 | `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
 
-Internal constants in `shm_broadcast.py`: **8 slots × 256 MB**; tensors larger
+Internal constants in `shm_tensor_arena.py`: **8 slots × 256 MB**; tensors larger
 than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
 `_reduce_tensor` path.
 

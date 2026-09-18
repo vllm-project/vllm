@@ -943,6 +943,41 @@ def test_arena_slot_not_released_while_tensor_retained_across_multiple_flushes()
     assert writer.write_tensor(t) == idx
 
 
+def test_arena_release_survives_intervening_flush_from_another_tensor():
+    """Regression test: `flush_releases()` must clear `_pending_release` IN
+    PLACE (`.clear()`), never rebind it to a new list object. `get_tensor`'s
+    `weakref.finalize` captures a bound `self._pending_release.append`
+    method tied to whatever list OBJECT is current at registration time --
+    if `flush_releases` ever did `self._pending_release = []` instead, a
+    tensor whose finalizer was registered before that reassignment but
+    collected after it would have its release silently appended into the
+    now-orphaned old list and never observed again, permanently leaking its
+    slot. This is exactly the interleaving a long-lived `prompt_embeds`
+    tensor sees in practice once any other (short-lived) tensor also flows
+    through the same reader/arena and triggers an intervening flush."""
+    writer, (reader,) = _make_arena(n_reader=1, n_slots=2)
+    t = torch.ones(1000)
+    # `a` is long-lived: its finalizer is registered first, while
+    # _pending_release is still the arena's original (empty) list object.
+    idx_a = writer.write_tensor(t)
+    a = _get_view(reader, idx_a, t)
+    # `b` is short-lived and its finalizer is registered against that SAME
+    # list object (nothing has flushed yet).
+    idx_b = writer.write_tensor(t)
+    b = _get_view(reader, idx_b, t)
+    del b
+    assert reader._pending_release == [idx_b]
+    # This flush must not orphan `a`'s still-pending finalizer.
+    reader.flush_releases()
+    assert reader._pending_release == []
+    assert writer.write_tensor(t) == idx_b  # b's slot correctly reused.
+    # `a` is dropped well after that intervening flush.
+    del a
+    assert reader._pending_release == [idx_a]
+    _drain(reader)
+    assert writer.write_tensor(t) == idx_a  # a's slot must NOT be leaked.
+
+
 def test_arena_oversize_falls_back():
     writer, _ = _make_arena(n_reader=1, slot_bytes=1 << 20, n_slots=2)
     big = torch.empty((1 << 20) + 4096, dtype=torch.uint8)

@@ -277,6 +277,12 @@ class ShmTensorArena:
         slot_mv = self._slot(idx, nbytes)
         t8 = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
         t = t8.view(dtype).view(shape)
+        # `self._pending_release.append` binds to the CURRENT list OBJECT,
+        # not to a live lookup of the `_pending_release` attribute -- so
+        # `flush_releases` must only ever mutate that same list in place
+        # (`.clear()`), never rebind `self._pending_release` to a new list,
+        # or a finalizer registered here before such a rebind would append
+        # into an orphaned list that nothing reads again (permanent leak).
         weakref.finalize(t, self._pending_release.append, idx)
         return t
 
@@ -340,8 +346,16 @@ class ShmTensorArena:
 
         if not self._pending_release:
             return
-        idxs = self._pending_release
-        self._pending_release = []
+        # Snapshot-and-clear IN PLACE (never rebind `self._pending_release`
+        # to a new list object): `get_tensor`'s `weakref.finalize` captured
+        # a bound `self._pending_release.append` method tied to THIS list
+        # object. Reassigning the attribute (`self._pending_release = []`)
+        # would silently orphan that bound method for any tensor still
+        # alive at this point -- its eventual release would be appended to
+        # the now-abandoned old list and never observed again, permanently
+        # leaking that slot.
+        idxs = list(self._pending_release)
+        self._pending_release.clear()
 
         event = self._record_release_event() if self._pinned else None
         if event is None:
