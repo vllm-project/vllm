@@ -88,3 +88,42 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "expected"),
+    [
+        pytest.param(SamplingParams(), False, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0), False, id="greedy"),
+        pytest.param(SamplingParams(temperature=0.7), False, id="temperature"),
+        pytest.param(
+            SamplingParams(allowed_token_ids=[1]), True, id="allowed-token-ids"
+        ),
+        pytest.param(SamplingParams(logit_bias={1: 1.0}), True, id="logit-bias"),
+        pytest.param(SamplingParams(frequency_penalty=0.1), True, id="penalty"),
+        pytest.param(SamplingParams(_bad_words_token_ids=[[1]]), True, id="bad-words"),
+        pytest.param(SamplingParams(min_p=0.1), True, id="min-p"),
+        pytest.param(SamplingParams(top_k=10), True, id="top-k"),
+        pytest.param(SamplingParams(top_p=0.9), True, id="top-p"),
+        pytest.param(
+            SamplingParams(thinking_token_budget=3), True, id="thinking-budget"
+        ),
+    ],
+)
+def test_target_only_sampling_transforms_match_draft_ignored_fields(
+    sampling_params: SamplingParams, expected: bool
+):
+    sampler = _make_sampler()
+    sampler.add_request(3, prompt_len=1, sampling_params=sampling_params)
+
+    idx = np.array([3], dtype=np.int32)
+    assert sampler.target_only_sampling_transforms(idx)[0] == expected
+
+
+def test_target_only_sampling_transforms_are_per_request():
+    sampler = _make_sampler()
+    sampler.add_request(0, 1, SamplingParams(temperature=0.0))
+    sampler.add_request(1, 1, SamplingParams(allowed_token_ids=[1]))
+
+    mask = sampler.target_only_sampling_transforms(np.array([0, 1], dtype=np.int32))
+    np.testing.assert_array_equal(mask, np.array([False, True]))

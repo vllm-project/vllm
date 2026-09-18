@@ -93,6 +93,29 @@ class Sampler:
             or states.top_p.np[req_idx] != 1.0
         )
 
+    def target_only_sampling_transforms(self, idx_mapping_np: np.ndarray) -> np.ndarray:
+        """Per-request mask of sampling transforms the draft sampler ignores.
+
+        Draft sampling copies temperature and seed only. The target still
+        applies allowed_token_ids, logit_bias, penalties, bad_words, min_p,
+        top_k, top_p, and thinking-budget constraints, which biases
+        accept/reject labels relative to the draft features. Those
+        observations must not update the shared acceptance estimator.
+        """
+        states = self.sampling_states
+        mask = (
+            self.logit_bias_state.use_logit_bias[idx_mapping_np]
+            | self.penalties_state.use_penalty[idx_mapping_np]
+            | (self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0)
+            | (states.min_p.np[idx_mapping_np] != 0.0)
+            | (states.top_k.np[idx_mapping_np] != states.vocab_size)
+            | (states.top_p.np[idx_mapping_np] != 1.0)
+        )
+        if self.thinking_budget_state.enabled:
+            thinking = self.thinking_budget_state.use_thinking_budget[idx_mapping_np]
+            mask = mask | thinking
+        return mask
+
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes()
