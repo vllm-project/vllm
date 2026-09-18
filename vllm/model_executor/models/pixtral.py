@@ -1500,15 +1500,11 @@ class PixtralHFVisionModel(nn.Module):
 
         """
         # pass images through initial convolution independently
-        if self.input_norm is not None:
-            pixel_values = [
-                self.input_norm(img.to(device=self.device), self.dtype)
-                for img in pixel_values
-            ]
-
-        patch_embeds_list = [
-            self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in pixel_values
-        ]
+        patch_embeds_list = []
+        for image in pixel_values:
+            if self.input_norm is not None:
+                image = self.input_norm(image.to(device=self.device), self.dtype)
+            patch_embeds_list.append(self.patch_conv(image.unsqueeze(0).to(self.dtype)))
 
         patch_embeds = [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list]
         embed_sizes = [p.shape[1] for p in patch_embeds]
