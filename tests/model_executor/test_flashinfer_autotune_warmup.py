@@ -46,6 +46,7 @@ def _make_runner(modules, *, max_tokens: int = 8192, linear_backend: str = "auto
         vllm_config=SimpleNamespace(
             kernel_config=SimpleNamespace(linear_backend=linear_backend),
             attention_config=SimpleNamespace(hisparse_config=None),
+            parallel_config=SimpleNamespace(data_parallel_rank=0),
         ),
         get_model=Mock(
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
@@ -146,12 +147,13 @@ class _AutotuneGroup:
     def record(self, operation):
         self.run.collectives[self.ranks][self.run.rank].append(operation)
 
-    def broadcast_object(self, obj, src=0):
-        assert src == 0
-        self.record(("broadcast", src))
-        if self.rank_in_group == src:
-            self.run.broadcasts[self.ranks] = obj
-        return self.run.broadcasts[self.ranks]
+    def all_gather_object(self, out, obj):
+        # Ranks run sequentially: snapshot every rank's file before any saves.
+        self.record(("all_gather",))
+        out[:] = self.run.gathered.setdefault(
+            self.ranks,
+            [self.run.cache_path(rank).exists() for rank in self.ranks],
+        )
 
     def barrier(self):
         self.record(("barrier",))
@@ -185,17 +187,21 @@ class _AutotuneTuner:
 
 
 class _AutotuneRun:
-    def __init__(self, pp, tp):
+    def __init__(self, pp, tp, cache_dir):
         self.pp, self.tp = pp, tp
+        self.cache_dir = cache_dir
         self.rank = 0
         self.tuning_group = None
         self.collectives: dict[tuple[int, ...], dict[int, list[tuple[Any, ...]]]] = (
             defaultdict(lambda: defaultdict(list))
         )
-        self.broadcasts = {}
+        self.gathered = {}
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
+
+    def cache_path(self, rank):
+        return self.cache_dir / f"autotune_configs_dp0_rank{rank}.json"
 
     def world(self):
         return _AutotuneGroup(self, range(self.pp * self.tp))
@@ -235,7 +241,7 @@ def autotune_run(monkeypatch, tmp_path):
     from vllm.distributed import parallel_state
 
     def make_run(*, pp=2, tp=4):
-        run = _AutotuneRun(pp, tp)
+        run = _AutotuneRun(pp, tp, tmp_path)
         autotuner = ModuleType("flashinfer.autotuner")
         monkeypatch.setattr(
             autotuner,
@@ -251,6 +257,10 @@ def autotune_run(monkeypatch, tmp_path):
         monkeypatch.setattr(parallel_state, "get_tp_group", run.tensor_group)
         monkeypatch.setattr(parallel_state, "get_pp_group", run.pipeline_group)
         monkeypatch.setattr(fi_utils, "autotune", lambda **kwargs: nullcontext())
+        monkeypatch.setattr(
+            "torch.distributed.all_gather_object",
+            lambda out, obj, group: group.all_gather_object(out, obj),
+        )
         monkeypatch.setattr(
             warmup,
             "resolve_flashinfer_autotune_file",
@@ -286,19 +296,18 @@ def test_pp_stage_cache_roundtrip_isolated_and_asymmetric_hits_safe(
     legacy = tmp_path / "autotune_configs.json"
     legacy.write_text('{"legacy_world_cache": 99}')
     cold = autotune_run().execute()
-    assert [rank for rank, _, _ in cold.saves] == [0, 4]
-    paths = [path for _, path, _ in cold.saves]
-    assert len(set(paths)) == 2 and legacy not in paths
-    assert json.loads(legacy.read_text()) == {"legacy_world_cache": 99}
-    assert cold.saves[0][2] == {"shared_gemm": 0, "pp0_extra_gemm": 0}
-    assert cold.saves[1][2] == {"shared_gemm": 1}
     cold.assert_collectives_match()
+    assert [rank for rank, _, _ in cold.saves] == list(range(8))
+    assert [path for _, path, _ in cold.saves] == [cold.cache_path(r) for r in range(8)]
+    assert json.loads(legacy.read_text()) == {"legacy_world_cache": 99}
+    stage_caches = [{"shared_gemm": 0, "pp0_extra_gemm": 0}, {"shared_gemm": 1}]
+    assert all(cache == stage_caches[r // 4] for r, _, cache in cold.saves)
     warm = autotune_run().execute()
     warm.assert_collectives_match()
     assert not warm.profile_groups
     for rank, tuner in warm.tuners.items():
-        assert tuner.loaded == cold.saves[rank // 4][2]
-    paths[1].unlink()
+        assert tuner.loaded == stage_caches[rank // 4]
+    cold.cache_path(5).unlink()
     mixed = autotune_run().execute()
     mixed.assert_collectives_match()
     assert set(mixed.profile_groups) == {4, 5, 6, 7}
@@ -306,10 +315,10 @@ def test_pp_stage_cache_roundtrip_isolated_and_asymmetric_hits_safe(
     assert all(mixed.tuners[rank].loaded is None for rank in range(4, 8))
 
 
-def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run):
+def test_pp1_tunes_world_group_and_saves_per_rank(autotune_run):
     run = autotune_run(pp=1, tp=4).execute()
     run.assert_collectives_match()
-    assert [(rank, path.name) for rank, path, _ in run.saves] == [
-        (0, "autotune_configs.json")
+    assert [(rank, path) for rank, path, _ in run.saves] == [
+        (rank, run.cache_path(rank)) for rank in range(4)
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
