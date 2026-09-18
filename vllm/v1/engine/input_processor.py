@@ -376,12 +376,6 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
-            if resumable and sampling_params.prompt_logprob_token_ids is not None:
-                raise VLLMValidationError(
-                    "prompt_logprob_token_ids is not supported for streaming "
-                    "(resumable) inputs.",
-                    parameter="prompt_logprob_token_ids",
-                )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 sampling_params.max_tokens = (
