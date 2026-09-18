@@ -13,7 +13,6 @@ from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningPar
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
-    flush_open_body,
     open_recipient,
     visible_channels,
 )
@@ -178,13 +177,9 @@ class MuseGlimmerParser(DelegatingParser):
         if not isinstance(tool_parser, MuseGlimmerToolParser):
             return delta_message
 
-        content, reasoning, content_open, reasoning_open = visible_channels(
-            state.previous_text
+        content, reasoning, _content_open, _reasoning_open = visible_channels(
+            state.previous_text, flush_growing=True
         )
-        if content_open:
-            content = flush_open_body(content)
-        if reasoning_open:
-            reasoning = flush_open_body(reasoning)
         content_remainder, emitted_content = advance_emitted(
             tool_parser._emitted_content, content
         )

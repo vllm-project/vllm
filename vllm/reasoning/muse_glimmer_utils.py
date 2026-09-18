@@ -68,7 +68,7 @@ _OPEN_TAIL_HEADER_RE = re.compile(rf"\s+(?:t|to|to={_RECIPIENT_PARTIAL})$")
 # header itself is stripped -- the preceding whitespace was legitimately
 # emitted while streaming.
 _TRAILING_BARE_HEADER_RE = re.compile(
-    rf"(?<=\s)to=(?!(?:self|user)<\|message\|>){_RECIPIENT}<\|message\|>$"
+    rf"(?<=\s)to=(?!(?:self|user)<\|message\|>){_RECIPIENT}<\|message\|>\Z"
 )
 
 
@@ -194,8 +194,10 @@ def flush_open_body(body: str) -> str:
     body never arrived -- so it is stripped as well. The partial marker goes
     first: a complete header ends with ``<|message|>``, so none can follow one.
     """
+    # A lone "<" is ordinary text; only a marker actually in progress ("<|…")
+    # is framing cut by the token limit.
     partial = _trailing_partial_marker_len(body)
-    if partial:
+    if partial >= 2:
         body = body[: len(body) - partial]
     header = _TRAILING_BARE_HEADER_RE.search(body)
     if header is not None:
@@ -203,8 +205,18 @@ def flush_open_body(body: str) -> str:
     return body
 
 
+def has_channel_framing(text: str) -> bool:
+    """Whether the text contains channel framing or a possible start of it."""
+    return (
+        MSG_HEADER_RE.search(text) is not None
+        or "<|start|>" in text
+        or FUNCTION_CALLS_OPEN in text
+        or "<atem:invoke" in text
+    )
+
+
 def visible_channels(
-    text: str, *, withhold_open_untagged: bool = False
+    text: str, *, withhold_open_untagged: bool = False, flush_growing: bool = False
 ) -> tuple[str, str, bool, bool]:
     """Return content, reasoning, and whether each last body is still growing.
 
@@ -216,6 +228,10 @@ def visible_channels(
     Open untagged bodies may later become ATEM tool channels, so streaming
     callers withhold them until their classification can no longer shrink --
     i.e. only while they can still grow.
+
+    With ``flush_growing`` (the end-of-stream paths), the growing body's tail
+    is flushed per-body BEFORE joining: on the joined string a frozen body's
+    tail is indistinguishable from the growing body's framing.
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -230,6 +246,8 @@ def visible_channels(
         # growing body makes its channel's tail unsafe to emit.
         growing = not closed and index == last and bool(body)
         if recipient == REASONING_RECIPIENT:
+            if flush_growing and growing:
+                body = flush_open_body(body)
             reasoning_parts.append(body)
             reasoning_open = growing
         elif recipient is None or recipient == USER_RECIPIENT:
@@ -253,6 +271,8 @@ def visible_channels(
                     body = body[: min(atem_starts)]
                     if not body:
                         continue
+            if flush_growing and growing:
+                body = flush_open_body(body)
             content_parts.append(body)
             content_open = growing
 

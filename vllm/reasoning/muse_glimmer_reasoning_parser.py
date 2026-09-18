@@ -13,7 +13,7 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     current_assistant_turn,
-    flush_open_body,
+    has_channel_framing,
     open_recipient,
     safe_open_body,
     visible_channels,
@@ -54,7 +54,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         Only the open channel's recipient is seeded, not its body text: a
         `continue_final_message` that stops mid-tool-call therefore parses
         nothing from the prefilled body (documented limitation, matching the
-        Rust parser).
+        Rust parser). Non-streaming `parse()` receives no prompt token ids,
+        so a prefilled channel continuation additionally drops text that a
+        later framed header would re-anchor (same limitation, one path over).
         """
         try:
             text = self.model_tokenizer.decode(prompt_token_ids)
@@ -81,11 +83,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> str | None:
         """Promote any unstreamed answer body when generation is truncated."""
-        content, _reasoning, content_open, _reasoning_open = visible_channels(
-            self._seeded_text(previous_text)
+        content, _reasoning, _content_open, _reasoning_open = visible_channels(
+            self._seeded_text(previous_text), flush_growing=True
         )
-        if content_open:
-            content = flush_open_body(content)
         remainder, self._emitted_content = advance_emitted(
             self._emitted_content, content
         )
@@ -93,11 +93,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
 
     def get_streaming_fallback_reasoning(self, previous_text: str) -> str | None:
         """Flush reasoning text held back while its channel was still open."""
-        _content, reasoning, _content_open, reasoning_open = visible_channels(
-            self._seeded_text(previous_text)
+        _content, reasoning, _content_open, _reasoning_open = visible_channels(
+            self._seeded_text(previous_text), flush_growing=True
         )
-        if reasoning_open:
-            reasoning = flush_open_body(reasoning)
         remainder, self._emitted_reasoning = advance_emitted(
             self._emitted_reasoning, reasoning
         )
@@ -109,13 +107,11 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """Extract reasoning while preserving framed text for channel consumers."""
-        _content, reasoning, _content_open, reasoning_open = visible_channels(
-            model_output
-        )
         # An open (truncated) reasoning body flushes minus trailing partial
         # framing, matching the streaming path.
-        if reasoning_open:
-            reasoning = flush_open_body(reasoning)
+        _content, reasoning, _content_open, _reasoning_open = visible_channels(
+            model_output, flush_growing=True
+        )
         return reasoning or None, model_output or None
 
     def extract_reasoning_streaming(
@@ -128,8 +124,20 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         """Stream clean reasoning and answer bodies from the shared segmenter."""
+        seeded = self._seeded_text(current_text)
+        if not has_channel_framing(seeded):
+            # No channel framing anywhere (e.g. a grammar-constrained answer
+            # that never opened a channel): stream the text as plain content,
+            # mirroring the non-streaming unframed fallback.
+            content = safe_open_body(seeded)
+            # A trailing whitespace run may still precede a `to=…` header.
+            content = content.rstrip()
+            content_delta, self._emitted_content = advance_emitted(
+                self._emitted_content, content
+            )
+            return DeltaMessage(content=content_delta) if content_delta else None
         content, reasoning, content_open, reasoning_open = visible_channels(
-            self._seeded_text(current_text), withhold_open_untagged=True
+            seeded, withhold_open_untagged=True
         )
         if content_open:
             content = safe_open_body(content)

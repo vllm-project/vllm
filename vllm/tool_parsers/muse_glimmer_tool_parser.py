@@ -72,6 +72,7 @@ from vllm.reasoning.muse_glimmer_utils import (
 from vllm.reasoning.muse_glimmer_utils import (
     advance_emitted,
     flush_open_body,
+    has_channel_framing,
     iter_messages,
     safe_open_body,
     visible_channels,
@@ -259,11 +260,11 @@ class MuseGlimmerToolParser(ToolParser):
     @classmethod
     def _extract_content(cls, text: str) -> str | None:
         """Return the user-facing body, or the raw text when unframed."""
-        content, reasoning, content_open, _r_open = visible_channels(text)
         # An open (truncated) body flushes minus trailing partial framing,
         # matching the streaming path.
-        if content_open:
-            content = flush_open_body(content)
+        content, reasoning, _content_open, _r_open = visible_channels(
+            text, flush_growing=True
+        )
         if content:
             return content
         # No framing at all -> the whole thing is plain content. Strip a
@@ -351,6 +352,18 @@ class MuseGlimmerToolParser(ToolParser):
             self._emitted_content = ""
             self._emitted_reasoning = ""
             self._emitted_tool_calls = 0
+
+        if not has_channel_framing(current_text):
+            # No channel framing anywhere (e.g. a grammar-constrained answer
+            # that never opened a channel): stream the text as plain content,
+            # mirroring the non-streaming unframed fallback.
+            content = safe_open_body(current_text)
+            # A trailing whitespace run may still precede a `to=…` header.
+            content = content.rstrip()
+            content_delta, self._emitted_content = advance_emitted(
+                self._emitted_content, content
+            )
+            return DeltaMessage(content=content_delta) if content_delta else None
 
         try:
             registered = self._registered_names(request)

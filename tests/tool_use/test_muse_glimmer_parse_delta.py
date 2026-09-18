@@ -725,6 +725,72 @@ def test_overlong_recipient_name_degrades_to_text(tokenizer):
     assert content == "the answer"
 
 
+def test_finish_keeps_bare_header_followed_by_newline(tokenizer):
+    # A bare header followed by a newline is stream-validated text; the finish
+    # flush must not strip it (absolute-end anchoring, not `$`-before-\n).
+    reasoning, content, tools = drive(
+        tokenizer,
+        [" to=user<|message|>ans to=x<|message|\n"],
+        with_tool_parser=False,
+    )
+    assert reasoning == ""
+    assert content == "ans to=x<|message|\n"
+    assert tools == []
+
+
+def test_flush_never_strips_frozen_body_tails(tokenizer):
+    # The frozen body's tail is validated text; a partial-marker lookalike
+    # spanning the join must not strip it, in either path.
+    generation = "<|message|><|<|eot|><|message|>e"
+    reasoning, content, tools = drive_tokenwise(tokenizer, generation)
+    assert content == "<|e"
+    assert tools == []
+
+    parser = ParserManager.get_parser(
+        reasoning_parser_name="muse_glimmer",
+        tool_parser_name="muse_glimmer",
+        enable_auto_tools=True,
+    )(tokenizer)
+    request = SimpleNamespace(tools=None, tool_choice="auto", include_reasoning=True)
+    _reasoning, content, _tools = parser.parse(
+        generation, request, enable_auto_tools=True
+    )
+    assert content == "<|e"
+
+
+def test_truncated_lone_angle_bracket_is_text(tokenizer):
+    # A lone `<` is model text, not framing; only an actual marker-in-progress
+    # (`<|…`) is stripped at finish.
+    reasoning, _content, tools = drive_tokenwise(tokenizer, " to=self<|message|>cut <")
+    assert reasoning == "cut <"
+    assert tools == []
+
+
+def test_unframed_grammar_output_streams_as_content(tokenizer):
+    # A grammar-constrained answer that never opened a channel streams as
+    # plain content instead of vanishing.
+    for with_tool_parser in (True, False):
+        reasoning, content, tools = drive_tokenwise(
+            tokenizer,
+            '{"answer": 42}',
+            with_tool_parser=with_tool_parser,
+        )
+        assert reasoning == ""
+        assert content == '{"answer": 42}'
+        assert tools == []
+
+
+def test_muse_kimi_mixed_pairing_rejected(tokenizer):
+    # The kimi_k3/cohere special-case blocks must not bypass the muse pairing
+    # validation: any muse-involving mix routes to the muse composite first.
+    with pytest.raises(VLLMValidationError, match="tool-call-parser"):
+        ParserManager.get_parser(
+            reasoning_parser_name="muse_glimmer",
+            tool_parser_name="kimi_k3",
+            enable_auto_tools=True,
+        )(tokenizer)
+
+
 def test_reasoning_only_tool_channel_yields_no_content(tokenizer):
     reasoning, content, tools = drive(
         tokenizer,

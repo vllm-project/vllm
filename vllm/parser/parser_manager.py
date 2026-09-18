@@ -119,6 +119,24 @@ class ParserManager:
             HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
 
+        # MuseGlimmer first: the composite validates its parser pairing, so a
+        # muse_glimmer-involving mix must never reach the other composites.
+        if (
+            reasoning_parser_name == "muse_glimmer"
+            or tool_parser_name == "muse_glimmer"
+        ):
+            from vllm.parser.muse_glimmer import MuseGlimmerParser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _MuseGlimmerParser(MuseGlimmerParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _MuseGlimmerParser
+
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser
 
@@ -147,22 +165,6 @@ class ParserManager:
                 tool_strict_level = strict_level
 
             return _CohereCommandParser
-
-        if (
-            reasoning_parser_name == "muse_glimmer"
-            or tool_parser_name == "muse_glimmer"
-        ):
-            from vllm.parser.muse_glimmer import MuseGlimmerParser
-
-            r_cls = reasoning_parser_cls
-            t_cls = tool_parser_cls
-
-            class _MuseGlimmerParser(MuseGlimmerParser):
-                reasoning_parser_cls = r_cls
-                tool_parser_cls = t_cls
-                tool_strict_level = strict_level
-
-            return _MuseGlimmerParser
 
         from vllm.parser.abstract_parser import DelegatingParser
 
