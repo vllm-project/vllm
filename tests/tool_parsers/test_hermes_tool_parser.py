@@ -389,6 +389,147 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
     assert not tool_call.tools_called
 
 
+def test_hermes_parser_non_streaming_serialized_arguments(
+    hermes_parser: ToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Arguments the model already serialized must not be encoded twice.
+
+    Granite 4 models emit `arguments` as a JSON string rather than an object.
+    Serializing that again yields a JSON string that decodes to another string,
+    which chat templates cannot render as a mapping.
+    """
+    text = (
+        "<tool_call>\n"
+        '{"name": "get_db_config", '
+        '"arguments": "{\\"param\\": \\"max_connections\\"}"}\n'
+        "</tool_call>"
+    )
+    tool_call = hermes_parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call is not None
+    assert tool_call.tools_called
+    assert tool_call.tool_calls[0].function.name == "get_db_config"
+    # Decoding once must yield the object, not another string.
+    assert json.loads(tool_call.tool_calls[0].function.arguments) == {
+        "param": "max_connections"
+    }
+
+
+def test_hermes_parser_non_streaming_bare_string_arguments(
+    hermes_parser: ToolParser,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Only serialized objects are passed through, not any string.
+
+    A string that does not itself hold JSON still has to be serialized, or the
+    client would receive something that is not valid JSON at all.
+    """
+    text = '<tool_call>\n{"name": "do_thing", "arguments": "hello"}\n</tool_call>'
+    tool_call = hermes_parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call is not None
+    assert tool_call.tools_called
+    assert json.loads(tool_call.tool_calls[0].function.arguments) == "hello"
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5])
+def test_hermes_streaming_serialized_arguments_with_stream_interval(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """Serialized arguments must stream back single-encoded at any interval."""
+    text = (
+        '<tool_call>{"name": "get_db_config", '
+        '"arguments": "{\\"param\\": \\"max_connections\\"}"}</tool_call>'
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert tool_calls[0].function.name == "get_db_config"
+    args_str = "".join(tc.function.arguments or "" for tc in tool_calls)
+    assert json.loads(args_str) == {"param": "max_connections"}
+
+
+@pytest.mark.parametrize("stream_interval", [1, 3])
+def test_hermes_streaming_bare_string_arguments_with_stream_interval(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """A non-JSON string argument must still stream back as valid JSON."""
+    text = '<tool_call>{"name": "do_thing", "arguments": "hello"}</tool_call>'
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    args_str = "".join(tc.function.arguments or "" for tc in tool_calls)
+    assert json.loads(args_str) == "hello"
+
+
+@pytest.mark.parametrize(
+    "args_value",
+    [
+        '{"param": "max_connections"}',
+        "hello",
+        # A string that only looks structured: unwrapping it would hand the
+        # client something that is not JSON at all.
+        "{hello world}",
+        "[oops",
+        '{"a": 1} tail text',
+    ],
+)
+@pytest.mark.parametrize("stream_interval", [1, 3])
+def test_hermes_streaming_string_arguments_match_non_streaming(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    args_value: str,
+    stream_interval: int,
+) -> None:
+    """Both paths must return the same arguments for a string-valued argument.
+
+    Whether such a string holds serialized arguments cannot be judged from a
+    prefix, so the streaming path waits for the literal to close and then
+    applies the same rule, rather than deciding on the first character.
+    """
+    text = (
+        "<tool_call>"
+        + json.dumps({"name": "f", "arguments": args_value})
+        + "</tool_call>"
+    )
+    non_streaming = Hermes2ProToolParser(qwen_tokenizer).extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+    expected = non_streaming.tool_calls[0].function.arguments
+
+    deltas = _simulate_streaming(
+        qwen_tokenizer,
+        Hermes2ProToolParser(qwen_tokenizer),
+        any_chat_request,
+        text,
+        stream_interval,
+    )
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    args_str = "".join(tc.function.arguments or "" for tc in tool_calls)
+
+    assert args_str == expected
+    # Valid JSON whatever the model emitted, which is what the API promises.
+    json.loads(args_str)
+
+
 def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     qwen_tokenizer: TokenizerLike,
     any_chat_request: ChatCompletionRequest,
