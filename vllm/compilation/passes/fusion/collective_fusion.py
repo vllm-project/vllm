@@ -699,13 +699,18 @@ class FlashInferBMMFP8ReduceScatterPattern(
             a_scale: torch.Tensor,
             b_scale: torch.Tensor,
         ) -> torch.Tensor:
+            # The backend literal must match production traces from
+            # flashinfer_scaled_fp8_mm exactly or the pattern silently
+            # stops matching, so derive it from the same helper.
+            from vllm.utils.flashinfer import bmm_fp8_backend
+
             bmm = torch.ops.vllm.bmm_fp8.default(
                 torch.ops.aten.unsqueeze.default(a_2d, 0),
                 torch.ops.aten.unsqueeze.default(b_2d, 0),
                 a_scale,
                 b_scale,
                 self.dtype,
-                "auto",
+                bmm_fp8_backend(),
             )
             output = torch.ops.aten.reshape.default(bmm, list(bmm.shape[1:]))
             return torch.ops.vllm.reduce_scatter.default(
@@ -763,6 +768,10 @@ class FlashInferAllGatherBMMFP8Pattern(
             a_scale: torch.Tensor,
             b_scale: torch.Tensor,
         ) -> torch.Tensor:
+            # Backend literal must match production traces — see
+            # FlashInferBMMFP8ReduceScatterPattern.pattern.
+            from vllm.utils.flashinfer import bmm_fp8_backend
+
             all_gather = torch.ops.vllm.all_gather.default(
                 a_shard_2d,
                 dim=0,
@@ -775,7 +784,7 @@ class FlashInferAllGatherBMMFP8Pattern(
                 a_scale,
                 b_scale,
                 self.dtype,
-                "auto",
+                bmm_fp8_backend(),
             )
 
         return _pattern
