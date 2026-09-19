@@ -221,7 +221,7 @@ def test_video_cache_is_independent_of_image_kwargs(
         mm_processor_cache_gb=1,
     )
     cache = MultiModalProcessorOnlyCache(ctx.model_config)
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor = processor.info.get_hf_processor()
     image = PILImage.new("RGB", (48, 48), color=(128, 128, 128))
     frames = np.stack([np.asarray(image)] * 2)
@@ -230,15 +230,16 @@ def test_video_cache_is_independent_of_image_kwargs(
         {"image": image, "video": [(frames, metadata)]}
     )
 
-    def process(mm_kwargs):
+    def process(mm_kwargs, cache):
         return processor(
             hf_processor.image_token + hf_processor.video_token,
             mm_items,
             mm_uuid_items={"video": [video_uuid]},
             hf_processor_mm_kwargs=mm_kwargs,
+            cache=cache,
         )
 
-    baseline = process({})
+    baseline = process({}, cache=None)
     if kwargs_on_init:
         ctx = build_model_context(
             model_id,
@@ -247,12 +248,12 @@ def test_video_cache_is_independent_of_image_kwargs(
             mm_processor_cache_gb=1,
         )
         cache = MultiModalProcessorOnlyCache(ctx.model_config)
-        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     request_kwargs = {} if kwargs_on_init else kwargs
-    process(request_kwargs)
-    cached = process(request_kwargs)
+    process(request_kwargs, cache=cache)
+    cached = process(request_kwargs, cache=cache)
     cache.clear_cache()
-    fresh = process(request_kwargs)
+    fresh = process(request_kwargs, cache=cache)
 
     def pixels(result, modality, field):
         return result["mm_kwargs"][modality][0][field].data

@@ -255,7 +255,7 @@ def test_model_tensor_schema(model_id: str):
             for modality, count in limit_mm_per_prompt.items()
         }
     )
-    processor = factories.build_processor(ctx, cache=None)
+    processor = factories.build_processor(ctx)
 
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):

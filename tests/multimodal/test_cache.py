@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -37,10 +35,13 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.processing import PromptInsertion
-from vllm.renderers.base import BaseRenderer
+from vllm.renderers import renderer_from_config
 from vllm.utils.async_utils import make_async
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.llm_engine import LLMEngine
 
+from ..models.utils import build_model_context
 from ..utils import create_new_process_for_each_test
 
 pytestmark = pytest.mark.cpu_test
@@ -773,12 +774,14 @@ def test_processor_cache_shared_across_loras():
 @pytest.mark.asyncio
 async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     """Release must not leave a sender hit pointing at a cleared receiver."""
-    from vllm.v1.engine.async_llm import AsyncLLM
-    from vllm.v1.engine.llm_engine import LLMEngine
-
-    model_config = SimpleNamespace(
-        get_multimodal_config=lambda: MultiModalConfig(mm_processor_cache_gb=1)
+    ctx = build_model_context(
+        "llava-hf/llava-v1.6-mistral-7b-hf",
+        mm_processor_kwargs=None,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_cache_gb=1,
     )
+    model_config = ctx.model_config
+
     sender = MultiModalProcessorSenderCache(model_config)
     receiver = MultiModalReceiverCache(model_config)
     item = _dummy_item({"pixel_values": 16})
@@ -787,43 +790,39 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     assert receiver.get_and_update_item(payload, mm_hash) is item
     assert sender.get_and_update_item(None, mm_hash)[0] is None
 
-    renderer = SimpleNamespace(mm_processor_cache=sender, _mm_cache_stats=None)
-    renderer.clear_mm_cache = partial(BaseRenderer.clear_mm_cache, renderer)
+    renderer = renderer_from_config(VllmConfig(model_config=model_config))
+    renderer._mm_processor_cache = sender
 
     def release():
         if release_error:
             raise RuntimeError(release_error)
         receiver.clear_cache()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        renderer._clear_mm_cache_async = make_async(
-            renderer.clear_mm_cache, executor=executor
-        )
-        renderer.clear_mm_cache_async = partial(
-            BaseRenderer.clear_mm_cache_async, renderer
-        )
-        engine = SimpleNamespace(
-            renderer=renderer,
-            engine_core=SimpleNamespace(
-                release_kv_cache_memory=release,
-                release_kv_cache_memory_async=make_async(release, executor=executor),
+    engine = SimpleNamespace(
+        renderer=renderer,
+        engine_core=SimpleNamespace(
+            release_kv_cache_memory=release,
+            release_kv_cache_memory_async=make_async(
+                release,
+                executor=renderer._executor,
             ),
-            logger_manager=Mock(),
-        )
+        ),
+        logger_manager=Mock(),
+    )
 
-        async def call_release():
-            if use_async:
-                await AsyncLLM.release_kv_cache_memory(engine)
-            else:
-                LLMEngine.release_kv_cache_memory(engine)
-
-        if release_error:
-            with pytest.raises(RuntimeError, match=release_error):
-                await call_release()
-            engine.logger_manager.record_sleep_state.assert_not_called()
+    async def call_release():
+        if use_async:
+            await AsyncLLM.release_kv_cache_memory(engine)
         else:
+            LLMEngine.release_kv_cache_memory(engine)
+
+    if release_error:
+        with pytest.raises(RuntimeError, match=release_error):
             await call_release()
-            engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
+        engine.logger_manager.record_sleep_state.assert_not_called()
+    else:
+        await call_release()
+        engine.logger_manager.record_sleep_state.assert_called_once_with(1, 0)
 
     payload, _ = sender.get_and_update_item((item, []), mm_hash)
     assert payload is item
