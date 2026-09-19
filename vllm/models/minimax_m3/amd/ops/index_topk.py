@@ -1637,3 +1637,121 @@ def minimax_m3_index_decode(
         num_stages=selector_num_stages,
     )
     return topk_idx
+
+
+# ---------------------------------------------------------------------------
+# Context-parallel indexer helpers (used by indexer_context_parallel.py
+# and indexer_candidate_exchange.py).
+# ---------------------------------------------------------------------------
+
+CP_TOPK_NUM_WARPS = 8
+
+
+@triton.jit
+def _cp_emit_sparse_block_table_row(
+    topk_idx,
+    bt_row,
+    sbt_row,
+    sctx_ptr,
+    causal_len,
+    topk,
+    pid_h,
+    block_size: tl.constexpr,
+    pages_per_block: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+):
+    """Emit physical page-16 ids for selected 128-token sparse blocks.
+
+    Separate from _write_sparse_block_table_row_from_values (which uses
+    abs_pos / BLOCK_PAGE_STRIDE) to avoid argument-mismatch bugs.
+    """
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    self_blk = (causal_len - 1) // block_size
+    bt_blk = tl.where(off_t < topk, topk_idx, -1)
+    bt_valid = (bt_blk >= 0) & (bt_blk <= self_blk)
+    bt_is_tail = bt_valid & (bt_blk == self_blk)
+    bt_is_full = bt_valid & (bt_blk < self_blk)
+    bt_n_full = tl.sum(bt_is_full.to(tl.int32), axis=0)
+    bt_n_valid = tl.sum(bt_valid.to(tl.int32), axis=0)
+    bt_earlier_full = (
+        tl.cumsum(bt_is_full.to(tl.int32), axis=0) - bt_is_full.to(tl.int32)
+    )
+    bt_slot = tl.where(bt_is_full, bt_earlier_full, bt_n_full)
+    bt_logical_page = tl.load(bt_row + bt_blk, mask=bt_valid, other=0).to(tl.int32)
+    bt_base_phys = bt_logical_page * pages_per_block * NUM_KV_HEADS + pid_h
+    bt_dst_base = bt_slot * pages_per_block
+    pj = tl.arange(0, pages_per_block)
+    tl.store(
+        sbt_row + bt_dst_base[:, None] + pj[None, :],
+        bt_base_phys[:, None] + pj[None, :] * NUM_KV_HEADS,
+        mask=bt_valid[:, None],
+    )
+    off_w = tl.arange(0, BLOCK_SIZE_T * pages_per_block)
+    tl.store(
+        sbt_row + off_w,
+        tl.zeros_like(off_w),
+        mask=off_w >= bt_n_valid * pages_per_block,
+    )
+    bt_tail_tokens = causal_len - self_blk * block_size
+    bt_has_tail = tl.sum(bt_is_tail.to(tl.int32), axis=0) > 0
+    bt_ctx = bt_n_full * block_size + tl.where(bt_has_tail, bt_tail_tokens, 0)
+    bt_ctx = tl.where(
+        bt_has_tail, bt_ctx, tl.minimum(bt_n_valid * block_size, causal_len)
+    )
+    tl.store(sctx_ptr, bt_ctx)
+
+
+@triton.jit
+def _pack_score_key(score, index, valid):
+    """Pack (fp32 score, block index) into one int64 sort key.
+
+    Ordering: score descending, index descending as tie-break.
+    Bit layout: [63:48] validity | [47:16] ordered score | [15:0] 1-based id.
+    """
+    bits = score.to(tl.uint32, bitcast=True)
+    bits = tl.where(bits == 0x80000000, 0, bits)
+    ordered = bits ^ tl.where(bits >> 31 != 0, 0xFFFFFFFF, 0x80000000)
+    ordered = tl.where((bits & 0x7FFFFFFF) > 0x7F800000, 0, ordered)
+    key = (1 << 48) | (ordered.to(tl.int64) << 16) | index.to(tl.int64)
+    return tl.where(valid, key, 0)
+
+
+def _require_packable(max_block: int) -> None:
+    """Raise if max_block exceeds the 16-bit block-id field in the sort key."""
+    if max_block >= 0xFFFF:
+        raise ValueError(
+            f"context-parallel indexer supports at most {0xFFFF - 1} blocks "
+            f"(max_seq_len / 128); got {max_block}."
+        )
+
+
+def _cp_decode_score_chunks(batch: int, max_block: int) -> int:
+    """Split decode score grid into chunks for occupancy, >=1 block each."""
+    target = max(1, DECODE_TOPK_TARGET_GRID // max(1, batch))
+    if max_block <= 0:
+        return 1
+    chunks = min(1 << (target.bit_length() - 1), max_block)
+    chunks = min(chunks, max(1, triton.cdiv(max_block, 3)))
+    return triton.cdiv(max_block, triton.cdiv(max_block, chunks))
+
+
+def _cp_alloc_emit(
+    total_q: int,
+    num_idx_heads: int,
+    topk: int,
+    block_table: torch.Tensor,
+    emit: bool,
+    device: torch.device,
+):
+    """Allocate sparse block table output buffers for the CP kernels."""
+    if not emit:
+        dummy = torch.empty(1, dtype=torch.int32, device=device)
+        return None, (dummy, dummy, 0, 0)
+    rows = total_q * num_idx_heads
+    sparse_bt = torch.empty(
+        (rows, topk * PAGES_PER_SPARSE_BLOCK), dtype=torch.int32, device=device
+    )
+    sparse_ctx = torch.empty((rows,), dtype=torch.int32, device=device)
+    args = (sparse_bt, sparse_ctx, block_table.stride(0), sparse_bt.stride(0))
+    return (sparse_bt, sparse_ctx), args
