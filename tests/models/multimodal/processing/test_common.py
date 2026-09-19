@@ -286,8 +286,7 @@ def _test_processing_correctness(
         }
     )
 
-    baseline_processor = factories.build_processor(ctx, cache=None)
-    cached_processor = factories.build_processor(ctx, cache=cache)
+    processor = factories.build_processor(ctx)
 
     rng = np.random.RandomState(0)
 
@@ -336,41 +335,42 @@ def _test_processing_correctness(
         _test_processing_correctness_one(
             model_config,
             mm_data,
-            baseline_processor,
-            cached_processor,
+            processor,
             batch_idx,
             hit_rate,
             num_batches,
             simplify_rate,
+            cache=cache,
         )
 
 
 def _test_processing_correctness_one(
     model_config: ModelConfig,
     mm_data: MultiModalDataDict,
-    baseline_processor: BaseMultiModalProcessor,
-    cached_processor: BaseMultiModalProcessor,
+    processor: BaseMultiModalProcessor,
     batch_idx: int,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    cache: MultiModalProcessorOnlyCache,
 ):
     model_type = model_config.hf_config.model_type
 
-    token_prompt = get_token_prompt(baseline_processor, mm_data)
-    mm_items = baseline_processor.info.parse_mm_data(mm_data)
+    token_prompt = get_token_prompt(processor, mm_data)
+    mm_items = processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
-    baseline_tokenized_result = baseline_processor(
+    baseline_tokenized_result = processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
-    cached_tokenized_result = cached_processor(
+    cached_tokenized_result = processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
+        cache=cache,
     )
 
     _assert_inputs_equal(
