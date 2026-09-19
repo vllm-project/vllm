@@ -16,6 +16,7 @@ import importlib.util
 import json
 import math
 import statistics
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,10 @@ def parse_config(value: str) -> Config:
 
 def production_residual_config(m: int) -> Config | None:
     """The measured Latent-MoE residual config for M, from the K3 table."""
-    from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
+    from vllm.models.kimi_k3.nvidia.low_latency_gemm import _low_latency_table
 
-    spec = KIMI_K3_PROJECTIONS.get((N, K))
+    table = _low_latency_table()
+    spec = table.get((N, K)) if table is not None else None
     config = spec.residual_config(m) if spec is not None else None
     if config is None:
         return None
@@ -96,6 +98,7 @@ def load_kernel_class(path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load CuTe kernel from {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module.CuteSkinnyGemm
 
@@ -277,8 +280,9 @@ def main() -> None:
     if not 0 <= args.config_shard < args.num_config_shards:
         raise ValueError("config shard must be in [0, num_config_shards)")
     torch.accelerator.set_device_index(0)
-    if torch.cuda.get_device_capability() != (10, 3):
-        raise RuntimeError("this benchmark requires SM103")
+    capability = torch.cuda.get_device_capability()
+    if capability not in ((10, 0), (10, 3)):
+        raise RuntimeError("this benchmark requires SM100 or SM103")
 
     kernel_class = load_kernel_class(args.kernel)
     properties = torch.cuda.get_device_properties(0)
