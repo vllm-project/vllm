@@ -35,8 +35,7 @@ def validate_and_normalize_dynamic_sd_schedule(
     """
     if speculative_token_schedule is None:
         raise ValueError(
-            "speculative_token_schedule is required for "
-            "dynamic speculative decoding."
+            "speculative_token_schedule is required for dynamic speculative decoding."
         )
     if not isinstance(speculative_token_schedule, list):
         raise ValueError(
@@ -70,27 +69,21 @@ def validate_and_normalize_dynamic_sd_schedule(
             )
 
         if bs_lo <= 0 or bs_hi <= 0:
-            raise ValueError(
-                f"Batch-size range ({bs_lo}, {bs_hi}) must be positive."
-            )
+            raise ValueError(f"Batch-size range ({bs_lo}, {bs_hi}) must be positive.")
         if bs_lo > bs_hi:
             raise ValueError(
                 "Batch-size range start must be <= end for "
                 f"({bs_lo}, {bs_hi}, ..., {k})."
             )
         if ctx_lo <= 0 or ctx_hi <= 0:
-            raise ValueError(
-                f"Context range ({ctx_lo}, {ctx_hi}) must be positive."
-            )
+            raise ValueError(f"Context range ({ctx_lo}, {ctx_hi}) must be positive.")
         if ctx_lo > ctx_hi:
             raise ValueError(
                 "Context range start must be <= end for "
                 f"({bs_lo}, {bs_hi}, {ctx_lo}, {ctx_hi}, {k})."
             )
         if k < 0:
-            raise ValueError(
-                "speculative_token_schedule K values must be >= 0."
-            )
+            raise ValueError("speculative_token_schedule K values must be >= 0.")
 
         parsed.append((bs_lo, bs_hi, ctx_lo, ctx_hi, k))
 
@@ -104,9 +97,7 @@ def validate_and_normalize_dynamic_sd_schedule(
     prev_bs_end = 0
     for bs_lo, bs_hi in bs_ranges:
         if bs_lo <= prev_bs_end:
-            raise ValueError(
-                "Batch-size ranges must be non-overlapping and sorted."
-            )
+            raise ValueError("Batch-size ranges must be non-overlapping and sorted.")
         prev_bs_end = bs_hi
     if bs_ranges[0][0] != 1:
         raise ValueError(
@@ -148,8 +139,7 @@ def validate_and_normalize_dynamic_sd_schedule(
         key = (bs_lo, bs_hi, ctx_lo)
         if key in seen:
             raise ValueError(
-                f"Duplicate schedule cell for (bs=[{bs_lo},{bs_hi}], "
-                f"ctx_lo={ctx_lo})."
+                f"Duplicate schedule cell for (bs=[{bs_lo},{bs_hi}], ctx_lo={ctx_lo})."
             )
         seen.add(key)
         normalized.append((bs_lo, bs_hi, ctx_lo, ctx_hi_by_lo[ctx_lo], k))
@@ -174,9 +164,7 @@ def build_dynamic_sd_schedule_lookup(
     if vllm_num_speculative_tokens <= 0:
         raise ValueError("vllm_num_speculative_tokens must be > 0.")
 
-    normalized = validate_and_normalize_dynamic_sd_schedule(
-        speculative_token_schedule
-    )
+    normalized = validate_and_normalize_dynamic_sd_schedule(speculative_token_schedule)
 
     ctx_boundaries = sorted(
         {(ctx_lo, ctx_hi) for _, _, ctx_lo, ctx_hi, _ in normalized}
@@ -188,9 +176,7 @@ def build_dynamic_sd_schedule_lookup(
     for bs_lo, bs_hi, ctx_lo, ctx_hi, k in normalized:
         per_ctx[ctx_index[(ctx_lo, ctx_hi)]].append((bs_lo, bs_hi, k))
 
-    dense: list[list[int]] = [
-        [0] * num_ctx for _ in range(vllm_max_batch_size + 1)
-    ]
+    dense: list[list[int]] = [[0] * num_ctx for _ in range(vllm_max_batch_size + 1)]
 
     for c, entries in enumerate(per_ctx):
         entries.sort(key=lambda e: e[0])

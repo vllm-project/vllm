@@ -124,9 +124,7 @@ def test_dynamic_sd_rejects_empty_schedule():
 
 
 def test_dynamic_sd_requires_schedule_config():
-    with pytest.raises(
-        ValueError, match="speculative_token_schedule is required"
-    ):
+    with pytest.raises(ValueError, match="speculative_token_schedule is required"):
         build_dynamic_sd_schedule_lookup(
             None,
             vllm_max_batch_size=256,
@@ -391,9 +389,7 @@ def test_scheduler_dispatches_k_via_ctx_bucket_for_fresh_requests():
         max_num_batched_tokens=200,
         runtime_num_speculative_tokens=3,
     )
-    output = _add_requests_and_schedule(
-        scheduler, num_requests=4, num_tokens=20
-    )
+    output = _add_requests_and_schedule(scheduler, num_requests=4, num_tokens=20)
 
     assert len(output.num_scheduled_tokens) == 4
     assert output.num_spec_tokens_to_schedule == 3
