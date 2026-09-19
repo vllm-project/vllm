@@ -57,6 +57,20 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 
+def _select_marlin_moe_block_size(
+    estimated_tokens_per_expert: float,
+    input_dtype: torch.dtype | None,
+) -> int:
+    block_size_m = 64
+    for candidate in [8, 16, 32, 48, 64]:
+        if estimated_tokens_per_expert / candidate < 0.9:
+            block_size_m = candidate
+            break
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
+    return block_size_m
+
+
 def _fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -337,14 +351,7 @@ def fused_marlin_moe(
         # Set M to estimated valid tokens per rank
         M = math.ceil(M * E / global_num_experts)
 
-    # M block size selection logic
-    # TODO: tune this further for specific models
-    for block_size_m in [8, 16, 32, 48, 64]:
-        if M * topk / E / block_size_m < 0.9:
-            break
-
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        block_size_m = max(block_size_m, 16)
+    block_size_m = _select_marlin_moe_block_size(M * topk / E, input_dtype)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
@@ -428,6 +435,7 @@ def batched_fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     activation_func: Callable[..., None] | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
+    num_token_assignments: int | None = None,
 ) -> torch.Tensor:
     """This function massages the inputs so the batched hidden_states can be
     presented as a 2D contiguous tensor that could be used with
@@ -496,16 +504,13 @@ def batched_fused_marlin_moe(
     # [B * MAX_TOKENS, K] and top_k can be interpreted as just 1.
     topk = 1
 
-    # TODO(varun) : Choose a decent block size like in fused_marlin_moe
-    # Tune block_size_m based on expert capacity to reduce padding overhead.
-    block_size_m = 64
-    for b_m in [8, 16, 32, 48, 64]:
-        if BATCH_TOKENS_MAX / b_m < 0.9:
-            block_size_m = b_m
-            break
-
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        block_size_m = max(block_size_m, 16)
+    estimated_tokens_per_expert = BATCH_TOKENS_MAX
+    if num_token_assignments is not None:
+        assert global_num_experts > 0
+        estimated_tokens_per_expert = num_token_assignments / global_num_experts
+    block_size_m = _select_marlin_moe_block_size(
+        estimated_tokens_per_expert, input_dtype
+    )
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = batched_moe_align_block_size(
         max_tokens_per_batch=BATCH_TOKENS_MAX,
@@ -1004,4 +1009,5 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             input_dtype=self.input_dtype,
             activation_func=activation_func,
             activation_config=self.activation_config,
+            num_token_assignments=topk_ids.numel(),
         )
