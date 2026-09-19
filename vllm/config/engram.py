@@ -73,7 +73,8 @@ class EngramConfig:
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and CUDA."
+                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
+                "device (CUDA or ROCm)."
             )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
