@@ -48,6 +48,8 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+    replay_start: int = 0
 
     mamba_checkpoint_position: int | None = None
     mamba_checkpoint_source_block_ids: tuple[int, ...] | None = None
@@ -80,6 +82,7 @@ class NewRequestData:
             mamba_checkpoint_position=request.mamba_checkpoint_position,
             mamba_checkpoint_source_block_ids=request.mamba_checkpoint_source_block_ids,
             mamba_prefix_producer_id=request.mamba_prefix_producer_id,
+            replay_start=request.replay_start,
         )
 
     @property

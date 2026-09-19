@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """
-    Cache of blocks that are used for prefix caching. It caches blocks
+    """Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
     (i.e. {block_hash: KVCacheBlocks})
     - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
@@ -59,9 +58,7 @@ class BlockHashToBlockMap:
         ] = {}
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
-        """
-        Gets any block with the given block hash key.
-        """
+        """Gets any block with the given block hash key."""
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
@@ -72,9 +69,7 @@ class BlockHashToBlockMap:
         return None
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
-        """
-        Checks whether the key maps to the given block ID.
-        """
+        """Checks whether the key maps to the given block ID."""
         blocks = self._cache.get(key)
         if blocks is None:
             return False
@@ -86,9 +81,7 @@ class BlockHashToBlockMap:
         return False
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
-        """
-        Inserts the KVCacheBlock to the cache
-        """
+        """Inserts the KVCacheBlock to the cache"""
         blocks = self._cache.get(key)
         if blocks is None:
             # When key is not found, attach a single block to the key
@@ -104,9 +97,7 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """
-        Checks if block_hash exists and pop block_id from the cache
-        """
+        """Checks if block_hash exists and pop block_id from the cache"""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache
@@ -158,6 +149,7 @@ class BlockPool:
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
         medium: Storage medium reported in KV cache events.
+
     """
 
     def __init__(
@@ -215,6 +207,7 @@ class BlockPool:
 
         Returns:
             The cached blocks if exists, or None.
+
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
@@ -273,6 +266,7 @@ class BlockPool:
                 consults a subset of blocks (e.g. SWA tail-window), so blocks
                 that can never serve a hit stay out of the prefix-cache hash
                 map.
+
         """
         if num_cached_blocks >= num_full_blocks:
             return
@@ -407,6 +401,7 @@ class BlockPool:
             num_cached_blocks: Number of blocks that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
@@ -504,6 +499,7 @@ class BlockPool:
         Returns:
             The hash key with group ID if a partial entry can be registered;
             otherwise ``None`` for null blocks.
+
         """
         if block.is_null:
             return None
@@ -686,6 +682,7 @@ class BlockPool:
 
         Returns:
             A list of new block.
+
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
@@ -739,8 +736,7 @@ class BlockPool:
         self.free_block_queue.append_n(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
-        """
-        If a block is cached in `cached_block_hash_to_block`, we reset its hash
+        """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
@@ -748,6 +744,7 @@ class BlockPool:
 
         Returns:
             True if the block is evicted, False otherwise.
+
         """
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
@@ -768,6 +765,7 @@ class BlockPool:
 
         Args:
             blocks: A list of blocks to touch.
+
         """
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
@@ -785,6 +783,7 @@ class BlockPool:
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
@@ -811,7 +810,7 @@ class BlockPool:
             pool.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
-        """evict blocks from the prefix cache by their block IDs.
+        """Evict blocks from the prefix cache by their block IDs.
 
         only evicts blocks that are currently cached (have a hash). blocks
         with ref_cnt > 0 are not freed from the block pool, only evicted
@@ -819,6 +818,7 @@ class BlockPool:
 
         Args:
             block_ids: Set of block IDs to evict from cache.
+
         """
         for block_id in block_ids:
             assert block_id < len(self.blocks), (
@@ -837,6 +837,7 @@ class BlockPool:
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
+
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
         if num_used_blocks != 1:  # The null block is always marked as used
@@ -875,6 +876,7 @@ class BlockPool:
 
         Returns:
             The number of free blocks.
+
         """
         return self.free_block_queue.num_free_blocks
 
@@ -883,8 +885,8 @@ class BlockPool:
 
         Returns:
             The KV cache usage (between 0.0 and 1.0).
-        """
 
+        """
         # Subtract 1 to account for null block.
         total_gpu_blocks = self.num_gpu_blocks - 1
         if not total_gpu_blocks:
@@ -896,6 +898,7 @@ class BlockPool:
 
         Returns:
             A list of KV cache events.
+
         """
         if not self.enable_kv_cache_events:
             return []
