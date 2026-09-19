@@ -337,6 +337,18 @@ def _flashinfer_autotune_token_counts(
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
     linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if linear_backend == "flashinfer_cutedsl_dynamic":
+        config = runner.vllm_config.kernel_config
+        cutoff = max(
+            config.nvfp4_dynamic_max_tokens,
+            config.nvfp4_dynamic_silu_max_tokens or 0,
+        )
+        capture_sizes = runner.vllm_config.compilation_config.cudagraph_capture_sizes
+        token_counts.extend(
+            m for m in capture_sizes or () if 0 < m <= min(cutoff, max_tokens)
+        )
+        if cutoff:
+            token_counts.append(min(cutoff, max_tokens))
     if (
         include_bf16
         and linear_backend == "flashinfer_cutedsl"
@@ -361,13 +373,26 @@ def _run_flashinfer_autotune_dummy_runs(
             tuning_buckets,
         )
         with fi_utils.autotune(tuning_buckets=tuning_buckets):
-            runner._dummy_run(
+            dummy_outputs = runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            if (
+                runner.vllm_config.kernel_config.linear_backend
+                == "flashinfer_cutedsl_dynamic"
+            ):
+                _, sample_hidden_states = dummy_outputs
+                if sample_hidden_states is not None:
+                    logits_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+                        sample_hidden_states.shape[0]
+                    )
+                    with fi_utils.autotune(tuning_buckets=logits_buckets):
+                        runner.get_model().compute_logits(
+                            torch.rand_like(sample_hidden_states)
+                        )
 
 
 def _run_flashinfer_bf16_autotune_dummy_run(
