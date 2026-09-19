@@ -56,4 +56,6 @@ steps:
   - tests/distributed/
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s distributed/test_elastic_ep.py
+  - export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=NIXL_
+  - UCX_LOG_LEVEL=info UCX_PRINT_TRANSPORT_TABLES=y pytest -v -s distributed/test_elastic_ep.py -k nixl_ep
+  - pytest -v -s distributed/test_elastic_ep.py -k nixl_ep
