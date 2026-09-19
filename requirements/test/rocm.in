@@ -65,8 +65,6 @@ decord==0.6.0
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch>0.4.0 # Required for Prithvi tests
 
-gpt-oss>=0.0.7; python_version > '3.11'
-
 perceptron # required for isaac test
 kaldi-native-fbank>=1.18.7 # required for fireredasr2 test
 cohere_melody>=0.11.1 # required for cohere command reasoning/tool parser tests
