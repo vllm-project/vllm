@@ -12,7 +12,6 @@ import vllm.envs as envs
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
-    get_cached_compilation_config,
     set_current_vllm_config,
 )
 from vllm.forward_context import set_forward_context
@@ -139,7 +138,6 @@ def test_grouped_topk(
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["all", "+grouped_topk"])
     )
-    get_cached_compilation_config.cache_clear()
 
     set_random_seed(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=input_dtype, device="cuda")
