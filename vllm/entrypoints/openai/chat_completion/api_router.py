@@ -67,8 +67,15 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     elif isinstance(generator, ChatCompletionResponse):
+        # In ``none`` fingerprint mode (``--fingerprint-mode=none``) the
+        # serving handler caches ``system_fingerprint`` as ``None``; drop the
+        # key (along with other unset fields, matching the streaming path)
+        # instead of emitting an explicit ``null`` (#57376). Other modes keep
+        # the full payload so OpenAI SDK clients keep working (see #53349).
         return JSONResponse(
-            content=generator.model_dump(),
+            content=generator.model_dump(
+                exclude_none=handler.system_fingerprint is None
+            ),
             headers=metrics_header(metrics_header_format),
         )
 
