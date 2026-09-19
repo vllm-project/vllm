@@ -24,6 +24,7 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -31,6 +32,8 @@ from ..utils import (
     multi_gpu_test,
     multi_process_parallel,
 )
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -44,14 +47,14 @@ def all_reduce_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
 
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=DEVICE_TYPE) * (r + 1)
         for r in range(tp_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
@@ -71,14 +74,14 @@ def reduce_scatter_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=DEVICE_TYPE) * (r + 1)
         for r in range(tp_size)
     ]
 
@@ -102,8 +105,8 @@ def all_gather_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_dimensions = 3
@@ -113,7 +116,7 @@ def all_gather_test_worker(
         total_size *= s
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
-            torch.arange(total_size, dtype=torch.float32, device="cuda").reshape(
+            torch.arange(total_size, dtype=torch.float32, device=DEVICE_TYPE).reshape(
                 tensor_size
             )
             * (r + 1)
@@ -136,20 +139,20 @@ def broadcast_tensor_dict_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=DEVICE_TYPE),
     }
 
     if (rank % tp_size) == 0:
@@ -173,21 +176,21 @@ def send_recv_tensor_dict_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=DEVICE_TYPE),
     }
 
     if not get_pp_group().is_first_rank:
@@ -289,6 +292,7 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
 
 
 @pytest.mark.parametrize("aliased", [False, True])
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="cuda-specific test")
 def test_cuda_communicator_checkpoints_flashinfer_workspaces(
     monkeypatch: pytest.MonkeyPatch,
     aliased: bool,
@@ -389,6 +393,7 @@ def test_flashinfer_standalone_workspace_size(
     assert create_workspace.call_args.args[3] == expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="cuda-specific test")
 def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
     output = torch.empty(2)
     fi_ar_comm = Mock(disabled=False)
@@ -410,6 +415,7 @@ def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) ->
     nccl_selector.assert_not_called()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="cuda-specific test")
 def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure can use aiter all_gather if available even if pynccl is not available."""
     output = torch.empty(2)
@@ -591,13 +597,13 @@ def send_recv_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+    device = torch.device(f"{DEVICE_TYPE}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     size = 64
-    test_tensor = torch.arange(64, dtype=torch.float32, device="cuda")
+    test_tensor = torch.arange(64, dtype=torch.float32, device=DEVICE_TYPE)
 
     if not get_pp_group().is_first_rank:
         recv_tensor = get_pp_group().recv(size, dtype=torch.float32)

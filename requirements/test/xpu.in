@@ -15,6 +15,7 @@ pytest-shard
 absl-py
 accelerate
 arctic-inference
+dpctl
 lm_eval[api]>=0.4.12
 modelscope<1.38
 runai-model-streamer[s3,gcs,azure]>=0.15.7
