@@ -6,7 +6,7 @@ import copy
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -533,7 +533,9 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         kv_cache_manager=manager,
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
+        prefix_replay_tokens=0,
     )
+    scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
     assert manager.allocate_slots(request, num_new_tokens=1) is not None
