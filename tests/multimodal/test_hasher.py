@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.media.base import MediaWithBytes
+from vllm.multimodal.media.base import LazyMedia, MediaWithBytes
 from vllm.multimodal.media.image import ImageMediaIO
 from vllm.multimodal.parse import MultiModalDataParser
 
@@ -308,3 +308,75 @@ def test_hash_collision_empty_container_vs_omitted():
     assert _hash(size={}) != omitted
     assert _hash(size=[]) != omitted
     assert _hash(size={}) != _hash(size=[])
+
+
+class _CountingDecoder:
+    """Decoder that records how many times it ran."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.value
+
+
+def test_hash_lazy_media_does_not_decode():
+    """Hashing a LazyMedia uses its original bytes and never decodes it."""
+    decoder = _CountingDecoder(np.zeros((4,), dtype=np.float32))
+    item = LazyMedia(decoder, b"audio-bytes")
+
+    hasher = MultiModalHasher
+    hash_lazy = hasher.hash_kwargs("blake3", audio=item)
+
+    assert decoder.calls == 0
+    assert hash_lazy == hasher.hash_kwargs("blake3", audio=b"audio-bytes")
+
+
+def test_hash_lazy_media_released_bytes_raises():
+    """Hashing after release_bytes() without decoding is a programming error."""
+    item = LazyMedia(lambda: np.zeros((4,), dtype=np.float32), b"raw")
+    item.release_bytes()
+
+    with pytest.raises(RuntimeError, match="released"):
+        MultiModalHasher.hash_kwargs("blake3", video=item)
+
+
+def test_hash_lazy_media_header_image_exif():
+    """With a header-only image, EXIF ImageID hashing needs no pixel decode."""
+    header = Image.new("RGB", (10, 20))
+    image_id = uuid.uuid4()
+    header.getexif()[Image.ExifTags.Base.ImageID] = image_id
+
+    decoder = _CountingDecoder(header)
+    item = LazyMedia(decoder, b"img-bytes", header_image=header)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", image=item) == hasher.hash_kwargs(
+        "blake3", image=image_id.bytes
+    )
+    assert decoder.calls == 0
+
+
+def test_hash_lazy_media_header_image_io_config_matches_eager():
+    """A lazy image with header + io_config hashes exactly like the eager
+    MediaWithBytes produced by ImageMediaIO.load_bytes."""
+    data = _rgba_png_bytes()
+    io = ImageMediaIO(rgba_background_color=(0, 0, 0))
+    eager = io.load_bytes(data)
+    assert eager.io_config is not None
+
+    decoder = _CountingDecoder(eager.media)
+    lazy = LazyMedia(
+        decoder,
+        data,
+        io_config=eager.io_config,
+        header_image=Image.open(BytesIO(data)),
+    )
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", image=lazy) == hasher.hash_kwargs(
+        "blake3", image=eager
+    )
+    assert decoder.calls == 0

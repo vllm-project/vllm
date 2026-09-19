@@ -8,6 +8,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Generic,
     NamedTuple,
@@ -18,6 +19,7 @@ from typing import (
 import torch
 from typing_extensions import TypeVar, assert_never
 
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -36,7 +38,9 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
-from ..parse import MultiModalDataItems, MultiModalUUIDItems
+from ..media import LazyMedia
+from ..media.connector import global_thread_pool
+from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 from .context import BaseProcessingInfo, TimingContext
 from .dummy_inputs import BaseDummyInputsBuilder
 from .inputs import ProcessorInputs
@@ -1298,7 +1302,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             missing_modality_data = []
             for idx in idxs:
-                data = mm_data_items[modality][idx]
+                # Use the raw item so that selecting a lazy item here does
+                # not trigger its decode ahead of the batch decode below.
+                items = mm_data_items[modality]
+                if isinstance(items, ProcessorBatchItems):
+                    data = items.get_raw(idx)
+                else:
+                    data = items[idx]
                 if data is None:
                     raise ValueError(
                         f"Cache miss for {modality} at index {idx} "
@@ -1312,6 +1322,68 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
         return mm_is_cached, mm_missing_items
+
+    def _decode_lazy_items(
+        self,
+        mm_data_items: MultiModalDataItems,
+        *,
+        release_bytes: bool = False,
+    ) -> None:
+        """Decode all lazy media items in parallel on the media thread pool.
+
+        Waits for every submitted decode to finish (in-flight work is never
+        abandoned), then wraps the first decode failure as
+        VLLMUnprocessableEntityError so corrupt media surfaces as a client
+        error (422) instead of a server error.
+        """
+        lazy_items = list[tuple[str, LazyMedia[Any]]]()
+        for modality, items in mm_data_items.items():
+            if not isinstance(items, ProcessorBatchItems):
+                continue
+            for idx in range(items.get_count()):
+                item = items.get_raw(idx)
+                if isinstance(item, LazyMedia):
+                    lazy_items.append((modality, item))
+
+        if not lazy_items:
+            return
+
+        futures = [
+            (modality, global_thread_pool.submit(item.decode))
+            for modality, item in lazy_items
+        ]
+        first_error: tuple[str, Exception] | None = None
+        for modality, future in futures:
+            try:
+                future.result()
+            except Exception as error:
+                if first_error is None:
+                    first_error = (modality, error)
+
+        if first_error is not None:
+            modality, cause = first_error
+            raise VLLMUnprocessableEntityError(
+                f"Failed to decode {modality} media: {cause}",
+                parameter=f"{modality}_url",
+            ) from cause
+
+        if release_bytes:
+            for _, item in lazy_items:
+                item.release_bytes()
+
+    def _release_lazy_item_bytes(
+        self,
+        mm_data_items: MultiModalDataItems,
+    ) -> None:
+        """Release the original bytes of lazy items (e.g. cache hits) once
+        hashing is done and their decode is no longer needed."""
+        for items in mm_data_items.values():
+            if not isinstance(items, ProcessorBatchItems):
+                continue
+            for idx in range(items.get_count()):
+                item = items.get_raw(idx)
+                if isinstance(item, LazyMedia):
+                    item.release_bytes()
 
     def _recompute_cached_prompt_update(
         self,
@@ -1379,6 +1451,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingResult:
+        # Hashes are computed after the HF processor ran on this path, so the
+        # original bytes must stay alive (no release here).
+        with timing_ctx.record("decode_mm_items"):
+            self._decode_lazy_items(inputs.mm_data_items)
+
         with timing_ctx.record("apply_hf_processor"):
             mm_processed_data = self._apply_hf_processor_main(
                 mm_items=inputs.mm_data_items,
@@ -1441,6 +1518,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
             )
+
+        with timing_ctx.record("decode_mm_items"):
+            # Cache-miss items are decoded in parallel here; cache-hit items
+            # are never decoded. Hashing is done by now, so the original
+            # bytes of every lazy item can be released.
+            self._decode_lazy_items(mm_missing_data_items, release_bytes=True)
+            self._release_lazy_item_bytes(inputs.mm_data_items)
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal

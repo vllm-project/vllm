@@ -27,6 +27,7 @@ from .inputs import (
 from .media import (
     AudioMediaIO,
     ImageMediaIO,
+    LazyMedia,
     MediaConnector,
     MediaWithBytes,
     VideoMediaIO,
@@ -330,10 +331,14 @@ def group_and_batch_mm_kwargs(
 def fetch_audio(
     audio_url: str,
     audio_io_kwargs: dict[str, Any] | None = None,
-) -> tuple[np.ndarray, int | float]:
+) -> LazyMedia[tuple[np.ndarray, int | float]]:
     """Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
+
+    Returns a lazy handle: decoding happens on first access, so in offline
+    user code decode errors surface at the use site (e.g. `LLM.generate`)
+    instead of at the fetch site.
 
     Warning:
         This method has direct access to local files and is only intended
@@ -351,10 +356,14 @@ def fetch_audio(
 def fetch_image(
     image_url: str,
     image_io_kwargs: dict[str, Any] | None = None,
-) -> Image.Image:
+) -> LazyMedia[Image.Image]:
     """Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
+
+    Returns a lazy handle: decoding happens on first access, so in offline
+    user code decode errors surface at the use site (e.g. `LLM.generate`)
+    instead of at the fetch site.
 
     Warning:
         This method has direct access to local files and is only intended
@@ -372,10 +381,14 @@ def fetch_image(
 def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
-) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+) -> LazyMedia[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]:
     """Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
+
+    Returns a lazy handle: decoding happens on first access, so in offline
+    user code decode errors surface at the use site (e.g. `LLM.generate`)
+    instead of at the fetch site.
 
     Warning:
         This method has direct access to local files and is only intended

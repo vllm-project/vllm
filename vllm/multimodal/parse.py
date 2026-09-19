@@ -35,7 +35,7 @@ from .inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
-from .media import MediaWithBytes
+from .media import LazyMedia, MediaWithBytes
 from .video import DecodedFrames
 
 _T = TypeVar("_T")
@@ -115,15 +115,28 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
     """Base class for data items that are arranged in a list."""
 
-    def _unwrap(self, item: _T | MediaWithBytes[_T]) -> _T:
-        """Extract media from wrapper if present."""
-        return item.media if isinstance(item, MediaWithBytes) else item
+    def _unwrap(self, item: _T | MediaWithBytes[_T] | LazyMedia[_T]) -> _T:
+        """Extract media from wrappers if present.
+
+        Unwrapping a LazyMedia triggers its decode; by the time items are
+        consumed here the processor's batch decode has already run, so this
+        is just a cache read.
+        """
+        while isinstance(item, (MediaWithBytes, LazyMedia)):
+            item = item.media
+        return item
 
     def get_count(self) -> int:
         return len(self.data)
 
     def get(self, index: int) -> _T:
         return self._unwrap(self.data[index])
+
+    def get_raw(self, index: int) -> object:
+        """Get a data item by its index without unwrapping media wrappers,
+        so lazy items can be selected (e.g. for cache-miss decode) without
+        triggering decoding."""
+        return self.data[index]
 
     def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
         # Return raw item for hashing (preserves original_bytes if present)
@@ -226,10 +239,13 @@ class EmbeddingItems(
                     )
 
     def _unwrap(
-        self, item: torch.Tensor | MediaWithBytes[torch.Tensor]
+        self,
+        item: torch.Tensor | MediaWithBytes[torch.Tensor] | LazyMedia[torch.Tensor],
     ) -> torch.Tensor:
-        """Extract media from wrapper if present."""
-        return item.media if isinstance(item, MediaWithBytes) else item
+        """Extract media from wrappers if present."""
+        while isinstance(item, (MediaWithBytes, LazyMedia)):
+            item = item.media
+        return item
 
     def get_count(self) -> int:
         return len(self.data)
@@ -411,6 +427,8 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
 
     def get_item_for_hash(self, index: int) -> Any:
         item = self.data[index]
+        # LazyMedia items hash their original bytes only; their metadata
+        # entry is None (metadata is a function of bytes + decode params).
         if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
             metadata = self.metadata[index]
             if metadata is not None:
@@ -642,13 +660,43 @@ class MultiModalDataParser:
             return audio, None
         if isinstance(audio, torch.Tensor):
             return audio.numpy(), None
+        if isinstance(audio, LazyMedia):
+            # Only reached by transforms stacked via LazyMedia.map(), whose
+            # input is the decoded media by construction.
+            return audio.media
 
         assert_never(audio)
 
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
+    ) -> tuple[
+        DecodedFrames | MediaWithBytes[DecodedFrames] | LazyMedia[Any],
+        dict[str, Any] | None,
+    ]:
+        if isinstance(video, LazyMedia):
+            # Unpack (frames, metadata) at decode time; nothing is decoded
+            # here. The connector's LazyMedia decodes to
+            # MediaWithBytes[(frames, metadata)], while an already-unpacked
+            # LazyMedia (re-parsed cache-miss items) decodes to bare frames.
+            def unpack(decoded: Any) -> Any:
+                if isinstance(decoded, MediaWithBytes):
+                    decoded = decoded.media
+                if isinstance(decoded, tuple):
+                    frames, metadata = decoded
+                else:
+                    frames, metadata = decoded, None
+                if self.video_needs_metadata:
+                    if metadata is None:
+                        raise ValueError(
+                            "Video metadata is required but not found in mm "
+                            "input. Please check your video input in "
+                            "`multi_modal_data`"
+                        )
+                    return frames, metadata
+                return frames
+
+            return video.map(unpack), None
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
@@ -664,6 +712,20 @@ class MultiModalDataParser:
 
         assert_never(video)
 
+    def _resample_normalize_audio(self, loaded: AudioItem) -> np.ndarray:
+        audio, orig_sr = self._get_audio_with_sr(loaded)
+        if orig_sr is None:
+            new_audio = audio
+        else:
+            new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
+
+        # Apply channel normalization if target_channels is set
+        if self.target_channels is not None:
+            spec = AudioSpec(target_channels=self.target_channels)
+            new_audio = normalize_audio(new_audio, spec)
+
+        return new_audio
+
     def _parse_audio_data(
         self,
         data: ModalityData[AudioItem],
@@ -678,7 +740,7 @@ class MultiModalDataParser:
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
-            or isinstance(data, tuple)
+            or isinstance(data, (tuple, LazyMedia))
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -686,25 +748,21 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray | None]()
+        new_audios = list[np.ndarray | LazyMedia[Any] | None]()
         for data_item in data_items:
             # Requests can omit audio samples when reusing a cached UUID.
             if data_item is None:
                 new_audios.append(None)
                 continue
 
-            audio, orig_sr = self._get_audio_with_sr(data_item)
-            if orig_sr is None:
-                new_audio = audio
-            else:
-                new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
+            if isinstance(data_item, LazyMedia):
+                # Defer decoding; resampling and channel normalization are
+                # stacked onto the decode so they run in the parallel
+                # decode phase.
+                new_audios.append(data_item.map(self._resample_normalize_audio))
+                continue
 
-            # Apply channel normalization if target_channels is set
-            if self.target_channels is not None:
-                spec = AudioSpec(target_channels=self.target_channels)
-                new_audio = normalize_audio(new_audio, spec)
-
-            new_audios.append(new_audio)
+            new_audios.append(self._resample_normalize_audio(data_item))
 
         return AudioProcessorItems(new_audios)
 
@@ -718,7 +776,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return ImageEmbeddingItems(data, self.expected_hidden_size)
 
-        if isinstance(data, (PILImage.Image, MediaWithBytes)) or (
+        if isinstance(data, (PILImage.Image, MediaWithBytes, LazyMedia)) or (
             isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3
         ):
             data_items = [data]
@@ -767,6 +825,7 @@ class MultiModalDataParser:
         new_videos = list[
             DecodedFrames
             | MediaWithBytes[DecodedFrames]
+            | LazyMedia[Any]
             | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
             | None
         ]()
@@ -779,14 +838,20 @@ class MultiModalDataParser:
                 metadata_lst.append(None)
                 continue
             video, metadata = self._get_video_with_metadata(data_item)
-            if self.video_needs_metadata:
-                if metadata is None:
-                    raise ValueError(
-                        "Video metadata is required but not found in mm input. "
-                        "Please check your video input in `multi_modal_data`"
-                    )
+            if (
+                self.video_needs_metadata
+                and metadata is None
+                and not isinstance(video, LazyMedia)
+            ):
+                raise ValueError(
+                    "Video metadata is required but not found in mm input. "
+                    "Please check your video input in `multi_modal_data`"
+                )
+            if self.video_needs_metadata and metadata is not None:
                 new_videos.append((video, metadata))
             else:
+                # For lazy items the metadata check is deferred to decode
+                # time (see _get_video_with_metadata).
                 new_videos.append(video)
             metadata_lst.append(metadata)
 

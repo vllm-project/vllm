@@ -1,19 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
+from PIL import Image
 
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.config.multimodal import MultiModalConfig
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.media import LazyMedia
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
+    TimingContext,
     overlay_modality_mm_kwargs,
 )
 from vllm.multimodal.processing.inputs import ProcessorInputs
@@ -1361,3 +1370,165 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
         ).get_mm_hashes("test-model", "blake3")["image"][0]
 
     assert hash_with(left) != hash_with(right)
+
+
+class _LazyTestProcessingInfo:
+    """Minimal ProcessingInfo for exercising the lazy-decode orchestration in
+    `_cached_apply_hf_processor` without a real HF model."""
+
+    model_id = "lazy-test-model"
+
+    def __init__(self) -> None:
+        self.data_parser = MultiModalDataParser()
+        self.ctx = SimpleNamespace(
+            tokenizer=None,
+            get_mm_config=lambda: MultiModalConfig(),
+        )
+
+    def get_data_parser(self):
+        return self.data_parser
+
+    def parse_mm_data(self, mm_data, *, validate=True):
+        return self.data_parser.parse_mm_data(mm_data)
+
+
+class _LazyTestModelConfig:
+    def __init__(self, mm_processor_cache_gb: float) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+class _LazyTestProcessor(BaseMultiModalProcessor):
+    """Processor whose HF call fabricates one dummy tensor per image item."""
+
+    requires_tokenizer = False
+
+    def __init__(self, *, with_cache: bool = True) -> None:
+        cache = None
+        if with_cache:
+            cache = MultiModalProcessorOnlyCache(
+                _LazyTestModelConfig(mm_processor_cache_gb=1)  # type: ignore[arg-type]
+            )
+        super().__init__(
+            _LazyTestProcessingInfo(),  # type: ignore[arg-type]
+            dummy_inputs=None,  # type: ignore[arg-type]
+            cache=cache,
+        )
+
+    def _call_hf_processor(self, hf_data, hf_kwargs):
+        from transformers.feature_extraction_utils import BatchFeature
+
+        images = hf_data.get("images") or []
+        if not images:
+            return BatchFeature()
+        return BatchFeature({"pixel_values": torch.zeros(len(images), 1)})
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        if "pixel_values" not in hf_inputs:
+            return {}
+        return {
+            "pixel_values": MultiModalFieldConfig.shared(
+                "image", hf_inputs["pixel_values"].shape[0]
+            )
+        }
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        # One placeholder update per image item so the modality is present
+        # in the grouped updates consumed by `_merge_mm_kwargs`.
+        return [PromptInsertion("image", [0], [0])]
+
+
+class _CountingDecoder:
+    """Decoder that records how many times it ran."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.value
+
+
+def _cached_apply(processor, lazy_items, timing_ctx=None):
+    mm_items = MultiModalDataParser().parse_mm_data({"image": lazy_items})
+    inputs = ProcessorInputs(prompt=[], mm_data_items=mm_items)
+    return processor._cached_apply_hf_processor(
+        inputs, timing_ctx or TimingContext(enabled=False)
+    )
+
+
+def test_lazy_cache_hit_skips_decode():
+    """A cache hit must not decode; a miss decodes once and releases bytes."""
+    processor = _LazyTestProcessor(with_cache=True)
+    data = b"fake-image-bytes"
+
+    # First request (miss): the item is decoded once and its bytes released.
+    decoder_1 = _CountingDecoder(Image.new("RGB", (4, 4)))
+    lazy_1 = LazyMedia(decoder_1, data)
+    timing_ctx = TimingContext(enabled=True)
+    _cached_apply(processor, [lazy_1], timing_ctx)
+    assert decoder_1.calls == 1
+    assert lazy_1.original_bytes == b""
+    assert "decode_mm_items" in timing_ctx.stage_secs
+
+    # Second request with identical bytes (hit): no decode, bytes released
+    # right after hashing.
+    decoder_2 = _CountingDecoder(Image.new("RGB", (4, 4)))
+    lazy_2 = LazyMedia(decoder_2, data)
+    _cached_apply(processor, [lazy_2])
+    assert decoder_2.calls == 0
+    assert lazy_2.original_bytes == b""
+
+
+def test_lazy_cache_miss_decodes_in_parallel():
+    """Cache-miss items must decode concurrently, not serialized."""
+    num_items = 4
+    barrier = threading.Barrier(num_items)
+    calls = [0] * num_items
+
+    def make_decoder(idx):
+        def decode():
+            calls[idx] += 1
+            # Deadlocks (BrokenBarrierError after timeout) if the decodes
+            # were serialized.
+            barrier.wait(timeout=10)
+            return Image.new("RGB", (4, 4))
+
+        return decode
+
+    processor = _LazyTestProcessor(with_cache=True)
+    lazy_items = [
+        LazyMedia(make_decoder(idx), f"image-{idx}".encode())
+        for idx in range(num_items)
+    ]
+    _cached_apply(processor, lazy_items)
+
+    assert calls == [1] * num_items
+
+
+def test_lazy_decode_error_becomes_unprocessable():
+    """A decode failure surfaces as VLLMUnprocessableEntityError, and
+    in-flight sibling decodes are still awaited rather than abandoned."""
+    processor = _LazyTestProcessor(with_cache=True)
+
+    def bad_decode():
+        raise ValueError("corrupt media")
+
+    slow_completed = threading.Event()
+
+    def slow_decode():
+        time.sleep(0.2)
+        slow_completed.set()
+        return Image.new("RGB", (4, 4))
+
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+        _cached_apply(
+            processor,
+            [LazyMedia(bad_decode, b"broken"), LazyMedia(slow_decode, b"good")],
+        )
+
+    assert exc_info.value.parameter == "image_url"
+    assert slow_completed.is_set()

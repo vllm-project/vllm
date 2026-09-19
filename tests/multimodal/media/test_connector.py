@@ -20,7 +20,7 @@ from PIL import Image, ImageChops
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media import LazyMedia, MediaConnector, MediaWithBytes
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -58,6 +58,13 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(convert_image_mode(b, a.mode))).all()
 
 
+def _decode_media(media):
+    """Unwrap LazyMedia / MediaWithBytes down to the decoded media object."""
+    while isinstance(media, (LazyMedia, MediaWithBytes)):
+        media = media.media
+    return media
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_http(image_url: str):
@@ -65,6 +72,14 @@ async def test_fetch_image_http(image_url: str):
 
     image_sync = connector.fetch_image(image_url)
     image_async = await connector.fetch_image_async(image_url)
+
+    # Fetches return lazy handles; accessing the decoded media decodes them.
+    assert isinstance(image_sync, LazyMedia)
+    assert not image_sync.is_decoded
+    assert isinstance(image_async, LazyMedia)
+
+    image_sync = _decode_media(image_sync)
+    image_async = _decode_media(image_async)
     assert _image_equals(image_sync, image_async)
 
 
@@ -102,13 +117,13 @@ async def test_fetch_image_base64(
         base64_image = base64.b64encode(f.read()).decode("utf-8")
         data_url = f"data:{mime_type};base64,{base64_image}"
 
-        data_image_sync = connector.fetch_image(data_url)
+        data_image_sync = _decode_media(connector.fetch_image(data_url))
         if _image_equals(url_image, Image.open(f)):
             assert _image_equals(url_image, data_image_sync)
         else:
             pass  # Lossy format; only check that image can be opened
 
-        data_image_async = await connector.fetch_image_async(data_url)
+        data_image_async = _decode_media(await connector.fetch_image_async(data_url))
         assert _image_equals(data_image_sync, data_image_async)
 
 
@@ -125,15 +140,15 @@ async def test_fetch_image_keep_original_mode():
     )
 
     # Default behavior: RGBA is composited onto a white background
-    default_image = MediaConnector().fetch_image(data_url)
+    default_image = _decode_media(MediaConnector().fetch_image(data_url))
     assert default_image.mode == "RGB"
     assert default_image.getpixel((0, 0)) == (255, 255, 255)
     assert default_image.getpixel((2, 2)) == (0, 0, 0)
 
     # image_mode=None via media_io_kwargs: original mode is preserved
     connector = MediaConnector(media_io_kwargs={"image": {"image_mode": None}})
-    image_sync = connector.fetch_image(data_url)
-    image_async = await connector.fetch_image_async(data_url)
+    image_sync = _decode_media(connector.fetch_image(data_url))
+    image_async = _decode_media(await connector.fetch_image_async(data_url))
     for image in (image_sync, image_async):
         assert image.mode == "RGBA"
         assert image.getpixel((0, 0)) == (0, 0, 0, 0)
@@ -148,18 +163,22 @@ async def test_fetch_image_local_files(image_url: str):
     with TemporaryDirectory() as temp_dir:
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
 
-        origin_image = connector.fetch_image(image_url)
+        origin_image = _decode_media(connector.fetch_image(image_url))
         origin_image.save(
             os.path.join(temp_dir, os.path.basename(image_url)),
             quality=100,
             icc_profile=origin_image.info.get("icc_profile"),
         )
 
-        image_async = await local_connector.fetch_image_async(
-            f"file://{temp_dir}/{os.path.basename(image_url)}"
+        image_async = _decode_media(
+            await local_connector.fetch_image_async(
+                f"file://{temp_dir}/{os.path.basename(image_url)}"
+            )
         )
-        image_sync = local_connector.fetch_image(
-            f"file://{temp_dir}/{os.path.basename(image_url)}"
+        image_sync = _decode_media(
+            local_connector.fetch_image(
+                f"file://{temp_dir}/{os.path.basename(image_url)}"
+            )
         )
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
@@ -191,8 +210,10 @@ async def test_fetch_image_local_files_relative_allowed_path(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     local_connector = MediaConnector(allowed_local_media_path="media")
 
-    image_sync = local_connector.fetch_image(image_path.as_uri())
-    image_async = await local_connector.fetch_image_async(image_path.as_uri())
+    image_sync = _decode_media(local_connector.fetch_image(image_path.as_uri()))
+    image_async = _decode_media(
+        await local_connector.fetch_image_async(image_path.as_uri())
+    )
 
     assert image_sync.size == (1, 1)
     assert not ImageChops.difference(image_sync, image_async).getbbox()
@@ -206,7 +227,7 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     with TemporaryDirectory() as temp_dir:
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
 
-        origin_image = connector.fetch_image(image_url)
+        origin_image = _decode_media(connector.fetch_image(image_url))
         filename = "file name with space.jpg"
         origin_image.save(
             os.path.join(temp_dir, filename),
@@ -215,10 +236,12 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
         )
 
         try:
-            image_async = await local_connector.fetch_image_async(
-                f"file://{temp_dir}/{filename}"
+            image_async = _decode_media(
+                await local_connector.fetch_image_async(f"file://{temp_dir}/{filename}")
             )
-            image_sync = local_connector.fetch_image(f"file://{temp_dir}/{filename}")
+            image_sync = _decode_media(
+                local_connector.fetch_image(f"file://{temp_dir}/{filename}")
+            )
         except FileNotFoundError as e:
             pytest.fail("Failed to fetch image with space in name: {}".format(e))
         # Check that the images are equal
@@ -237,8 +260,8 @@ async def test_fetch_image_data_url_with_params():
         base64_image = base64.b64encode(f.read()).decode("utf-8")
 
     data_url = f"data:image/png;charset=utf-8;base64,{base64_image}"
-    image_sync = connector.fetch_image(data_url)
-    image_async = await connector.fetch_image_async(data_url)
+    image_sync = _decode_media(connector.fetch_image(data_url))
+    image_async = _decode_media(await connector.fetch_image_async(data_url))
     assert _image_equals(image_sync, image_async)
 
 
@@ -268,12 +291,17 @@ async def test_fetch_image_error_conversion():
     connector = MediaConnector()
     broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
 
-    # PIL.UnidentifiedImageError should be converted to ValueError
-    with pytest.raises(ValueError):
-        await connector.fetch_image_async(broken_img)
+    # Fetches return lazy handles, so decode errors surface at decode time
+    # (inside the multi-modal processor), not at the fetch site.
+    image_async = await connector.fetch_image_async(broken_img)
+    assert isinstance(image_async, LazyMedia)
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_async.decode()
 
-    with pytest.raises(ValueError):
-        connector.fetch_image(broken_img)
+    image_sync = connector.fetch_image(broken_img)
+    assert isinstance(image_sync, LazyMedia)
+    with pytest.raises(ValueError, match="Failed to load image"):
+        image_sync.decode()
 
 
 @pytest.mark.flaky(reruns=3, reruns_delay=5)
@@ -290,10 +318,18 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     )
 
     try:
-        video_sync, metadata_sync = connector.fetch_video(video_url)
-        video_async, metadata_async = await connector.fetch_video_async(video_url)
+        lazy_sync = connector.fetch_video(video_url)
+        lazy_async = await connector.fetch_video_async(video_url)
     except (TimeoutError, asyncio.TimeoutError) as e:
         pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
+
+    # Fetches return lazy handles; unpacking decodes them.
+    assert isinstance(lazy_sync, LazyMedia)
+    assert not lazy_sync.is_decoded
+    assert isinstance(lazy_async, LazyMedia)
+
+    video_sync, metadata_sync = lazy_sync
+    video_async, metadata_async = lazy_async
 
     assert np.array_equal(video_sync, video_async)
     assert metadata_sync == metadata_async

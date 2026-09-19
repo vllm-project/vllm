@@ -21,7 +21,7 @@ from vllm.utils.sparse_utils import (
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
 from ..video_decoders import incompatible_backend_options
-from .base import MediaIO, MediaWithBytes
+from .base import LazyMedia, MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
@@ -191,6 +191,15 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             return MediaWithBytes((frames, metadata), data.encode())
 
         return self.load_bytes(pybase64.b64decode(data, validate=True))
+
+    def load_base64_lazy(
+        self, media_type: str, data: str
+    ) -> LazyMedia[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]:
+        if media_type.lower() == "video/jpeg":
+            # The jpeg_sequence branch parses per-frame base64 segments rather
+            # than one encoded payload, so defer load_base64 as a whole.
+            return LazyMedia(partial(self.load_base64, media_type, data), data.encode())
+        return super().load_base64_lazy(media_type, data)
 
     def load_file(
         self, filepath: Path

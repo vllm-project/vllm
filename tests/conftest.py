@@ -61,7 +61,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.media import MediaWithBytes
+from vllm.multimodal.media import LazyMedia, MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -1715,8 +1715,8 @@ class LocalAssetServer:
 
     def get_image_asset(self, name: str) -> Image.Image:
         image = fetch_image(self.url_for(name))
-        # Unwrap MediaWithBytes if present
-        if isinstance(image, MediaWithBytes):
+        # Unwrap LazyMedia / MediaWithBytes if present
+        while isinstance(image, (LazyMedia, MediaWithBytes)):
             image = image.media
         return image
 

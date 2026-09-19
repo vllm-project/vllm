@@ -18,7 +18,7 @@ import numpy as np
 import numpy.typing as npt
 import requests
 import torch
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
@@ -33,7 +33,7 @@ from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO, MediaWithBytes
+from .base import LazyMedia, MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
@@ -315,7 +315,7 @@ class MediaConnector:
         self,
         url: str,
         media_io: MediaIO[_M],
-    ) -> _M:  # type: ignore[type-var]
+    ) -> LazyMedia[_M]:
         # Format per RFC 2397:
         # data:[<mediatype>][;<param>=<value>]*[;base64],<data>
         data_spec, sep, data = url[5:].partition(",")
@@ -329,13 +329,13 @@ class MediaConnector:
             raise NotImplementedError(msg)
 
         media_type = media_type.partition(";")[0]
-        return media_io.load_base64(media_type, data)
+        return media_io.load_base64_lazy(media_type, data)
 
     def _load_file_url(
         self,
         url_spec: Url,
         media_io: MediaIO[_M],
-    ) -> _M:  # type: ignore[type-var]
+    ) -> LazyMedia[_M]:
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
             raise RuntimeError(
@@ -351,7 +351,7 @@ class MediaConnector:
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
-        return media_io.load_file(filepath)
+        return media_io.load_file_lazy(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
@@ -370,7 +370,7 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
-    ) -> _M:  # type: ignore[type-var]
+    ) -> LazyMedia[_M]:
         if url[:5].lower() == "data:":
             return self._load_data_url(url, media_io)
 
@@ -382,7 +382,7 @@ class MediaConnector:
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
-                return media_io.load_bytes(cached)
+                return media_io.load_bytes_lazy(cached)
 
             connection = self.connection
             try:
@@ -399,7 +399,7 @@ class MediaConnector:
                 raise
 
             self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+            return media_io.load_bytes_lazy(data)
 
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
@@ -413,7 +413,7 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
-    ) -> _M:
+    ) -> LazyMedia[_M]:
         loop = asyncio.get_running_loop()
 
         if url[:5].lower() == "data:":
@@ -432,10 +432,8 @@ class MediaConnector:
                 global_thread_pool, self._get_cached_bytes, url
             )
             if cached is not None:
-                future = loop.run_in_executor(
-                    global_thread_pool, media_io.load_bytes, cached
-                )
-                return await future
+                # Constructing a LazyMedia is O(1), so no offload is needed.
+                return media_io.load_bytes_lazy(cached)
 
             connection = self.connection
             try:
@@ -454,8 +452,7 @@ class MediaConnector:
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
             )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
+            return media_io.load_bytes_lazy(data)
 
         if url_spec.scheme == "file":
             future = loop.run_in_executor(
@@ -468,8 +465,13 @@ class MediaConnector:
     def fetch_audio(
         self,
         audio_url: str,
-    ) -> tuple[np.ndarray, int | float]:
-        """Load audio from a URL."""
+    ) -> LazyMedia[tuple[np.ndarray, int | float]]:
+        """Load audio from a URL.
+
+        Returns a lazy handle: decoding happens on first access (inside the
+        multi-modal processor), so decode errors surface there rather than
+        at the fetch site.
+        """
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
@@ -481,7 +483,7 @@ class MediaConnector:
     async def fetch_audio_async(
         self,
         audio_url: str,
-    ) -> tuple[np.ndarray, int | float]:
+    ) -> LazyMedia[tuple[np.ndarray, int | float]]:
         """Asynchronously fetch audio from a URL."""
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
@@ -496,33 +498,33 @@ class MediaConnector:
         image_url: str,
         *,
         image_mode: str | None = "RGB",
-    ) -> Image.Image:
+    ) -> LazyMedia[Image.Image]:
         """Load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set
         `media_io_kwargs={"image": {"image_mode": None}}` to keep the
         original image mode (e.g. preserving the alpha channel).
+
+        Returns a lazy handle: decoding happens on first access (inside the
+        multi-modal processor), so decode errors surface there rather than
+        at the fetch site.
         """
         image_io = ImageMediaIO(
             **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
 
-        try:
-            return self.load_from_url(
-                image_url,
-                image_io,
-                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-            )
-        except UnidentifiedImageError as e:
-            # convert to ValueError to be properly caught upstream
-            raise ValueError(str(e)) from e
+        return self.load_from_url(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
 
     async def fetch_image_async(
         self,
         image_url: str,
         *,
         image_mode: str | None = "RGB",
-    ) -> Image.Image:
+    ) -> LazyMedia[Image.Image]:
         """Asynchronously load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set
@@ -533,15 +535,11 @@ class MediaConnector:
             **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
 
-        try:
-            return await self.load_from_url_async(
-                image_url,
-                image_io,
-                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-            )
-        except UnidentifiedImageError as e:
-            # convert to ValueError to be properly caught upstream
-            raise ValueError(str(e)) from e
+        return await self.load_from_url_async(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
 
     def fetch_video(
         self,
@@ -549,8 +547,13 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
-    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-        """Load video from an HTTP or base64 data URL."""
+    ) -> LazyMedia[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]:
+        """Load video from an HTTP or base64 data URL.
+
+        Returns a lazy handle: decoding happens on first access (inside the
+        multi-modal processor), so decode errors surface there rather than
+        at the fetch site.
+        """
         image_io = ImageMediaIO(
             **({"image_mode": image_mode} | self.media_io_kwargs.get("image", {}))
         )
@@ -573,7 +576,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
-    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+    ) -> LazyMedia[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format. Set

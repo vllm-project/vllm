@@ -25,7 +25,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
 
-from .media import MediaWithBytes
+from .media import LazyMedia, MediaWithBytes
 
 if TYPE_CHECKING:
     import torch
@@ -55,7 +55,9 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", MediaWithBytes[HfImageItem]]
+ImageItem: TypeAlias = Union[
+    HfImageItem, "torch.Tensor", MediaWithBytes[HfImageItem], LazyMedia[HfImageItem]
+]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
@@ -70,6 +72,7 @@ VideoItem: TypeAlias = Union[
     "torch.Tensor",
     tuple[HfVideoItem, dict[str, Any]],
     MediaWithBytes[tuple[HfVideoItem, dict[str, Any]]],
+    LazyMedia[tuple[HfVideoItem, dict[str, Any]]],
 ]
 """
 A `transformers.video_utils.VideoInput` representing a single video item. 
@@ -81,7 +84,12 @@ which are treated as video embeddings;
 these are directly passed to the model without HF processing.
 """
 
-AudioItem: TypeAlias = Union[HfAudioItem, tuple[np.ndarray, float], "torch.Tensor"]
+AudioItem: TypeAlias = Union[
+    HfAudioItem,
+    tuple[np.ndarray, float],
+    "torch.Tensor",
+    LazyMedia[tuple[np.ndarray, float]],
+]
 """
 Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
@@ -238,8 +246,8 @@ def nested_tensors_equal(
 
     If `check_dtype` is `True`, the tensors must have the same dtype.
     """
-    check_dtype_func = (
-        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    check_dtype_func = lambda a, b, check_dtype: (
+        a.dtype == b.dtype if check_dtype else True
     )
     if isinstance(a, torch.Tensor):
         return (

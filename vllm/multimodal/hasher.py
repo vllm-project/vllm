@@ -14,7 +14,7 @@ from PIL import Image
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.logger import init_logger
 
-from .media import MediaWithBytes
+from .media import LazyMedia, MediaWithBytes
 
 logger = init_logger(__name__)
 
@@ -113,6 +113,28 @@ class MultiModalHasher:
                     data["palette_rawmode"] = palette.rawmode
 
             return cls.iter_item_to_bytes("image", data)
+
+        if isinstance(obj, LazyMedia):
+            if (header_image := obj.header_image) is not None:
+                # The header was opened eagerly at fetch time, so the EXIF /
+                # io_config branches below do not trigger pixel decoding.
+                image_id = _get_image_id_bytes(header_image)
+                if image_id is not None:
+                    return _framed(image_id)
+
+                if obj.io_config:
+                    return cls.iter_item_to_bytes(
+                        "image",
+                        {"io_config": obj.io_config, "data": obj.original_bytes},
+                    )
+
+            original_bytes = obj.original_bytes
+            if not original_bytes and not obj.is_decoded:
+                raise RuntimeError(
+                    "Cannot hash a LazyMedia whose original bytes were released "
+                    "before decoding; hashing must precede release_bytes()."
+                )
+            return _framed(original_bytes)
 
         if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
             image_id = _get_image_id_bytes(obj.media)
