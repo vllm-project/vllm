@@ -867,6 +867,10 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
+
+    @classmethod
     def pre_register_and_update(
         cls, parser: "FlexibleArgumentParser | None" = None
     ) -> None:
