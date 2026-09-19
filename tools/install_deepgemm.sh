@@ -6,11 +6,8 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
-# NOTE: This targets the vLLM fork's dev branch tip, which carries the sm120
-# and sm90 paged-MQA ports plus the SwiGLU alpha/beta and SiTU Mega MoE
-# activations
-DEEPGEMM_GIT_REF="a6bbb8000161c0dc3a85a0300a905f76898a7913"
+DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
+DEEPGEMM_GIT_REF="84774729f5b208e42f34c92fa0577e61e44e3512"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -93,6 +90,8 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+git submodule sync --recursive
+git submodule update --init --recursive
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
