@@ -160,3 +160,24 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
     out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
+
+
+def test_scaled_mm_rank3_input():
+    # Regression test for #56024: a rank-3 activation (e.g. from the Whisper
+    # encoder) must be flattened to 2D and restored to its original shape.
+    set_random_seed(0)
+    B, M, K, N = 2, 64, 128, 256
+    in_dtype = torch.int8
+    out_dtype = torch.bfloat16
+
+    a = torch.randint(-32, 32, (B, M, K), dtype=in_dtype, device=device)
+    b = torch.randint(-32, 32, (K, N), dtype=in_dtype, device=device)
+    scale_a = 0.25 * torch.rand((B * M, 1), device=device)
+    scale_b = 0.25 * torch.rand((N, 1), device=device)
+
+    out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype)
+    assert out.shape == (B, M, N)
+
+    flat = a.reshape(-1, K)
+    expected = torch_scaled_mm(flat, b, scale_a, scale_b, out_dtype).reshape(B, M, N)
+    torch.testing.assert_close(out, expected, rtol=1e-1, atol=1e-1)
