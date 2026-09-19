@@ -8,8 +8,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -147,6 +149,29 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
+        if (
+            current_platform.is_rocm()
+            and self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        ):
+            # Under DCP the draft is sharded, so the graphs captured below
+            # contain a context-parallel collective, and capture faults if ranks
+            # enter it staggered -- ranks arrive from target capture up to ~1s
+            # apart. Align once here, outside any capture-stream context.
+            #
+            # Barrier on TP, not DCP: __init__ forces the draft to pcp == 1, and
+            # at pcp == 1 config validation requires tp % dcp == 0, so the DCP
+            # group is a subset of TP. The captured graph also carries the
+            # draft's TP all-reduces, so at dcp < tp a DCP barrier would align
+            # only some of the participants. TP is the full set either way.
+            #
+            # GroupCoordinator.barrier() is CPU/Gloo; torch.distributed.barrier()
+            # would allocate GPU tensors during capture.
+            #
+            # ROCm-gated: the fault was measured on gfx950 and the fix is
+            # untested on CUDA, so other platforms keep their current behaviour
+            # rather than take an unverified change to graph capture.
+            torch.accelerator.synchronize()
+            get_tp_group().barrier()
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
