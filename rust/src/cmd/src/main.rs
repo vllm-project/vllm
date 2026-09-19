@@ -11,7 +11,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use vllm_managed_engine::ManagedEngineHandle;
+use vllm_engine_core_client::{HandshakeListener, TransportMode};
+use vllm_managed_engine::cli::ManagedEngineArgs;
+use vllm_managed_engine::{ManagedEngineHandle, allocate_handshake_port};
+use vllm_server::Config;
 
 use crate::cli::{BenchCommand, Cli, Command};
 
@@ -121,26 +124,38 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
-            let handshake_port = args.managed_engine.resolve_handshake_port()?;
+            let (handshake_port, handshake_listener) =
+                resolve_serve_handshake(&args.managed_engine, !args.headless).await?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {
                 if args.headless {
                     bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
                 }
 
-                let handshake_address = args.managed_engine.handshake_address(handshake_port);
+                let handshake_address = handshake_address(
+                    &args.managed_engine,
+                    handshake_port,
+                    handshake_listener.as_ref(),
+                );
                 info!(
                     %handshake_address,
                     engine_count = args.managed_engine.data_parallel_size,
                     "running Rust frontend without a managed local Python engine"
                 );
-                let config = args.to_frontend_config(handshake_address);
+                let config = attach_handshake_listener(
+                    args.to_frontend_config(handshake_address),
+                    handshake_listener,
+                );
                 return vllm_server::serve(config, shutdown_signal()).await;
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
             let engine_config = args.to_managed_engine_config(handshake_port);
-            let handshake_address = engine_config.handshake_address();
+            let handshake_address = handshake_address(
+                &args.managed_engine,
+                handshake_port,
+                handshake_listener.as_ref(),
+            );
 
             let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
@@ -156,7 +171,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     Ok(())
                 })
             } else {
-                let config = args.to_frontend_config(handshake_address);
+                let config = attach_handshake_listener(
+                    args.to_frontend_config(handshake_address),
+                    handshake_listener,
+                );
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     let result = vllm_server::serve(config, shutdown).await;
@@ -215,4 +233,48 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_server::serve_render(args.into_config(), shutdown_signal()).await
         }
     }
+}
+
+/// Bind the handshake ROUTER before engines start when the operator did not
+/// pin a port. Headless-only mode has no local binder, so it still probes.
+async fn resolve_serve_handshake(
+    args: &ManagedEngineArgs,
+    bind_handshake: bool,
+) -> Result<(u16, Option<std::sync::Arc<HandshakeListener>>)> {
+    if let Some(port) = args.resolve_handshake_port() {
+        return Ok((port, None));
+    }
+    if !bind_handshake {
+        return allocate_handshake_port(&args.handshake_host).map(|port| (port, None));
+    }
+
+    let listener = HandshakeListener::bind(format!("tcp://{}:0", args.handshake_host))
+        .await
+        .context("failed to bind handshake listener")?;
+    let port = listener.port().context("failed to read handshake port")?;
+    Ok((port, Some(listener)))
+}
+
+fn handshake_address(
+    args: &ManagedEngineArgs,
+    handshake_port: u16,
+    handshake_listener: Option<&std::sync::Arc<HandshakeListener>>,
+) -> String {
+    handshake_listener
+        .map(|listener| listener.address().to_string())
+        .unwrap_or_else(|| args.handshake_address(handshake_port))
+}
+
+fn attach_handshake_listener(
+    mut config: Config,
+    handshake_listener: Option<std::sync::Arc<HandshakeListener>>,
+) -> Config {
+    if let TransportMode::HandshakeOwner {
+        handshake_listener: current,
+        ..
+    } = &mut config.transport_mode
+    {
+        *current = handshake_listener;
+    }
+    config
 }

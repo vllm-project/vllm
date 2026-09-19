@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
+            handshake_listener: None,
         },
         coordinator_mode: None,
         model_name: args.model.clone(),
