@@ -4,8 +4,11 @@ import json
 import os
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
+
+logger = init_logger(__name__)
 
 
 class FilesystemResolver(LoRAResolver):
@@ -34,8 +37,8 @@ class FilesystemResolver(LoRAResolver):
                 with open(adapter_config_path) as file:
                     adapter_config = json.load(file)
                 if (
-                    adapter_config["peft_type"] == "LORA"
-                    and adapter_config["base_model_name_or_path"] == base_model_name
+                    adapter_config.get("peft_type") == "LORA"
+                    and adapter_config.get("base_model_name_or_path") == base_model_name
                 ):
                     lora_request = LoRARequest(
                         lora_name=lora_name,
@@ -43,6 +46,14 @@ class FilesystemResolver(LoRAResolver):
                         lora_path=lora_path,
                     )
                     return lora_request
+                logger.warning(
+                    "Skipping %s: adapter_config.json is not a LoRA adapter for "
+                    "base model %s (peft_type=%r, base_model_name_or_path=%r).",
+                    lora_path,
+                    base_model_name,
+                    adapter_config.get("peft_type"),
+                    adapter_config.get("base_model_name_or_path"),
+                )
         return None
 
 
