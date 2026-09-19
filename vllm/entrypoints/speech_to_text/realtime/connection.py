@@ -209,6 +209,14 @@ class RealtimeConnection:
         prompt_token_ids_len: int = 0
         completion_tokens_len: int = 0
 
+        # Each audio segment is a separate generation that may repeat the
+        # model's structured header (e.g. ``language Chinese<asr_text>``),
+        # so a fresh post-processor is used per segment. A segment boundary
+        # is signalled by ``finish_reason`` on the completion output; the
+        # request itself stays alive while streaming input continues.
+        post_processor_cls = self.serving.model_cls.get_streaming_post_processor_cls()
+        post_processor = post_processor_cls()
+
         try:
             # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -235,14 +243,21 @@ class RealtimeConnection:
                     if not prompt_token_ids_len and output.prompt_token_ids:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 
-                    delta = output.outputs[0].text
+                    completion = output.outputs[0]
+                    segment_finished = completion.finish_reason is not None
+                    delta = post_processor.process_delta(
+                        completion.text, segment_finished
+                    )
+                    if segment_finished:
+                        post_processor = post_processor_cls()
                     full_text += delta
 
                     # append output to input
-                    input_stream.put_nowait(list(output.outputs[0].token_ids))
-                    await self.send(TranscriptionDelta(delta=delta))
+                    input_stream.put_nowait(list(completion.token_ids))
+                    if delta:
+                        await self.send(TranscriptionDelta(delta=delta))
 
-                    completion_tokens_len += len(output.outputs[0].token_ids)
+                    completion_tokens_len += len(completion.token_ids)
 
                 if not self._is_connected:
                     # finish because websocket connection was killed
