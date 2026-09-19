@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
@@ -19,6 +20,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from torch.distributed import PrefixStore, ProcessGroup
+
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -534,6 +537,34 @@ class XPUPlatform(Platform):
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[src_block_indices]
         dst_cache[dst_block_indices] = _src_cache.cpu()
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: "PrefixStore",
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> "ProcessGroup":
+        from torch.distributed import ProcessGroup
+        from torch.distributed.distributed_c10d import ProcessGroupXCCL
+
+        assert torch.distributed.is_xccl_available()
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+
+        backend_options = ProcessGroupXCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupXCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.XCCL
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(torch.device("xpu"), backend_type, backend_class)
+        return pg
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
