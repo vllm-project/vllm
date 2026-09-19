@@ -237,6 +237,86 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     ]
 
 
+def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
+    """``configure_quant_config`` reads both mappings off the class, before
+    ``__init__`` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's ``language_model.``-rooted
+    prefixes and every attention shard falls back to the global spec."""
+    from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
+
+    assert "fused_wqa_wkv" in DeepseekV41ForCausalLM.packed_modules_mapping
+    mapper = DeepseekV41ForCausalLM.hf_to_vllm_mapper.get_rename_mapper()
+    assert mapper.apply_list(["layers.0.attn.wq_a"]) == [
+        "language_model.model.layers.0.attn.wq_a"
+    ]
+
+
+def test_deepseek_v41_engram_scale_accepts_quark_name():
+    """Quark exports name the engram scale ``embed.weight_scale``; the
+    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    explicit rule the tensor is never routed and loading fails."""
+    from vllm.models.deepseek_v41.amd import model as model_module
+
+    mapper = model_module._make_deepseek_v4_weights_mapper("fp4", "weight_scale")
+    weight = torch.empty(0)
+    mapped = [
+        name
+        for name, _ in mapper.apply(
+            [
+                ("layers.1.engram.embed.weight_scale", weight),
+                ("layers.1.engram.embed.scale", weight),
+            ]
+        )
+    ]
+    assert mapped == [
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+        "model.layers.1.engram.embed_tokens.weight_scale_inv",
+    ]
+
+
+def test_deepseek_v41_declines_mixed_precision_quark_config():
+    """A Quark export with per-layer specs is mixed precision (MXFP4 experts +
+    2-D block MXFP8 attention in DeepSeek-V4.1-Flash). ``from_config`` rewrites
+    the config into a single global FP8 scheme, so claiming such a checkpoint
+    would discard the per-layer specs; QuarkConfig must handle it instead."""
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    hf_config = SimpleNamespace(model_type="deepseek_v41")
+    mxfp4_global = {
+        "global_quant_config": {
+            "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+        },
+        "quant_method": "quark",
+    }
+
+    # Single-scheme Quark MXFP4 exports (DeepSeek V4) are still claimed.
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mxfp4_global, None, hf_config=hf_config
+        )
+        == "deepseek_v4_fp8"
+    )
+
+    mixed = {
+        **mxfp4_global,
+        "layer_quant_config": {
+            "layers.0.attn.wkv": {
+                "weight": {
+                    "dtype": "fp8_e4m3",
+                    "qscheme": "per_block",
+                    "block_size": [32, 32],
+                }
+            }
+        },
+    }
+    assert (
+        DeepseekV4FP8Config.override_quantization_method(
+            mixed, None, hf_config=hf_config
+        )
+        is None
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
 @pytest.mark.parametrize(

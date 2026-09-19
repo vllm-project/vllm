@@ -10,19 +10,27 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MxFp4LinearKernel,
     MxFp6LinearKernel,
+    Mxfp8LinearKernel,
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
+    init_mxfp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
+    OCP_MX_UNPACKED_DTYPES,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
     kMxfp6E2M3Static,
     kMxfp6E3M2Static,
+    kMxfp8Static,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -38,7 +46,7 @@ logger = init_logger(__name__)
 
 
 class QuarkOCP_MX(QuarkScheme):
-    ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
+    ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel | Mxfp8LinearKernel
     supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
@@ -47,9 +55,11 @@ class QuarkOCP_MX(QuarkScheme):
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
+        scale_block_rows: int = 1,
     ):
         super().__init__(weight_quant_key, activation_quant_key)
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
+        self.scale_block_rows = scale_block_rows
         self.weight_dtype = next(
             dtype
             for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
@@ -65,10 +75,20 @@ class QuarkOCP_MX(QuarkScheme):
             else None
         )
 
-        if self.weight_dtype == "mxfp4":
-            self.packed_factor: int | Fraction = 2
+        self.is_unpacked = self.weight_dtype in OCP_MX_UNPACKED_DTYPES
+
+        if self.is_unpacked:
+            self.packed_factor: int | Fraction = 1
+        elif self.weight_dtype == "mxfp4":
+            self.packed_factor = 2
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
+
+        if self.is_unpacked:
+            # MXFP8 runs on the shared kernel abstraction, which picks a native
+            # backend where one exists and emulates otherwise. The MXFP4/MXFP6
+            # warnings below do not apply.
+            return
 
         if not current_platform.supports_mx():
             logger.warning_once(
@@ -91,7 +111,9 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
-        if quant_dtype == "mxfp4":
+        if quant_dtype in OCP_MX_UNPACKED_DTYPES:
+            return dim
+        elif quant_dtype == "mxfp4":
             assert dim % 2 == 0
             return dim // 2
         elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
@@ -104,6 +126,26 @@ class QuarkOCP_MX(QuarkScheme):
                 f"got quant_dtype={quant_dtype}. Something is wrong, please "
                 "open an issue."
             )
+
+    def _expanding_scale_loader(self, weight_loader: Callable) -> Callable:
+        """Expand a 2-D block scale to one row per weight row.
+
+        A ``block_size=[R, 32]`` export carries one e8m0 value per R weight
+        rows; the kernels want one per row. At ``R == 1`` the layouts already
+        coincide, so the loader is passed through untouched.
+        """
+        if self.scale_block_rows == 1:
+            return weight_loader
+
+        rows = self.scale_block_rows
+
+        def expanding_loader(param, loaded_weight, *args, **kwargs):
+            loaded_weight = loaded_weight.view(torch.uint8).repeat_interleave(
+                rows, dim=0
+            )
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        return expanding_loader
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -159,6 +201,37 @@ class QuarkOCP_MX(QuarkScheme):
 
             layer.register_parameter("weight", weight)
             set_weight_attrs(weight, kwargs)
+        elif self.is_unpacked:
+            output_size_per_partition = sum(output_partition_sizes)
+            layer.logical_widths = output_partition_sizes
+            layer.input_size_per_partition = input_size_per_partition
+            layer.output_size_per_partition = output_size_per_partition
+            layer.params_dtype = params_dtype
+
+            weight = ModelWeightParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition,
+                    dtype=MXFP8_VALUE_DTYPE,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("weight", weight)
+
+            weight_scale = GroupQuantScaleParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition // OCP_MX_BLOCK_SIZE,
+                    dtype=MXFP8_SCALE_DTYPE,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=self._expanding_scale_loader(weight_loader),
+            )
+            layer.register_parameter("weight_scale", weight_scale)
+            layer.weight_block_size = [1, OCP_MX_BLOCK_SIZE]
         else:
             output_size_per_partition = sum(output_partition_sizes)
             layer.logical_widths = output_partition_sizes
@@ -199,6 +272,14 @@ class QuarkOCP_MX(QuarkScheme):
             self.ocp_mx_linear = init_mxfp6_linear_kernel(
                 weight_quant_key=self.weight_quant_key,
                 activation_quant_key=self.activation_quant_key,
+            )
+        elif self.weight_quant_key == kMxfp8Static:
+            self.ocp_mx_linear = init_mxfp8_linear_kernel()
+        else:
+            raise NotImplementedError(
+                "No OCP MX linear kernel for weight_quant_key="
+                f"{self.weight_quant_key}. Something is wrong, please open an "
+                "issue."
             )
 
     def apply_weights(
