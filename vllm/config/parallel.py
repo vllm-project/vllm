@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -16,7 +17,7 @@ import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:
@@ -56,6 +57,20 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
 ]
+
+
+@cache
+def _prefers_one_sided_all2all() -> bool:
+    """Only GB200/GB300 prefer one-sided all2all"""
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.get_cpu_architecture() != CpuArchEnum.ARM:
+        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300
+        return False
+    try:
+        return current_platform.is_device_capability_family(100)
+    except Exception:
+        return False
 
 
 @config
@@ -199,8 +214,16 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
-    """All2All backend for MoE expert parallel communication. Available options:
+    all2all_backend: All2AllBackend = Field(
+        default_factory=lambda: (
+            "flashinfer_nvlink_one_sided"
+            if _prefers_one_sided_all2all()
+            else "allgather_reducescatter"
+        )
+    )
+    """All2All backend for MoE expert parallel communication. Defaults to
+    "flashinfer_nvlink_one_sided" on GB200/GB300 and "allgather_reducescatter"
+    everywhere else. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -511,6 +534,25 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if self.all2all_backend == "flashinfer_nvlink_one_sided":
+            if not self.enable_expert_parallel:
+                logger.debug(
+                    "Expert parallel is disabled; using the "
+                    "'allgather_reducescatter' all2all backend instead of "
+                    "'flashinfer_nvlink_one_sided'."
+                )
+                self.all2all_backend = "allgather_reducescatter"
+            else:
+                # Deferred so the ~3s FlashInfer import stays off non-EP paths.
+                from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+                if not has_flashinfer_nvlink_one_sided():
+                    logger.warning_once(
+                        "FlashInfer trtllm_moe_alltoall is unavailable; falling "
+                        "back to the 'allgather_reducescatter' all2all backend."
+                    )
+                    self.all2all_backend = "allgather_reducescatter"
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(

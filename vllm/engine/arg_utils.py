@@ -527,7 +527,7 @@ class EngineArgs:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
         KernelConfig.sparse_indexer_topk_backend
     )
-    all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    all2all_backend: All2AllBackend = get_field(ParallelConfig, "all2all_backend")
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
