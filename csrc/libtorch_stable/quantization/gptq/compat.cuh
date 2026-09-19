@@ -41,23 +41,37 @@ __device__ __forceinline__ void atomicAdd_half2(half2* address, half2 val) {
   } while (assumed != old);
 }
 
-//
-#if defined(__CUDA_ARCH__) || \
-    (defined(USE_ROCM) && (HIP_VERSION_MAJOR * 100 + HIP_VERSION_MINOR) < 713)
-  #if __CUDA_ARCH__ < 700 || defined(USE_ROCM)
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 700
 
 __device__ __forceinline__ void atomicAdd(half* address, half val) {
   atomicAdd_half(address, val);
 }
 
-    #if __CUDA_ARCH__ < 600 || defined(USE_ROCM)
+  #if __CUDA_ARCH__ < 600
 __device__ __forceinline__ void atomicAdd(half2* address, half2 val) {
   atomicAdd_half2(address, val);
 }
-    #endif
-
   #endif
+
 #endif
+
+// Native half/half2 atomicAdd availability varies across ROCm 7.13 builds, so
+// ROCm always uses the CAS-based helpers above.
+__device__ __forceinline__ void gptq_atomic_add(half* address, half val) {
+#if defined(USE_ROCM)
+  atomicAdd_half(address, val);
+#else
+  atomicAdd(address, val);
+#endif
+}
+
+__device__ __forceinline__ void gptq_atomic_add(half2* address, half2 val) {
+#if defined(USE_ROCM)
+  atomicAdd_half2(address, val);
+#else
+  atomicAdd(address, val);
+#endif
+}
 
 }  // namespace gptq
 }  // namespace vllm
