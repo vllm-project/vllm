@@ -1211,7 +1211,7 @@ def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions
 
 @pytest.mark.cpu_test
 def test_csa_linear_ple_descriptor_is_not_split():
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
         TPMapping,
     )
 

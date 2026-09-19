@@ -13,11 +13,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReadSpec,
     ReqMeta,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-    ReadSpec,
-    _is_attention_spec,
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_attention_spec,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -271,7 +271,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_ids = group_ids(meta.local_block_ids, rank)
                     remote_ids = group_ids(remote_logical_block_ids, rank)
                     for g in range(num_groups):
-                        if not local_ids[g] or not _is_attention_spec(
+                        if not local_ids[g] or not is_attention_spec(
                             self._group_spec_types[g]
                         ):
                             continue

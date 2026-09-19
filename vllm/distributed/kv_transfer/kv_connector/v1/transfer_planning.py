@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TP mapping computation for NIXL KV cache transfers."""
+"""Shared transfer-planning primitives for KV connectors.
+
+Spec-type classification and local-to-remote TP mapping for
+cross-engine KV cache transfers, usable by any connector.
+"""
 
 from __future__ import annotations
 
@@ -8,33 +12,39 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    BlockIds,
-    TransferTopology,
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
 # ======================================================================
-# Data structures
+# Spec-type classification
 # ======================================================================
 
 
-@dataclass(frozen=True)
-class ReadSpec:
-    """Specification for a single remote block read operation."""
-
-    remote_rank: int
-    local_block_ids: BlockIds
-    remote_block_ids: BlockIds
-    block_ids_by_region: bool = False
-
-
-def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
+def is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, AttentionSpec)
 
 
-def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
+def is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, MambaSpec)
+
+
+def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
+    """Return the concrete spec type behind ``spec``, unwrapping uniform-type groups."""
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        # All inner specs are the same type; pick any.
+        inner = next(iter(spec.kv_cache_specs.values()))
+        return type(inner)
+    return type(spec)
+
+
+# ======================================================================
+# Local-to-remote TP mapping
+# ======================================================================
 
 
 @dataclass(frozen=True)
@@ -62,11 +72,6 @@ class TPMapping:
     local_consumers: int = 1
 
 
-# ======================================================================
-# TP mapping computation
-# ======================================================================
-
-
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
@@ -78,8 +83,8 @@ def compute_tp_mapping(
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
 
-    DCP support is scoped to MLA only, with a side is either fully replicated or fully
-    sharded. DCP-branch reuses the same rank set used at handshake selection.
+    DCP support is scoped to MLA only, with each side either fully replicated or fully
+    sharded. The DCP branch reuses the same rank set used at handshake selection.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
@@ -109,7 +114,7 @@ def compute_tp_mapping(
         attn_ranks = (start + np.sort(unique_idx)).tolist()
 
     # --- SSM source ranks ---
-    has_ssm = any(_is_ssm_spec(t) for t in group_spec_types)
+    has_ssm = any(is_ssm_spec(t) for t in group_spec_types)
     if has_ssm:
         if tp_size < remote_tp_size:
             abs_tp = remote_tp_size // tp_size
@@ -123,7 +128,7 @@ def compute_tp_mapping(
 
     # --- Per-group ordered source ranks ---
     source_ranks_per_group = tuple(
-        tuple(ssm_ranks) if _is_ssm_spec(t) else tuple(attn_ranks)
+        tuple(ssm_ranks) if is_ssm_spec(t) else tuple(attn_ranks)
         for t in group_spec_types
     )
 

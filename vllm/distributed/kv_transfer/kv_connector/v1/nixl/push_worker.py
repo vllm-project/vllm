@@ -50,16 +50,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    ReadSpec,
     RemoteMeta,
     ReqId,
     ReqMeta,
     TransferHandle,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-    ReadSpec,
-    _is_attention_spec,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_attention_spec,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -561,7 +561,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return [
                 list(block_ids[g])
                 if (self._is_csa_linear and tp_ratio < 0)
-                or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                or (replicate_attn and is_attention_spec(self._group_spec_types[g]))
                 or rank in plan.source_ranks_per_group[g]
                 else []
                 for g in range(num_groups)

@@ -232,6 +232,16 @@ class RemoteMeta:
     num_tokens: int | None = None
 
 
+@dataclass(frozen=True)
+class ReadSpec:
+    """Specification for a single remote block read operation."""
+
+    remote_rank: int
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
+    block_ids_by_region: bool = False
+
+
 @dataclass
 class ReqMeta:
     local_block_ids: BlockIds
