@@ -10,6 +10,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -350,7 +351,8 @@ def test_prefill_exports_cached_tokens_in_kv_transfer_params():
     """The P worker reports its own prefix-cache hits in the returned
     kv_transfer_params so the D worker can surface them in
     prompt_tokens_details instead of the ~100% local hit it measures
-    when pulling the KVs from the remote."""
+    when pulling the KVs from the remote.
+    """
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -1681,6 +1683,83 @@ def test_kv_connector_stats_aggregation():
     assert all(not isinstance(v, np.generic) for v in cli_stats.values())
 
 
+def test_kv_connector_stats_failure_grouping():
+    """Transfer, handshake and notification failures are reported as one
+    transport-failure count, while KV expiry is reported separately: the
+    former are sporadic lower-transport-layer events, the latter an
+    autoscaler signal."""
+    stats = NixlKVConnectorStats()
+    assert stats.is_empty()
+
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    assert not stats.is_empty()
+
+    # No successful transfers: latency stats are zero but the failure
+    # counts still surface.
+    reduced = stats.reduce()
+    assert reduced["Num successful transfers"] == 0
+    assert reduced["Num failed transfers"] == 3
+    assert reduced["Num KV expired reqs"] == 1
+
+
+def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
+    """vllm:nixl_num_failed_transfers counts handshake and notification
+    failures too, while vllm:nixl_num_kv_expired_reqs stays a separate
+    counter."""
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+        NixlPromMetrics,
+    )
+
+    registry = CollectorRegistry()
+
+    class RegistryGauge(Gauge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryCounter(Counter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryHistogram(Histogram):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    vllm_config = create_vllm_config()
+    metric_types = {
+        Gauge: RegistryGauge,
+        Counter: RegistryCounter,
+        Histogram: RegistryHistogram,
+    }
+    prom = NixlPromMetrics(
+        vllm_config,
+        metric_types,
+        labelnames=["engine"],
+        per_engine_labelvalues={0: ["engine-0"]},
+    )
+
+    stats = NixlKVConnectorStats()
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    prom.observe(stats.data, engine_idx=0)
+
+    def counter_value(name: str) -> float:
+        for metric in registry.collect():
+            for sample in metric.samples:
+                if sample.name == name:
+                    return sample.value
+        raise AssertionError(f"metric {name} not found in registry")
+
+    assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
+    assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+
+
 def test_multi_kv_connector_stats_aggregation():
     """Test MultiKVConnectorStats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
@@ -2821,6 +2900,52 @@ def test_empty_recv_is_reported_only_when_awaited(
     assert (request_id in done_recving) is awaiting_kvs
 
 
+@pytest.mark.parametrize("is_hma", [False, True])
+@pytest.mark.parametrize(
+    "local_block_ids,awaiting_kvs",
+    [((), False), (([],), False), (([],), True), (([1, 2, 3],), True)],
+)
+def test_handshake_failure_reports_only_awaited_recvs(
+    recv_worker, is_hma, local_block_ids, awaiting_kvs
+):
+    """A failed cleanup handshake must not complete an already-aborted request."""
+    worker = recv_worker
+    worker._is_hma_required = is_hma
+    worker._recving_metadata.clear()
+    worker._remote_agents = {}
+    worker._handshake_lock = contextlib.nullcontext()
+    worker._ready_requests = queue.Queue()
+    worker._reqs_to_process = set()
+    worker.pcp_rank = 0
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": "prefill",
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+        awaiting_kvs=awaiting_kvs,
+    )
+    handshake = Future[None]()
+    handshake.set_exception(RuntimeError("handshake failed"))
+    with patch.object(worker, "_ensure_handshake", return_value=handshake):
+        worker.start_load_kv(metadata)
+
+    results = worker.get_transfer_results()
+    expected = {"request"} if awaiting_kvs else set()
+    assert results.finished_recving == results.failed_recving == expected
+    assert worker.get_block_ids_with_load_errors() == (
+        set(local_block_ids[0]) if awaiting_kvs and not is_hma else set()
+    )
+    assert not worker._recving_metadata
+    assert not worker._recv_failures
+    assert not worker._pending_recv_notifs
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FailingNixlWrapper,
@@ -3027,6 +3152,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
     assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+    # Handshake failures are recorded as transport failures, separately
+    # from KV expiry.
+    assert connector.connector_worker.xfer_stats.data["num_failed_handshakes"]
+    assert connector.connector_worker.xfer_stats.data["num_failed_transfers"] == []
 
 
 @patch(

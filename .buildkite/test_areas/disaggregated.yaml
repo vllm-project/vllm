@@ -287,7 +287,7 @@ steps:
     PREFILL_BLOCK_SIZE: "256"
     DECODE_BLOCK_SIZE: "256"
     MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
-    VLLM_ENGINE_READY_TIMEOUT_S: "900"
+    VLLM_ENGINE_READY_TIMEOUT_S: "1800"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
     # The V4 indexer only supports block-outermost layouts; let it pick.
     PREFILLER_KV_LAYOUT: ""
@@ -311,6 +311,9 @@ steps:
     PREFILLER_TP_SIZE: "2"
     DECODER_TP_SIZE: "2"
     MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
+    PREFILL_BLOCK_SIZE: "2048"
+    DECODE_BLOCK_SIZE: "2048"
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh

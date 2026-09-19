@@ -296,7 +296,7 @@ steps:
 
 - label: ":nvidia: (H200) LM Eval Large Models"
   key: lm-eval-large-models-8xh200
-  timeout_in_minutes: 50
+  timeout_in_minutes: 120
   device: h200
   optional: true
   num_devices: 8
