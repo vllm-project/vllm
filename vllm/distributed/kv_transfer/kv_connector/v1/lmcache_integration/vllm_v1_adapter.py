@@ -1245,7 +1245,7 @@ class LMCacheConnectorV1Impl:
     def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
         """Update KVConnector state after temporary buffer alloc.
 
-        For SharedStorageConnector, update _request_needs_load
+        For ExampleConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
         # Clear local status in lookup client when a new request is
