@@ -11,6 +11,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.post_load import (
+    PostLoadPhase,
+    iter_post_load_modules,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
@@ -222,7 +226,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     return online_process_loader
 
 
-def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
+def finalize_layerwise_processing(
+    model: torch.nn.Module, model_config: ModelConfig | None = None
+):
     """Apply processing to any layers which were not layerwise processed during loading.
     This includes attention layers and layers which have weight elements which are not
     loaded (due to padding).
@@ -232,23 +238,28 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     Args:
         model: model to finalize processing for
-        model_config: config needed for applying processing to attention layers
+        model_config: unused; accepted so existing callers keep working
 
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
 
-    deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
+    for _, layer, phase in iter_post_load_modules(model):
+        # Reload has never run the model-level hook; cold start does.
+        if phase is PostLoadPhase.MODEL:
+            continue
+        # Deferred attention-like layers are only finalized in their own pass.
+        if phase is PostLoadPhase.LAYER and is_deferred_attention_layer(layer):
+            continue
 
-    for layer in model.modules():
         info = get_layerwise_info(layer)
         if not info.can_load():
             info.reset()
             continue
 
-        # Deferred attention-like layers are processed after all other layers
-        if is_deferred_attention_layer(layer):
-            deferred_attn.append((layer, info))
+        if phase is PostLoadPhase.ATTENTION:
+            _finalize_attention_layer(layer, info)
+            info.reset()
             continue
 
         # No weights were loaded
@@ -275,11 +286,6 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         info.reset()
 
-    # Process attention layers after all other layers are done
-    for layer, info in deferred_attn:
-        _finalize_attention_layer(layer, info, model_config)
-        info.reset()
-
     LOADING_LAYERS.clear()
 
 
@@ -287,9 +293,7 @@ def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
 
 
-def _finalize_attention_layer(
-    layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
-) -> None:
+def _finalize_attention_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     if info.kernel_tensors is None:
         if info.load_numel > 0:
             _layerwise_process(layer, info)
@@ -299,7 +303,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    layer.process_weights_after_loading()
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
