@@ -626,7 +626,7 @@ async def client_main(
     async with aiohttp.ClientSession() as session:
         # Print progress
 
-        while task_queue_empty is False:
+        while task_queue_empty is False or active_convs:
             result = None
 
             if (
@@ -680,7 +680,7 @@ async def client_main(
                         f"{Color.YELLOW}Client {client_id} will not use conversation ID {conv_id} (all {len(messages)} messages already sent){Color.RESET}"  # noqa: E501
                     )
 
-            if len(active_convs) == 0 or task_queue_empty:
+            if len(active_convs) == 0:
                 logger.info(
                     f"{Color.YELLOW}Client {client_id} has no more work{Color.RESET}"
                 )
