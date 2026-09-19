@@ -32,12 +32,15 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
+    LookupResult,
     Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CPU_MEDIUM = Medium.CPU
@@ -356,11 +359,73 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.kv_cache_spec_sliding_window is None
 
 
+@pytest.mark.parametrize("tokens_per_hash", [4, 16])
+@pytest.mark.parametrize("shared_tokens", [0, 16, 32, 48, 64])
+def test_chunk_event_matches_retrievable_cpu_prefix(tokens_per_hash, shared_tokens):
+    """An interior GPU-block hit must not advertise a retrievable CPU chunk."""
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=16, blocks_per_chunk=4, tokens_per_hash=tokens_per_hash
+    )
+    hashes = [_hash(i) for i in range(64 // tokens_per_hash)]
+    req = _request(block_hashes=hashes, token_count=64)
+    [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
+    manager = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    context = ReqContext(req_id="stored")
+    assert manager.prepare_store([key], context) is not None
+    manager.complete_store([key], context)
+    [event] = tracker.take_events(manager.take_events())
+
+    shared_hashes = shared_tokens // tokens_per_hash
+    query_hashes = hashes[:shared_hashes] + [
+        _hash(100 + i) for i in range(shared_hashes, len(hashes))
+    ]
+    query_key = make_offload_key(query_hashes[-1], group_config.group_idx)
+    hit = manager.lookup(query_key, ReqContext(req_id="query")) is LookupResult.HIT
+    assert hit == (shared_tokens == 64)
+
+    query_wire_hashes = {_wire_hash(h) for h in query_hashes}
+    advertised_tokens = sum(
+        event.block_size for h in event.block_hashes if h in query_wire_hashes
+    )
+    assert advertised_tokens == (64 if hit else 0)
+
+
+@pytest.mark.parametrize("shared_blocks", [1, 2, 3])
+def test_overlapping_chunks_store_and_remove_distinct_hashes(shared_blocks):
+    tracker = _tracker()
+    group_config = _group_config(block_size=16, blocks_per_chunk=4)
+    hashes = [_hash(i) for i in range(4)]
+    other_hashes = hashes[:shared_blocks] + [
+        _hash(100 + i) for i in range(shared_blocks, 4)
+    ]
+    req = _request(block_hashes=hashes, token_count=64)
+    other_req = _request(block_hashes=other_hashes, token_count=64, req_id="other")
+    other_req.all_token_ids[shared_blocks * 16 :] = [
+        100 + i for i in range(shared_blocks * 16, 64)
+    ]
+    [key] = _record_chunks(tracker, req, group_config, num_chunks=1)
+    [other_key] = _record_chunks(tracker, other_req, group_config, num_chunks=1)
+
+    first, second = tracker.take_events([_stored_event([key, other_key])])
+    assert first.block_hashes == [_wire_hash(hashes[-1])]
+    assert second.block_hashes == [_wire_hash(other_hashes[-1])]
+    assert first.block_size == second.block_size == 64
+    assert first.token_ids == req.all_token_ids
+    assert second.token_ids == other_req.all_token_ids
+
+    [removed] = tracker.take_events([_removed_event([key])])
+    assert removed.block_hashes == first.block_hashes
+    assert set(removed.block_hashes).isdisjoint(second.block_hashes)
+    [other_removed] = tracker.take_events([_removed_event([other_key])])
+    assert other_removed.block_hashes == second.block_hashes
+
+
 @pytest.mark.parametrize(
     ("blocks_per_chunk", "expected_hash_indices"),
-    [(1, [63]), (2, [63, 127])],
+    [(1, [63]), (2, [127])],
 )
-def test_event_hashes_use_group_block_size(
+def test_event_hashes_use_chunk_size(
     blocks_per_chunk: int, expected_hash_indices: list[int]
 ):
     tokens_per_hash = 4
@@ -382,7 +447,7 @@ def test_event_hashes_use_group_block_size(
 
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(i)) for i in expected_hash_indices]
-    assert event.block_size == block_size
+    assert event.block_size == block_size * blocks_per_chunk
     assert len(event.token_ids) == block_size * blocks_per_chunk
 
 
@@ -406,14 +471,10 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     for chunk_idx, event in enumerate(stored):
         assert isinstance(event, BlockStored)
         expected_chunk_hashes = [
-            _wire_hash(_hash(i))
-            for i in range(
-                chunk_idx * blocks_per_chunk,
-                (chunk_idx + 1) * blocks_per_chunk,
-            )
+            _wire_hash(_hash((chunk_idx + 1) * blocks_per_chunk - 1))
         ]
         assert event.block_hashes == expected_chunk_hashes
-        assert event.block_size == block_size
+        assert event.block_size == block_size * blocks_per_chunk
         assert len(event.token_ids) == block_size * blocks_per_chunk
         if chunk_idx == 0:
             assert event.parent_block_hash is None
@@ -447,7 +508,7 @@ def test_take_events_factor_gt_1_store_is_order_independent():
 
     assert len(events) == 3
     chunk1, placeholder, chunk0 = events
-    assert [len(event.block_hashes) for event in events] == [3, 1, 3]
+    assert [len(event.block_hashes) for event in events] == [1, 1, 1]
     assert placeholder.block_size == 0
     assert placeholder.token_ids == []
     assert chunk0.parent_block_hash is None
@@ -532,10 +593,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     )
     removed = list(tracker.take_events([_removed_event([key])]))
     assert len(removed) == 1
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
+    assert removed[0].block_hashes == [_wire_hash(_hash(1))]
 
     stored = list(tracker.take_events([_stored_event([key])]))
     assert len(stored) == 1
@@ -544,10 +602,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
 
     tracker.record_lookup(lookup_req, group_config, 0, key)
     removed = list(tracker.take_events([_removed_event([key])]))
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
+    assert removed[0].block_hashes == [_wire_hash(_hash(1))]
 
 
 @pytest.mark.parametrize(
@@ -596,8 +651,8 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     assert len(removed) == 2
     by_group = {event.group_idx: event.block_hashes for event in removed}
     assert by_group == {
-        0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
-        1: [_wire_hash(_hash(10)), _wire_hash(_hash(11))],
+        0: [_wire_hash(_hash(1))],
+        1: [_wire_hash(_hash(11))],
     }
 
 
