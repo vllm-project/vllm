@@ -58,6 +58,20 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     return pa_sparse_prefill_opus
 
 
+@functools.cache
+def _get_aiter_sparse_mla_fwd() -> Callable[..., tuple[torch.Tensor, None]] | None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mla_enabled():
+        return None
+    try:
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+    except ImportError:
+        return None
+    logger.info_once("Using AITER gluon sparse MLA on gfx950")
+    return sparse_mla_fwd
+
+
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
@@ -3159,6 +3173,65 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
     return True
 
 
+def _can_use_aiter_sparse_mla_fwd(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    output: torch.Tensor,
+    rope_head_dim: int,
+    on_gfx950: bool = _ON_GFX950,
+) -> bool:
+    """Rope-free bf16 sparse MLA (GLM-5.3-Flash), the gluon kernel's geometry.
+
+    A bf16 pool carries no rope information, so the kernel contracts over the
+    whole row and V is that row; models with an appended rope keep the in-tree
+    Triton path.
+    """
+    return (
+        on_gfx950
+        and rope_head_dim == 0
+        and q.is_cuda
+        and q.dtype == torch.bfloat16
+        and kv.dtype == q.dtype
+        and output.dtype == q.dtype
+        and kv.device == q.device
+        and output.device == q.device
+        and kv.shape[-1] == q.shape[-1]
+        and output.shape[:2] == q.shape[:2]
+        and output.shape[-1] == q.shape[-1]
+        and q.stride(-1) == 1
+        and kv.stride(-1) == 1
+        and output.stride(-1) == 1
+    )
+
+
+def _rocm_sparse_attn_ragged_aiter_gluon(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+) -> bool:
+    sparse_mla_fwd = _get_aiter_sparse_mla_fwd()
+    if sparse_mla_fwd is None:
+        return False
+
+    sparse_mla_fwd(
+        q,
+        kv,
+        _as_int32_contiguous_1d(indptr),
+        _as_int32_contiguous_1d(indices),
+        float(scale),
+        kv_lora_rank=q.shape[-1],
+        qk_rope_head_dim=0,
+        has_invalid=True,
+        attn_sink=None if attn_sink is None else attn_sink.contiguous(),
+        out=output,
+    )
+    return True
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -3688,6 +3761,22 @@ def rocm_sparse_attn_prefill(
             output=output,
         ):
             return
+
+    if (
+        ragged_indices is not None
+        and ragged_indptr is not None
+        and _can_use_aiter_sparse_mla_fwd(q, kv.squeeze(1), output, rope_head_dim)
+        and _rocm_sparse_attn_ragged_aiter_gluon(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            output=output,
+        )
+    ):
+        return
 
     if ragged_indices is not None and ragged_indptr is not None:
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
