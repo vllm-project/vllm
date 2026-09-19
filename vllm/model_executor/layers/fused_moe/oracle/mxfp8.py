@@ -82,11 +82,7 @@ def _select_kernel_cls(
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
     last_reason: str | None = None
     for cls in _mxfp8_backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
