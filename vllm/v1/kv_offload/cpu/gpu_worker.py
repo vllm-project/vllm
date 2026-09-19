@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import math
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -12,6 +13,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_pcp_group,
+    get_pp_group,
+    get_tp_group,
+    model_parallel_is_initialized,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -198,7 +206,153 @@ def _canonical_block_sizes(
 MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 
-def pin_mmap_region(region: SharedOffloadRegion) -> None:
+@dataclass(frozen=True)
+class _ModelParallelCoordination:
+    groups: tuple[GroupCoordinator, GroupCoordinator, GroupCoordinator]
+
+    @property
+    def rank(self) -> int:
+        tp, pcp, pp = self.groups
+        return (
+            pp.rank_in_group * pcp.world_size + pcp.rank_in_group
+        ) * tp.world_size + tp.rank_in_group
+
+    @property
+    def world_size(self) -> int:
+        return math.prod(group.world_size for group in self.groups)
+
+    def barrier(self) -> None:
+        for group in self.groups:
+            if group.world_size > 1:
+                group.barrier()
+
+
+def _model_parallel_coordination() -> _ModelParallelCoordination:
+    # The mmap is shared by all TP x PCP x PP workers of one engine. These
+    # axis groups keep a DP coordinate fixed, unlike the global world group.
+    return _ModelParallelCoordination((get_tp_group(), get_pcp_group(), get_pp_group()))
+
+
+def _group_max(status: int, groups: Sequence[GroupCoordinator]) -> int:
+    status_tensor = torch.tensor([status], dtype=torch.int32, device="cpu")
+    for group in groups:
+        if group.world_size == 1:
+            continue
+        torch.distributed.all_reduce(
+            status_tensor,
+            op=torch.distributed.ReduceOp.MAX,
+            group=group.cpu_group,
+        )
+    return int(status_tensor.item())
+
+
+def _pin_mmap_region_coordinated(
+    region: SharedOffloadRegion, coordination: _ModelParallelCoordination
+) -> None:
+    rank = coordination.rank
+    local_registration_status = 0
+    local_registration_error: Exception | None = None
+    cudart = None
+    addresses: list[int] = []
+
+    try:
+        base_ptr = region._base.data_ptr()
+        cudart = CudaRTLibrary()
+        rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
+        chunk_size = rows_per_chunk * region._row_stride
+    except Exception as error:
+        local_registration_status = 2
+        local_registration_error = error
+        logger.exception("Failed to prepare mmap host registration for rank=%d", rank)
+
+    # Each process registers its VA only after every peer has mapped the region.
+    coordination.barrier()
+    for turn in range(coordination.world_size):
+        if rank == turn and local_registration_status == 0:
+            assert cudart is not None
+            try:
+                for offset in range(0, region.total_size_bytes, chunk_size):
+                    address = base_ptr + offset
+                    size = min(chunk_size, region.total_size_bytes - offset)
+                    result = cudart.cudaHostRegister(address, size)
+                    if result == 0:
+                        addresses.append(address)
+                        region.pinned_addresses.append(address)
+                    else:
+                        local_registration_status = 1
+                        cudart.cudaGetLastError()
+                        logger.warning(
+                            "cudaHostRegister failed for group rank=%d, mmap rank=%d "
+                            "at %#x (code=%d)",
+                            rank,
+                            region.rank,
+                            address,
+                            result,
+                        )
+                        break
+            except Exception as error:
+                local_registration_status = 2
+                local_registration_error = error
+                logger.exception("cudaHostRegister raised for group rank=%d", rank)
+        coordination.barrier()
+
+    group_registration_status = _group_max(
+        local_registration_status, coordination.groups
+    )
+    if group_registration_status == 0:
+        region.is_pinned = True
+        return
+
+    local_rollback_status = 0
+    for turn in range(coordination.world_size):
+        if rank == turn and addresses:
+            assert cudart is not None
+            for address in reversed(addresses):
+                try:
+                    result = cudart.cudaHostUnregister(address)
+                    if result == 0:
+                        region.pinned_addresses.remove(address)
+                    else:
+                        local_rollback_status = 1
+                        cudart.cudaGetLastError()
+                        logger.error(
+                            "cudaHostUnregister rollback failed for group rank=%d "
+                            "at %#x (code=%d)",
+                            rank,
+                            address,
+                            result,
+                        )
+                except Exception:
+                    local_rollback_status = 1
+                    logger.exception(
+                        "cudaHostUnregister rollback raised for group rank=%d", rank
+                    )
+        coordination.barrier()
+
+    # Keep failed unregisters owned so constructor cleanup can retry them.
+    region.is_pinned = bool(region.pinned_addresses)
+    group_rollback_status = _group_max(local_rollback_status, coordination.groups)
+    if group_registration_status == 1 and group_rollback_status == 0:
+        if rank == 0:
+            logger.warning(
+                "cudaHostRegister failed on at least one worker; all workers "
+                "will use unpinned DMA"
+            )
+        return
+
+    registration_error = RuntimeError(
+        "Coordinated cudaHostRegister failed because a CUDA call raised or "
+        "the group could not roll back every successful registration"
+    )
+    if local_registration_error is not None:
+        raise registration_error from local_registration_error
+    raise registration_error
+
+
+def pin_mmap_region(
+    region: SharedOffloadRegion,
+    coordination: _ModelParallelCoordination | None = None,
+) -> None:
     """Register row-aligned chunks, rolling back on failure."""
     if not current_platform.is_cuda_alike():
         logger.info(
@@ -206,6 +360,10 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             "available on CUDA/ROCm.",
             current_platform.device_name,
         )
+        return
+
+    if coordination is not None:
+        _pin_mmap_region_coordinated(region, coordination)
         return
 
     rank = region.rank
@@ -816,7 +974,12 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            coordination = (
+                _model_parallel_coordination()
+                if model_parallel_is_initialized()
+                else None
+            )
+            pin_mmap_region(mmap_region, coordination)
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned
         )
