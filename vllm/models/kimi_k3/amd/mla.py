@@ -9,6 +9,10 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.models.kimi_k3.amd.ops.sigmoid_mul_fp8_per_token import (
+    maybe_fused_mla_oproj_ptpc,
+    o_proj_is_ptpc_fp8,
+)
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
@@ -114,7 +118,17 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             q_dcp_replicated=q_dcp_replicated,
         )
 
-        if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+        return self._gated_o_proj(attn_out, hidden_states)
 
-        return self.o_proj(attn_out)[0]
+    def _gated_o_proj(
+        self,
+        attn_out: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.g_proj is None or not o_proj_is_ptpc_fp8(self.o_proj):
+            return super()._gated_o_proj(attn_out, hidden_states)
+        gate = self.g_proj(hidden_states)[0]
+        fused = maybe_fused_mla_oproj_ptpc(attn_out, gate, self.o_proj)
+        if fused is not None:
+            return self.o_proj(fused)[0]
+        return self.o_proj(attn_out * gate.sigmoid())[0]
