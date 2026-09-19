@@ -758,6 +758,9 @@ class CudaPlatformBase(Platform):
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
+            # One Triton launch per residual boundary beats both the two
+            # vllm_c launches and Inductor's codegen for the native form.
+            rms_norm_add_rms_norm=["triton", "native"],
             gelu_and_mul_sparse=["triton", "native"],
         )
 
