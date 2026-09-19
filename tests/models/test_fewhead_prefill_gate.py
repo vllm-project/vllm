@@ -22,6 +22,8 @@ def test_defaults_enable_fewhead_above_min_sq():
     assert fh.fewhead_prefill_enabled() is True
     assert fh.fewhead_min_sq() == 2048
     assert fh.should_use_fewhead_prefill(n_local_heads=8, padded_heads=64, s_q=8192)
+    assert fh.should_use_fewhead_prefill(n_local_heads=8, padded_heads=64, s_q=2048)
+    assert not fh.should_use_fewhead_prefill(n_local_heads=8, padded_heads=64, s_q=2047)
     assert not fh.should_use_fewhead_prefill(n_local_heads=8, padded_heads=64, s_q=512)
 
 
