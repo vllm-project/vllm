@@ -148,6 +148,10 @@ class XPUPlatform(Platform):
     ) -> str:
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype == "ultraquant_4bit":
+            raise ValueError(
+                "ultraquant_4bit KV cache is only supported on ROCm gfx950."
+            )
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
             logger.info_once("Using TurboQuant attention backend.")
             return AttentionBackendEnum.TURBOQUANT.get_path()

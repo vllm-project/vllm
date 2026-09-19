@@ -804,8 +804,12 @@ class Platform:
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
-        elif cache_config.cache_dtype.startswith("turboquant_"):
-            # TQ has a packed K|V layout; the standard FullAttentionSpec
+        elif (
+            cache_config.cache_dtype.startswith("turboquant_")
+            or cache_config.cache_dtype == "ultraquant_4bit"
+        ):
+            # TurboQuant and UltraQuant have packed K|V layouts; the standard
+            # FullAttentionSpec
             # formula over-sizes it and trips unify_kv_cache_spec_page_size
             # when all attention layers are TQ. With mixed skip+TQ the skip
             # layers still use the standard layout — take max so mamba

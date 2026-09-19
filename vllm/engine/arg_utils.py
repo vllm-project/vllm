@@ -2137,7 +2137,11 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        uses_turboquant_backend = (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "ultraquant_4bit"
+        )
+        if uses_turboquant_backend:
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -2531,14 +2535,14 @@ class EngineArgs:
                 "specified; defaulting to TRITON_ATTN."
             )
 
-        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
-        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        # Packed TurboQuant-family backends require FlashAttention 2.
+        if uses_turboquant_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "The selected compressed KV cache is not yet compatible with "
+                "FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
                 "warning, pass --attention-config.flash_attn_version=2"
             )

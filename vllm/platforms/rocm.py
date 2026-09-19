@@ -633,20 +633,27 @@ class RocmPlatform(Platform):
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
-            # Only tolerate the mismatch for turboquant_* KV-cache layers:
+            # Only tolerate the mismatch for packed TurboQuant/UltraQuant
+            # KV-cache layers:
             # boundary layers keep the native dtype (served by the selected
             # backend) while turboquant_* layers need TURBOQUANT, so no single
             # --attention-backend can serve every layer. For any other dtype
             # the explicit selection is genuinely invalid -> fail loud.
             kv_dtype = attn_selector_config.kv_cache_dtype
-            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+            if not (
+                kv_dtype is not None
+                and (
+                    str(kv_dtype).startswith("turboquant")
+                    or str(kv_dtype) == "ultraquant_4bit"
+                )
+            ):
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: {sel_invalid_reasons}"
                 )
             # NOTE: pass a str (not the list) -- info_once hashes its args.
             logger.info_once(
-                "Selected backend %s is incompatible with this turboquant "
+                "Selected backend %s is incompatible with this compressed-KV "
                 "layer (%s); using the auto-selected per-layer backend. "
                 "Reason: %s",
                 selected_backend.name,
