@@ -2127,7 +2127,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.sampler is not None
             if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.observe_verification(
-                    input_batch.idx_mapping, num_sampled, num_rejected
+                    input_batch.idx_mapping,
+                    num_sampled,
+                    num_rejected,
+                    skip_np=self.sampler.target_only_sampling_transforms(
+                        input_batch.idx_mapping_np
+                    ),
                 )
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
