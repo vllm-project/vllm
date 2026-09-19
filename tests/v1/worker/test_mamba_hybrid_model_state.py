@@ -35,6 +35,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
+        seq_lens_cpu_lower_bound=None,
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
         dcp_local_seq_lens=None,

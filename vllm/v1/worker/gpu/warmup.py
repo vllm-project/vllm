@@ -231,6 +231,9 @@ def warmup_kernels(
     if adaptive_sampling:
         assert rejection_sampler is not None
         rejection_sampler.enable_adaptive_verification = False
+    # The synthetic steps below never subtract rejected drafts.
+    emit_lower_bound = model_runner.emit_seq_lens_cpu_lower_bound
+    model_runner.emit_seq_lens_cpu_lower_bound = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
     finally:
@@ -238,6 +241,7 @@ def warmup_kernels(
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+        model_runner.emit_seq_lens_cpu_lower_bound = emit_lower_bound
 
 
 def _warmup_kernels(
