@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Iterator
+from typing import Any
 
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     get_num_sampled_and_rejected,
@@ -78,9 +80,15 @@ class RejectionSampler:
         sampler: Sampler,
         spec_config: SpeculativeConfig,
         device: torch.device,
+        *,
+        watermark_key: int | None = None,
     ):
         self.sampler = sampler
+        self.watermark_key = watermark_key
+        if watermark_key is not None:
+            assert isinstance(sampler, GPUWatermarkSampler)
         self.num_speculative_steps = spec_config.num_speculative_tokens
+        self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
@@ -122,14 +130,40 @@ class RejectionSampler:
             num_warps=1,
         )
         expanded_logits = num_logits != num_reqs
+        cu_num_generated_tokens: list[int] | torch.Tensor | None = None
+        if expanded_logits:
+            if self.enable_adaptive_verification:
+                # Adaptive verification keeps the true per-request boundaries
+                # on device only; cu_num_logits_np holds the pre-compacted
+                # layout.
+                cu_num_generated_tokens = cu_num_logits.clone()
+            else:
+                cu_num_generated_tokens = cu_num_logits_np.tolist()
         return compute_topk_scores(
             logits,
             max_num_logprobs,
             flat_sampled,
-            cu_num_logits_np.tolist() if expanded_logits else None,
+            cu_num_generated_tokens,
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
         )
+
+    def _watermarking_kwargs(
+        self,
+        draft_sampled: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> dict[str, Any]:
+        if self.watermark_key is None:
+            return {}
+        assert isinstance(self.sampler, GPUWatermarkSampler)
+        return {
+            "contexts": self.sampler._get_contexts(
+                expanded_idx_mapping, expanded_local_pos, draft_sampled
+            ),
+            "watermarking": self.sampler.watermarking.gpu,
+            "watermark_key": self.watermark_key,
+        }
 
     def _verify(
         self,
@@ -167,6 +201,9 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            **self._watermarking_kwargs(
+                draft_sampled, expanded_idx_mapping, expanded_local_pos
+            ),
         )
         return processed_logits, sampled, num_sampled
 
@@ -191,6 +228,7 @@ class RejectionSampler:
             # guarantees the compacted batch always lands here.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
         else:
+            assert not self.enable_adaptive_verification
             request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
 
         sampled_chunks: list[torch.Tensor] = []

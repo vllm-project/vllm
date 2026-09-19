@@ -3,17 +3,26 @@
 
 set -euo pipefail
 
+# shellcheck source=.buildkite/scripts/rocm/build-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-config.sh"
+configure_rocm_build
+
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="2"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
-DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
+DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE ROCM_SDK_VERSION TORCH_VERSION TORCHVISION_VERSION TORCHAUDIO_VERSION TRITON_VERSION TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
 DEFAULT_ROCM_BASE_BUILD_ARGS="${DEFAULT_ROCM_BASE_CONTENT_ARGS} SCCACHE_ENDPOINT"
 
 ROCM_BASE_LAYER_CACHE_REF=""
-ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
+BASE_CACHE_PREFIX="rocm-base"
+if using_custom_rocm_dockerfiles; then
+    BASE_CACHE_PREFIX="rocm-base-$(printf '%s\n%s\n' \
+        "${ROCM_BASE_DOCKERFILE}" "${CI_BASE_DOCKERFILE}" | sha256sum | cut -c1-12)"
+fi
+ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:${BASE_CACHE_PREFIX}-main"
 declare -a ROCM_BASE_CACHE_ARGS=()
 
 metadata_set() {
@@ -58,6 +67,14 @@ tag_component() {
     local max_chars="${2:-24}"
 
     clean_docker_tag "${input:-unknown}" | cut -c1-"${max_chars}"
+}
+
+rocm_version_from_base_image() {
+    local base_image="$1"
+    local version=""
+
+    version="$(sed -n -E 's/.*:([0-9]+\.[0-9]+(\.[0-9]+)?)-.*/\1/p' <<<"${base_image}")"
+    tag_component "${version:-${base_image}}" 16
 }
 
 normalize_repo_slug() {
@@ -121,7 +138,7 @@ configure_rocm_base_layer_cache() {
     fi
 
     scope=$(rocm_base_layer_cache_scope)
-    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-${scope}"
+    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:${BASE_CACHE_PREFIX}-${scope}"
     ROCM_BASE_CACHE_ARGS+=(
         --cache-from "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF}"
     )
@@ -140,7 +157,7 @@ configure_rocm_base_layer_cache() {
 extract_arg_default() {
     local arg_name="$1"
 
-    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${DOCKERFILE}" | head -1
 }
 
@@ -418,11 +435,16 @@ build_base_image() {
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
     base_hash=$(compute_base_content_hash \
         "${use_sccache}" "${pinned_base_image}" "${metadata_version}")
-    rocm_version="$(tag_component "${base_image_digest}" 16)"
+    rocm_version="$(resolve_rocm_base_arg_value ROCM_SDK_VERSION "${use_sccache}")"
+    rocm_version="${rocm_version:-$(rocm_version_from_base_image "${base_image_arg}")}"
     triton_arg="$(resolve_rocm_base_arg_value TRITON_BRANCH "${use_sccache}")"
     pytorch_arg="$(resolve_rocm_base_arg_value PYTORCH_BRANCH "${use_sccache}")"
     pytorch_vision_arg="$(resolve_rocm_base_arg_value PYTORCH_VISION_BRANCH "${use_sccache}")"
     pytorch_audio_arg="$(resolve_rocm_base_arg_value PYTORCH_AUDIO_BRANCH "${use_sccache}")"
+    triton_arg="${triton_arg:-$(resolve_rocm_base_arg_value TRITON_VERSION "${use_sccache}")}"
+    pytorch_arg="${pytorch_arg:-$(resolve_rocm_base_arg_value TORCH_VERSION "${use_sccache}")}"
+    pytorch_vision_arg="${pytorch_vision_arg:-$(resolve_rocm_base_arg_value TORCHVISION_VERSION "${use_sccache}")}"
+    pytorch_audio_arg="${pytorch_audio_arg:-$(resolve_rocm_base_arg_value TORCHAUDIO_VERSION "${use_sccache}")}"
     fa_arg="$(resolve_rocm_base_arg_value FA_BRANCH "${use_sccache}")"
     aiter_arg="$(resolve_rocm_base_arg_value AITER_BRANCH "${use_sccache}")"
     mori_arg="$(resolve_rocm_base_arg_value MORI_BRANCH "${use_sccache}")"
@@ -551,6 +573,13 @@ build_base_image() {
 }
 
 main() {
+    if using_custom_rocm_dockerfiles; then
+        if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
+            echo "Custom ROCm Dockerfiles require ROCM_BASE_REFRESH_SKIP=0" >&2
+            return 2
+        fi
+        validate_rocm_dockerfile "${DOCKERFILE}" || return $?
+    fi
     build_base_image
 }
 

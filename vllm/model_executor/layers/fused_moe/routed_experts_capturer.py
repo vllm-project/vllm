@@ -17,7 +17,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
 from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
@@ -136,8 +136,8 @@ class RoutedExpertsCapturer:
         Args:
             layer_id: The layer index.
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
-        """
 
+        """
         ctx = get_forward_context()
         if ctx.dp_metadata is None:  # single dp
             start_loc = 0
@@ -241,6 +241,7 @@ class RoutedExpertsCapturer:
             slot_mappings: Per-KV-cache-group slot mappings for this step,
                 shape ``(num_kv_cache_groups, max_num_batched_tokens)``.
             num_tokens: Total number of tokens scheduled in this step.
+
         """
         return RoutedExpertsTensors(
             routing_data=self.device_buffer[:num_tokens].clone(),
@@ -307,7 +308,7 @@ def bind_routed_experts_capturer(
 def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
     """Return the full-attention KV cache group used for routed experts."""
     for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-        if isinstance(group.kv_cache_spec, FullAttentionSpec):
+        if is_full_attention_spec(group.kv_cache_spec):
             return gid
     raise ValueError("Routed-experts capture requires a full-attention KV cache group.")
 
@@ -417,6 +418,7 @@ class RoutedExpertsManager:
         Returns:
             Array of shape (num_tokens - token_start, num_layers,
             num_experts_per_tok).
+
         """
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)

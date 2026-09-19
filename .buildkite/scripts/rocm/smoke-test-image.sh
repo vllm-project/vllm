@@ -3,6 +3,44 @@
 
 set -euo pipefail
 
+run_smoke_checks() {
+    local required_dir=""
+
+    for required_dir in \
+        /vllm-workspace \
+        /vllm-workspace/tests \
+        /vllm-workspace/src/vllm; do
+        if [[ ! -d "${required_dir}" ]]; then
+            echo "Missing directory: ${required_dir}" >&2
+            return 1
+        fi
+    done
+    if [[ ! -x /vllm-workspace/src/vllm/vllm-rs ]]; then
+        echo "Missing executable: /vllm-workspace/src/vllm/vllm-rs" >&2
+        return 1
+    fi
+
+    command -v python3
+    command -v uv
+    command -v pytest
+
+    if ! command -v amd-smi >/dev/null 2>&1 \
+        && ! command -v rocminfo >/dev/null 2>&1; then
+        echo "No ROCm CLI found in image" >&2
+        return 1
+    fi
+
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import torch
+import vllm
+
+print(torch.__version__)
+print(vllm.__version__)
+PY
+
+    echo "AMD image smoke OK"
+}
+
 metadata_get() {
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent meta-data get "$1" 2>/dev/null || true
@@ -66,6 +104,14 @@ pin_image_ref() {
 }
 
 main() {
+    if [[ "${1:-}" == "--inside" ]]; then
+        run_smoke_checks
+        return
+    fi
+    if (($#)); then
+        echo "Usage: $0 [--inside]" >&2
+        return 2
+    fi
     local image_ref="${VLLM_CI_SMOKE_IMAGE:-}"
     local image_digest=""
     local pinned_image=""
@@ -95,37 +141,16 @@ main() {
             return 1
         fi
     elif [[ -z "${image_ref}" ]]; then
-        image_ref="rocm/vllm-ci:${BUILDKITE_COMMIT:?set VLLM_CI_SMOKE_IMAGE or BUILDKITE_COMMIT}"
+        image_ref="${IMAGE_TAG:-rocm/vllm-ci:${BUILDKITE_COMMIT:?set VLLM_CI_SMOKE_IMAGE, IMAGE_TAG, or BUILDKITE_COMMIT}}"
     fi
 
     image_digest=$(resolve_image_digest "${image_ref}") || return 1
     pinned_image=$(pin_image_ref "${image_ref}" "${image_digest}") || return 1
 
-    docker run --rm --network=none --entrypoint /bin/bash "${pinned_image}" -ec '
-  if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
-  if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
-  if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
-  if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
-
-  command -v python3
-  command -v uv
-  command -v pytest
-
-  if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
-    echo No ROCm CLI found in image >&2
-    exit 1
-  fi
-
-  python3 - <<PY
-import torch
-import vllm
-
-print(torch.__version__)
-print(vllm.__version__)
-PY
-
-  echo AMD image smoke OK
-'
+    # The BuildKit marker records a build ID, not the published image digest.
+    # Promotion requires these checks against the exact pinned image.
+    docker run --rm -i --network=none --entrypoint /bin/bash "${pinned_image}" \
+        -s -- --inside < "${BASH_SOURCE[0]}"
 
     post_smoke_digest=$(resolve_image_digest "${image_ref}") || return 1
     if [[ "${post_smoke_digest}" != "${image_digest}" ]]; then
@@ -137,6 +162,6 @@ PY
     metadata_set rocm-ci-image-smoked 1
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
     main "$@"
 fi

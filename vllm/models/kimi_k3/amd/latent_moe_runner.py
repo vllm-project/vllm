@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
+
 import torch
 
 from vllm.distributed import (
@@ -7,7 +9,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 logger = init_logger(__name__)
 
@@ -59,9 +61,7 @@ class ROCmLatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         if not self._logged_sharded_tail:
             self._logged_sharded_tail = True
             logger.info_once(
@@ -139,8 +139,7 @@ class ROCmLatentMoERunner(MoERunner):
             else 0,
         )
 
-        shared_output, fused_output = _unpack(result)
-        assert shared_output is not None
+        shared_output, fused_output = cast(tuple[torch.Tensor, torch.Tensor], result)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]

@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# shellcheck source=.buildkite/scripts/rocm/build-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-config.sh"
+
 readonly TRUSTED_REPO="vllm-project/vllm"
 readonly STABLE_BRANCH="main"
 readonly IMAGE_REPO="rocm/vllm-dev"
@@ -269,6 +272,10 @@ main() {
     }
     is_trusted_main \
         || { echo "Skipping stable ROCm promotion outside trusted main"; return 0; }
+    if using_custom_rocm_dockerfiles; then
+        echo "Skipping stable ROCm promotion for custom Dockerfiles"
+        return 0
+    fi
     [[ "${BUILDKITE_COMMIT:-}" =~ ^[0-9a-fA-F]{40}$ \
         && -n "${BUILDKITE_BUILD_ID:-}" ]] \
         || { echo "Promotion requires a full commit and build ID" >&2; return 1; }
