@@ -183,8 +183,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         )
         from aiter.ops.triton.unified_attention import unified_attention
 
+        from vllm.platforms.rocm import on_gfx11
+
         self.unified_attention = unified_attention
-        self.supports_quant_query_input = True
+        # RDNA3 has no low precision MMA, preserve query precision
+        self.supports_quant_query_input = not on_gfx11()
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
