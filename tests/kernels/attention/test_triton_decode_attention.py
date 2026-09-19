@@ -325,3 +325,101 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize(
+    "H_Q,H_KV,D_QK,D_V,is_mla",
+    [
+        (16, 1, 576, 512, True),  # MLA (TRITON_MLA decode path)
+        (32, 8, 128, 128, False),  # GQA
+        (32, 32, 128, 128, False),  # MHA
+    ],
+)
+def test_decode_attention_zero_seq_len_pad_no_nan(H_Q, H_KV, D_QK, D_V, is_mla):
+    """CUDA-graph decode pads inactive slots with seq_len=0.
+
+    Stage2 used to emit NaN (0/0) for those rows. Online FP8 MoE then takes a
+    per-tensor amax over the batch and poisons every request (issue #57017).
+    Pad rows must stay finite (zeros); active rows must match an unpadded run.
+    """
+    B_active = 3
+    B = 4  # one CUDA-graph pad slot
+    seq_len = 128
+    CACHE_SIZE = 4096
+    PAGE_SIZE = 16
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    num_kv_splits = 4
+
+    num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
+    req_to_page = torch.randint(
+        0,
+        CACHE_SIZE // PAGE_SIZE,
+        (B, num_pages_per_batch),
+        device=DEVICE_TYPE,
+    )
+
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k_buffer = torch.randn(
+        CACHE_SIZE // PAGE_SIZE,
+        PAGE_SIZE,
+        H_KV,
+        D_QK,
+        dtype=dtype,
+        device=DEVICE_TYPE,
+    )
+    if is_mla:
+        v_buffer = k_buffer[..., :D_V]
+    else:
+        v_buffer = torch.randn(
+            CACHE_SIZE // PAGE_SIZE,
+            PAGE_SIZE,
+            H_KV,
+            D_V,
+            dtype=dtype,
+            device=DEVICE_TYPE,
+        )
+
+    b_seq_len = torch.tensor(
+        [seq_len] * B_active + [0], dtype=torch.int32, device=DEVICE_TYPE
+    )
+
+    def run(q_in, pages, seq_lens, batch):
+        o = torch.zeros(batch, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(batch, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        # Deliberately leave logits uninitialized so empty stage1 writes would
+        # still surface as NaN if stage2 divides by a zero e_sum.
+        attn_logits = torch.empty(
+            (batch, H_Q, num_kv_splits, D_V + 1),
+            dtype=torch.float32,
+            device=DEVICE_TYPE,
+        )
+        decode_attention_fwd(
+            q_in,
+            k_buffer,
+            v_buffer,
+            o,
+            lse,
+            pages,
+            seq_lens,
+            attn_logits,
+            num_kv_splits,
+            sm_scale,
+            PAGE_SIZE,
+            is_mla=is_mla,
+        )
+        return o, lse
+
+    o_pad, lse_pad = run(q, req_to_page, b_seq_len, B)
+    assert torch.isfinite(o_pad).all(), "pad/active outputs must not contain NaN/Inf"
+    assert torch.isfinite(lse_pad[:B_active]).all()
+    assert torch.count_nonzero(o_pad[B_active:]) == 0
+
+    o_ref, lse_ref = run(
+        q[:B_active],
+        req_to_page[:B_active],
+        b_seq_len[:B_active],
+        B_active,
+    )
+    torch.testing.assert_close(o_pad[:B_active], o_ref, atol=0, rtol=0)
+    torch.testing.assert_close(lse_pad[:B_active], lse_ref, atol=0, rtol=0)
