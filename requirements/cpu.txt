@@ -1,7 +1,7 @@
 # Common dependencies
 -r common.txt
 
-setuptools==77.0.3 # this version can reuse CMake build dir
+setuptools==78.1.1 # bumped for CVE-2025-47273 (GHSA-5rjg-fvgr-3xxf); please confirm this still reuses the CMake build dir as intended, or pick another >=78.1.1 release that does
 
 numba == 0.65.0; platform_machine != "s390x" # Required for N-gram speculative decoding
 
