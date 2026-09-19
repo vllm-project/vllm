@@ -409,17 +409,23 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Every rank profiles the same tactics. When distributed, per-tactic
-    timings are averaged over the world CPU group so all ranks select the
+    Every rank in a tuning group profiles the same tactics. Per-tactic
+    timings are averaged over its CPU group so all its ranks select the
     same tactic.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        get_tp_group,
+        get_world_group,
+    )
 
     world = get_world_group()
-    is_leader = world.rank_in_group == 0
+    pp_size = get_pp_group().world_size
+    tune_group = get_tp_group() if pp_size > 1 else world
+    is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
@@ -432,6 +438,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         autotune_kwargs["skip_ops"] = skip_ops
 
     cache_path = resolve_flashinfer_autotune_file(runner)
+    if pp_size > 1:
+        ranks = "-".join(str(rank) for rank in tune_group.ranks)
+        cache_path = cache_path.with_name(
+            f"{cache_path.stem}_tp_{ranks}{cache_path.suffix}"
+        )
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
@@ -445,13 +456,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
             cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
+    cached_results = tune_group.broadcast_object(cached_results, src=0)
     if cached_results is not None:
         write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
+        tune_group.barrier()
         tuner.load_configs(str(cache_path))
 
-    group = world.cpu_group if world.world_size > 1 else None
+    group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
         with (
