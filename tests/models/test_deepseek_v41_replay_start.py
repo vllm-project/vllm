@@ -37,24 +37,6 @@ KV_CACHE_CONFIG = SimpleNamespace(
         ),
     ]
 )
-ONE_WINDOW_KV_CACHE_CONFIG = SimpleNamespace(
-    kv_cache_groups=[
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=True, prefix_replay_tokens=0
-            )
-        ),
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False,
-                prefix_replay_tokens=WINDOW,
-                sliding_window=WINDOW,
-            )
-        ),
-    ]
-)
-
-
 @pytest.fixture
 def state(monkeypatch):
     cfg = MagicMock()
@@ -94,10 +76,10 @@ def _batch(query_lens, seq_lens, idx_mapping, is_prefilling):
     )
 
 
-def _prepare(state, batch, kv_cache_config=KV_CACHE_CONFIG):
+def _prepare(state, batch):
     slot_mappings = torch.arange(2 * batch.num_tokens, device=DEVICE).view(2, -1)
     state.prepare_attn(
-        batch, CUDAGraphMode.NONE, (), slot_mappings, [], kv_cache_config
+        batch, CUDAGraphMode.NONE, (), slot_mappings, [], KV_CACHE_CONFIG
     )
     swa_builder = MagicMock(spec=DeepseekSparseSWAMetadataBuilder)
     extra = state.seen["extra"]
@@ -108,25 +90,17 @@ def _prepare(state, batch, kv_cache_config=KV_CACHE_CONFIG):
     return replay_start.tolist(), state.seen["slot_mappings"]
 
 
-def test_layered_replay_recomputes_target_and_window_groups(state):
-    # Request state 3 resumes a layered replay at 16. DSpark recomputes both
-    # compressed target KV and window KV through the complete layered suffix.
+def test_replayed_tokens_write_only_the_window_group(state):
+    # Request state 3 resumes a layered replay at 16: positions 16..27 retain
+    # the loaded compressed KV, while positions 28..29 are new prompt tokens.
     state.add_request(3, SimpleNamespace(replay_start=16))
     state.add_request(1, SimpleNamespace(replay_start=0))
     batch = _batch([14, 2], [30, 2], idx_mapping=[3, 1], is_prefilling=[True, True])
     replay_start, slots = _prepare(state, batch)
     assert replay_start == [16, 0]
-    assert slots[0].tolist() == list(range(16))
-    assert slots[1].tolist() == list(range(16, 32))
-
-
-def test_one_window_replay_keeps_loaded_target_kv(state):
-    state.add_request(3, SimpleNamespace(replay_start=24))
-    batch = _batch([6], [30], idx_mapping=[3], is_prefilling=[True])
-    replay_start, slots = _prepare(state, batch, ONE_WINDOW_KV_CACHE_CONFIG)
-    assert replay_start == [24]
-    assert slots[0].tolist() == [PAD_SLOT_ID] * WINDOW + [4, 5]
-    assert slots[1].tolist() == list(range(6, 12))
+    padded = [PAD_SLOT_ID] * LAYERED_REPLAY + [12, 13, 14, 15]
+    assert slots[0].tolist() == padded  # compressed KV keeps its cached rows
+    assert slots[1].tolist() == list(range(16, 32))  # the window is rebuilt
 
 
 def test_only_prefills_carry_a_replay_start(state):

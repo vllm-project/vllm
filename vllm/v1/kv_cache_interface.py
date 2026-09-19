@@ -915,8 +915,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     model_version: str | None = None
     bounded_replay: bool = False
     # Optional replay length larger than the physical SWA window. DeepSeek-V4.1
-    # with DSpark uses one window per target layer so replay can rebuild the
-    # layered SWA state while normally recomputing the target suffix.
+    # with DSpark uses one window per target layer so replay can rebuild exact
+    # layered SWA state without overwriting the reusable target KV.
     bounded_replay_tokens: int | None = None
 
     # MLA stores a single latent vector per state; there is no separate V.

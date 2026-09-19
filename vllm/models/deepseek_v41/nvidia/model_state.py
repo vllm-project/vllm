@@ -110,11 +110,10 @@ class DeepseekV41ModelState(DefaultModelState):
     request the position from which it holds window KV
     (``NewRequestData.replay_start``). DSpark uses a layered span so every
     target layer's window state is exact.
-    ``prepare_attn`` gathers those per batch and hands the starts to the
-    sliding-window metadata builders, whose kernels read no window KV below
-    them. The ordinary one-window replay keeps prefix-cacheable KV unchanged;
-    DSpark's longer layered replay recomputes the target suffix as well so the
-    compressed/indexer current-token path is identical to normal prefill.
+    ``prepare_attn`` gathers those per batch, pads the replayed tokens' slots
+    in the prefix-cacheable groups so the cached KV stays as is, and hands the
+    starts to the sliding-window metadata builders, whose kernels read no
+    window KV below them.
     """
 
     def __init__(
@@ -191,20 +190,10 @@ class DeepseekV41ModelState(DefaultModelState):
     ) -> dict[str, Any]:
         if self._replay is None:
             specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
-            replay_tokens = max(spec.prefix_replay_tokens for spec in specs)
-            layered_replay = any(
-                spec.prefix_replay_tokens
-                > getattr(spec, "sliding_window", spec.prefix_replay_tokens)
-                for spec in specs
-            )
             self._replay = (
-                replay_tokens,
+                max(spec.prefix_replay_tokens for spec in specs),
                 torch.tensor(
-                    [
-                        i
-                        for i, spec in enumerate(specs)
-                        if spec.prefix_cacheable and not layered_replay
-                    ],
+                    [i for i, spec in enumerate(specs) if spec.prefix_cacheable],
                     dtype=torch.int32,
                     device=self.device,
                 ),
@@ -222,9 +211,9 @@ class DeepseekV41ModelState(DefaultModelState):
             replay_start = self._replay_start_staging.copy_to_gpu(
                 replay_start_np, out=self._replay_start[:num_reqs]
             )
-            if replay_start_np.any() and cacheable_groups.numel():
-                # One-window replay rebuilds only window KV. Layered DSpark
-                # replay leaves this group list empty and recomputes target KV.
+            if replay_start_np.any():
+                # The replayed tokens rebuild window KV only: their slots in the
+                # prefix-cacheable groups are padded so the cached KV stays as is.
                 _pad_replayed_slots_kernel[(num_reqs,)](
                     slot_mappings,
                     slot_mappings.stride(0),

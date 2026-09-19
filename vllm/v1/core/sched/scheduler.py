@@ -3017,7 +3017,7 @@ class Scheduler(SchedulerInterface):
 
         The replayed tokens are the hit's trailing replay span (see
         ``Request.replay_start``): the worker rebuilds their sliding-window KV
-        and decides whether the prefix-cacheable groups are retained.
+        and leaves their cached KV alone.
         """
         if not self.prefix_replay_tokens:
             return 0
