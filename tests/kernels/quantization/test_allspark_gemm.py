@@ -37,10 +37,15 @@ MNK_FACTORS = [
     (257, 13, 11),
     (658, 13, 11),
     (1033, 9, 17),
+    # Added factors specifically to ensure K divisibility for large group sizes
+    (1, 4, 32),  # K = 512 (divisible by 16, 32, 64, 128)
+    (33, 16, 64),  # K = 1024 (divisible by 16, 32, 64, 128)
+    (1033, 8, 128),  # K = 2048, cuBLAS fallback path + large group sizes
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
 HAS_ZP_OPTS = [False, True]
+GROUP_SIZES = [-1, 16, 32, 64, 128]  # Expanded to stress test sub-channel boundaries
 
 
 def compute_max_diff(output, output_ref):
@@ -58,7 +63,7 @@ def rand_data(shape, dtype=torch.float16):
     reason="AllSpark Ampere kernel is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-@pytest.mark.parametrize("group_size", [-1])
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
 @pytest.mark.parametrize("has_zp", HAS_ZP_OPTS)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
@@ -66,6 +71,18 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     m = m_factor
     n = n_factor * ALLSPARK_AMPERE_N_ALIGN
     k = k_factor * ALLSPARK_AMPERE_K_ALIGN
+
+    # Sub-channel quantization safety checks
+    if group_size != -1:
+        if group_size < 16:
+            pytest.skip(
+                f"AllSpark subchannel kernel requires "
+                f"group_size >= 16, got {group_size}"
+            )
+        if k % group_size != 0:
+            pytest.skip(
+                f"K ({k}) is not perfectly divisible by group_size ({group_size})"
+            )
 
     input = rand_data((m, k), dtype=dtype)
     weight = rand_data((k, n), dtype=dtype)
@@ -87,7 +104,19 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     qw_reorder, s_reorder, zp_reorder = ops.allspark_repack_weight(qw, s, zp, has_zp)
     opcheck(
         torch.ops._C.rearrange_kn_weight_as_n32k16_order,
-        (qw, s, zp, has_zp, qw_reorder, s_reorder, zp_reorder, k, n, n_32align),
+        (
+            qw,
+            s,
+            zp,
+            has_zp,
+            qw_reorder,
+            s_reorder,
+            zp_reorder,
+            k,
+            n,
+            n_32align,
+            s.shape[0],
+        ),
     )
 
     opcheck(
