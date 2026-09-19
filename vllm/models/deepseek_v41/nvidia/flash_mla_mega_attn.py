@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v41.common.ops.fused_layout import (
@@ -327,16 +326,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if self.compress_ratio == 0:
             return None, None, None
         assert flashmla_metadata is not None
-        assert swa_metadata.is_valid_token is not None
-        assert self.topk_indices_buffer is not None
-        num_decode_tokens = swa_metadata.num_decode_tokens
-        indices, lens = compute_global_topk_indices_and_lens(
-            self.topk_indices_buffer[:num_decode_tokens],
-            swa_metadata.token_to_req_indices,
-            flashmla_metadata.block_table[: swa_metadata.num_decodes],
-            flashmla_metadata.block_size // self.compress_ratio,
-            swa_metadata.is_valid_token[:num_decode_tokens],
-        )
+        indices, lens = self._decode_global_topk(swa_metadata, flashmla_metadata)
         return self._compressed_kv_cache().unsqueeze(-2), indices, lens
 
     def _forward_decode_mega(
