@@ -35,9 +35,8 @@ class WeightCacheDaemon:
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
         self.tp_size = tp_size
         self._cmd = [
-            sys.executable,
-            "-m",
-            "vllm.model_executor.model_loader.weight_cache.daemon",
+            "vllm",
+            "weight-cache-daemon",
             "--model",
             model,
             "--tensor-parallel-size",
