@@ -207,6 +207,41 @@ class TestStreamingScheduler(unittest.TestCase):
         # 2 + len([1, 2, 3])
         assert session.mm_features[1].mm_position.offset == 5
 
+    def test_free_encoder_inputs_releases_data_for_resumable_session(self):
+        """Resumable sessions must drop committed encoder input data.
+
+        Resumable sessions accumulate every frame's raw input tensors via
+        _update_request_as_session. Once the encoder output is committed to the
+        decoder KV cache, _free_encoder_inputs should null MultiModalFeatureSpec
+        .data so the session does not retain every frame for its lifetime.
+        """
+        scheduler = create_scheduler()
+
+        mm_feature = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="audio",
+            identifier="input-hash",
+            mm_position=PlaceholderRange(offset=0, length=1),
+        )
+        session = DummyRequest(
+            request_id="session",
+            resumable=True,
+            prompt_token_ids=[1, 2, 3],
+            mm_features=[mm_feature],
+        )
+        # The input at offset 0, length 1 is committed: start_pos + num_tokens
+        # (0 + 1) <= num_computed_tokens (1) - num_output_placeholders (0).
+        session.num_computed_tokens = 1
+
+        scheduler.encoder_cache_manager.request_cached_ids.setdefault(
+            session.request_id, set()
+        ).add(0)
+
+        scheduler._free_encoder_inputs(session)
+
+        assert mm_feature.data is None
+        assert scheduler.encoder_cache_manager.get_cached_input_ids(session) == set()
+
     def test_process_streaming_requests_with_finish_session(self):
         """Test that a non-resumable request signals stream completion.
 
