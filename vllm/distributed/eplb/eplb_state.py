@@ -569,14 +569,14 @@ class EplbState:
 
         """
         ep_group = get_ep_group().device_group
-        if is_profile:
-            self.rearrange(is_profile=True)
-            return
-
         if is_dummy:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+
+        if is_profile:
+            self.rearrange(is_profile=True)
+            return
 
         if (
             log_stats
