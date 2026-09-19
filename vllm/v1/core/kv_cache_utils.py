@@ -888,18 +888,31 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
+    """How the user can make room for the KV cache, for error messages."""
+    if vllm_config.cache_config.enable_extensible_kv_cache:
+        return (
+            "The extensible KV cache already takes all device memory left after "
+            "the model and its activations; decrease `max_model_len` or "
+            "`max_num_seqs`, or the model needs a device with more memory."
+        )
+    return (
+        "Try increasing `gpu_memory_utilization` when initializing the engine "
+        "(this flag also controls CPU memory reservation on the CPU backend, "
+        "despite its name)."
+    )
+
+
 def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],
     max_model_len: int,
     estimate_max_model_len: Callable[[int], int],
+    hint: str,
 ):
     if available_memory <= 0:
         raise ValueError(
-            "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when initializing the engine "
-            "(this flag also controls CPU memory reservation on the CPU "
-            "backend, despite its name). "
+            f"No available memory for the cache blocks. {hint} "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
@@ -920,9 +933,7 @@ def _check_enough_kv_cache_memory(
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
-            f"Try increasing `gpu_memory_utilization` (which also controls "
-            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
-            f"when initializing the engine. "
+            f"{hint} Decreasing `max_model_len` also reduces what is needed. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
         )
@@ -1022,6 +1033,7 @@ def check_enough_kv_cache_memory(
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            _more_kv_cache_memory_hint(vllm_config),
         )
 
 
@@ -2442,6 +2454,7 @@ def shrink_kv_cache_configs(
                 partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
                 vllm_config.model_config.max_model_len,
                 partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+                _more_kv_cache_memory_hint(vllm_config),
             )
         kv_cache_config.num_blocks = num_blocks
 
@@ -2507,6 +2520,8 @@ def finalize_extensible_kv_cache(
     ``commit_granule`` (set when a KV connector is configured) the count is
     also granule-aligned, see `granule_aligned_kv_cache_blocks`.
     """
+    # No measurements: the elastic-EP scale-up path skips warmup. It forces the
+    # V1 runner today, so this branch is not reached; it keeps the capacity.
     num_blocks = min(
         (
             times.num_kv_blocks
@@ -2693,7 +2708,7 @@ def _auto_fit_max_model_len(
     if auto_fit_max <= 0:
         raise ValueError(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
-            "to serve even a single token. Try increasing `gpu_memory_utilization`."
+            f"to serve even a single token. {_more_kv_cache_memory_hint(vllm_config)}"
         )
 
     if auto_fit_max >= original_max:
@@ -2876,6 +2891,7 @@ def get_kv_cache_configs(
             partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            _more_kv_cache_memory_hint(vllm_config),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []

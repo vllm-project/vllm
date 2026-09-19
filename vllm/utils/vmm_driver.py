@@ -7,6 +7,8 @@ management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
 from __future__ import annotations
 
 import ctypes
+import os
+from collections.abc import Iterable
 from functools import cache
 from typing import Any
 
@@ -40,7 +42,9 @@ class _MemAllocFlags(ctypes.Structure):
 
 
 class _MemAllocationProp(ctypes.Structure):
-    # Layout shared by CUmemAllocationProp and hipMemAllocationProp.
+    # CUmemAllocationProp. hipMemAllocationProp matches it up to allocFlags,
+    # whose HIP variant lacks the trailing reserved bytes; the driver never
+    # reads past the end of its own layout, so the CUDA shape serves both.
     _fields_ = [
         ("type", ctypes.c_int),
         ("requestedHandleTypes", ctypes.c_int),
@@ -54,14 +58,21 @@ class _MemAccessDesc(ctypes.Structure):
     _fields_ = [("location", _MemLocation), ("flags", ctypes.c_int)]
 
 
-def _find_loaded_library(lib_name: str) -> str | None:
+def _find_loaded_library(
+    lib_name: str, maps_lines: Iterable[str] | None = None
+) -> str | None:
+    """Path of the mapped shared object named ``lib_name`` (e.g. ``libcuda``),
+    matched on the file name so that ``libcudart`` does not stand in for it."""
     try:
-        with open("/proc/self/maps") as f:
-            for line in f:
-                if lib_name not in line:
-                    continue
-                start = line.index("/")
-                return line[start:].strip()
+        if maps_lines is None:
+            with open("/proc/self/maps") as f:
+                return _find_loaded_library(lib_name, f.readlines())
+        for line in maps_lines:
+            if "/" not in line:
+                continue
+            path = line[line.index("/") :].strip()
+            if os.path.basename(path).startswith(f"{lib_name}.so"):
+                return path
     except (OSError, ValueError):
         return None
     return None
@@ -236,8 +247,12 @@ class CudaVmmDriver(VmmDriver):
             ctypes.POINTER(ctypes.c_char_p),
         ]
         lib.cuGetErrorString.restype = ctypes.c_int
+        lib.cuInit.argtypes = [ctypes.c_uint]
+        lib.cuInit.restype = ctypes.c_int
         lib.cuCtxGetCurrent.argtypes = [ctypes.POINTER(_Context)]
         lib.cuCtxGetCurrent.restype = ctypes.c_int
+        lib.cuCtxGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        lib.cuCtxGetDevice.restype = ctypes.c_int
         lib.cuDevicePrimaryCtxRetain.argtypes = [
             ctypes.POINTER(_Context),
             ctypes.c_int,
@@ -252,14 +267,19 @@ class CudaVmmDriver(VmmDriver):
         return msg.value.decode() if msg.value else "unknown error"
 
     def ensure_context(self, device_index: int) -> None:
+        """Make the primary context of ``device_index`` current, as torch does
+        for the device it runs on; usable before torch has touched the device."""
+        lib = self._lib
+        self._check(lib.cuInit(0))
         pctx = _Context()
-        self._check(self._lib.cuCtxGetCurrent(ctypes.byref(pctx)))
+        self._check(lib.cuCtxGetCurrent(ctypes.byref(pctx)))
         if pctx.value:
-            return
-        self._check(
-            self._lib.cuDevicePrimaryCtxRetain(ctypes.byref(pctx), device_index)
-        )
-        self._check(self._lib.cuCtxSetCurrent(pctx))
+            device = ctypes.c_int()
+            self._check(lib.cuCtxGetDevice(ctypes.byref(device)))
+            if device.value == device_index:
+                return
+        self._check(lib.cuDevicePrimaryCtxRetain(ctypes.byref(pctx), device_index))
+        self._check(lib.cuCtxSetCurrent(pctx))
 
 
 class HipVmmDriver(VmmDriver):
@@ -351,8 +371,9 @@ def get_vmm_driver() -> VmmDriver:
 def vmm_unavailable_reason() -> str | None:
     """Why VMM cannot be used on the current device, or None if it can.
 
-    Checks library load, entry points, a reserve/free round trip, and known
-    defective runtimes. Covers WSL2 and non-CUDA/ROCm builds.
+    Checks library load, entry points, known defective runtimes, and one
+    reserve/create/map/set-access/unmap/release round trip of a single granule.
+    Covers WSL2 and non-CUDA/ROCm builds.
     """
     try:
         import torch
@@ -369,7 +390,18 @@ def vmm_unavailable_reason() -> str | None:
             return reason
         granularity = driver.granularity(device_index)
         ptr = driver.reserve(granularity)
-        driver.free_reserved(ptr, granularity)
+        try:
+            handle = driver.create(granularity, device_index)
+            try:
+                driver.map(ptr, granularity, handle)
+                try:
+                    driver.set_access(ptr, granularity, device_index)
+                finally:
+                    driver.unmap(ptr, granularity)
+            finally:
+                driver.release(handle)
+        finally:
+            driver.free_reserved(ptr, granularity)
     except Exception as e:
         return str(e)
     return None

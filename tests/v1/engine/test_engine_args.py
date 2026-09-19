@@ -216,7 +216,13 @@ def test_extensible_kv_cache_from_cli():
     assert engine_args.enable_extensible_kv_cache is False
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+# Off CUDA the platform check trips first, before the behavior under test.
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA"
+)
+
+
+@requires_cuda
 def test_extensible_kv_cache_defaults():
     """Unset, the extensible KV cache is on for the V2 runner on CUDA and the
     budget is the whole device; turned off, or where unsupported, the standard
@@ -261,6 +267,7 @@ def test_extensible_kv_cache_defaults():
     "manual_size",
     [dict(kv_cache_memory_bytes=1 << 30), dict(num_gpu_blocks_override=64)],
 )
+@requires_cuda
 def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
     """Measured sizing and a manual size conflict: silently clamping the manual
     one would misreport the cache, so an explicit request is an error."""
@@ -284,6 +291,7 @@ def _fake_executor(vllm_config, collective_rpc):
     return fake
 
 
+@requires_cuda
 def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     from vllm.v1.executor.abstract import Executor
 
@@ -319,6 +327,7 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert not vllm_config.cache_config.enable_extensible_kv_cache
 
 
+@requires_cuda
 def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     """Under torchrun each rank probes only its own driver; a rank whose probe
     passes must still follow one whose probe fails, or it hangs waiting for
@@ -360,6 +369,7 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     ]
 
 
+@requires_cuda
 def test_extensible_kv_cache_connector_needs_block_compact_layout():
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout

@@ -738,6 +738,8 @@ def report_usage_stats(
             # Common configuration
             "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
+            # Reported at worker init: the extensible KV cache default (1.0) is
+            # still shown if the driver probe later falls back to 0.92.
             "gpu_memory_utilization": (
                 vllm_config.cache_config.resolved_gpu_memory_utilization
             ),
