@@ -1191,7 +1191,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return False
         use_masked_mha = (
             self.prefill_backend is not None
-            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.masked_mha_available
             and self.impl.dcp_world_size <= 1
             and _use_masked_mha(
                 backend_name=self.attn_backend.get_name(),
