@@ -530,6 +530,11 @@ class Cosmos3EdgeForConditionalGeneration(
             ".self_attn.to_v.": ".self_attn.v_proj.",
             ".self_attn.to_out.": ".self_attn.o_proj.",
             "language_model.embeddings": "language_model.embed_tokens",
+            # ModelOpt-native dialect (diffusers/transformers read these; vLLM reads
+            # weight_scale/input_scale instead), drop so AutoWeightsLoader passes
+            ".input_quantizer.": None,
+            ".weight_quantizer.": None,
+            ".output_quantizer.": None,
         },
     )
 
