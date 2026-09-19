@@ -26,14 +26,51 @@ def clear_cache():
     _auto_select_mla_prefill_backend.cache_clear()
 
 
+GFX950 = DeviceCapability(major=9, minor=5)
+GFX942 = DeviceCapability(major=9, minor=4)
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    ON_GFX950 = on_gfx950()
+else:
+    ON_GFX950 = False
+
+requires_gfx950 = pytest.mark.skipif(
+    not ON_GFX950,
+    reason="ROCM_AITER_ASM MLA prefill backend requires ROCm gfx950",
+)
+
+# DeepSeek-R1 MLA head dimensions, which ROCM_AITER_ASM supports.
+_R1_DIMS = MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
+_NON_R1_DIMS = MLADimensions(qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=128)
+
+
+def _rocm_aiter_asm_class():
+    try:
+        return MLAPrefillBackendEnum.ROCM_AITER_ASM.get_class()
+    except ImportError:
+        return None
+
+
+@pytest.fixture
+def rocm_aiter_asm_cls():
+    cls = _rocm_aiter_asm_class()
+    if cls is None:
+        pytest.skip("ROCM_AITER_ASM backend not importable")
+    return cls
+
+
 def _make_mock_model_config(
     qk_nope_head_dim: int = 128,
     qk_rope_head_dim: int = 64,
     v_head_dim: int = 128,
     dtype: torch.dtype = torch.bfloat16,
+    num_heads: int = 128,
 ) -> ModelConfig:
     mock_config = MagicMock(spec=ModelConfig)
     mock_config.dtype = dtype
+    mock_config.get_num_attention_heads.return_value = num_heads
     mock_config.hf_text_config = MagicMock()
     mock_config.hf_text_config.qk_nope_head_dim = qk_nope_head_dim
     mock_config.hf_text_config.qk_rope_head_dim = qk_rope_head_dim
@@ -381,7 +418,7 @@ class TestROCmAiterFAPrefillSelection:
 
         assert AiterFlashAttnPrefillBackend.supports_dtype(torch.bfloat16)
         assert AiterFlashAttnPrefillBackend.supports_dtype(torch.float16)
-        # FP8 is served by the separate AITER ASM backend, not this one.
+        # FP8 is served by the separate ROCM_AITER_ASM backend, not this one.
         assert not AiterFlashAttnPrefillBackend.supports_dtype(torch.float8_e4m3fn)
 
     def test_supports_compute_capability_on_rocm(self):
@@ -507,3 +544,140 @@ class TestMLAPrefillBackendConfig:
             mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
+
+
+@requires_gfx950
+class TestROCmAiterASMValidation:
+    """ROCM_AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
+
+    @pytest.mark.parametrize(
+        (
+            "capability",
+            "cache_dtype",
+            "dtype",
+            "num_heads",
+            "is_r1_compatible",
+            "expect_valid",
+            "reason",
+        ),
+        [
+            (GFX950, "fp8", torch.bfloat16, 128, True, True, None),
+            # Unaligned counts are padded up to the next multiple of 16, and an
+            # unknown (0) count cannot be validated against.
+            (GFX950, "fp8", torch.bfloat16, 12, True, True, None),
+            (GFX950, "fp8", torch.bfloat16, 0, True, True, None),
+            (GFX950, "auto", torch.bfloat16, 128, True, False, "fp8"),
+            (GFX942, "fp8", torch.bfloat16, 128, True, False, "compute capability"),
+            (GFX950, "fp8", torch.bfloat16, 128, False, False, "MLA dimensions"),
+            # The kernel writes bf16 through a raw output pointer.
+            (GFX950, "fp8", torch.float16, 128, True, False, "dtype"),
+            # Above 128 only 16-aligned counts are supported.
+            (GFX950, "fp8", torch.bfloat16, 136, True, False, "num_heads"),
+        ],
+    )
+    def test_validate_configuration(
+        self,
+        rocm_aiter_asm_cls,
+        capability,
+        cache_dtype,
+        dtype,
+        num_heads,
+        is_r1_compatible,
+        expect_valid,
+        reason,
+    ):
+        cls = rocm_aiter_asm_cls
+        with patch.object(cls, "is_available", return_value=True):
+            reasons = cls.validate_configuration(
+                capability,
+                MLAPrefillSelectorConfig(
+                    dtype=dtype,
+                    mla_dimensions=_R1_DIMS if is_r1_compatible else _NON_R1_DIMS,
+                    cache_dtype=cache_dtype,
+                    num_heads=num_heads,
+                ),
+            )
+        if expect_valid:
+            assert reasons == []
+        else:
+            assert any(reason.lower() in r.lower() for r in reasons)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
+class TestROCmAiterASMAvailabilityGating:
+    """ROCM_AITER_ASM needs gfx950 (compute capability) and an installed AITER.
+
+    The two halves are gated separately: arch by supports_compute_capability,
+    library presence by is_available. The chunked-prefill final_lse fix
+    (ROCm/aiter#3606) is assumed present in the installed aiter.
+    """
+
+    @pytest.mark.parametrize("found", [True, False])
+    def test_is_available_tracks_aiter_installation(self, rocm_aiter_asm_cls, found):
+        with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=found):
+            assert rocm_aiter_asm_cls.is_available() is found
+
+    @pytest.mark.parametrize("on_gfx950", [True, False])
+    def test_compute_capability_tracks_gfx950(self, rocm_aiter_asm_cls, on_gfx950):
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950),
+        ):
+            mock_platform.is_rocm.return_value = True
+            assert rocm_aiter_asm_cls.supports_compute_capability(GFX950) is on_gfx950
+
+    def test_compute_capability_false_off_rocm(self, rocm_aiter_asm_cls):
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_rocm.return_value = False
+            assert not rocm_aiter_asm_cls.supports_compute_capability(GFX950)
+
+    def test_unavailable_aiter_is_reported_as_invalid(self, rocm_aiter_asm_cls):
+        with patch.object(rocm_aiter_asm_cls, "is_available", return_value=False):
+            reasons = rocm_aiter_asm_cls.validate_configuration(
+                GFX950,
+                MLAPrefillSelectorConfig(
+                    dtype=torch.bfloat16,
+                    mla_dimensions=_R1_DIMS,
+                    cache_dtype="fp8",
+                    num_heads=128,
+                ),
+            )
+        assert any("dependencies" in r for r in reasons)
+
+
+@requires_gfx950
+class TestROCmAiterASMSelectorPriority:
+    """On gfx950, ROCM_AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
+
+    def test_rocm_aiter_asm_wins_on_gfx950_fp8(self, rocm_aiter_asm_cls):
+        cls = rocm_aiter_asm_cls
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=_R1_DIMS,
+            cache_dtype="fp8",
+        )
+        with patch.object(cls, "is_available", return_value=True):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "ROCM_AITER_ASM"
+
+    def test_falls_through_to_flash_attn_when_not_fp8(self, rocm_aiter_asm_cls):
+        cls = rocm_aiter_asm_cls
+        try:
+            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not importable")
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=_R1_DIMS,
+            cache_dtype="auto",
+        )
+        with (
+            patch.object(cls, "is_available", return_value=True),
+            patch.object(fa_cls, "validate_configuration", return_value=[]),
+        ):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "FLASH_ATTN"
