@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.config import (
@@ -17,10 +18,15 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
+from vllm.profiler.wrapper import (
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+    WorkerProfiler,
+)
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -49,6 +55,186 @@ def default_profiler_config():
         delay_iterations=0,
         max_iterations=0,
     )
+
+
+def test_torch_profiler_rebuilds_one_shot_profiler_each_round(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CUDA"],
+        torch_profiler_dump_cuda_time_total=False,
+        warmup_iterations=2,
+    )
+    profilers = [MagicMock(), MagicMock()]
+    for profiler in profilers:
+        profiler.profiler = MagicMock()
+
+    with patch(
+        "vllm.profiler.wrapper.torch.profiler.profile", side_effect=profilers
+    ) as profile:
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="worker", local_rank=0, activities=["CUDA"]
+        )
+        profile.assert_not_called()
+
+        wrapper.start()
+        assert not wrapper.should_annotate
+        assert not wrapper._profiler_step()
+        wrapper.stop()
+        wrapper.start()
+        assert not wrapper._profiler_step()
+        wrapper.stop()
+
+    assert profile.call_count == 2
+    assert profile.call_args.kwargs["activities"] == [
+        torch.profiler.ProfilerActivity.CUDA
+    ]
+    for profiler in profilers:
+        profiler.start.assert_called_once_with()
+        profiler.step.assert_called_once_with()
+        profiler.stop.assert_called_once_with()
+
+
+def test_torch_profiler_records_each_profile_round(tmp_path):
+    traces: list[torch.profiler.profile] = []
+    wrapper = TorchProfilerWrapper(
+        ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir=str(tmp_path),
+            torch_profiler_dump_cuda_time_total=False,
+        ),
+        worker_name="worker",
+        local_rank=1,
+        activities=["CPU"],
+        on_trace_ready=traces.append,
+    )
+
+    for run in range(2):
+        wrapper.start()
+        with torch.profiler.record_function(f"run_{run}"):
+            pass
+        wrapper.stop()
+
+    assert len(traces) == 2
+
+
+@pytest.mark.parametrize(
+    "activities",
+    [[], ["CPU", "CPU"], ["INVALID"]],
+)
+def test_torch_profiler_activities_reject_invalid_values(activities):
+    with pytest.raises(ValueError, match="torch_profiler_activities"):
+        ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/tmp/mock",
+            torch_profiler_activities=activities,
+        )
+
+
+def test_torch_profiler_activities_require_torch_profiler():
+    with pytest.raises(ValueError, match="only applicable"):
+        ProfilerConfig(torch_profiler_activities=["CPU"])
+
+
+@pytest.mark.parametrize(
+    ("worker_type", "expected"),
+    [
+        (Worker, ("CPU", "CUDA")),
+        (XPUWorker, ("CPU", "XPU")),
+    ],
+)
+def test_worker_resolves_platform_default_activities(worker_type, expected):
+    worker = object.__new__(worker_type)
+    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+
+    assert worker._resolve_torch_profiler_activities(config) == expected
+
+
+@pytest.mark.parametrize(
+    ("worker_type", "activities"),
+    [
+        (Worker, ["XPU"]),
+        (XPUWorker, ["CUDA"]),
+    ],
+)
+def test_worker_rejects_unsupported_activities_at_startup(worker_type, activities):
+    worker = object.__new__(worker_type)
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=activities,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported torch profiler activities"):
+        worker._validate_profiler_config()
+
+
+@pytest.mark.parametrize(
+    ("worker_type", "expected"),
+    [
+        (Worker, ("CPU", "CUDA")),
+        (XPUWorker, ("CPU", "XPU")),
+    ],
+)
+def test_worker_creates_platform_torch_profiler(worker_type, expected):
+    worker = object.__new__(worker_type)
+    worker.local_rank = 0
+    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+
+    with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
+        profiler = worker._create_profiler(config, "rank0")
+
+    assert profiler is wrapper.return_value
+    wrapper.assert_called_once_with(
+        config,
+        worker_name="rank0",
+        local_rank=0,
+        activities=expected,
+    )
+
+
+def test_worker_forwards_configured_torch_profiler_activities():
+    worker = object.__new__(Worker)
+    worker.local_rank = 0
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=["CUDA"],
+    )
+
+    with patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper:
+        worker._create_profiler(config, "rank0")
+
+    wrapper.assert_called_once_with(
+        config,
+        worker_name="rank0",
+        local_rank=0,
+        activities=("CUDA",),
+    )
+
+
+@pytest.mark.parametrize("worker_type", [Worker, XPUWorker])
+def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
+    worker = object.__new__(worker_type)
+    worker.rank = 0
+    worker.local_rank = 0
+    worker.profiler = None
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch", torch_profiler_dir="/tmp/mock"
+    )
+
+    with (
+        patch("vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"),
+        patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper,
+    ):
+        worker.profile()
+        worker.profile(is_start=False)
+        worker.profile()
+
+    assert worker.profiler is wrapper.return_value
+    wrapper.assert_called_once()
+    assert wrapper.return_value.start.call_count == 2
+    wrapper.return_value.stop.assert_called_once_with()
 
 
 def test_immediate_start_stop(default_profiler_config):
@@ -318,13 +504,17 @@ class TestAnnotateProfile:
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
 
-    def test_skips_annotation_work_after_profiler_stops(self):
+    def test_skips_annotation_work_when_profiler_does_not_annotate(self):
         worker = MagicMock()
-        worker.profiler.is_running = False
+        worker.profiler.should_annotate = False
 
-        context = Worker.annotate_profile(worker, scheduler_output=None)
+        with patch(
+            "vllm.v1.worker.gpu_worker.compute_iteration_details"
+        ) as compute_iteration_details:
+            context = Worker.annotate_profile(worker, scheduler_output=None)
 
         worker.profiler.step.assert_called_once_with()
+        compute_iteration_details.assert_not_called()
         worker.profiler.annotate_context_manager.assert_not_called()
         assert isinstance(context, nullcontext)
 
@@ -837,10 +1027,11 @@ class TestProtonProfilerWrapper:
 
 @_requires_cuda_for_proton
 def test_gpu_worker_creates_proton_profiler():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
+    worker.local_rank = 1
     worker.profiler = None
-    worker.profiler_config.profiler = "proton"
+    worker.profiler_config = MagicMock(profiler="proton")
 
     with (
         patch(
@@ -857,10 +1048,11 @@ def test_gpu_worker_creates_proton_profiler():
 
 @_requires_cuda_for_proton
 def test_gpu_worker_recreates_proton_profiler_for_each_run():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
+    worker.local_rank = 1
     worker.profiler = None
-    worker.profiler_config.profiler = "proton"
+    worker.profiler_config = MagicMock(profiler="proton")
 
     with (
         patch(
