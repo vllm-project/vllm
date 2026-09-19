@@ -374,7 +374,19 @@ class SparseAttnIndexerKpool(nn.Module):
                         (key * q[row]).sum(dim=-1) * w[row]
                     ).sum()
             select = min(self.topk_tokens // pool_size, scores.shape[1])
-            pool_ids = torch.topk(scores, select, dim=-1).indices.to(torch.int32)
+            pool_ids = torch.full(
+                (end - start, select),
+                -1,
+                dtype=torch.int32,
+                device=scores.device,
+            )
+            for row, length_value in enumerate(seq_lens.tolist()):
+                length = min(int(length_value), scores.shape[1])
+                if length:
+                    count = min(select, length)
+                    pool_ids[row, :count] = torch.topk(
+                        scores[row, :length], count
+                    ).indices.to(torch.int32)
             expanded = _expand_pool_ids(
                 pool_ids,
                 positions[start:end] + 1,
@@ -420,7 +432,16 @@ class SparseAttnIndexerKpool(nn.Module):
                     * weights[row].float()
                 ).sum()
             select = min(self.topk_tokens // pool_size, length)
-            pool_ids = torch.topk(scores, select).indices.to(torch.int32).unsqueeze(0)
+            pool_ids = torch.full(
+                (1, self.topk_tokens // pool_size),
+                -1,
+                dtype=torch.int32,
+                device=scores.device,
+            )
+            if select:
+                pool_ids[0, :select] = torch.topk(scores, select).indices.to(
+                    torch.int32
+                )
             expanded = _expand_pool_ids(
                 pool_ids,
                 positions[row : row + 1] + 1,
