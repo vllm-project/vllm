@@ -619,6 +619,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         # Clean up reshape nodes
         self.noop_cleanup(graph)
 
+
 class MoEAllReduceRMSNormChunkPattern(_SequenceParallelPatternHelper):
     def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -657,6 +658,7 @@ class MoEAllReduceRMSNormChunkPattern(_SequenceParallelPatternHelper):
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
+
 
 class MoEAllGatherRMSNormPattern(_SequenceParallelPatternHelper):
     def get_inputs(self) -> list[torch.Tensor]:
@@ -703,6 +705,7 @@ class MoEAllGatherRMSNormPattern(_SequenceParallelPatternHelper):
             pm_pass,
         )
 
+
 class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism specifically for Tensor Parallel
@@ -732,9 +735,9 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
             MoEAllReduceRMSNormChunkPattern(
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
-            MoEAllGatherRMSNormPattern(
-                epsilon, self.model_dtype, self.device
-            ).register(self.patterns)
+            MoEAllGatherRMSNormPattern(epsilon, self.model_dtype, self.device).register(
+                self.patterns
+            )
 
         self.dump_patterns(config, self.patterns)
 

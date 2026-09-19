@@ -1541,6 +1541,7 @@ def _get_kv_cache_groups_uniform_page_size(
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
     import functools
+
     layer_counts = [len(layers) for layers in layer_buckets]
     min_num_layers = min(layer_counts)
     group_size = functools.reduce(math.gcd, layer_counts)
