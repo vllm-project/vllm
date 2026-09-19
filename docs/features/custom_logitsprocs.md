@@ -466,3 +466,15 @@ Once vLLM loads a logits processor during initialization, then vLLM will invoke 
     * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class handles this by default
 
 * `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However, the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+
+## Post-generation classifiers and safety checks
+
+Logits processors run **during decoding**, on model logits. They are a poor fit for checks that need the **fully decoded text** (for example numeric grounding against a retrieval context, PII scanning of the answer string, or an external safety classifier that scores the completed generation).
+
+For those workloads today:
+
+1. Do **not** call an external gRPC/HTTP service from `apply()` / `update_state()` on every engine step. That adds unpredictable latency to the hot path and still cannot see the final detokenized string until generation finishes.
+2. Prefer an OpenAI-compatible reverse proxy (or application layer) that runs after `/v1/chat/completions` / `/v1/completions` returns, or at end-of-stream for SSE. You can still pass request-scoped metadata into the engine via [`vllm_xargs` / `SamplingParams.extra_args`](./custom_arguments.md) if a custom logits processor only needs to *annotate* or *gate* behavior, without performing the text-level check itself.
+3. ASGI middleware that rewrites streaming response bodies is fragile across vLLM releases; treat it as a last resort.
+
+A first-class in-engine post-generation hook is discussed in [RFC #43999](https://github.com/vllm-project/vllm/issues/43999). Until that lands, an external verify/proxy adapter remains the portable pattern.
