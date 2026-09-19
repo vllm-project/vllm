@@ -32,6 +32,8 @@ test ``tests/models/glm5next/test_kda_recurrent.py``):
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
@@ -276,7 +278,7 @@ def _resolve_seqs(
     total_tokens: int,
     batch: int,
     tokens_per_batch: int,
-) -> tuple[int, callable]:
+) -> tuple[int, Callable[[int], tuple[int, int]]]:
     """Return ``N`` and a callable mapping sequence index -> (bos, eos)."""
     if cu_seqlens is None:
         return batch, lambda n: (
@@ -495,6 +497,7 @@ def fused_recurrent_kda(
     ):
         raise ValueError("1-D `ssm_state_indices` requires one token per sequence.")
     if ssm_state_indices is not None and ssm_state_indices.dim() == 2:
+        assert num_accepted_tokens is not None
         if any(
             bounds(n)[1] - bounds(n)[0] > ssm_state_indices.shape[1]
             for n in range(n_seqs)
@@ -555,6 +558,7 @@ def fused_recurrent_kda(
             and compute_gate
             and a_log is not None
             and g_bias is not None
+            and lower_bound is not None
             and num_accepted_tokens is not None
             and hasattr(torch.ops._C, "glm5next_kda_recurrent")
         ):
@@ -594,6 +598,7 @@ def fused_recurrent_kda(
             and compute_gate
             and a_log is not None
             and g_bias is not None
+            and lower_bound is not None
         ):
             native = _native_recurrent_kda(
                 q_flat[bos:eos].unsqueeze(0),
@@ -629,6 +634,9 @@ def fused_recurrent_kda(
             b_q = b_q * scale
 
             if compute_gate:
+                assert a_log is not None
+                assert g_bias is not None
+                assert lower_bound is not None
                 b_g = _kda_gate(g_flat[t], a_log, g_bias, float(lower_bound))
             else:
                 b_g = g_flat[t].to(torch.float32)

@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cpu():
-    from vllm.models.glm5next.cpu.kda import (
+    from vllm.models.glm5next.cpu.kda import (  # type: ignore[assignment]
         causal_conv1d_update_cpu as causal_conv1d_update,
     )
     from vllm.models.glm5next.cpu.kda import (
@@ -54,12 +54,12 @@ if current_platform.is_cpu():
         scatter_states_cpu as scatter_states,
     )
 elif current_platform.is_rocm():
-    from vllm.models.glm5next.amd.ops.third_party.kda import (
+    from vllm.models.glm5next.amd.ops.third_party.kda import (  # type: ignore[assignment]
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
 else:
-    from vllm.models.glm5next.nvidia.ops.third_party.kda import (
+    from vllm.models.glm5next.nvidia.ops.third_party.kda import (  # type: ignore[assignment]
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
