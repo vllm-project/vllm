@@ -1103,6 +1103,51 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     )
 
 
+@pytest.mark.parametrize("free_blocks", [7, 8, 9, 10])
+def test_hisparse_prefix_copy_admission_under_memory_pressure(free_blocks):
+    """Prefix-copy pins must leave enough GPU blocks for the hot region."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
+    _publish_hisparse_pages(manager)
+    resident_ids = [
+        block.block_id for block in manager.get_blocks("original").blocks[2]
+    ]
+    manager.free(original)
+    pool = manager.block_pool
+    pressure = pool.get_new_blocks(pool.get_num_free_blocks() - free_blocks)
+    evicted_ids = {block.block_id for block in pressure}
+    expected_resident_ids = [
+        pool.null_block.block_id if block_id in evicted_ids else block_id
+        for block_id in resident_ids[:3]
+    ]
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(resumed)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
+    allocated = manager.allocate_slots(
+        resumed,
+        num_new_tokens=len(tokens) - num_computed,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    if free_blocks < 10:
+        assert allocated is None
+        assert pool.get_num_free_blocks() == free_blocks
+        pool.free_blocks(pressure)
+        allocated = manager.allocate_slots(
+            resumed,
+            num_new_tokens=len(tokens) - num_computed,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=computed,
+        )
+    assert allocated is not None
+    assert [
+        block.block_id for block in manager.get_blocks("resumed").blocks[2][:3]
+    ] == expected_resident_ids
+
+
 def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     """Local group-completion hits need no external host import allocation."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
