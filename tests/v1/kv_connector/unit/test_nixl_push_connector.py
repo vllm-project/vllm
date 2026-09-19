@@ -392,6 +392,29 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
 
+        # Layer-wise overlapped WRITE-push state (opt-in; disabled here so the
+        # default monolithic push path is exercised). Set by
+        # NixlPushConnectorWorker.__init__, which ``fresh`` bypasses. Some are
+        # read eagerly as ``logger.debug`` args (e.g. len(_lw_deferred)) even
+        # when the feature is off, so they must exist.
+        w._layerwise = False
+        w._lw_defer_timeout = 60.0
+        w._lw_layer_names = []
+        w._lw_layer_index = {}
+        w._lw_task_q = queue.Queue()
+        w._lw_deferred = []
+        w._lw_reg = {}
+        w._lw_plan = {}
+        w._lw_lock = threading.Lock()
+        w._lw_local_blocks = {}
+        w._lw_scheduled_layers = defaultdict(set)
+        w._lw_handles = defaultdict(list)
+        w._lw_done = defaultdict(int)
+        w._lw_expected = {}
+        w._lw_sealed = set()
+        w._lw_notified = set()
+        w._lw_failed = set()
+
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
         w.start_push_calls = calls
@@ -1980,3 +2003,84 @@ def test_layer_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+class TestPushLayerwiseCompletenessSweep:
+    """Layer-wise push (opt-in) must guarantee byte-complete KV even when some
+    regions are never covered by a matching ``save_kv_layer`` call.
+
+    Model-agnostic: the per-layer producer hook only fires for attention layers
+    whose ``layer_name`` is registered in ``_lw_layer_index``. Any region whose
+    layer is NOT visited during the forward (e.g. a DSA indexer cache) would
+    otherwise never be written, leaving stale KV on D. ``seal_layer_writes_push``
+    runs a post-forward completeness sweep that enqueues the missing layer
+    indices (ungated, since all KV is resident post-forward) and freezes the
+    expected WRITE count so completion can be detected.
+    """
+
+    @staticmethod
+    def _layerwise_worker(num_layers: int):
+        w = _StubWriterWorker.fresh()
+        w._layerwise = True
+        w._lw_layer_names = [f"layer.{i}" for i in range(num_layers)]
+        w._lw_layer_index = {n: i for i, n in enumerate(w._lw_layer_names)}
+        return w
+
+    @staticmethod
+    def _meta_with_save(req_id: str):
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_save(req_id, ([0, 1],), {})
+        return meta
+
+    def test_sweep_enqueues_uncovered_regions(self):
+        """Only layers {0, 2} were visited during the forward; the sweep must
+        enqueue the missing {1, 3} (with event=None) and expect all 4."""
+        num_layers = 4
+        w = self._layerwise_worker(num_layers)
+        req_id = "req-sweep"
+        # Forward covered a strict subset (the synthetic "uncovered region"
+        # is layers 1 and 3, e.g. caches whose layer_name was never hooked).
+        w._lw_scheduled_layers[req_id] = {0, 2}
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        # Every region is now scheduled, expected count sealed at N.
+        assert w._lw_scheduled_layers[req_id] == {0, 1, 2, 3}
+        assert w._lw_expected[req_id] == num_layers
+        assert req_id in w._lw_sealed
+
+        # The sweep enqueued exactly the missing layers, each ungated
+        # (event is None => no CUDA-event wait; KV already resident).
+        swept = []
+        while not w._lw_task_q.empty():
+            rid, layer_idx, event, _ = w._lw_task_q.get_nowait()
+            assert rid == req_id
+            assert event is None
+            swept.append(layer_idx)
+        assert sorted(swept) == [1, 3]
+
+    def test_full_coverage_sweeps_nothing(self):
+        """All layers visited during the forward => sweep is a no-op, but the
+        expected count is still frozen so completion can fire."""
+        num_layers = 3
+        w = self._layerwise_worker(num_layers)
+        req_id = "req-full-cov"
+        w._lw_scheduled_layers[req_id] = {0, 1, 2}
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        assert w._lw_expected[req_id] == num_layers
+        assert req_id in w._lw_sealed
+        assert w._lw_task_q.empty()
+
+    def test_sweep_skips_failed_request(self):
+        """A request already marked failed is not swept or sealed."""
+        w = self._layerwise_worker(4)
+        req_id = "req-failed"
+        w._lw_failed.add(req_id)
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        assert req_id not in w._lw_expected
+        assert req_id not in w._lw_sealed
+        assert w._lw_task_q.empty()
