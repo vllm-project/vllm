@@ -36,7 +36,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    get_kpool_indexer_backend,
+)
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
@@ -336,6 +339,23 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
         [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
     )
     assert selected_size == 16
+
+
+@pytest.mark.parametrize(
+    ("manager_block_size", "expected_kernel_block_size"),
+    [(640, 128), (1280, 256)],
+)
+def test_select_common_block_size_scales_kpool_pages_to_tokens(
+    manager_block_size, expected_kernel_block_size
+):
+    kpool_backend = get_kpool_indexer_backend(index_kpool=4)
+
+    selected_size = select_common_block_size(
+        manager_block_size,
+        [kpool_backend, ROCMAiterMLASparseBackend],
+    )
+
+    assert selected_size == expected_kernel_block_size
 
 
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(

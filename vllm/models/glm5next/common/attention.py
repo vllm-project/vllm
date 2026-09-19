@@ -155,6 +155,15 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
             storage_block_size=page_size * self._index_kpool,
         )
 
+    def get_attn_backend(self):
+        if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.indexer import (
+                get_kpool_indexer_backend,
+            )
+
+            return get_kpool_indexer_backend(self._index_kpool)
+        return super().get_attn_backend()
+
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
     """Paged circular buffer for the kpool indexer's in-progress (tail) pool.

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    PAGED_MQA_PAGE_SIZES,
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
     native_next_n_supported,
@@ -34,6 +36,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_utils import request_row_bounds
@@ -210,6 +213,34 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["DeepseekV32IndexerMetadataBuilder"]:
         return DeepseekV32IndexerMetadataBuilder
+
+
+@functools.cache
+def get_kpool_indexer_backend(index_kpool: int) -> type[AttentionBackend]:
+    """Return an indexer backend with token-scaled kpool page sizes."""
+    if index_kpool <= 1:
+        raise ValueError(f"index_kpool must be greater than 1, got {index_kpool}")
+
+    kernel_block_sizes = tuple(
+        index_kpool * page_size for page_size in PAGED_MQA_PAGE_SIZES
+    )
+
+    def get_name() -> str:
+        return f"GLM5_NEXT_KPOOL_{index_kpool}_INDEXER"
+
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return list(kernel_block_sizes)
+
+    return subclass_attention_backend_with_overrides(
+        f"Glm5NextKpool{index_kpool}",
+        DeepseekV32IndexerBackend,
+        {
+            "get_name": staticmethod(get_name),
+            "get_supported_kernel_block_sizes": staticmethod(
+                get_supported_kernel_block_sizes
+            ),
+        },
+    )
 
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):
