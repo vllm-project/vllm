@@ -33,6 +33,9 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    OnlineAcceptanceEstimator,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -158,6 +161,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
         self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+        )
+        self.use_acceptance_estimator = self.enable_adaptive_verification
+        self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
+
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
@@ -225,6 +237,20 @@ class DraftModelSpeculator(BaseSpeculator):
                 "Embeddings from the target model will not be passed to the "
                 "drafter; using text-only draft inputs instead.",
                 type(self.model).__name__,
+            )
+
+        if self.use_acceptance_estimator:
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "Adaptive verification without a confidence head estimates "
+                    "per-position acceptance from the draft logits, which "
+                    "use_local_argmax_reduction never materializes. Disable one "
+                    "of them."
+                )
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.device,
             )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -371,12 +397,6 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    def _greedy_sample_draft(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
-        logits = self.model.compute_logits(hidden_states)
-        return logits.argmax(dim=-1)
-
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -408,8 +428,42 @@ class DraftModelSpeculator(BaseSpeculator):
                     idx_mapping,
                     temperature,
                 )
-            return sampled
-        return self._greedy_sample_draft(hidden_states)
+        elif self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        else:
+            logits = self.model.compute_logits(hidden_states)
+            sampled = logits.argmax(dim=-1)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        return sampled
+
+    def _maybe_predict_acceptance(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+    ) -> None:
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.predict(
+                logits,
+                idx_mapping,
+                draft_step,
+                self.draft_token_confidence_probs,
+                self.temperature,
+            )
+
+    def observe_verification(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        """Fold the target's verdict on the last drafts into the estimator.
+
+        Must run before the next `propose`, which overwrites the per-slot
+        features the verdict grades.
+        """
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
         self, contexts: torch.Tensor, watermarking: torch.Tensor

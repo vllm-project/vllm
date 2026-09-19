@@ -245,6 +245,7 @@ class OffloadingEventsTracker:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
+
         """
         for event in events:
             if event.removed:
