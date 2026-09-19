@@ -85,6 +85,7 @@ def region_pull_worker():
         remote_physical_blocks_per_logical=2,
     )
     worker.tp_mappings = {"P": TPMapping(((0,), (0,)), (0,), {0: 0}, 0)}
+    worker._transfer_layer_group_ids = ()
     worker._mixed_mem_types = True
     worker.src_xfer_handles_by_block_size = {64: 1}
     worker._dram_src_handles_by_block_size = {64: 2}
@@ -1504,6 +1505,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
+    scheduler.prefix_replay_tokens = 0
 
     request = MagicMock()
     request.request_id = "req-1"

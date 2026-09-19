@@ -22,6 +22,7 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    is_typeddict,
 )
 
 import huggingface_hub
@@ -183,6 +184,18 @@ def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     return type_hint is type or get_origin(type_hint) is type
 
 
+def is_dict_subclass(type_hint: TypeHint) -> bool:
+    """Check if the type hint is a subclass of `dict`.
+
+    `TypedDict`s are excluded because they do not support class checks.
+    """
+    return (
+        isinstance(type_hint, type)
+        and not is_typeddict(type_hint)
+        and issubclass(type_hint, dict)
+    )
+
+
 def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
     """Check if the type hints contain a specific type."""
     return any(is_type(type_hint, type) for type_hint in type_hints)
@@ -305,6 +318,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     for field in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = get_type_hints(field.type)
+        # Subclasses of dict (e.g. MultiModalDummyOptions) are CLI dicts
+        type_hints = {dict if is_dict_subclass(th) else th for th in type_hints}
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
@@ -556,6 +571,7 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -765,6 +781,7 @@ class EngineArgs:
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    swa_bounded_replay: bool = CacheConfig.swa_bounded_replay
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
@@ -1295,6 +1312,9 @@ class EngineArgs:
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
         cache_group.add_argument(
+            "--swa-bounded-replay", **cache_kwargs["swa_bounded_replay"]
+        )
+        cache_group.add_argument(
             "--mamba-cache-dtype", **cache_kwargs["mamba_cache_dtype"]
         )
         cache_group.add_argument(
@@ -1588,6 +1608,10 @@ class EngineArgs:
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
+        )
+        scheduler_group.add_argument(
+            "--max-num-active-seqs",
+            **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
@@ -2098,6 +2122,7 @@ class EngineArgs:
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
+            swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
@@ -2421,6 +2446,7 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_active_seqs=self.max_num_active_seqs,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,

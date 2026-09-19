@@ -10,7 +10,7 @@ import torch
 from PIL import Image as PILImage
 from PIL import ImageOps
 
-from vllm.config.multimodal import VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
     build_flat_image_bool_length,
@@ -89,7 +89,9 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
     data = builder.get_dummy_mm_data(
         seq_len=128,
         mm_counts={"image": 0, "video": 1},
-        mm_options={"video": VideoDummyOptions(num_frames=num_frames_override)},
+        mm_options=MultiModalDummyOptions(
+            video=VideoDummyOptions(num_frames=num_frames_override)
+        ),
     )
 
     video, _metadata = data["video"][0]

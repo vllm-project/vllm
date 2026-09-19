@@ -1881,6 +1881,55 @@ class VllmConfig:
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
 
+        if self.parallel_config.all2all_backend == "moonep":
+            if (
+                self.model_config is not None
+                and self.model_config.quantization is not None
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports unquantized "
+                    "BF16 models only; got "
+                    f"quantization={self.model_config.quantization!r}. Use a "
+                    "different --all2all-backend for quantized models."
+                )
+            if (
+                self.model_config is not None
+                and self.model_config.dtype != torch.bfloat16
+            ):
+                raise ValueError(
+                    "The moonep all2all backend currently supports BF16 models "
+                    f"only; got dtype={self.model_config.dtype}. Use a "
+                    "different --all2all-backend or --dtype bfloat16."
+                )
+            if self.parallel_config.enable_eplb:
+                raise ValueError(
+                    "The moonep all2all backend does not support EPLB yet: "
+                    "EPLB rearranges expert parameters in a layout MoonEP's "
+                    "replicated [E+B] weights do not follow. Disable "
+                    "--enable-eplb or use a different --all2all-backend."
+                )
+            if self.parallel_config.expert_placement_strategy != "linear":
+                raise ValueError(
+                    "The moonep all2all backend requires linear expert "
+                    "placement: its load-time all-gather assumes each rank "
+                    "holds a contiguous chunk of the global expert range. Got "
+                    "--expert-placement-strategy "
+                    f"{self.parallel_config.expert_placement_strategy!r}."
+                )
+            # Enforced here rather than in set_splitting_ops_for_v1 so it
+            # holds for every compilation mode, and keyed on use_all2all so
+            # PCP/SP-only topologies are covered too: MoonEP dispatch/combine
+            # are eager-only and must not be captured.
+            if (
+                self.parallel_config.use_all2all
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                logger.info(
+                    "MoonEP: Disabling CUDA Graphs since the MoonEP "
+                    "integration is currently eager-only."
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -2223,9 +2272,9 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            # Decode sizes to cover, in tokens. Populated only when a request
-            # is more than one token wide and only when the default is computed
-            # here, so an explicit capture range is left exactly as configured.
+            # Decode sizes to cover, in tokens. Populated only when the default
+            # is computed here, so an explicit capture range is left exactly as
+            # configured.
             uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
@@ -2316,6 +2365,8 @@ class VllmConfig:
                             if n * query_len <= max_cudagraph_capture_size
                         }
                     )
+                elif max_num_seqs <= max_cudagraph_capture_size:
+                    uniform_decode_sizes = [max_num_seqs]
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
