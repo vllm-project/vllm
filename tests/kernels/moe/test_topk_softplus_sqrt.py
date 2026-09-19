@@ -620,3 +620,181 @@ def test_dsv4_fast_topk_bias_vl():
     assert topk_ids.dtype == torch.int64
     torch.testing.assert_close(topk_ids_ref.to(torch.int64), topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize(
+    "num_tokens", [1, 4, 8, 17, 33, 64, 110, 128, 256, 768, 1280, 1536]
+)
+@pytest.mark.parametrize(
+    ("topk", "renormalize", "has_bias", "indices_dtype"),
+    [
+        (1, False, True, torch.int32),
+        (6, False, False, torch.int32),
+        (8, True, True, torch.int64),
+    ],
+)
+def test_rocm_fused_router_gate_matches_gate_gemm_plus_selection(
+    num_tokens: int,
+    topk: int,
+    renormalize: bool,
+    has_bias: bool,
+    indices_dtype: torch.dtype,
+) -> None:
+    """Tiled gate GEMM and selection must preserve routing across token masks."""
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        rocm_fused_router_gate,
+    )
+
+    torch.manual_seed(0)
+    hidden_size, num_experts = 7168, 384
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    router_weight = (
+        torch.randn(num_experts, hidden_size, dtype=torch.float32, device="cuda")
+        * hidden_size**-0.5
+    ).to(torch.bfloat16)
+    correction_bias = (
+        torch.randn(num_experts, dtype=torch.float32, device="cuda")
+        if has_bias
+        else None
+    )
+
+    gating_output = hidden_states.float() @ router_weight.float().t()
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+
+    topk_weights, topk_ids = rocm_fused_router_gate(
+        hidden_states,
+        router_weight,
+        correction_bias,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+        indices_dtype=indices_dtype,
+    )
+
+    assert topk_weights.dtype == torch.float32
+    assert topk_ids.dtype == indices_dtype
+    torch.testing.assert_close(topk_ids_ref.to(indices_dtype), topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize("logits_kind", ["ties", "negative_tail"])
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("num_tokens", [3, 256, 1536])
+def test_rocm_fused_router_gate_preserves_ties_and_small_scores(
+    logits_kind: str, renormalize: bool, num_tokens: int
+) -> None:
+    """Equal ranks favor lower ids, and negative logits retain nonzero weights."""
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        rocm_fused_router_gate,
+    )
+
+    hidden_size, num_experts, topk = 7168, 384, 8
+    hidden_states = torch.zeros(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    hidden_states[:, 0] = 1
+    router_weight = torch.zeros(
+        num_experts, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    correction_bias = None
+    if logits_kind == "negative_tail":
+        router_weight[:, 0] = torch.arange(num_experts, device="cuda") * 0.125 - 68
+    else:
+        correction_bias = torch.zeros(num_experts, device="cuda")
+        correction_bias[::3] = 1
+
+    gating_output = router_weight[:, 0].float().expand(num_tokens, -1)
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+    topk_weights, topk_ids = rocm_fused_router_gate(
+        hidden_states,
+        router_weight,
+        correction_bias,
+        topk,
+        renormalize,
+        routed_scaling_factor=1.5,
+    )
+
+    torch.testing.assert_close(topk_ids_ref, topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=1e-9, rtol=2e-5)
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+def test_rocm_fused_router_gate_empty_rows() -> None:
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        rocm_fused_router_gate,
+    )
+
+    hidden_states = torch.empty(0, 7168, dtype=torch.bfloat16, device="cuda")
+    router_weight = torch.empty(384, 7168, dtype=torch.bfloat16, device="cuda")
+    topk_weights, topk_ids = rocm_fused_router_gate(
+        hidden_states, router_weight, None, 6, True, indices_dtype=torch.int64
+    )
+
+    assert topk_weights.shape == topk_ids.shape == (0, 6)
+    assert topk_weights.dtype == torch.float32
+    assert topk_ids.dtype == torch.int64
+    assert topk_weights.device == topk_ids.device == hidden_states.device
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="fused router gate targets gfx950")
+@pytest.mark.parametrize(
+    "invalid_input", ["cpu", "bias_device", "bias_strided", "indices_dtype"]
+)
+def test_rocm_fused_router_gate_rejects_unsupported_inputs(invalid_input: str) -> None:
+    """Reject unsupported storage before launch or dispatch into the fast path."""
+    from vllm.model_executor.layers.fused_moe.router.rocm_fused_router_gate import (
+        can_use_rocm_fused_router_gate,
+        rocm_fused_router_gate,
+    )
+
+    hidden_states = torch.empty(1, 7168, dtype=torch.bfloat16, device="cuda")
+    router_weight = torch.empty(384, 7168, dtype=torch.bfloat16, device="cuda")
+    correction_bias = None
+    indices_dtype = torch.int32
+    if invalid_input == "cpu":
+        hidden_states = hidden_states.cpu()
+        router_weight = router_weight.cpu()
+    elif invalid_input == "bias_device":
+        correction_bias = torch.empty(384, dtype=torch.float32)
+    elif invalid_input == "bias_strided":
+        correction_bias = torch.empty(768, dtype=torch.float32, device="cuda")[::2]
+    else:
+        indices_dtype = torch.float32
+
+    if invalid_input != "indices_dtype":
+        assert not can_use_rocm_fused_router_gate(
+            hidden_states, router_weight, correction_bias, 8
+        )
+    with pytest.raises(ValueError):
+        rocm_fused_router_gate(
+            hidden_states,
+            router_weight,
+            correction_bias,
+            8,
+            True,
+            indices_dtype=indices_dtype,
+        )
