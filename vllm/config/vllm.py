@@ -611,6 +611,8 @@ class VllmConfig:
             self.speculative_config is not None
             and self.speculative_config.num_speculative_tokens is not None
         ):
+            if self.speculative_config.is_dspark_prefill_only():
+                return 0
             return self.speculative_config.num_speculative_tokens
         if (
             self.diffusion_config is not None
@@ -659,7 +661,11 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_eagle():
+        if (
+            speculative_config is None
+            or not speculative_config.use_eagle()
+            or speculative_config.is_dspark_prefill_only()
+        ):
             return 0
         if speculative_config.use_multi_module_mtp():
             # Each MTP module reads one token further ahead than the one before
@@ -2901,16 +2907,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                # https://github.com/vllm-project/vllm/pull/40704
-                "ngram",
-                "ngram_gpu",
-                # https://github.com/vllm-project/vllm/pull/43091
-                "draft_model",
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
+            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
+            if speculative_config.method in ("ngram", "ngram_gpu"):
+                unsupported.append("ngram/ngram_gpu speculative decoding")
+            elif speculative_config.method not in (
+                "eagle",
+                "eagle3",
+                "mtp",
+                "dflash",
+                "dspark",
+                "extract_hidden_states",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
