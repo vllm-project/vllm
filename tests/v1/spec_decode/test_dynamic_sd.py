@@ -245,3 +245,55 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     assert len(scheduler.dynamic_sd_lookup) == 17
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3
+
+
+def _make_scheduler_with_seq_len_dynamic_sd(
+    schedule: list[tuple[int, int, int]],
+    *,
+    max_num_seqs: int = 16,
+    max_num_batched_tokens: int = 300000,
+    runtime_num_speculative_tokens: int = 5,
+) -> Scheduler:
+    base_scheduler = create_scheduler(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        num_speculative_tokens=runtime_num_speculative_tokens,
+    )
+
+    speculative_config = base_scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    speculative_config.num_speculative_tokens_per_seq_len = schedule
+
+    return Scheduler(
+        vllm_config=base_scheduler.vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        block_size=base_scheduler.block_size,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
+    )
+
+
+def test_scheduler_uses_seq_len_dynamic_sd():
+    schedule = [
+        (1, 32000, 5),
+        (32001, 128000, 3),
+        (128001, 250000, 0),
+    ]
+
+    test_cases = [
+        (1000, 5),  # Short context -> full draft budget K=5
+        (64000, 3),  # Medium context -> downscale draft budget K=3
+        (185000, 0),  # Ultra-long context (~185k) -> disable drafter K=0
+    ]
+
+    for num_tokens, expected_k in test_cases:
+        scheduler = _make_scheduler_with_seq_len_dynamic_sd(
+            schedule,
+            runtime_num_speculative_tokens=5,
+        )
+        output = _add_requests_and_schedule(scheduler, 1, num_tokens=num_tokens)
+
+        assert output.num_spec_tokens_to_schedule == expected_k, (
+            f"Expected K={expected_k} for sequence length {num_tokens}, "
+            f"got {output.num_spec_tokens_to_schedule}"
+        )
