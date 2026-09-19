@@ -51,6 +51,20 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@pytest.mark.parametrize("seed", [-(2**63) - 1, 2**63, 2**64 - 1, 2**64])
+def test_seed_rejects_values_outside_int64(seed):
+    """2**63..2**64-1 pass MessagePack but overflow the MRV2 int64 seed tensor."""
+    with pytest.raises(VLLMValidationError, match="seed must be in") as exc_info:
+        SamplingParams(seed=seed)
+    assert exc_info.value.parameter == "seed"
+
+
+@pytest.mark.parametrize("seed", [-(2**63), -1, 0, 2**63 - 1])
+def test_seed_accepts_int64_boundaries(seed):
+    expected = None if seed == -1 else seed
+    assert SamplingParams(seed=seed).seed == expected
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""

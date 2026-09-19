@@ -159,7 +159,7 @@ class CohereChatV2Request(BaseModel):
 
     # Sampling
     temperature: float | None = None
-    seed: int | None = None
+    seed: int | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
     k: int | None = None
