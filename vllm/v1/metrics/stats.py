@@ -196,6 +196,9 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    # Same quantity measured in token slots instead of blocks; see
+    # KVCacheManager.token_usage. Equal to kv_cache_usage for hybrid models.
+    kv_cache_token_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

@@ -396,7 +396,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
-        self.last_scheduler_stats.kv_cache_usage /= len(self.last_scheduler_stats_dict)
+            self.last_scheduler_stats.kv_cache_token_usage += (
+                last_scheduler_stats.kv_cache_token_usage
+            )
+        num_engines = len(self.last_scheduler_stats_dict)
+        self.last_scheduler_stats.kv_cache_usage /= num_engines
+        self.last_scheduler_stats.kv_cache_token_usage /= num_engines
 
     def log(self):
         LoggingStatLogger.log(self)
@@ -581,6 +586,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_kv_cache_usage = create_metric_per_engine(
             gauge_kv_cache_usage, per_engine_labelvalues
+        )
+
+        gauge_kv_cache_token_usage = self._gauge_cls(
+            name="vllm:kv_cache_token_usage_perc",
+            documentation=(
+                "KV-cache usage counted in token slots rather than blocks. "
+                "Always <= vllm:kv_cache_usage_perc; the difference is the "
+                "space lost to partially filled blocks. Equal to "
+                "vllm:kv_cache_usage_perc for hybrid models."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_token_usage = create_metric_per_engine(
+            gauge_kv_cache_token_usage, per_engine_labelvalues
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1048,6 +1068,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_cache_token_usage[engine_idx].set(
+                scheduler_stats.kv_cache_token_usage
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
