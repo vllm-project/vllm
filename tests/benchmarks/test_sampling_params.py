@@ -19,7 +19,7 @@ class _FakeTokenizer(TokenizerLike):
     # -- Properties required by TokenizerLike --
 
     @classmethod
-    def from_pretrained(cls, path_or_repo_id, *a, **kw):  # type: ignore[override]
+    def from_pretrained(cls, path_or_repo_id, *a, **kw):
         return cls()
 
     @property
@@ -80,16 +80,16 @@ class _FakeTokenizer(TokenizerLike):
     def apply_chat_template(self, messages, **kw):  # type: ignore[override]
         raise NotImplementedError
 
-    def convert_tokens_to_ids(self, tokens):  # type: ignore[override]
+    def convert_tokens_to_ids(self, tokens):
         raise NotImplementedError
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError
 
-    def decode(self, ids, skip_special_tokens: bool = False) -> str:  # type: ignore[override]
+    def decode(self, ids, skip_special_tokens: bool = False) -> str:
         raise NotImplementedError
 
-    def convert_ids_to_tokens(  # type: ignore[override]
+    def convert_ids_to_tokens(
         self, ids, skip_special_tokens: bool = False
     ) -> list[str]:
         raise NotImplementedError

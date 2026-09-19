@@ -10,6 +10,7 @@ CUDA (SM >= 7.5), ROCm, or XPU — not just gfx950.
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -44,7 +45,7 @@ requires_int8_moe = pytest.mark.skipif(
 DEVICE = current_platform.device_type
 
 
-def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
+def _make_int8_moe_config(moe_backend: MoEBackend = "auto") -> FusedMoEConfig:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     return FusedMoEConfig(

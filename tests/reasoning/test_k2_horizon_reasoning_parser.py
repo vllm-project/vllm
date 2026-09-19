@@ -70,7 +70,7 @@ def _request(**kwargs) -> ChatCompletionRequest:
 @pytest.mark.parametrize("effort", ["high", "medium", "low"])
 def test_reasoning_effort_selects_tokens(effort: str):
     parser = K2HorizonReasoningParser(
-        K2Tokenizer(),
+        K2Tokenizer(),  # type: ignore[arg-type]
         chat_template_kwargs={"reasoning_effort": effort},
     )
 
@@ -90,10 +90,10 @@ def test_reasoning_effort_precedence_and_default():
     )
 
     parser = K2HorizonReasoningParser(
-        tokenizer,
+        tokenizer,  # type: ignore[arg-type]
         chat_template_kwargs=resolved_kwargs,
     )
-    default_parser = K2HorizonReasoningParser(tokenizer)
+    default_parser = K2HorizonReasoningParser(tokenizer)  # type: ignore[arg-type]
 
     assert parser.start_token == EFFORT_TOKENS["medium"][0]
     assert default_parser.start_token == EFFORT_TOKENS["high"][0]
@@ -103,13 +103,13 @@ def test_reasoning_effort_precedence_and_default():
 def test_invalid_reasoning_effort_raises(effort: str | None):
     with pytest.raises(ValueError, match="Unsupported reasoning_effort"):
         K2HorizonReasoningParser(
-            K2Tokenizer(),
+            K2Tokenizer(),  # type: ignore[arg-type]
             chat_template_kwargs={"reasoning_effort": effort},
         )
 
 
 def test_non_streaming_explicit_and_implicit_boundaries():
-    parser = K2HorizonReasoningParser(K2Tokenizer())
+    parser = K2HorizonReasoningParser(K2Tokenizer())  # type: ignore[arg-type]
     request = _request()
 
     assert parser.extract_reasoning("<ifm|think>plan</ifm|think>answer", request) == (
@@ -126,7 +126,7 @@ def test_non_streaming_explicit_and_implicit_boundaries():
 
 @pytest.mark.parametrize("reasoning", ["plan", " ", "\n", " \n"])
 def test_character_split_reasoning_stream(reasoning: str):
-    parser = K2HorizonReasoningParser(K2Tokenizer())
+    parser = K2HorizonReasoningParser(K2Tokenizer())  # type: ignore[arg-type]
     reasoning_parts: list[str] = []
     content_parts: list[str] = []
 
@@ -151,7 +151,7 @@ def test_character_split_reasoning_stream(reasoning: str):
 
 def test_latest_boundary_controls_reasoning_state():
     tokenizer = K2Tokenizer()
-    parser = K2HorizonReasoningParser(tokenizer)
+    parser = K2HorizonReasoningParser(tokenizer)  # type: ignore[arg-type]
     vocab = tokenizer.get_vocab()
 
     assert parser.is_reasoning_end([vocab["<ifm|think>"], vocab[TOOL_CALLS_START]])
@@ -177,7 +177,7 @@ def test_composed_streaming_reasoning_to_tool_handoff():
     )
     assert parser_cls is not None
     parser = parser_cls(
-        tokenizer,
+        tokenizer,  # type: ignore[arg-type]
         request.tools,
         chat_template_kwargs={"reasoning_effort": "high"},
     )

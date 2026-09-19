@@ -178,7 +178,7 @@ class DummyFusedMoE:
 
 
 def make_config(**overrides) -> INCConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "weight_bits": 4,
         "group_size": 128,
         "sym": True,
@@ -193,7 +193,7 @@ def make_config(**overrides) -> INCConfig:
 
 
 def make_layer_config(**overrides) -> INCLayerConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "bits": 4,
         "group_size": 128,
         "sym": True,
@@ -408,7 +408,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
     config = make_config(extra_config={"model.moe_layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None
+    layer.moe_config = None  # type: ignore[assignment]  # No MoE config used by this stub.
 
     method = config.get_quant_method(layer, "moe_layer")
 
@@ -715,7 +715,7 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     )
 
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
+    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
     layer_config = make_layer_config(bits=bits)
     method = INCWna16Scheme().get_moe_method(
         make_config(), layer, "model.layers.0.mlp", layer_config
@@ -846,7 +846,7 @@ def test_qwen3_30b_a3b_w4a16_autoround_routes_to_gptq_moe(
 
     config = make_qwen3_autoround_config("qwen3_30b_a3b_w4a16")
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
+    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
 
     method = config.get_quant_method(layer, "model.layers.0.mlp")
 
@@ -875,7 +875,7 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
 
     config = make_qwen3_autoround_config("qwen3_30b_a3b_mxfp4")
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
+    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
 
     ignored_method = config.get_quant_method(
         object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
@@ -1171,7 +1171,7 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     )
 
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = DummyMoeConfig()
+    layer.moe_config = DummyMoeConfig()  # type: ignore[assignment]
     method = INCWna16Scheme().get_moe_method(
         make_config(),
         layer,
@@ -1667,7 +1667,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config
+    layer.moe_config = None  # type: ignore[assignment]  # No MoE config used by this stub.
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -2092,7 +2092,7 @@ def _with_w4a8_kernel(monkeypatch) -> None:
 
 def _dispatch(layer_config=None):
     return INCWna16Scheme().get_linear_method(
-        object(), object(), "layer", layer_config or make_layer_config()
+        make_config(), object(), "layer", layer_config or make_layer_config()
     )
 
 

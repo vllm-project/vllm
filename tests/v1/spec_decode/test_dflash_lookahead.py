@@ -141,9 +141,9 @@ def test_dflash_drafter_window_reserves_bonus_token():
         speculative_config=_dflash_speculative_config(NUM_SPECULATIVE_TOKENS),
     )
     # window = 4, so 96 fits (96 + 4 == 100) but 97 does not (97 + 4 == 101)
-    assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))
-    assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))
-    assert not input_fits_in_drafter(dflash_runner, None)  # no metadata
+    assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))  # type: ignore[arg-type]
+    assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))  # type: ignore[arg-type]
+    assert not input_fits_in_drafter(dflash_runner, None)  # type: ignore[arg-type]  # No metadata.
 
     # Other drafters don't reserve the bonus token, so 97 fits (97 + 3 == 100).
     plain_runner = SimpleNamespace(
@@ -151,4 +151,4 @@ def test_dflash_drafter_window_reserves_bonus_token():
         effective_drafter_max_model_len=100,
         speculative_config=SimpleNamespace(use_dflash=lambda: False),
     )
-    assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
+    assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))  # type: ignore[arg-type]
