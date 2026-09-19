@@ -31,6 +31,29 @@ from vllm.transformers_utils.configs.glm5_next import (
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
 
+@pytest.mark.parametrize("max_seq_len", [8192, 256000])
+def test_mistral_config_mirrors_max_seq_len_to_max_position_embeddings(max_seq_len):
+    """Native Mistral params.json uses ``max_seq_len`` and omits
+    ``max_position_embeddings``; the HF conversion must mirror it instead of
+    hardcoding 128000, otherwise a >128k context is wrongly capped."""
+    from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
+    params = {
+        "dim": 512,
+        "n_layers": 8,
+        "n_heads": 8,
+        "n_kv_heads": 8,
+        "hidden_dim": 2048,
+        "vocab_size": 1000,
+        "norm_eps": 1e-5,
+        "max_seq_len": max_seq_len,
+    }
+    config = adapt_config_dict(dict(params), {})
+
+    assert config.max_seq_len == max_seq_len
+    assert config.max_position_embeddings == max_seq_len
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
