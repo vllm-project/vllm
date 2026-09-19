@@ -575,6 +575,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/cpu_isa.cpp"
+        "csrc/cpu/glm5next_kda.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
