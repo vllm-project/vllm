@@ -29,7 +29,12 @@ from vllm.transformers_utils.processors.internvl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 from .internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
@@ -44,13 +49,12 @@ from .utils import (
 
 
 class SkyworkR1VImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -67,12 +71,11 @@ class SkyworkR1VImagePixelInputs(TensorSchema):
 
 
 class SkyworkR1VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - ni: Number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - ni: Number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -156,7 +159,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -182,20 +185,22 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+            self.language_model = language_model
+            assert supports_pp(language_model)
 
-        self.img_context_token_id = None
+        self.img_context_token_id: int | None = None
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -232,7 +237,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _init_mlp1(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
