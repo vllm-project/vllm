@@ -98,6 +98,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
+from .gpu.cudagraph_utils import has_compiled_submodule
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
@@ -302,6 +303,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         self.synchronize_device()
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        self.sleep_mode_backend.discard(tags)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -772,7 +776,10 @@ class Worker(WorkerBase):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
-        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        if (
+            self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and has_compiled_submodule(self.model_runner.get_model())
+        ):
             # warm up sizes that are not in cudagraph capture sizes,
             # but users still want to compile for better performance,
             # e.g. for the max-num-batched token size in chunked prefill.
@@ -1445,7 +1452,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:
