@@ -7,12 +7,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    compute_mm_prefix_ranges,
-)
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
@@ -205,10 +203,18 @@ class DefaultModelState(ModelState):
             and self.encoder_cache is not None
             and self.model_config.is_mm_prefix_lm
         ):
+            mm_features = self.encoder_cache.mm_features
+            hf_text_config = self.model_config.hf_text_config
             req_doc_ranges = compute_mm_prefix_ranges(
-                req_ids=input_batch.req_ids,
-                mm_features=self.encoder_cache.mm_features,
+                [mm_features.get(req_id, ()) for req_id in input_batch.req_ids],
                 sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(
+                    hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+                ),
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
