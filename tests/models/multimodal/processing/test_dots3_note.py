@@ -34,3 +34,4 @@ def test_processor_cache_miss_preserves_video_source_bytes():
     missing_video = missing_items["video"].data[0]
     assert isinstance(missing_video, MediaWithBytes)
     assert missing_video.original_bytes == source_bytes
+    assert missing_items["video"].metadata == [{"fps": 1.0}]

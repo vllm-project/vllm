@@ -1298,8 +1298,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             missing_modality_data = []
             for idx in idxs:
-                # Preserve raw media wrappers for model-specific processors.
-                data = mm_data_items[modality].get_item_for_hash(idx)
+                data = mm_data_items[modality].get_item_for_reparse(idx)
                 if data is None:
                     raise ValueError(
                         f"Cache miss for {modality} at index {idx} "
