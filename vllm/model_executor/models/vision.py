@@ -634,6 +634,10 @@ class FusedInputNorm(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.weight.dtype
 
+    @property
+    def input_dtype(self) -> torch.dtype | None:
+        return None if self.is_identity else torch.uint8
+
     @classmethod
     def identity(
         cls, channel: int = 3, dtype: torch.dtype = torch.float32
@@ -647,7 +651,7 @@ class FusedInputNorm(nn.Module):
         )
 
     @classmethod
-    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
+    def from_model_config(cls, model_config: "ModelConfig") -> "FusedInputNorm":
         if not model_config.multimodal_config.mm_device_do_normalize:
             return cls.identity()
 

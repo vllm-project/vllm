@@ -627,7 +627,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        input_norm: nn.Module | None = None,
+        input_norm: FusedInputNorm | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -1897,7 +1897,8 @@ class Qwen2_5_VLForConditionalGeneration(
                 for _ in range(max_batch_size)
             ]
 
-        # Create dummy pixel_values
+        # Create dummy pixel_values; uint8 when normalization is fused
+        # on-device. Contents are overwritten before every replay.
         patch_embed = self.visual.patch_embed
         in_channels = patch_embed.proj.in_channels
         patch_size = patch_embed.patch_size
@@ -1906,8 +1907,11 @@ class Qwen2_5_VLForConditionalGeneration(
         flattened_patch_size = (
             in_channels * temporal_patch_size * patch_size * patch_size
         )
-        dummy_pixel_values = torch.randn(
-            total_patches, flattened_patch_size, device=device, dtype=dtype
+        dummy_pixel_values = torch.zeros(
+            total_patches,
+            flattened_patch_size,
+            device=device,
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
 
         # Override max_seqlen with a safe upper bound for capture.
