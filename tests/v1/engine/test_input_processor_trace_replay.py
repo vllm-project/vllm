@@ -85,6 +85,7 @@ def _validate(enable_trace_replay: bool) -> None:
         speculative_config=None,
         structured_outputs_config=None,
         tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
     )
     params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
     with patch.object(SamplingParams, "verify"):
