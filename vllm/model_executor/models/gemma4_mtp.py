@@ -48,11 +48,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4 import Gemma4MLP, _get_text_config
+from .interfaces import SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
     get_draft_quant_config,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 
@@ -438,7 +440,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class Gemma4MTP(nn.Module):
+class Gemma4MTP(nn.Module, SupportsPP):
     """Gemma4 Multi-Token Prediction model for speculative decoding.
 
     forward() returns (draft_hidden_states, backbone_hidden_states).
@@ -492,6 +494,11 @@ class Gemma4MTP(nn.Module):
             text_config.vocab_size,
             soft_cap=getattr(text_config, "final_logit_softcapping", None),
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], text_config.hidden_size
+        )
 
         self.masked_embedding: Gemma4MTPMaskedEmbedder | None
         if getattr(config, "use_ordered_embeddings", False):
@@ -525,7 +532,7 @@ class Gemma4MTP(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

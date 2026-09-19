@@ -37,8 +37,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsPP
 from .llama import LlamaDecoderLayer
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 
 class ErnieMultiTokenPredictorLayer(nn.Module):
@@ -140,11 +146,16 @@ class ErnieMultiTokenPredictor(nn.Module):
         return logits
 
 
-class ErnieMTP(nn.Module):
+class ErnieMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         self.config = vllm_config.model_config.hf_config
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
         # MTP weights are stored under a flat `mtp_*.0.` block in the
         # checkpoint; rewrite them into `model.layers.{spec_layer}.*`.
         spec_layer = self.config.num_hidden_layers
@@ -182,7 +193,7 @@ class ErnieMTP(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
