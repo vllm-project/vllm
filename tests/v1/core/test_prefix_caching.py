@@ -4727,20 +4727,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
 
 
 def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
-    """An identical resend and a longer sibling resume at DIFFERENT positions.
-
-    How far a lookup matches depends on who is asking. A resend of the same
-    prompt caps its lookup at ``num_tokens - 1`` (the last token is recomputed
-    for logits), while a sibling whose prompt merely starts with this one caps
-    above the prompt. The two coincide unless the prompt length is an exact
-    multiple of the alignment -- there they differ by one alignment unit, and
-    under the EAGLE drop BOTH are reachable.
-
-    Retaining only the higher one leaves the resend with every retained state
-    above every candidate its lookup can produce, and the reconciled hit
-    collapses to 0 -- the same zero-hit failure sparse retention already fixes
-    at unaligned prompt lengths.
-    """
+    """An identical resend and a longer sibling reuse the saved replay tail."""
     block_size = 32
     num_spec = 3
     kv_cache_config = KVCacheConfig(
@@ -4777,9 +4764,8 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         use_eagle=True,
     )
 
-    # 128 tokens, an exact multiple of the 32-token alignment. A longer sibling
-    # matches 128 and drops to 96; this prompt's own resend caps at 127, matches
-    # 96 and drops to 64. Both states must survive retention.
+    # Both requests can match 128 proof tokens and drop to the saved state at
+    # 96, below the identical resend's reusable-token limit of 127.
     token_ids = [i for i in range(4) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
@@ -4810,15 +4796,14 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
             assert cached is None, f"mamba hash {i} should not be cached"
     manager.free(req0)
 
-    # The identical resend: full attention matches blocks 0-2 (96 tokens, capped
-    # by num_tokens - 1) and the EAGLE drop caps the candidate at 64. Without
-    # the lower state retained the reconciled hit would be 0.
+    # The identical resend must reach the higher retained state. Capping the
+    # proof scan at num_tokens - 1 would unnecessarily drop back to 64.
     req1 = make_request("1", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == 2 * block_size
-    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+    assert num_computed_tokens == 3 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 3]
 
-    # The longer sibling resumes one alignment unit higher, off the same prompt.
+    # The longer sibling resumes at the same checkpoint.
     longer = make_request("2", token_ids + [9] * block_size, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(longer)
     assert num_computed_tokens == 3 * block_size
