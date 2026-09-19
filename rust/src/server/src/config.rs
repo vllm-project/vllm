@@ -59,6 +59,8 @@ pub struct ApiServerOptions {
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// When `true`, include usage in every streamed OpenAI response chunk.
+    pub enable_force_include_usage: bool,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
