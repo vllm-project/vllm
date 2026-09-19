@@ -44,6 +44,7 @@ from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,
     force_use_trtllm_attention,
+    has_flashinfer,
     pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
@@ -513,8 +514,10 @@ class FlashInferBackend(AttentionBackend):
         # https://github.com/flashinfer-ai/flashinfer/pull/3621). Temporarily
         # raise the floor to SM80 so it is not auto-selected on SM75 until
         # that fix lands; revert to DeviceCapability(7, 5) once it does.
-        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
-            12, 1
+        return (
+            has_flashinfer()
+            and capability >= DeviceCapability(8, 0)
+            and capability <= DeviceCapability(12, 1)
         )
 
     @classmethod
