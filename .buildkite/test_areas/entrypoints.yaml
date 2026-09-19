@@ -21,9 +21,11 @@ steps:
       label: ":amd: (MI355) Entrypoints Unit"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 35
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
@@ -44,7 +46,7 @@ steps:
       label: ":amd: (MI300) Entrypoints Integration (LLM)"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
 
@@ -176,6 +178,15 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Speech to Text)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
@@ -210,6 +221,15 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 65
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) OpenAI API Correctness"
   key: openai-api-correctness
