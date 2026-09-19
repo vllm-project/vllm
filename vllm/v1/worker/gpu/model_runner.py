@@ -2244,6 +2244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
         self.fast_prefill = None
+        self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
