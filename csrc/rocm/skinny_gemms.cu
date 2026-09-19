@@ -1,6 +1,7 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -355,13 +356,17 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GROUPS = 1>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap, const int M,
                      const int Bx, const int By, const scalar_t* B,
                      const scalar_t* __restrict__ A,
                      const scalar_t* __restrict__ BIAS, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
+  // Keep each four-row group's reduction topology while interleaving their
+  // workgroups and writing directly into one contiguous output.
+  A += (blockIdx.x % GROUPS) * N * Kap;
+  C += (blockIdx.x % GROUPS) * N * M;
   constexpr int max_lds_len = LDS_SIZE / 2;
   #if defined(__HIP__MI3XX__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
@@ -411,7 +416,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   if (threadIdx.y >= _WvPrGrp) return;
 
-  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+  uint32_t m =
+      ((blockIdx.x / GROUPS) * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
   //----------------------------------------------------
   // Each wave works on a single column of weight matrix.
@@ -577,7 +583,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GROUPS = 1>
 __global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
                                  const int M, const int Bx, const int By,
                                  const scalar_t* B,
@@ -1217,6 +1223,30 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
+
+  if (N_in == 8) {
+    // Initial admitted domain of the arithmetic-preserving target-head path.
+    const std::string arch =
+        at::cuda::getCurrentDeviceProperties()->gcnArchName;
+    TORCH_CHECK(arch.find("gfx1201") == 0 &&
+                    in_a.scalar_type() == at::kBFloat16 && in_a.dim() == 2 &&
+                    in_b.dim() == 2 && M_in == 248320 && K_in == 5120 &&
+                    in_b.size(1) == K_in && CuCount == 32 &&
+                    in_a.is_contiguous() && in_b.is_contiguous() &&
+                    in_a.device() == in_b.device() &&
+                    (!in_bias.has_value() || in_bias->numel() == 0),
+                "M8 wvSplitK requires contiguous gfx1201 BF16 [248320,5120] "
+                "weights, [8,5120] activations, a 32-CU grid and no bias");
+    wvSplitK_hf_sml_<__hip_bfloat16, 32, 4, 16, 8, 1, 4, 2>
+        <<<dim3(2 * CuCount), dim3(32, 16), 0, stream>>>(
+            K_in, Kap_in, Kbp_in, M_in, 1, 1,
+            reinterpret_cast<const __hip_bfloat16*>(in_a.data_ptr()),
+            reinterpret_cast<const __hip_bfloat16*>(in_b.data_ptr()), nullptr,
+            reinterpret_cast<__hip_bfloat16*>(out_c.data_ptr()),
+            mindiv(M_in, CuCount * 4, 16), CuCount);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out_c;
+  }
 
 #define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                     \
   {                                                                           \

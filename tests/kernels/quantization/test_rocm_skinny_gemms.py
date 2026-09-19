@@ -4,7 +4,6 @@ import math
 
 import pytest
 import torch
-
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -413,3 +412,29 @@ def test_rocm_wvsplitk_fp8_kernel(
         torch.testing.assert_close(out, ref_out, atol=0.07, rtol=5e-2)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("scale", [0.0, 0.01, 1.0, 16.0])
+@torch.inference_mode()
+def test_wvsplitk_m8_interleaved_exact(scale):
+    """The admitted head keeps both serial and M4 arithmetic, including replay."""
+    prop = torch.cuda.get_device_properties(0)
+    if not prop.gcnArchName.startswith("gfx1201"):
+        pytest.skip("The initial M8 domain is gfx1201")
+    torch.manual_seed(42)
+    weight = torch.randn(248320, 5120, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 5120, device="cuda", dtype=torch.bfloat16) * scale
+    cu = prop.multi_processor_count
+    serial = torch.cat([ops.wvSplitK(weight, row[None], cu) for row in x])
+    grouped = torch.cat([ops.wvSplitK(weight, part, cu) for part in x.split(4)])
+    actual = ops.wvSplitK(weight, x, cu)
+    torch.testing.assert_close(actual, serial, rtol=0, atol=0)
+    torch.testing.assert_close(actual, grouped, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = ops.wvSplitK(weight, x, cu)
+    graph.replay()
+    torch.testing.assert_close(replayed, serial, rtol=0, atol=0)
+    with pytest.raises(RuntimeError, match="M8 wvSplitK requires"):
+        ops.wvSplitK(weight, x, cu, torch.zeros(248320, device="cuda"))
