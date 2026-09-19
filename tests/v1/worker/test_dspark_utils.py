@@ -7,6 +7,16 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_con
 
 
 @dataclass
+class _FakeHFConfig:
+    model_type: str
+
+
+@dataclass
+class _FakeModelConfig:
+    hf_config: _FakeHFConfig
+
+
+@dataclass
 class _FakeEPLBConfig:
     num_redundant_experts: int = 0
 
@@ -28,12 +38,16 @@ class _FakeParallelConfig:
             raise ValueError("elastic EP requires EPLB")
 
 
-def test_dspark_parallel_config_disables_eplb_atomically():
+def test_dspark_parallel_config_preserves_eplb_for_dsv4():
     target_config = _FakeParallelConfig()
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v4")
+    )
 
     draft_config = _get_dspark_parallel_config(
         target_config,
         tensor_parallel_size=4,
+        draft_model_config=draft_model_config,
     )
 
     assert target_config.pipeline_parallel_size == 2
@@ -45,7 +59,24 @@ def test_dspark_parallel_config_disables_eplb_atomically():
     assert draft_config is not target_config
     assert draft_config.pipeline_parallel_size == 1
     assert draft_config.tensor_parallel_size == 4
-    assert not draft_config.enable_eplb
-    assert draft_config.eplb_config.num_redundant_experts == 0
+    assert draft_config.enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == 32
     assert not draft_config.enable_elastic_ep
+    assert draft_config.eplb_config is target_config.eplb_config
+
+
+def test_dspark_parallel_config_disables_eplb_for_dsv41():
+    target_config = _FakeParallelConfig()
+    draft_model_config = _FakeModelConfig(
+        hf_config=_FakeHFConfig(model_type="deepseek_v41")
+    )
+
+    draft_config = _get_dspark_parallel_config(
+        target_config,
+        tensor_parallel_size=4,
+        draft_model_config=draft_model_config,
+    )
+
+    assert draft_config.enable_eplb is False
+    assert draft_config.eplb_config.num_redundant_experts == 0
     assert draft_config.eplb_config is not target_config.eplb_config
