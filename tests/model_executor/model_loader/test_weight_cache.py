@@ -207,3 +207,177 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
     assert restart_outputs == baseline_outputs
+
+
+def _parallel(**kw):
+    from types import SimpleNamespace
+
+    base = dict(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_rank=0,
+        nnodes=1,
+        node_rank=0,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
+    """Local GPU i is TP rank r*local+i without DP, and DP rank start+i//tp,
+    TP rank i%tp with DP, matching the engine's placement on both nodes."""
+    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+
+    tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
+    assert plan_local_ranks(tp_second_node) == [(i, 0, 4 + i) for i in range(4)]
+
+    dp_third_node = _parallel(
+        data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
+    )
+    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0) for i in range(4)]
+
+    dp_tp = _parallel(
+        tensor_parallel_size=2,
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_rank=2,
+    )
+    assert plan_local_ranks(dp_tp) == [(0, 2, 0), (1, 2, 1), (2, 3, 0), (3, 3, 1)]
+
+
+def test_daemon_rejects_unmappable_parallelism():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        _reject_unsupported_parallelism,
+    )
+
+    _reject_unsupported_parallelism(
+        _parallel(
+            data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=12
+        )
+    )
+    with pytest.raises(ValueError, match="pipeline"):
+        _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
+    with pytest.raises(ValueError, match="--nnodes"):
+        _reject_unsupported_parallelism(
+            _parallel(data_parallel_size=4, data_parallel_size_local=2, nnodes=2)
+        )
+    with pytest.raises(ValueError, match="exceeds"):
+        _reject_unsupported_parallelism(
+            _parallel(
+                data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=13
+            )
+        )
+
+
+def test_weight_cache_key_distinguishes_dp_ranks():
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    key = WeightCacheKey(
+        checkpoint="ckpt",
+        model_arch="Arch",
+        tp_size=1,
+        tp_rank=0,
+        dtype="bf16",
+        quantization=None,
+        quant_config_hash="h",
+        revision=None,
+        vllm_version="v",
+        dp_size=16,
+        dp_rank=3,
+    )
+    assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
+    assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
+
+
+def test_weight_cache_caches_mtp_and_eagle_drafts():
+    from types import SimpleNamespace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        caches_draft_model,
+    )
+
+    draft = object()
+    for method in ("mtp", "eagle", "eagle3"):
+        assert caches_draft_model(
+            SimpleNamespace(method=method, draft_model_config=draft)
+        )
+    assert not caches_draft_model(
+        SimpleNamespace(method="dflash", draft_model_config=draft)
+    )
+    assert not caches_draft_model(
+        SimpleNamespace(method="mtp", draft_model_config=None)
+    )
+    assert not caches_draft_model(None)
+
+
+def test_weight_cache_exports_eagle_ownership_flags():
+    """The engine never runs load_weights for cached drafts, so the flags that
+    decide whether to share the target's embed/lm_head travel with the state."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        export_model_attrs,
+    )
+
+    model = torch.nn.Module()
+    assert export_model_attrs(model) == {}
+    model.has_own_lm_head = True
+    assert export_model_attrs(model) == {"has_own_lm_head": True}
+
+
+def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
+
+    target_path = get_socket_path("GPU-abc", str(tmp_path))
+    draft_path = get_socket_path("GPU-abc", str(tmp_path), is_draft_model=True)
+
+    assert target_path != draft_path
+    assert draft_path.endswith("GPU-abc_draft0.sock")
+
+
+def test_draft_load_config_under_ipc_cache():
+    """A cached draft is routed to the daemon's draft group; any other draft
+    falls back to disk instead of hitting the target daemon; an explicit
+    draft_load_config always wins."""
+    from types import SimpleNamespace
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.utils import get_draft_load_config
+
+    ipc = LoadConfig(
+        load_format="ipc_cache", model_loader_extra_config={"fallback": False}
+    )
+    explicit = LoadConfig(load_format="fastsafetensors")
+
+    def cfg(method, draft_load_config=None, load_config=ipc):
+        return SimpleNamespace(
+            load_config=load_config,
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=object(),
+                draft_load_config=draft_load_config,
+            ),
+        )
+
+    mtp = get_draft_load_config(cfg("mtp"))
+    assert mtp.load_format == "ipc_cache"
+    assert mtp.weight_cache_is_draft_model
+    assert mtp.weight_cache_draft_model_idx == 0
+    assert mtp.model_loader_extra_config == {"fallback": False}
+
+    eagle = get_draft_load_config(cfg("eagle3"))
+    assert eagle.load_format == "ipc_cache"
+    assert eagle.weight_cache_is_draft_model
+
+    dflash = get_draft_load_config(cfg("dflash"))
+    assert dflash.load_format == "auto"
+    assert not dflash.weight_cache_is_draft_model
+    assert dflash.model_loader_extra_config == {}
+
+    assert get_draft_load_config(cfg("mtp", explicit)) is explicit
+    disk = LoadConfig(load_format="fastsafetensors")
+    assert get_draft_load_config(cfg("mtp", load_config=disk)) is disk
