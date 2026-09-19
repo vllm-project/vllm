@@ -60,6 +60,10 @@ CHECK_IMPORTS = {
             "benchmarks/kernels/benchmark_lora.py",
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
+            "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
+            "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
+            "benchmarks/overheads/benchmark_scheduler_output_rpc_pack.py",
+            "tests/v1/core/test_scheduler_output_rpc_pack.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/v1/executor/ray_executor.py",
