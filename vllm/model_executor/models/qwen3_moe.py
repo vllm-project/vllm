@@ -217,7 +217,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         )
         is_input_1d = hidden_states.dim() == 1
-        num_tokens, hidden_dim = hidden_states.shape
+        hidden_dim = hidden_states.shape[-1]
+        num_tokens = 1 if is_input_1d else hidden_states.shape[0]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.is_sequence_parallel:
