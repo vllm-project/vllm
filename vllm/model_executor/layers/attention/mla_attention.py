@@ -1055,7 +1055,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_q_nope,
                     self.impl._w_uk_packed,  # type: ignore[attr-defined]
                     True,
-                    None,
+                    self.impl._w_scale,  # type: ignore[attr-defined]
                 )
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
             else:
@@ -1401,7 +1401,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x,
                 self.impl._w_uv_packed,  # type: ignore[attr-defined]
                 True,
-                None,
+                self.impl._w_scale,  # type: ignore[attr-defined]
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
