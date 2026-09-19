@@ -37,6 +37,8 @@ KV_CACHE_CONFIG = SimpleNamespace(
         ),
     ]
 )
+
+
 @pytest.fixture
 def state(monkeypatch):
     cfg = MagicMock()
