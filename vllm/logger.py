@@ -184,6 +184,25 @@ def _configure_vllm_root_logger() -> None:
         vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
         vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+        trace_context = envs.VLLM_LOGGING_TRACE_CONTEXT
+        logging_config["filters"] = (
+            {
+                "trace_context": {
+                    "()": "vllm.logging_utils.trace_context.TraceContextFilter"
+                }
+            }
+            if trace_context
+            else {}
+        )
+        vllm_handler["filters"] = ["trace_context"] if trace_context else []
+        log_format = _FORMAT
+        if trace_context:
+            log_format = log_format.replace(
+                "%(message)s",
+                "%(trace_context)s%(message)s",
+            )
+        for formatter in logging_config["formatters"].values():
+            formatter["format"] = log_format
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL

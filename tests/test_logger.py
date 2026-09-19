@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import enum
 import io
 import json
@@ -26,6 +27,77 @@ from vllm.logger import (
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+
+
+@pytest.mark.parametrize("color", ["0", "1"])
+@pytest.mark.parametrize("sampled", [False, True])
+def test_trace_context_logging(monkeypatch, color, sampled):
+    """Correlate descendant logs and clear IDs after leaving a span."""
+    from opentelemetry import trace
+
+    stream = io.StringIO()
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_CONFIGURE_LOGGING", "1")
+        mp.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
+        mp.setenv("VLLM_LOGGING_TRACE_CONTEXT", "1")
+        mp.setenv("VLLM_LOGGING_COLOR", color)
+        mp.setenv("VLLM_LOGGING_LEVEL", "INFO")
+        mp.setattr(sys, "stdout", stream)
+        try:
+            _configure_vllm_root_logger()
+            logger = init_logger("vllm.test_trace_context")
+            context = trace.SpanContext(
+                trace_id=0x123,
+                span_id=0x456,
+                is_remote=False,
+                trace_flags=trace.TraceFlags(int(sampled)),
+            )
+            with trace.use_span(trace.NonRecordingSpan(context)):
+                logger.info("first line\nsecond line")
+            logger.info("outside span")
+            lines = stream.getvalue().splitlines()
+            for line in lines[:2]:
+                assert f"trace_id={0x123:032x}" in line
+                assert f"span_id={0x456:016x}" in line
+                assert "trace_sampled=" not in line
+            assert "second line" in lines[1]
+            for field in ("trace_id=", "span_id=", "trace_sampled="):
+                assert field not in lines[2]
+            assert lines[2].endswith(" outside span")
+
+            mp.setenv("VLLM_LOGGING_TRACE_CONTEXT", "0")
+            _configure_vllm_root_logger()
+            logger.info("disabled")
+            assert "trace_id=" not in stream.getvalue().splitlines()[-1]
+        finally:
+            mp.setenv("VLLM_LOGGING_TRACE_CONTEXT", "0")
+            _configure_vllm_root_logger()
+    _configure_vllm_root_logger()
+
+
+def test_trace_context_task_isolation():
+    """Overlapping async requests must retain their own span IDs."""
+    from opentelemetry import trace
+
+    from vllm.logging_utils.trace_context import TraceContextFilter
+
+    context_filter = TraceContextFilter()
+
+    async def emit(identifier):
+        context = trace.SpanContext(identifier, identifier, is_remote=False)
+        with trace.use_span(trace.NonRecordingSpan(context)):
+            await asyncio.sleep(0)
+            record = logging.makeLogRecord({"msg": "request"})
+            assert context_filter.filter(record)
+            return record.trace_id, record.span_id
+
+    async def run():
+        return await asyncio.gather(emit(1), emit(2))
+
+    assert asyncio.run(run()) == [
+        (f"{1:032x}", f"{1:016x}"),
+        (f"{2:032x}", f"{2:016x}"),
+    ]
 
 
 def f1(x):
