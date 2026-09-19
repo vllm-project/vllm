@@ -471,12 +471,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             match = re.fullmatch(r"model\.layers\.(\d+)\.attn\.wkv\.(.+)", name)
             if match is not None:
                 context_name = f"model.context_wkv_proj.{match.group(2)}"
-                param = params_dict.get(context_name)
-                if param is None:
-                    raise ValueError(
-                        f"{name}: no context projection shard. The checkpoint has "
-                        "more draft layers than num_nextn_predict_layers."
-                    )
+                param = params_dict[context_name]
                 param.weight_loader(param, loaded_weight, int(match.group(1)))
                 loaded_params.add(context_name)
 
