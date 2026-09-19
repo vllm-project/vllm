@@ -684,7 +684,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
-            documentation="Number of prefill tokens processed.",
+            documentation=(
+                "Prompt tokens summed over sequences, including prefix-cache hits; "
+                "each parallel-sampling child counts its prompt separately. "
+                "Equals the sum of vllm:prompt_tokens_by_source_total."
+            ),
             labelnames=labelnames,
         )
         self.counter_prompt_tokens = create_metric_per_engine(
@@ -754,7 +758,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
-            documentation="Number of prefill tokens processed.",
+            documentation=(
+                "Prompt length of each finished sequence; "
+                "each parallel-sampling child is one observation."
+            ),
             buckets=request_tokens_buckets,
             labelnames=labelnames,
         )

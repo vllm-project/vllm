@@ -149,7 +149,7 @@ impl RequestMetrics {
         let prompt_tokens = Family::default();
         registry.register(
             "vllm:prompt_tokens",
-            "Number of prefill tokens processed.",
+            "Prompt tokens summed over sequences, including prefix-cache hits; each parallel-sampling child counts its prompt separately. Equals the sum of vllm:prompt_tokens_by_source_total.",
             prompt_tokens.clone(),
         );
 
@@ -186,7 +186,7 @@ impl RequestMetrics {
             Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_prompt_tokens",
-            "Number of prefill tokens processed.",
+            "Prompt length of each finished sequence; each parallel-sampling child is one observation.",
             request_prompt_tokens.clone(),
         );
 
