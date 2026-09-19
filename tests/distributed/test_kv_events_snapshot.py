@@ -94,17 +94,21 @@ def test_snapshot_references_match_full_history(seed):
     assert counts(snap.export()) == expected
 
 
-def test_metadata_collected_when_last_dependent_disappears():
+def test_orphan_metadata_is_retained_within_budget(monkeypatch):
     snap = KVCacheSnapshot()
     for h in range(1, 1001):
         snap.apply([stored([h])])
         snap.apply([BlockRemoved(block_hashes=[h], medium="GPU")])
-        assert not snap._sources and not snap._known
-        assert snap._metadata_bytes == 0
+    assert snap._sources and snap._known and snap._orphan_metadata_bytes
+    monkeypatch.setattr(snap, "MAX_ORPHAN_METADATA_BYTES", 0)
+    snap.apply([])
+    assert not snap._sources and not snap._known
+    assert snap._metadata_bytes == 0
 
 
-def test_dependencies_released_iteratively():
+def test_dependencies_released_iteratively(monkeypatch):
     snap = KVCacheSnapshot()
+    monkeypatch.setattr(snap, "MAX_ORPHAN_METADATA_BYTES", 0)
     for h in range(1, 1501):
         snap.apply([stored([h], parent=h - 1 if h > 1 else None)])
         if h > 1:
@@ -124,6 +128,16 @@ def test_transfer_within_batch_preserves_metadata():
     exported = list(snap.export())
     assert isinstance(exported[0], BlockStored) and exported[0].token_ids
     assert counts(exported) == Counter({("CPU", None, 1): 1})
+
+
+def test_delayed_transfer_preserves_metadata():
+    snap = KVCacheSnapshot()
+    snap.apply([stored([1, 2])])
+    snap.apply([BlockRemoved(block_hashes=[1, 2], medium="GPU")])
+    snap.apply([stored([2], parent=1, medium="CPU")])
+    exported = list(snap.export())
+    assert isinstance(exported[0], BlockStored) and exported[0].token_ids
+    assert counts(exported) == Counter({("CPU", None, 2): 1})
 
 
 def test_missing_metadata_fails_closed():

@@ -14,7 +14,7 @@ resource exhaustion disables snapshots rather than returning partial state.
 import queue
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
@@ -51,26 +51,30 @@ class _Source:
     dependencies: tuple[int, ...]
     cost: int
     references: int = 0
+    orphaned: bool = False
+    orphan_generation: int = 0
 
 
 class KVCacheSnapshot:
     """Live references and the source events required to reconstruct them.
 
     A source is retained while a live key or another retained source needs it.
-    Collection happens at batch boundaries: GPU removal and CPU storage in the
-    same scheduler batch can transfer the metadata without losing it.
+    Unreferenced source metadata is retained in a bounded FIFO so asynchronous
+    GPU removal and CPU storage can transfer metadata across scheduler batches.
     """
 
     MAX_METADATA_BYTES = 256 * 1024 * 1024
+    MAX_ORPHAN_METADATA_BYTES = 64 * 1024 * 1024
     MAX_REFERENCES = 1_000_000
 
     def __init__(self) -> None:
         self._live: dict[_BlockKey, tuple[int, int]] = {}
         self._sources: dict[int, _Source] = {}
         self._known: dict[ExternalBlockHash, dict[int, None]] = {}
-        self._unused: list[int] = []
+        self._unused: deque[tuple[int, int]] = deque()
         self._next_id = 0
         self._metadata_bytes = 0
+        self._orphan_metadata_bytes = 0
         self._references = 0
 
     def __len__(self) -> int:
@@ -96,6 +100,13 @@ class KVCacheSnapshot:
         if not sources:
             raise ValueError(f"Missing reconstruction metadata for block {h!r}")
         return next(reversed(sources))
+
+    def _acquire(self, source_id: int) -> None:
+        source = self._sources[source_id]
+        if source.orphaned:
+            source.orphaned = False
+            self._orphan_metadata_bytes -= source.cost
+        source.references += 1
 
     def apply(self, events: list[Any]) -> None:
         for event in events:
@@ -139,6 +150,7 @@ class KVCacheSnapshot:
         # Account conservatively for decoded integers, containers and wire data.
         cost = 512 + 64 * (len(event.block_hashes) + len(event.token_ids))
         cost += len(msgspec.msgpack.encode(event))
+        self._collect(self.MAX_METADATA_BYTES - cost)
         if self._metadata_bytes + cost > self.MAX_METADATA_BYTES:
             raise ValueError("Snapshot metadata budget exceeded")
         if self._references + len(event.block_hashes) > self.MAX_REFERENCES:
@@ -148,7 +160,7 @@ class KVCacheSnapshot:
         self._sources[source_id] = _Source(event, tuple(dependencies), cost)
         self._metadata_bytes += cost
         for dep in dependencies:
-            self._sources[dep].references += 1
+            self._acquire(dep)
         if event.token_ids:
             for h in event.block_hashes:
                 self._known.setdefault(self._metadata_hash(h), {})[source_id] = None
@@ -158,23 +170,35 @@ class KVCacheSnapshot:
                 count, old = self._live[key]
                 self._release(old)
             self._live[key] = (count + 1, source_id)
-            self._sources[source_id].references += 1
+            self._acquire(source_id)
             self._references += 1
 
     def _release(self, source_id: int) -> None:
         source = self._sources[source_id]
         source.references -= 1
-        if source.references == 0:
-            self._unused.append(source_id)
+        if source.references == 0 and not source.orphaned:
+            source.orphaned = True
+            source.orphan_generation += 1
+            self._orphan_metadata_bytes += source.cost
+            self._unused.append((source_id, source.orphan_generation))
 
-    def _collect(self) -> None:
-        while self._unused:
-            source_id = self._unused.pop()
+    def _collect(self, metadata_limit: int | None = None) -> None:
+        while self._unused and (
+            self._orphan_metadata_bytes > self.MAX_ORPHAN_METADATA_BYTES
+            or (metadata_limit is not None and self._metadata_bytes > metadata_limit)
+        ):
+            source_id, orphan_generation = self._unused.popleft()
             source = self._sources.get(source_id)
-            if source is None or source.references:
+            if (
+                source is None
+                or source.references
+                or not source.orphaned
+                or source.orphan_generation != orphan_generation
+            ):
                 continue
             del self._sources[source_id]
             self._metadata_bytes -= source.cost
+            self._orphan_metadata_bytes -= source.cost
             if source.event.token_ids:
                 for h in {self._metadata_hash(h) for h in source.event.block_hashes}:
                     known = self._known[h]
