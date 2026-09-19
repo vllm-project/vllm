@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import ctypes
 import itertools
-from collections.abc import Sequence
+import math
+from collections.abc import Iterable, Sequence
 from contextlib import suppress
 from typing import Any
 
@@ -17,6 +18,28 @@ from vllm.utils.vmm_driver import get_vmm_driver
 
 def _round_up(value: int, multiple: int) -> int:
     return ((value + multiple - 1) // multiple) * multiple
+
+
+def granule_block_alignment(block_strides: Iterable[int], granule: int) -> int:
+    """Block count multiple at which every stride's prefix is a granule multiple."""
+    alignment = 1
+    for stride in set(block_strides):
+        alignment = math.lcm(alignment, granule // math.gcd(granule, stride))
+    return alignment
+
+
+def granule_aligned_blocks(
+    num_blocks: int, block_strides: Iterable[int], granule: int
+) -> int:
+    """Largest count up to ``num_blocks`` at which, for every block stride, that
+    many blocks span a whole number of granules.
+
+    Segments hold ``num_blocks`` blocks of one stride each, so at such a count
+    every segment starts and ends on a granule boundary and one physical chunk
+    can back it exactly, as RDMA registration of a segment requires.
+    """
+    alignment = granule_block_alignment(block_strides, granule)
+    return num_blocks // alignment * alignment
 
 
 # ROCm reports a 4 KiB granularity (CUDA 2 MiB); commit in larger units to
@@ -386,6 +409,15 @@ class ExtensibleTensor:
     def num_physical_chunks(self) -> int:
         """Number of driver allocations currently mapped into the reservation."""
         return len(self._buffer._handles)
+
+    def segments_backed_by_one_chunk(self, sizes: Sequence[int]) -> list[bool]:
+        """Whether each segment's first ``sizes[i]`` bytes lie within a single
+        driver allocation, as RDMA registration of the segment requires."""
+        chunks = [(offset, offset + size) for _, offset, size in self._buffer._handles]
+        return [
+            any(start <= offset and offset + size <= end for start, end in chunks)
+            for offset, size in zip(self._segment_offsets, sizes)
+        ]
 
     @property
     def granularity(self) -> int:
