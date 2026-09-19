@@ -39,6 +39,24 @@ from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
+# Parameters a quantized layer may legitimately not find in a checkpoint.
+# KV-cache scales are absent from most checkpoints and are supplied by
+# calibration or left at their default, which is what the "ignore kv_cache
+# scale and online quant scale" exemption in `track_weights_loading` was
+# describing. Enroll a parameter here if a quantization method registers it in
+# `create_weights` and fills it in `process_weights_after_loading` rather than
+# reading it from the checkpoint.
+OPTIONAL_QUANT_PARAM_NAMES = frozenset(
+    {
+        "k_scale",
+        "v_scale",
+        "q_scale",
+        "prob_scale",
+        "k_scale_float",
+        "v_scale_float",
+    }
+)
+
 
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
@@ -448,23 +466,32 @@ class DefaultModelLoader(BaseModelLoader):
         self, model: nn.Module, loaded_weights: set[str] | None
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
-        if loaded_weights is not None:
-            # ignore online quantization scales
-            for name, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                has_online_quant = getattr(quant_method, "uses_meta_device", False)
-                has_postprocess_quant = getattr(
-                    quant_method, "process_weights_after_loading", None
-                )
-                # ignore kv_cache scale and online quant scale,
-                # which can be missing in checkpoints
-                if has_online_quant or has_postprocess_quant:
-                    for param_name, _ in module.named_parameters():
-                        full_name = f"{name}.{param_name}" if name else param_name
-                        loaded_weights.add(full_name)
-            weights_not_loaded = weights_to_load - loaded_weights
-            if weights_not_loaded:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
-                )
+        if loaded_weights is None:
+            return
+        for name, module in model.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if quant_method is None:
+                continue
+            prefix = f"{name}." if name else ""
+            if getattr(quant_method, "uses_meta_device", False):
+                # Online quantization: every scale is computed at load time,
+                # so no parameter of this module comes from the checkpoint.
+                for param_name, _ in module.named_parameters():
+                    loaded_weights.add(f"{prefix}{param_name}")
+                continue
+            if getattr(quant_method, "process_weights_after_loading", None) is None:
+                continue
+            # Exempt the parameters that are genuinely optional in a
+            # serialized checkpoint, rather than every parameter of any
+            # module whose quant_method defines process_weights_after_loading
+            # -- which is nearly all of them, and left this check covering
+            # nothing on a quantized model.
+            for param_name, _ in module.named_parameters():
+                if param_name.rsplit(".", 1)[-1] in OPTIONAL_QUANT_PARAM_NAMES:
+                    loaded_weights.add(f"{prefix}{param_name}")
+        weights_not_loaded = weights_to_load - loaded_weights
+        if weights_not_loaded:
+            raise ValueError(
+                "Following weights were not initialized from "
+                f"checkpoint: {weights_not_loaded}"
+            )
