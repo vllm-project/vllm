@@ -40,8 +40,12 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.kv_transfer_utils import (
+    maybe_wait_for_kv_layer,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -548,6 +552,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             o_padded,
         )
 
+    @eager_break_during_capture
+    def _wait_for_kv_layer(self) -> None:
+        """Eager break holding the connector's KV load for this layer.
+
+        ``@maybe_transfer_kv_layer`` gives this wait to every model that
+        dispatches through a unified attention op. DeepSeek V4 owns its
+        attention call and registers directly into ``static_forward_context``,
+        so it never reaches that decorator and must ask for the wait itself.
+
+        Under MRV2 ``_prepare_and_attn`` is captured, so this
+        decorator opens the eager segment the wait needs. Under MRV1 the whole
+        of ``_prepare_and_attn`` already runs inside
+        ``_prepare_and_attn_eager`` and ``add_eager`` has cleared
+        ``_capturing``, so this runs inline at no extra cost.
+
+        One call covers every cache this layer owns. The connector keys the
+        wait on the layer, not on the individual tensor.
+        """
+        maybe_wait_for_kv_layer(self.prefix)
+
     def _prepare_and_attn(
         self,
         hidden_states: torch.Tensor,
@@ -564,6 +588,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         Only the latter runs in the eager break.
         """
+        # Must precede the KV insert, the indexer and the compressor below:
+        # all three read or write caches this layer owns. Gated on the group
+        # rather than on pending copies so the break topology is identical at
+        # capture and at replay; the per-step conditions live inside the wait.
+        if has_kv_transfer_group():
+            self._wait_for_kv_layer()
+
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
