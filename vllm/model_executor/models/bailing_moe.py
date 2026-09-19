@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only BailingMoE model compatible with HuggingFace weights."""
 
+import copy
 from collections.abc import Iterable
 from itertools import islice
 
@@ -66,6 +67,24 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+
+def _build_rope_parameters(config: PretrainedConfig) -> dict:
+    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
+    # Under Transformers v5 the top-level ``rope_theta`` is no longer auto-merged
+    # into ``rope_parameters``, so without this bridge get_rope falls back to
+    # base=10000 and misaligns the whole RoPE spectrum.
+    if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
+        rope_parameters["rope_theta"] = config.rope_theta
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if isinstance(rope_scaling, dict):
+        rope_scaling = copy.deepcopy(rope_scaling)
+        if "type" in rope_scaling and "rope_type" not in rope_scaling:
+            rope_scaling["rope_type"] = rope_scaling.pop("type")
+        rope_parameters.update(rope_scaling)
+
+    return rope_parameters
 
 
 class BailingAttention(nn.Module):
@@ -132,12 +151,19 @@ class BailingAttention(nn.Module):
             rotary_dim = int(self.head_dim * partial_rotary_factor)
         if rotary_dim is None:
             rotary_dim = self.head_dim
-        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
+
+        # Hand get_rope a bridged copy, not config.rope_parameters directly:
+        # _build_rope_parameters merges the top-level rope_theta + rope_scaling that
+        # Transformers v5 leaves out of config.rope_parameters (without it get_rope
+        # falls back to base=10000). partial_rotary_factor is set on this local copy
+        # so the shared config is not mutated.
+        rope_parameters = _build_rope_parameters(config)
+        rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
 
