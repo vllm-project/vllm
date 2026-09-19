@@ -176,6 +176,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        num_spec_override: int | None = None,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -225,6 +226,7 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    num_spec_override=num_spec_override,
                 )
         return num_blocks_to_allocate
 
@@ -280,6 +282,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        num_spec_override: int | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """Allocate new blocks for the request to give it at least `num_tokens`
         token slots.
@@ -298,16 +301,19 @@ class KVCacheCoordinator(ABC):
             The new allocated blocks.
 
         """
-        return tuple(
-            manager.allocate_new_blocks(
-                request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
-                num_tokens_main_model,
+        new_blocks = []
+        for manager in self.single_type_managers:
+            new_blocks.append(
+                manager.allocate_new_blocks(
+                    request_id,
+                    num_encoder_tokens
+                    if isinstance(manager, CrossAttentionManager)
+                    else num_tokens,
+                    num_tokens_main_model,
+                    num_spec_override=num_spec_override,
+                )
             )
-            for manager in self.single_type_managers
-        )
+        return tuple(new_blocks)
 
     def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
         """Positions a later request replaying this prompt can resume at.

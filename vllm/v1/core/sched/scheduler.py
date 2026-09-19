@@ -567,6 +567,30 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _get_step_spec_tokens(self) -> int:
+        """Select one speculative depth for the current scheduler step."""
+        if self.dynamic_sd_lookup is None or self.num_spec_tokens <= 0:
+            return self.num_spec_tokens
+        projected_batch_size = min(
+            self.max_num_running_reqs,
+            len(self.running) + len(self.waiting),
+        )
+        if projected_batch_size <= 0:
+            return self.num_spec_tokens
+        return self.dynamic_sd_lookup[
+            min(projected_batch_size, len(self.dynamic_sd_lookup) - 1)
+        ]
+
+    def _get_step_lookahead_tokens(self, step_spec_tokens: int) -> int:
+        """Match speculative lookahead allocation to the step-level K."""
+        if self.dynamic_sd_lookup is None:
+            return self.num_lookahead_tokens
+        if self.num_lookahead_tokens == self.num_spec_tokens + 1:
+            return step_spec_tokens + 1
+        if self.num_lookahead_tokens == self.num_spec_tokens:
+            return step_spec_tokens
+        return self.num_lookahead_tokens
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -591,6 +615,8 @@ class Scheduler(SchedulerInterface):
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         input_budget = self.scheduler_config.max_num_batched_tokens
+        step_spec_tokens = self._get_step_spec_tokens()
+        step_lookahead_tokens = self._get_step_lookahead_tokens(step_spec_tokens)
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -738,7 +764,8 @@ class Scheduler(SchedulerInterface):
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_lookahead_tokens=step_lookahead_tokens,
+                        num_spec_override=step_spec_tokens,
                     )
 
                     if new_blocks is not None:
@@ -1175,9 +1202,9 @@ class Scheduler(SchedulerInterface):
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
-                limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
+                limit_lookahead_tokens = load_kv_async and step_lookahead_tokens > 0
                 effective_lookahead_tokens = (
-                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
+                    0 if limit_lookahead_tokens else step_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -1213,6 +1240,7 @@ class Scheduler(SchedulerInterface):
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    num_spec_override=step_spec_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
@@ -1439,12 +1467,8 @@ class Scheduler(SchedulerInterface):
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
-        # Dynamic speculative decoding: compute optimal K
-        num_spec_tokens_to_schedule = self.num_spec_tokens
-        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
-            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
-            ]
+        # Reuse the step-level K selected before admission.
+        num_spec_tokens_to_schedule = step_spec_tokens
 
         scheduled_encoder_input_stats = None
         if (
