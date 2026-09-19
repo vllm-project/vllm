@@ -128,31 +128,40 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
 
-    def get_mapped_bytes(worker):
-        return mapped_usage(get_mem_allocator_instance())
+    def get_mapped_bytes_by_tag(worker):
+        allocator = get_mem_allocator_instance()
+        mapped_bytes = mapped_usage(allocator)
+        kv_cache_bytes = sum(
+            data.handle[1]
+            for data in allocator.pointer_to_data.values()
+            if data.tag == "kv_cache" and not data.is_asleep
+        )
+        return mapped_bytes, kv_cache_bytes
 
-    mapped_before = llm.collective_rpc(get_mapped_bytes)[0]
+    mapped_before, kv_cache_before = llm.collective_rpc(get_mapped_bytes_by_tag)[0]
     # Utility RPC transports the engine error as a plain Exception.
     with pytest.raises(Exception, match="requires a completed pause"):
         llm.release_kv_cache_memory()
-    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
+    assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == mapped_before
     assert not llm.llm_engine.is_sleeping()
     assert llm.generate(prompt, sampling_params)[0].outputs[0].token_ids == expected
 
     llm.sleep(level=0)
     llm.release_kv_cache_memory()
-    mapped_after = llm.collective_rpc(get_mapped_bytes)[0]
-    assert mapped_before - mapped_after >= kv_cache_memory_bytes * 0.99
+    mapped_after, kv_cache_after = llm.collective_rpc(get_mapped_bytes_by_tag)[0]
+    assert kv_cache_before > 0
+    assert kv_cache_after == 0
+    assert mapped_before - mapped_after >= kv_cache_before
     assert mapped_after > 0
     assert llm.llm_engine.is_sleeping()
 
     if full_sleep:
         llm.sleep(level=full_sleep)
-        assert llm.collective_rpc(get_mapped_bytes)[0] == 0
+        assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == 0
     llm.wake_up(tags=None if full_sleep else ["kv_cache"])
     if full_sleep == 2:
         llm.collective_rpc("reload_weights")
-    assert llm.collective_rpc(get_mapped_bytes)[0] == mapped_before
+    assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == mapped_before
     assert not llm.llm_engine.is_sleeping()
     actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
     assert actual == expected
