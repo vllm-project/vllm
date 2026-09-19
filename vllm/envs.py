@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
+    VLLM_GDN_BA_GEMV_MAX_TOKENS: int = 0
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1218,6 +1219,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "cuda",
         ["cuda", "triton"],
         case_sensitive=False,
+    ),
+    # Token count below which the Qwen GDN b/a projection uses FlashInfer's
+    # bf16 mm instead of cuBLAS. 0 disables; clamped to 32.
+    "VLLM_GDN_BA_GEMV_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_GDN_BA_GEMV_MAX_TOKENS", "0")
     ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
