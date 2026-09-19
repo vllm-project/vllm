@@ -1,28 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the SM100 GEMM-RS/AR kernel.
+"""Benchmark the SM100 GEMM-RS/AR kernel against the model's unfused path.
 
-All ranks must belong to one NVLink domain. For example, run a TP8 sweep over
-the Kimi-K3 projections with:
+The baseline is what a model runs without the fusion: the projection's own
+linear kernel followed by vLLM's collective (``sp_reduce_scatter`` for RS,
+``tensor_model_parallel_all_reduce`` for AR), with the collective backend
+chosen by vLLM's dispatch exactly as in serving.
 
-    torchrun --nproc-per-node=8 benchmarks/kernels/benchmark_gemm_rs_ar.py
+All ranks must belong to one NVLink domain. Run a TP8 sweep over the Kimi-K3
+projections with:
+
+    torchrun --nproc-per-node=8 -- benchmarks/kernels/benchmark_gemm_rs_ar.py
 
 or the DeepSeek-V4.1 MXFP8 ``wo_b`` projection at TP4 with:
 
-    torchrun --nproc-per-node=4 benchmarks/kernels/benchmark_gemm_rs_ar.py \
+    torchrun --nproc-per-node=4 -- benchmarks/kernels/benchmark_gemm_rs_ar.py \
         --model deepseek_v41 --backend flashinfer_cutedsl
 """
 
 import argparse
+import json
 import os
 import statistics
 from collections.abc import Callable
-from dataclasses import dataclass
 
-import pandas as pd
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
@@ -36,6 +39,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 # Per model: (hidden size N, global input widths K). Kimi-K3 lists the
 # shared-expert down-proj and attention O-proj; DeepSeek-V4.1 lists the
@@ -44,13 +48,6 @@ _MODEL_PROJECTIONS = {
     "kimi_k3": (7168, (6144, 12288)),
     "deepseek_v41": (5120, (8192,)),
 }
-
-
-@dataclass
-class Candidate:
-    name: str
-    runs: list[Callable[[], torch.Tensor]]
-    check_correctness: bool = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,74 +99,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--warmup-replays", type=int, default=5)
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--json", type=str, help="Also write the results here.")
     return parser.parse_args()
-
-
-def capture_graph(
-    op: Callable[[], torch.Tensor],
-    stream: torch.cuda.Stream,
-    cpu_group: dist.ProcessGroup,
-) -> tuple[torch.cuda.CUDAGraph, list[torch.Tensor | None]]:
-    result: list[torch.Tensor | None] = [None]
-    stream.wait_stream(torch.cuda.current_stream())
-    dist.barrier(group=cpu_group)
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            result[0] = op()
-    stream.synchronize()
-    dist.barrier(group=cpu_group)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        result[0] = op()
-    torch.cuda.current_stream().wait_stream(stream)
-    dist.barrier(group=cpu_group)
-    return graph, result
-
-
-def benchmark_graphs(
-    candidate_graphs: dict[str, list[torch.cuda.CUDAGraph]],
-    warmup_replays: int,
-    samples: int,
-    device_group: dist.ProcessGroup,
-    device_barrier: Callable[[], None],
-) -> dict[str, float]:
-    candidate_names = list(candidate_graphs)
-    for round_index in range(warmup_replays):
-        for candidate_index in range(len(candidate_names)):
-            candidate_id = (round_index + candidate_index) % len(candidate_names)
-            name = candidate_names[candidate_id]
-            graphs = candidate_graphs[name]
-            device_barrier()
-            graphs[round_index % len(graphs)].replay()
-    torch.accelerator.synchronize()
-
-    timings: dict[str, list[float]] = {name: [] for name in candidate_names}
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    for sample_index in range(samples):
-        for candidate_index in range(len(candidate_names)):
-            candidate_id = (sample_index + candidate_index) % len(candidate_names)
-            name = candidate_names[candidate_id]
-            graphs = candidate_graphs[name]
-            device_barrier()
-            start.record()
-            graphs[sample_index % len(graphs)].replay()
-            end.record()
-            end.synchronize()
-
-            elapsed = torch.tensor(
-                start.elapsed_time(end) * 1000,
-                dtype=torch.float64,
-                device=torch.accelerator.current_device_index(),
-            )
-            dist.all_reduce(elapsed, op=dist.ReduceOp.MAX, group=device_group)
-            timings[name].append(elapsed.item())
-    return {name: statistics.median(values) for name, values in timings.items()}
-
-
-def valid_rows(M: int, local_M: int, rank: int) -> int:
-    return min(max(M - rank * local_M, 0), local_M)
 
 
 def make_projection(
@@ -200,8 +131,7 @@ def make_projection(
             bias=False,
             params_dtype=weight.dtype,
             quant_config=quant_config,
-            # The unfused baseline wants the local partial, as under sequence
-            # parallel; the collective candidates reduce it themselves.
+            # The baseline reduces the local partial itself, like the models.
             reduce_results=False,
             return_bias=False,
         )
@@ -210,6 +140,67 @@ def make_projection(
     linear.weight = torch.nn.Parameter(weight, requires_grad=False)
     linear.quant_method.process_weights_after_loading(linear)
     return linear
+
+
+def capture_graph(
+    op: Callable[[], torch.Tensor],
+    stream: torch.cuda.Stream,
+    cpu_group: dist.ProcessGroup,
+) -> torch.cuda.CUDAGraph:
+    stream.wait_stream(torch.cuda.current_stream())
+    dist.barrier(group=cpu_group)
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            op()
+    stream.synchronize()
+    dist.barrier(group=cpu_group)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        op()
+    torch.cuda.current_stream().wait_stream(stream)
+    dist.barrier(group=cpu_group)
+    return graph
+
+
+def benchmark_graphs(
+    candidate_graphs: dict[str, list[torch.cuda.CUDAGraph]],
+    warmup_replays: int,
+    samples: int,
+    device_group: dist.ProcessGroup,
+    device_barrier: Callable[[], None],
+) -> dict[str, float]:
+    """Median over samples of the slowest rank's replay time, in us."""
+    names = list(candidate_graphs)
+    for round_index in range(warmup_replays):
+        for offset in range(len(names)):
+            name = names[(round_index + offset) % len(names)]
+            graphs = candidate_graphs[name]
+            device_barrier()
+            graphs[round_index % len(graphs)].replay()
+    torch.accelerator.synchronize()
+
+    timings: dict[str, list[float]] = {name: [] for name in names}
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    for sample_index in range(samples):
+        for offset in range(len(names)):
+            name = names[(sample_index + offset) % len(names)]
+            graphs = candidate_graphs[name]
+            device_barrier()
+            start.record()
+            graphs[sample_index % len(graphs)].replay()
+            end.record()
+            end.synchronize()
+
+            elapsed = torch.tensor(
+                start.elapsed_time(end) * 1000,
+                dtype=torch.float64,
+                device=torch.accelerator.current_device_index(),
+            )
+            dist.all_reduce(elapsed, op=dist.ReduceOp.MAX, group=device_group)
+            timings[name].append(elapsed.item())
+    return {name: statistics.median(values) for name, values in timings.items()}
 
 
 def benchmark_shape(
@@ -230,8 +221,7 @@ def benchmark_shape(
     world_size = dist.get_world_size(device_group)
     rank = dist.get_rank(device_group)
     device = torch.device("cuda", torch.accelerator.current_device_index())
-    padded_M = (M + world_size - 1) // world_size * world_size
-    local_M = padded_M // world_size
+    local_M = (M + world_size - 1) // world_size
 
     rng = torch.Generator(device=device)
     rng.manual_seed(1000 + rank * 10 + M + K)
@@ -249,263 +239,60 @@ def benchmark_shape(
         for _ in range(num_workspaces)
     ]
 
-    partial = torch.empty((padded_M, N), dtype=torch.bfloat16, device=device)
-    symm_partial = symm_mem.empty((padded_M, N), dtype=torch.bfloat16, device=device)
-    symm_partial_handle = symm_mem.rendezvous(symm_partial, device_group)
-    collective_inputs = [torch.empty_like(partial) for _ in range(num_workspaces)]
-    symm_collective_inputs = []
-    symm_collective_handles = []
-    for _ in range(num_workspaces):
-        collective_input = symm_mem.empty(
-            (padded_M, N),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        symm_collective_inputs.append(collective_input)
-        symm_collective_handles.append(
-            symm_mem.rendezvous(collective_input, device_group)
-        )
-    torch_output = torch.empty((local_M, N), dtype=torch.bfloat16, device=device)
-    symm_output = torch.empty_like(torch_output)
-    gemm_output = torch.empty((M, N), dtype=torch.bfloat16, device=device)
+    def unfused(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
+        if all_reduce:
+            return tensor_model_parallel_all_reduce(linear(x))
+        return sp_reduce_scatter(linear(x))
 
-    if padded_M > M:
-        partial[M:].zero_()
-        symm_partial[M:].zero_()
+    def fused(x: torch.Tensor, linear: RowParallelLinear) -> torch.Tensor:
+        return gemm_rs_ar.apply(x, linear)
 
-    def gemm_into(x: torch.Tensor, linear: RowParallelLinear, out: torch.Tensor):
-        # BF16 writes straight into the collective buffer; the MXFP8 kernels
-        # allocate their own output, so the baseline pays one extra copy, as
-        # the model's unfused path does before its collective.
-        if backend == "bf16":
-            torch.mm(x, linear.weight.T, out=out)
-        else:
-            out.copy_(linear(x))
+    candidates = {"vllm": unfused, "gemm_rs_ar": fused}
 
-    def make_torch_ring_ll_gemm_collective(
-        x: torch.Tensor, linear: RowParallelLinear
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            gemm_into(x, linear, partial[:M])
-            if all_reduce:
-                dist.all_reduce(partial, group=device_group)
-                return partial[:M]
-            dist.reduce_scatter_single(torch_output, partial, group=device_group)
-            return torch_output
-
-        return run
-
-    def make_torch_ldmc_gemm_collective(
-        x: torch.Tensor, linear: RowParallelLinear
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            gemm_into(x, linear, symm_partial[:M])
-            if all_reduce:
-                dist.all_reduce(symm_partial, group=device_group)
-                return symm_partial[:M]
-            dist.reduce_scatter_single(
-                symm_output,
-                symm_partial,
-                group=device_group,
-            )
-            return symm_output
-
-        return run
-
-    def make_vllm_gemm_collective(
-        x: torch.Tensor, linear: RowParallelLinear
-    ) -> Callable[[], torch.Tensor]:
-        # The model's unfused sequence-parallel path: the projection's own
-        # kernel followed by vLLM's reduce-scatter dispatch.
-        from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
-
-        def run() -> torch.Tensor:
-            if all_reduce:
-                return tensor_model_parallel_all_reduce(linear(x))
-            return sp_reduce_scatter(linear(x))
-
-        return run
-
-    def make_fused_gemm_collective(
-        x: torch.Tensor, linear: RowParallelLinear
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            return gemm_rs_ar.apply(x, linear)
-
-        return run
-
-    def make_torch_gemm(
-        x: torch.Tensor,
-        linear: RowParallelLinear,
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            gemm_into(x, linear, gemm_output)
-            return gemm_output
-
-        return run
-
-    def make_ring_ll_collective(
-        collective_input: torch.Tensor,
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            if all_reduce:
-                dist.all_reduce(collective_input, group=device_group)
-                return collective_input
-            dist.reduce_scatter_single(
-                torch_output, collective_input, group=device_group
-            )
-            return torch_output
-
-        return run
-
-    def make_ldmc_collective(
-        collective_input: torch.Tensor,
-    ) -> Callable[[], torch.Tensor]:
-        def run() -> torch.Tensor:
-            if all_reduce:
-                dist.all_reduce(collective_input, group=device_group)
-                return collective_input
-            dist.reduce_scatter_single(
-                symm_output, collective_input, group=device_group
-            )
-            return symm_output
-
-        return run
-
-    pairs = list(zip(inputs, projections))
-    candidates = (
-        Candidate(
-            "ring_ll_us",
-            [make_torch_ring_ll_gemm_collective(x, w) for x, w in pairs],
-        ),
-        Candidate(
-            "ldmc_us",
-            [make_torch_ldmc_gemm_collective(x, w) for x, w in pairs],
-        ),
-        Candidate(
-            "vllm_us",
-            [make_vllm_gemm_collective(x, w) for x, w in pairs],
-        ),
-        Candidate(
-            "gemm_rs_ar_us",
-            [make_fused_gemm_collective(x, w) for x, w in pairs],
-        ),
-        Candidate(
-            "torch_gemm_us",
-            [make_torch_gemm(x, w) for x, w in pairs],
-            check_correctness=False,
-        ),
-        Candidate(
-            "ring_ll_collective_us",
-            [make_ring_ll_collective(x) for x in collective_inputs],
-            check_correctness=False,
-        ),
-        Candidate(
-            "ldmc_collective_us",
-            [make_ldmc_collective(x) for x in symm_collective_inputs],
-            check_correctness=False,
-        ),
+    expected = unfused(inputs[0], projections[0])
+    actual = fused(inputs[0], projections[0])
+    torch.accelerator.synchronize(device)
+    rows = M if all_reduce else min(max(M - rank * local_M, 0), local_M)
+    torch.testing.assert_close(
+        actual[:rows], expected[:rows], rtol=5e-2, atol=4.0, msg=f"M={M}, K={K}"
     )
-
-    expected = candidates[0].runs[0]()
-    rows = M if all_reduce else valid_rows(M, local_M, rank)
-    for candidate in candidates[1:]:
-        if not candidate.check_correctness:
-            continue
-        actual = candidate.runs[0]()
-        torch.accelerator.synchronize(device)
-        label = f"{candidate.name} vs ring_ll at M={M}"
-        torch.testing.assert_close(
-            actual[:rows],
-            expected[:rows],
-            rtol=5e-2,
-            atol=4.0,
-            msg=lambda m, label=label: f"{label}: {m}",
-        )
 
     candidate_graphs = {}
-    graph_keepalive: list[object] = [symm_partial_handle, *symm_collective_handles]
-    for candidate in candidates:
+    keepalive: list[object] = []
+    for name, fn in candidates.items():
         stream = torch.cuda.Stream()
-        bundles = [capture_graph(run, stream, cpu_group) for run in candidate.runs]
-        candidate_graphs[candidate.name] = [graph for graph, _ in bundles]
-        graph_keepalive.extend(bundles)
-        graph_keepalive.append(stream)
+        candidate_graphs[name] = [
+            capture_graph(lambda x=x, w=w, fn=fn: fn(x, w), stream, cpu_group)
+            for x, w in zip(inputs, projections)
+        ]
+        keepalive.append(stream)
 
     times = benchmark_graphs(
-        candidate_graphs,
-        warmup_replays,
-        samples,
-        device_group,
-        device_barrier,
+        candidate_graphs, warmup_replays, samples, device_group, device_barrier
     )
-
-    best_nccl_us = min(times["ring_ll_collective_us"], times["ldmc_collective_us"])
     return {
         "mode": mode.upper(),
         "backend": backend,
         "M": M,
         "N": N,
         "K": K,
-        **times,
-        "best_nccl_us": best_nccl_us,
-        "speedup_vs_ring_ll": times["ring_ll_us"] / times["gemm_rs_ar_us"],
-        "speedup_vs_ldmc": times["ldmc_us"] / times["gemm_rs_ar_us"],
-        "speedup_vs_vllm": times["vllm_us"] / times["gemm_rs_ar_us"],
+        "vllm_us": times["vllm"],
+        "gemm_rs_ar_us": times["gemm_rs_ar"],
+        "latency_change": (times["gemm_rs_ar"] - times["vllm"]) / times["vllm"],
     }
 
 
 def print_results(results: list[dict[str, float | int | str]]) -> None:
-    results_df = pd.DataFrame(results)
-    collective = str(results_df["mode"].iloc[0])
-    end_to_end = (
-        results_df[
-            [
-                "M",
-                "N",
-                "K",
-                "ring_ll_us",
-                "ldmc_us",
-                "vllm_us",
-                "gemm_rs_ar_us",
-                "speedup_vs_ring_ll",
-                "speedup_vs_ldmc",
-                "speedup_vs_vllm",
-            ]
-        ]
-        .rename(
-            columns={
-                "ring_ll_us": f"Torch GEMM + NCCL {collective} (RING_LL) (us)",
-                "ldmc_us": f"Torch GEMM + NCCL {collective} (LDMC) (us)",
-                "vllm_us": f"vLLM linear + {collective} (us)",
-                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
-                "speedup_vs_ring_ll": "Speedup vs RING_LL",
-                "speedup_vs_ldmc": "Speedup vs LDMC",
-                "speedup_vs_vllm": "Speedup vs vLLM",
-            }
+    collective = results[0]["mode"]
+    backend = results[0]["backend"]
+    print(f"### GEMM-{collective} vs vLLM unfused path ({backend} weights)")
+    print(f"| M | N | K | vLLM (us) | GEMM-{collective} (us) | latency |")
+    print("|---:|---:|---:|---:|---:|---:|")
+    for r in results:
+        print(
+            f"| {r['M']} | {r['N']} | {r['K']} | {r['vllm_us']:.1f} | "
+            f"{r['gemm_rs_ar_us']:.1f} | {r['latency_change']:+.1%} |"
         )
-        .round(3)
-    )
-    components = (
-        results_df[["M", "N", "K", "torch_gemm_us", "best_nccl_us", "gemm_rs_ar_us"]]
-        .rename(
-            columns={
-                "torch_gemm_us": "Torch GEMM (us)",
-                "best_nccl_us": f"NCCL {collective} (best) (us)",
-                "gemm_rs_ar_us": f"GEMM-{collective} (us)",
-            }
-        )
-        .round(2)
-    )
-
-    print(f"### {collective} end-to-end latency")
-    print(end_to_end.to_markdown(index=False))
-    print(f"\n### {collective} component latency")
-    print(components.to_markdown(index=False))
-    print(
-        f"\nNCCL {collective} (best) is the faster of RING_LL and LDMC "
-        "for each shape.\n"
-    )
 
 
 def main() -> None:
@@ -530,10 +317,7 @@ def main() -> None:
         K_values = args.k
     k_alignment = 64 if args.backend == "bf16" else 128
     assert all(K % k_alignment == 0 for K in K_values)
-    # Reserve symmetric memory for the NCCL-managed benchmark allocations.
-    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-    # NCCL-managed symmetric allocations select the NVLS/LDMC collective path.
-    symm_mem.set_backend("NCCL")
+
     config = VllmConfig()
     config.model_config = ModelConfig(dtype="bfloat16")
     # Pin the online-MXFP8 kernel the projections quantize through.
@@ -541,11 +325,12 @@ def main() -> None:
         "auto" if args.backend == "bf16" else args.backend
     )
     with set_current_vllm_config(config):
+        # Builds the TP communicator as in serving, so the baseline's
+        # collective is whatever vLLM's dispatch selects (FlashInfer all-reduce
+        # first, then NCCL symmetric memory, custom all-reduce, pynccl).
         initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     tp_group = get_tp_group()
-    group_warmup = torch.zeros(1, device=torch.accelerator.current_device_index())
-    dist.all_reduce(group_warmup, group=tp_group.device_group)
     pynccl_comm = tp_group.device_communicator.pynccl_comm
     assert pynccl_comm is not None
     sync_input = torch.zeros(1, device=torch.accelerator.current_device_index())
@@ -584,6 +369,9 @@ def main() -> None:
 
     if tp_group.rank_in_group == 0:
         print_results(results)
+        if args.json:
+            with open(args.json, "w") as f:
+                json.dump(results, f, indent=2)
 
     dist.barrier(group=tp_group.cpu_group)
     cleanup_dist_env_and_memory()
