@@ -259,8 +259,14 @@ impl Stream for GenerateOutputStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let raw = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
             Some(Ok(raw)) => raw,
-            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-            None => return Poll::Ready(None),
+            Some(Err(error)) => {
+                self.request_metrics.flush_pending_itl();
+                return Poll::Ready(Some(Err(error.into())));
+            }
+            None => {
+                self.request_metrics.flush_pending_itl();
+                return Poll::Ready(None);
+            }
         };
 
         let received_at = current_unix_timestamp_secs();
@@ -281,6 +287,7 @@ impl Stream for GenerateOutputStream {
         if let Some(mask) = sampling_mask.as_ref()
             && mask.rows.len() != raw.new_token_ids.len()
         {
+            self.request_metrics.flush_pending_itl();
             return Poll::Ready(Some(Err(crate::Error::SamplingMaskTokenCountMismatch {
                 request_id: raw.request_id,
                 token_count: raw.new_token_ids.len(),
@@ -322,6 +329,7 @@ impl FusedStream for GenerateOutputStream {
 
 impl Drop for GenerateOutputStream {
     fn drop(&mut self) {
+        self.request_metrics.flush_pending_itl();
         if self.raw_stream.is_terminated() {
             // Already terminated cleanly, no need to record abort metrics.
             return;

@@ -206,6 +206,14 @@ fn request_metrics_model_name(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4().simple())
 }
 
+#[track_caller]
+fn assert_metric_line(rendered: &str, expected: &str) {
+    assert!(
+        rendered.lines().any(|line| line == expected),
+        "missing metric line: {expected}"
+    );
+}
+
 fn init_tracing() {
     TRACING.call_once(|| {
         let filter = EnvFilter::try_from_default_env()
@@ -427,6 +435,82 @@ async fn collect_output_rejects_partial_sampling_mask() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_mask_error_flushes_pending_itl_before_returning() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let model_name = request_metrics_model_name("metrics-mask-error");
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(0),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                for (timestamp, token) in [(10.0, 1), (10.5, 2)] {
+                    let mut output = request_output(&request.request_id, vec![token], None);
+                    if token == 2 {
+                        output.new_token_ids.push(3);
+                        output.new_sampling_mask =
+                            Some(MaybeWireSamplingMask::Direct(SamplingMask {
+                                rows: vec![vec![2, 3]],
+                            }));
+                    }
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            timestamp,
+                            outputs: vec![output],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+    let mut stream = llm.generate(sample_generate_request("req-mask-error", 3)).await.unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
+    let active = METRICS.render().unwrap();
+    for (metric, value) in [
+        ("inter_token_latency_seconds_count", "0"),
+        ("inter_token_latency_seconds_sum", "0.0"),
+        ("generation_tokens_total", "1"),
+    ] {
+        assert_metric_line(
+            &active,
+            &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"}} {value}"),
+        );
+    }
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap_err(),
+        Error::SamplingMaskTokenCountMismatch {
+            token_count: 2,
+            row_count: 1,
+            ..
+        }
+    ));
+    let after_error = METRICS.render().unwrap();
+    drop(stream);
+    for rendered in [after_error, METRICS.render().unwrap()] {
+        for (metric, value) in [
+            ("inter_token_latency_seconds_count", "1"),
+            ("inter_token_latency_seconds_sum", "0.5"),
+            ("generation_tokens_total", "3"),
+        ] {
+            assert_metric_line(
+                &rendered,
+                &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"}} {value}"),
+            );
+        }
+    }
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_propagates_unexpected_close_errors() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -441,6 +525,18 @@ async fn generate_propagates_unexpected_close_errors() {
                 assert_eq!(add[0].as_ref(), &[0x00]);
                 let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
 
+                for (timestamp, token) in [(10.0, 1), (10.5, 2)] {
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            timestamp,
+                            outputs: vec![request_output(&request.request_id, vec![token], None)],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
                 send_outputs(
                     push,
                     RequestBatchOutputs {
@@ -455,10 +551,24 @@ async fn generate_propagates_unexpected_close_errors() {
         },
     );
 
-    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let model_name = request_metrics_model_name("metrics-close-model");
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
     let mut stream = llm.generate(sample_generate_request("req-close", 1)).await.unwrap();
     let internal_id = stream.request_id().to_string();
 
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![2]);
+    let active = METRICS.render().unwrap();
+    for (metric, value) in [
+        ("inter_token_latency_seconds_count", "0"),
+        ("inter_token_latency_seconds_sum", "0.0"),
+        ("generation_tokens_total", "2"),
+    ] {
+        assert_metric_line(
+            &active,
+            &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"}} {value}"),
+        );
+    }
     let error = stream.next().await.unwrap().unwrap_err();
     assert!(matches!(
         error,
@@ -466,7 +576,20 @@ async fn generate_propagates_unexpected_close_errors() {
             request_id
         }) if request_id == internal_id
     ));
+    let after_error = METRICS.render().unwrap();
     assert!(stream.next().await.is_none());
+    drop(stream);
+    for rendered in [after_error, METRICS.render().unwrap()] {
+        for (metric, value) in [
+            ("inter_token_latency_seconds_count", "1"),
+            ("inter_token_latency_seconds_sum", "0.5"),
+        ] {
+            assert_metric_line(
+                &rendered,
+                &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"}} {value}"),
+            );
+        }
+    }
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -732,66 +855,311 @@ async fn abort_by_external_id_aborts_all_internal_requests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_records_request_metrics_in_prometheus_output() {
+    for (engine_finish, finish, finish_label, terminal_has_tokens) in [
+        (
+            EngineCoreFinishReason::Length,
+            FinishReason::Length,
+            "length",
+            false,
+        ),
+        (
+            EngineCoreFinishReason::Abort,
+            FinishReason::Abort,
+            "abort",
+            false,
+        ),
+        (
+            EngineCoreFinishReason::Error,
+            FinishReason::Error,
+            "error",
+            false,
+        ),
+        (
+            EngineCoreFinishReason::Length,
+            FinishReason::Length,
+            "length",
+            true,
+        ),
+    ] {
+        let ipc = IpcNamespace::new().unwrap();
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_id = EngineId::from_engine_index(4);
+        let case = format!("{finish_label}-terminal-tokens-{terminal_has_tokens}");
+        let model_name = request_metrics_model_name(&case);
+
+        let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+            handshake_address.clone(),
+            engine_id.clone(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 4,
+                            timestamp: 10.0,
+                            outputs: vec![EngineCoreOutput {
+                                prefill_stats: Some(PrefillStats {
+                                    num_prompt_tokens: 2,
+                                    num_computed_tokens: 2,
+                                    ..Default::default()
+                                }),
+                                ..request_output_with_events(
+                                    &request.request_id,
+                                    vec![1],
+                                    None,
+                                    Some(vec![
+                                        EngineCoreEvent {
+                                            r#type: EngineCoreEventType::Queued,
+                                            timestamp: 8.0,
+                                        },
+                                        EngineCoreEvent {
+                                            r#type: EngineCoreEventType::Scheduled,
+                                            timestamp: 9.0,
+                                        },
+                                    ]),
+                                )
+                            }],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            engine_index: 4,
+                            timestamp: 11.5,
+                            outputs: vec![request_output_with_events(
+                                &request.request_id,
+                                vec![2, 3],
+                                terminal_has_tokens.then_some(engine_finish),
+                                Some(vec![EngineCoreEvent {
+                                    r#type: EngineCoreEventType::Preempted,
+                                    timestamp: 10.5,
+                                }]),
+                            )],
+                            finished_requests: terminal_has_tokens
+                                .then(|| BTreeSet::from([request.request_id.clone()])),
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                    if !terminal_has_tokens {
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                engine_index: 4,
+                                timestamp: 12.0,
+                                outputs: vec![request_output(
+                                    &request.request_id,
+                                    vec![],
+                                    Some(engine_finish),
+                                )],
+                                finished_requests: Some(BTreeSet::from([request.request_id])),
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        );
+
+        let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+        let mut request = sample_generate_request("req-metrics", 8);
+        request.arrival_time = None;
+        let mut stream = llm.generate(request).await.unwrap();
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().token_ids,
+            vec![1],
+            "{case}"
+        );
+        if !terminal_has_tokens {
+            assert_eq!(
+                stream.next().await.unwrap().unwrap().token_ids,
+                vec![2, 3],
+                "{case}"
+            );
+        }
+        let active = METRICS.render().unwrap();
+        for (metric, value) in [
+            ("inter_token_latency_seconds_count", "0"),
+            ("inter_token_latency_seconds_sum", "0.0"),
+            (
+                "generation_tokens_total",
+                if terminal_has_tokens { "1" } else { "3" },
+            ),
+        ] {
+            assert_metric_line(
+                &active,
+                &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"4\"}} {value}"),
+            );
+        }
+        let final_output = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            final_output.token_ids,
+            if terminal_has_tokens {
+                vec![2, 3]
+            } else {
+                vec![]
+            },
+            "{case}"
+        );
+        assert_eq!(final_output.finish_reason, Some(finish), "{case}");
+
+        // The terminal output must publish ITL before any later poll or drop.
+        let after_terminal = METRICS.render().unwrap();
+        for (metric, value) in [
+            ("inter_token_latency_seconds_count", "1"),
+            ("inter_token_latency_seconds_sum", "1.5"),
+        ] {
+            assert_metric_line(
+                &after_terminal,
+                &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"4\"}} {value}"),
+            );
+        }
+        assert!(stream.next().await.is_none(), "{case}");
+
+        let before_drop = METRICS.render().unwrap();
+        drop(stream);
+        let rendered = METRICS.render().unwrap();
+        let model_lines = |text: &str| {
+            text.lines()
+                .filter(|line| line.contains(&model_name))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            model_lines(&before_drop),
+            model_lines(&after_terminal),
+            "{case}"
+        );
+        assert_eq!(model_lines(&rendered), model_lines(&before_drop), "{case}");
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"4\",finished_reason=\"{finish_label}\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!("vllm:prompt_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_compute\"}} 2"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_cache_hit\"}} 0"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"external_kv_transfer\"}} 0"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!("vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!("vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:inter_token_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_prompt_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_generation_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+        assert_metric_line(
+            &rendered,
+            &format!(
+                "vllm:request_prefill_kv_computed_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+            ),
+        );
+
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+        llm.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_token_only_completion_has_no_itl_observation() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = EngineId::from_engine_index(4);
-    let model_name = request_metrics_model_name("metrics-model");
-
+    let model_name = request_metrics_model_name("metrics-first-only-model");
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_id.clone(),
+        EngineId::from_engine_index(0),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
-                assert_eq!(add[0].as_ref(), &[0x00]);
                 let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-
                 send_outputs(
                     push,
                     RequestBatchOutputs {
-                        engine_index: 4,
                         timestamp: 10.0,
-                        outputs: vec![EngineCoreOutput {
-                            prefill_stats: Some(PrefillStats {
-                                num_prompt_tokens: 2,
-                                num_computed_tokens: 2,
-                                ..Default::default()
-                            }),
-                            ..request_output_with_events(
-                                &request.request_id,
-                                vec![1],
-                                None,
-                                Some(vec![
-                                    EngineCoreEvent {
-                                        r#type: EngineCoreEventType::Queued,
-                                        timestamp: 8.0,
-                                    },
-                                    EngineCoreEvent {
-                                        r#type: EngineCoreEventType::Scheduled,
-                                        timestamp: 9.0,
-                                    },
-                                ]),
-                            )
-                        }],
-                        ..Default::default()
-                    }
-                    .into(),
-                )
-                .await;
-
-                send_outputs(
-                    push,
-                    RequestBatchOutputs {
-                        engine_index: 4,
-                        timestamp: 11.5,
-                        outputs: vec![request_output_with_events(
+                        outputs: vec![request_output(
                             &request.request_id,
-                            vec![2, 3],
+                            vec![1],
                             Some(EngineCoreFinishReason::Length),
-                            Some(vec![EngineCoreEvent {
-                                r#type: EngineCoreEventType::Preempted,
-                                timestamp: 10.5,
-                            }]),
                         )],
                         finished_requests: Some(BTreeSet::from([request.request_id])),
                         ..Default::default()
@@ -802,68 +1170,25 @@ async fn generate_records_request_metrics_in_prometheus_output() {
             })
         },
     );
-
     let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
-    let mut request = sample_generate_request("req-metrics", 8);
-    request.arrival_time = None;
-    let mut stream = llm.generate(request).await.unwrap();
-
-    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
-    let final_output = stream.next().await.unwrap().unwrap();
-    assert_eq!(final_output.token_ids, vec![2, 3]);
-    assert_eq!(final_output.finish_reason, Some(FinishReason::Length));
+    let mut stream = llm.generate(sample_generate_request("first-only", 1)).await.unwrap();
+    let output = stream.next().await.unwrap().unwrap();
+    assert_eq!(output.token_ids, vec![1]);
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
-
+    drop(stream);
     let rendered = METRICS.render().unwrap();
-    assert!(rendered.contains(&format!(
-        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"4\",finished_reason=\"length\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_compute\"}} 2"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_cache_hit\"}} 0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"external_kv_transfer\"}} 0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:inter_token_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_prompt_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_generation_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_prefill_kv_computed_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
-    )));
-
+    for (metric, value) in [
+        ("generation_tokens_total", "1"),
+        ("time_to_first_token_seconds_count", "1"),
+        ("inter_token_latency_seconds_count", "0"),
+        ("inter_token_latency_seconds_sum", "0.0"),
+    ] {
+        assert_metric_line(
+            &rendered,
+            &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"}} {value}"),
+        );
+    }
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
@@ -913,6 +1238,18 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
                 )
                 .await;
 
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        engine_index: 5,
+                        timestamp: 10.5,
+                        outputs: vec![request_output(&request.request_id, vec![100], None)],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
                 let abort =
                     timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
                 assert_eq!(abort[0].as_ref(), &[0x01]);
@@ -927,23 +1264,59 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     request.arrival_time = None;
     let mut stream = llm.generate(request).await.unwrap();
     assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![99]);
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![100]);
+    let active = METRICS.render().unwrap();
+    for (metric, value) in [
+        ("inter_token_latency_seconds_count", "0"),
+        ("inter_token_latency_seconds_sum", "0.0"),
+        ("generation_tokens_total", "2"),
+    ] {
+        assert_metric_line(
+            &active,
+            &format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"5\"}} {value}"),
+        );
+    }
     drop(stream);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     let rendered = METRICS.render().unwrap();
-    assert!(rendered.contains(&format!(
-        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"5\",finished_reason=\"abort\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"5\"}} 0.0"
-    )));
-    assert!(rendered.contains(&format!(
-        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
-    )));
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:inter_token_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
+        ),
+    );
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:inter_token_latency_seconds_sum{{model_name=\"{model_name}\",engine=\"5\"}} 0.5"
+        ),
+    );
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"5\",finished_reason=\"abort\"}} 1"
+        ),
+    );
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
+        ),
+    );
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"5\"}} 0.0"
+        ),
+    );
+    assert_metric_line(
+        &rendered,
+        &format!(
+            "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
+        ),
+    );
 
     llm.shutdown().await.unwrap();
 }

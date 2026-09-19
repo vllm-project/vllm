@@ -13,10 +13,12 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
 mod api_server;
+mod itl;
 mod request;
 mod scheduler;
 
 pub use api_server::*;
+pub use itl::{InterTokenLatencyHistogram, InterTokenLatencyObservations};
 pub use request::*;
 pub use scheduler::*;
 

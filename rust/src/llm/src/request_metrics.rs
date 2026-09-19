@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::output::{
@@ -8,8 +9,8 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
-    EngineLabels, Family, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
-    U64Counter,
+    EngineLabels, Family, FinishedReasonLabels, HistogramMetric, InterTokenLatencyHistogram,
+    InterTokenLatencyObservations, METRICS, PromptTokenSourceLabels, U64Counter,
 };
 
 use crate::FinishReason;
@@ -17,8 +18,32 @@ use crate::FinishReason;
 const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
+const ITL_FLUSH_INTERVAL_ENV: &str = "VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS";
+const DEFAULT_ITL_FLUSH_INTERVAL_TOKENS: u32 = 32;
+static ITL_FLUSH_INTERVAL_TOKENS: LazyLock<u32> = LazyLock::new(|| {
+    let value = std::env::var_os(ITL_FLUSH_INTERVAL_ENV);
+    itl_flush_interval_tokens(value.as_ref().map(|value| value.to_string_lossy()).as_deref())
+});
+
+fn itl_flush_interval_tokens(value: Option<&str>) -> u32 {
+    match value {
+        None => DEFAULT_ITL_FLUSH_INTERVAL_TOKENS,
+        Some(value) => match value.parse::<u32>() {
+            Ok(interval) if interval > 0 => interval,
+            _ => {
+                tracing::warn!(
+                    value,
+                    "ignoring invalid {ITL_FLUSH_INTERVAL_ENV}; using {DEFAULT_ITL_FLUSH_INTERVAL_TOKENS}"
+                );
+                DEFAULT_ITL_FLUSH_INTERVAL_TOKENS
+            }
+        },
+    }
+}
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
+///
+/// Pending observations have one owner, so neither the tracker nor its accumulator is cloneable.
 ///
 /// This is the Rust-side counterpart of the Python frontend's request-lifecycle
 /// bookkeeping, centered on `RequestStateStats` and the per-output/per-finished
@@ -29,10 +54,12 @@ const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 ///
 /// Original Python update flow:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/engine/output_processor.py#L600-L677>
-#[derive(Clone)]
 pub(crate) struct RequestMetricsTracker {
     /// Cached request metric handles for this request's model and engine index.
     handles: RequestMetricHandles,
+    pending_itl: InterTokenLatencyObservations,
+    itl_flush_interval_tokens: u32,
+    last_itl_flush_token_count: u32,
 
     arrival_time: f64,
     prompt_len: u32,
@@ -73,7 +100,7 @@ struct RequestMetricHandles {
     request_num_preemptions: HistogramMetric,
     request_prefill_kv_computed_tokens: HistogramMetric,
     time_to_first_token_seconds: HistogramMetric,
-    inter_token_latency_seconds: HistogramMetric,
+    inter_token_latency_seconds: InterTokenLatencyHistogram,
     e2e_request_latency_seconds: HistogramMetric,
     request_queue_time_seconds: HistogramMetric,
     request_prefill_time_seconds: HistogramMetric,
@@ -95,6 +122,9 @@ impl RequestMetricsTracker {
     ) -> Self {
         Self {
             handles: resolve_request_metric_handles(&model_name, engine_index),
+            pending_itl: InterTokenLatencyObservations::default(),
+            itl_flush_interval_tokens: *ITL_FLUSH_INTERVAL_TOKENS,
+            last_itl_flush_token_count: 0,
             arrival_time,
             prompt_len,
             max_tokens_param,
@@ -145,12 +175,15 @@ impl RequestMetricsTracker {
                 self.first_token_ts = batch_timestamp;
                 self.is_prefilling = false;
             } else if self.last_token_ts > 0.0 {
-                self.handles
-                    .inter_token_latency_seconds
-                    .observe(batch_timestamp - self.last_token_ts);
+                self.pending_itl.observe(batch_timestamp - self.last_token_ts);
             }
 
             self.last_token_ts = batch_timestamp;
+            if self.num_generation_tokens - self.last_itl_flush_token_count
+                >= self.itl_flush_interval_tokens
+            {
+                self.flush_pending_itl();
+            }
         }
     }
 
@@ -159,7 +192,8 @@ impl RequestMetricsTracker {
     ///
     /// Original Python finished-request stats:
     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L222-L237>
-    pub(crate) fn record_finished(&self, received_at: f64, finish_reason: FinishReason) {
+    pub(crate) fn record_finished(&mut self, received_at: f64, finish_reason: FinishReason) {
+        self.flush_pending_itl();
         let prefill_kv_computed_tokens =
             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
@@ -199,6 +233,11 @@ impl RequestMetricsTracker {
         self.handles
             .request_time_per_output_token_seconds
             .observe(time_per_output_token_seconds);
+    }
+
+    pub(crate) fn flush_pending_itl(&mut self) {
+        self.handles.inter_token_latency_seconds.flush(&mut self.pending_itl);
+        self.last_itl_flush_token_count = self.num_generation_tokens;
     }
 
     /// Record prompt token counters through cached metric handles.
@@ -348,10 +387,108 @@ pub fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
 
-    use super::{RequestMetricsTracker, diff_or_zero};
+    use super::{
+        DEFAULT_ITL_FLUSH_INTERVAL_TOKENS, RequestMetricsTracker, diff_or_zero,
+        itl_flush_interval_tokens,
+    };
+
+    fn observe_tokens(tracker: &mut RequestMetricsTracker, timestamp: f64, count: usize) {
+        tracker.observe_output(
+            timestamp,
+            timestamp + 100.0,
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
+                new_token_ids: vec![1; count],
+                ..Default::default()
+            },
+        );
+    }
+
+    fn published_itl(tracker: &RequestMetricsTracker) -> (u64, f64) {
+        let labels = &tracker.handles.labels;
+        let rendered = vllm_metrics::METRICS.render().unwrap();
+        let value = |suffix: &str| {
+            let prefix = format!(
+                "vllm:inter_token_latency_seconds_{suffix}{{model_name=\"{}\",engine=\"{}\"}} ",
+                labels.model_name, labels.engine,
+            );
+            rendered.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap()
+        };
+        (
+            value("count").parse().unwrap(),
+            value("sum").parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn itl_interval_defaults_to_32_and_accepts_only_positive_integers() {
+        assert_eq!(itl_flush_interval_tokens(None), 32);
+        for value in ["", "0", "-1", "invalid", "4294967296"] {
+            assert_eq!(itl_flush_interval_tokens(Some(value)), 32);
+        }
+        for value in [1, 16, 32, u32::MAX] {
+            assert_eq!(itl_flush_interval_tokens(Some(&value.to_string())), value);
+        }
+    }
+
+    #[test]
+    fn token_intervals_publish_itl_while_active_and_finish_flushes_the_tail() {
+        let model_name = format!("itl-token-interval-{}", Uuid::new_v4().simple());
+        let mut tracker = RequestMetricsTracker::new(model_name, 0, 100.0, 1, Some(65), 1);
+        tracker.itl_flush_interval_tokens = DEFAULT_ITL_FLUSH_INTERVAL_TOKENS;
+        for tokens in 1_u32..=65 {
+            observe_tokens(&mut tracker, 10.0 + f64::from(tokens) * 0.5, 1);
+            if let Some((_, observations)) = [(31, 0), (32, 31), (63, 31), (64, 63), (65, 63)]
+                .into_iter()
+                .find(|(at, _)| *at == tokens)
+            {
+                assert_eq!(
+                    published_itl(&tracker),
+                    (observations, observations as f64 * 0.5)
+                );
+                assert_eq!(tracker.handles.generation_tokens.get(), u64::from(tokens));
+            }
+        }
+        tracker.record_finished(150.0, crate::FinishReason::Length);
+        assert_eq!(published_itl(&tracker), (64, 32.0));
+        tracker.flush_pending_itl();
+        assert_eq!(published_itl(&tracker), (64, 32.0));
+    }
+
+    #[test]
+    fn token_flushes_are_per_request_and_preserve_multi_token_observations() {
+        let model_name = format!("itl-chunks-{}", Uuid::new_v4().simple());
+        let mut a = RequestMetricsTracker::new(model_name.clone(), 0, 100.0, 1, None, 1);
+        let mut b = RequestMetricsTracker::new(model_name, 0, 100.0, 1, None, 1);
+        a.itl_flush_interval_tokens = 32;
+        b.itl_flush_interval_tokens = 32;
+        observe_tokens(&mut a, 10.0, 16);
+        observe_tokens(&mut b, 10.0, 16);
+        observe_tokens(&mut a, 10.5, 14);
+        observe_tokens(&mut b, 10.5, 15);
+        assert_eq!(published_itl(&a), (0, 0.0));
+        observe_tokens(&mut a, 11.0, 2);
+        assert_eq!(published_itl(&a), (2, 1.0));
+        observe_tokens(&mut b, 11.0, 1);
+        assert_eq!(published_itl(&a), (4, 2.0));
+
+        // One oversized update produces one observation and restarts the interval.
+        observe_tokens(&mut a, 11.5, 65);
+        assert_eq!(published_itl(&a), (5, 2.5));
+        observe_tokens(&mut a, 12.0, 31);
+        observe_tokens(&mut a, 12.5, 0);
+        assert_eq!(published_itl(&a), (5, 2.5));
+        observe_tokens(&mut a, 13.0, 1);
+        assert_eq!(published_itl(&a), (7, 4.0));
+
+        // An interval of one flushes each subsequent token update.
+        b.itl_flush_interval_tokens = 1;
+        observe_tokens(&mut b, 14.0, 1);
+        assert_eq!(published_itl(&b), (8, 7.0));
+    }
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {

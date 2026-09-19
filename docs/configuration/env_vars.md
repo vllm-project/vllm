@@ -10,3 +10,21 @@ vLLM uses the following environment variables to configure the system:
 ```python
 --8<-- "vllm/envs.py:env-vars-definition"
 ```
+
+## Rust frontend
+
+`VLLM_RS_ITL_FLUSH_INTERVAL_TOKENS` controls how often the Rust frontend publishes
+pending inter-token latency (ITL) observations. The default is **32 generated
+tokens per request**. The Rust frontend reads this setting directly; it does not
+configure the Python frontend.
+
+The value must be a positive `u32` integer (1 through 4294967295). An unset value
+uses 32; an invalid value logs a warning and falls back to 32. The setting is read
+once, when the first request creates its metrics tracker. Set it before starting
+the frontend.
+
+Use `1` to publish on each eligible output update. The frontend also flushes
+pending observations when a stream ends. Token-based flushing provides no
+wall-clock bound on publication delay during stalls. See
+[Rust frontend ITL publication](../design/metrics.md#rust-frontend-itl-publication)
+for termination behavior and the effect on metric visibility.

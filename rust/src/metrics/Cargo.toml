@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 itertools.workspace = true
+parking_lot.workspace = true
 prometheus-client.workspace = true
 
 [lints]

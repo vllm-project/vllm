@@ -6,13 +6,13 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{EngineLabels, HistogramFamily, U64Counter};
+use crate::{EngineLabels, HistogramFamily, InterTokenLatencyHistogram, U64Counter};
 
 const TTFT_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
     20.0, 40.0, 80.0, 160.0, 640.0, 2560.0,
 ];
-const ITL_BUCKETS: [f64; 19] = [
+pub(crate) const ITL_BUCKETS: [f64; 19] = [
     0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0,
     40.0, 80.0,
 ];
@@ -47,10 +47,6 @@ fn build_1_2_5_buckets(max_value: u32) -> Vec<f64> {
 
 fn time_to_first_token_histogram() -> Histogram {
     Histogram::new(TTFT_BUCKETS.iter().copied())
-}
-
-fn inter_token_latency_histogram() -> Histogram {
-    Histogram::new(ITL_BUCKETS.iter().copied())
 }
 
 fn request_time_per_output_token_histogram() -> Histogram {
@@ -118,7 +114,7 @@ pub struct RequestMetrics {
     pub request_num_preemptions: HistogramFamily,
     pub request_prefill_kv_computed_tokens: HistogramFamily,
     pub time_to_first_token_seconds: HistogramFamily,
-    pub inter_token_latency_seconds: HistogramFamily,
+    pub inter_token_latency_seconds: Family<EngineLabels, InterTokenLatencyHistogram>,
     pub e2e_request_latency_seconds: HistogramFamily,
     pub request_queue_time_seconds: HistogramFamily,
     pub request_prefill_time_seconds: HistogramFamily,
@@ -246,8 +242,7 @@ impl RequestMetrics {
             time_to_first_token_seconds.clone(),
         );
 
-        let inter_token_latency_seconds =
-            Family::new_with_constructor(inter_token_latency_histogram as fn() -> Histogram);
+        let inter_token_latency_seconds = Family::default();
         registry.register(
             "vllm:inter_token_latency_seconds",
             "Histogram of inter-token latency in seconds.",
