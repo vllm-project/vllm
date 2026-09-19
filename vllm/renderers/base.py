@@ -35,6 +35,7 @@ from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
+    ProcessorBatchItems,
     parse_mm_uuids,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
@@ -806,7 +807,13 @@ class BaseRenderer(ABC, Generic[_T]):
                         f"got {len(uuid_items)} vs {len(data_items)}."
                     )
 
-                for i, item in enumerate(data_items):
+                for i in range(len(data_items)):
+                    # Only None-ness is checked here; use the raw item so that
+                    # unwrapping a LazyMedia does not trigger its decode.
+                    if isinstance(data_items, ProcessorBatchItems):
+                        item = data_items.get_raw(i)
+                    else:
+                        item = data_items[i]
                     if item is None and uuid_items[i] is None:
                         raise ValueError(
                             f"multi_modal_data[{modality!r}][{i}] is empty but "

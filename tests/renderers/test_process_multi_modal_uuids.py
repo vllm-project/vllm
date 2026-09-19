@@ -219,3 +219,29 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     )
 
     assert processed_mm_uuids == expected
+
+
+def test_validate_mm_uuids_does_not_decode_lazy_media():
+    """UUID validation only checks None-ness, so it must not unwrap lazy
+    items (unwrapping would decode every item on the single _mm_executor
+    worker, defeating cache-hit-skips-decode)."""
+    from vllm.multimodal.media import LazyMedia
+
+    renderer = _build_renderer()
+
+    decoder_calls = 0
+
+    def decode():
+        nonlocal decoder_calls
+        decoder_calls += 1
+        return baby_reading_np_ndarrays
+
+    mm_data = {"video": [LazyMedia(decode, b"video-bytes")]}
+
+    mm_processor = renderer.get_mm_processor()
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids({"video": [None]})
+
+    renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-lazy")
+
+    assert decoder_calls == 0
