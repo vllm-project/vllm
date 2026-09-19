@@ -284,6 +284,12 @@ class KVConnectorOutput:
     # Receive failures keyed by request identity. This remains unambiguous for
     # hybrid/multi-pool cache layouts where numeric block IDs overlap.
     failed_recving: set[str] = field(default_factory=set)
+    # Destination block IDs that may contain incomplete data, keyed first by
+    # request and then by KV cache group. Connectors that can retain this
+    # information let the scheduler preserve the valid prefix of an HMA load.
+    failed_recving_block_ids: dict[str, tuple[set[int], ...]] = field(
+        default_factory=dict
+    )
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -299,6 +305,7 @@ class KVConnectorOutput:
             and not self.kv_cache_events
             and not self.invalid_block_ids
             and not self.failed_recving
+            and not self.failed_recving_block_ids
             and not self.kv_connector_worker_meta
         )
 

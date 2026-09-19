@@ -496,6 +496,7 @@ def test_worker_failed_recv_reports_request_level_failure_with_hma():
     assert worker.get_block_ids_with_load_errors() == set()
     results = worker.get_transfer_results()
     assert results.failed_recving == {"d-req-1"}
+    assert results.failed_recving_block_ids == {"d-req-1": ({1, 2}, {3, 4})}
     assert results.finished_recving == {"d-req-1"}
 
 
@@ -510,4 +511,5 @@ def test_worker_failed_recv_reports_block_ids_without_hma():
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3, 4}
     results = worker.get_transfer_results()
     assert results.failed_recving == set()
+    assert results.failed_recving_block_ids == {}
     assert results.finished_recving == {"d-req-1"}

@@ -2938,6 +2938,11 @@ def test_handshake_failure_reports_only_awaited_recvs(
     results = worker.get_transfer_results()
     expected = {"request"} if awaiting_kvs else set()
     assert results.finished_recving == results.failed_recving == expected
+    assert results.failed_recving_block_ids == (
+        {"request": tuple(set(group) for group in local_block_ids)}
+        if awaiting_kvs and is_hma
+        else {}
+    )
     assert worker.get_block_ids_with_load_errors() == (
         set(local_block_ids[0]) if awaiting_kvs and not is_hma else set()
     )

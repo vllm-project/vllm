@@ -16,6 +16,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         finished_recving: set[str] | None = None,
         invalid_block_ids: set[int] | None = None,
         failed_recving: set[str] | None = None,
+        failed_recving_block_ids: dict[str, tuple[set[int], ...]] | None = None,
         expected_finished_count: int = 0,
     ):
         self.kv_connector_output = KVConnectorOutput(
@@ -23,6 +24,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
             failed_recving=failed_recving or set(),
+            failed_recving_block_ids=failed_recving_block_ids or {},
             expected_finished_count=expected_finished_count,
         )
 
@@ -78,6 +80,7 @@ def test_aggregate_workers_output():
         finished_recving={"req2"},
         invalid_block_ids={4, 5},
         failed_recving={"req3"},
+        failed_recving_block_ids={"req3": ({7}, {11})},
     )
 
     aggregated = aggregator.aggregate([output1, output2])
@@ -88,11 +91,18 @@ def test_aggregate_workers_output():
     assert aggregated.finished_recving == {"req2"}
     assert aggregated.invalid_block_ids == {3, 4, 5}
     assert not aggregated.failed_recving
+    assert not aggregated.failed_recving_block_ids
 
-    output1 = DummyModelRunnerOutput(finished_recving={"req3"})
+    output1 = DummyModelRunnerOutput(
+        finished_recving={"req3"},
+        failed_recving_block_ids={"req3": ({8}, {11, 12})},
+    )
     output2 = DummyModelRunnerOutput(finished_recving={"req3"})
     aggregated = aggregator.aggregate([output1, output2])
     assert aggregated.kv_connector_output.failed_recving == {"req3"}
+    assert aggregated.kv_connector_output.failed_recving_block_ids == {
+        "req3": ({7, 8}, {11, 12})
+    }
 
 
 def test_aggregate_workers_output_with_expected_finished_count():
@@ -130,3 +140,20 @@ def test_aggregate_workers_output_with_expected_finished_count():
     # NOTE: This is to showcase dynamic update. Workers are responsible for
     # ensuring "req1" termination in this case
     assert aggregator._send_remaining_count["req1"] == 2
+
+
+def test_failed_group_count_mismatch_falls_back_to_request_scope():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    output1 = DummyModelRunnerOutput(
+        finished_recving={"req"},
+        failed_recving_block_ids={"req": ({1}, {2})},
+    )
+    output2 = DummyModelRunnerOutput(
+        finished_recving={"req"},
+        failed_recving_block_ids={"req": ({3},)},
+    )
+
+    aggregated = aggregator.aggregate([output1, output2]).kv_connector_output
+
+    assert aggregated.failed_recving == {"req"}
+    assert aggregated.failed_recving_block_ids == {"req": ()}

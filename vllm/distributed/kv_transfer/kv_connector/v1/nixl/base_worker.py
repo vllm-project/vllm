@@ -2849,6 +2849,7 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
+        failed_recving_block_ids: dict[ReqId, tuple[set[int], ...]] = {}
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -2857,8 +2858,11 @@ class NixlBaseConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
-                # TODO (NickLucche) handle failed transfer for HMA.
-                if not self._is_hma_required:
+                if self._is_hma_required:
+                    failed_recving_block_ids[req_id] = tuple(
+                        set(group) for group in meta.local_block_ids
+                    )
+                else:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
@@ -2953,6 +2957,7 @@ class NixlBaseConnectorWorker:
             finished_sending=done_sending,
             finished_recving=done_recving,
             failed_recving=failed_recv_reqs,
+            failed_recving_block_ids=failed_recving_block_ids,
         )
 
     def get_finished(self) -> tuple[set[str], set[str]]:

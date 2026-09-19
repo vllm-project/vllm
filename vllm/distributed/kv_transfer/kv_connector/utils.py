@@ -15,6 +15,9 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    merge_failed_recving_block_ids,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -59,6 +62,7 @@ class KVOutputAggregator:
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
+        self._failed_recving_block_ids_pending = dict[str, tuple[set[int], ...]]()
         self._expected_finished_count = expected_finished_count
 
     @classmethod
@@ -156,9 +160,19 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
             self._failed_recving_pending |= kv_output.failed_recving
+            failed_blocks = kv_output.failed_recving_block_ids
+            self._failed_recving_pending.update(failed_blocks)
+            merge_failed_recving_block_ids(
+                self._failed_recving_block_ids_pending, failed_blocks
+            )
 
         failed_recving = self._failed_recving_pending & finished_recving
         self._failed_recving_pending -= failed_recving
+        failed_recving_block_ids = {
+            req_id: self._failed_recving_block_ids_pending.pop(req_id)
+            for req_id in failed_recving
+            if req_id in self._failed_recving_block_ids_pending
+        }
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -172,6 +186,7 @@ class KVOutputAggregator:
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
+            failed_recving_block_ids=failed_recving_block_ids,
             expected_finished_count=self._expected_finished_count,
         )
 
