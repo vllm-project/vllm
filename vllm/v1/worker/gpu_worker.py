@@ -3,6 +3,7 @@
 """A GPU worker class."""
 
 import gc
+import hashlib
 import os
 import time
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_ep_group,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
@@ -93,7 +95,10 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    _iter_checksum_targets,
+    is_residual_scattered_for_sp,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -112,6 +117,21 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
         if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
         else 1
     )
+
+
+def _fill_random_inplace_(tensor: torch.Tensor) -> None:
+    """Fill ``tensor`` with random values without a same-sized temporary."""
+    if tensor.is_floating_point():
+        values = torch.rand_like(tensor, dtype=torch.float32).to(tensor.dtype)
+    else:
+        values = torch.randint(
+            0,
+            2,
+            tensor.shape,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    tensor.copy_(values)
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -312,6 +332,57 @@ class Worker(WorkerBase):
 
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        """Return SHA-256 hex digests for every named parameter AND buffer.
+
+        Copies each tensor to CPU before hashing so the result is the same
+        regardless of which GPU the worker is on.  Non-persistent buffers
+        (RoPE sin/cos caches recomputed from config) are skipped because they
+        vary across restarts even when weights are unchanged.
+        """
+
+        dp_rank = self.parallel_config.data_parallel_rank
+        pcp_rank = get_pcp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        ep_rank = (
+            get_ep_group().rank_in_group if self.vllm_config.model_config.is_moe else 0
+        )
+
+        checksums: dict[str, str] = {}
+
+        for name, tensor in _iter_checksum_targets(self.model_runner.model):
+            raw = (
+                tensor.data.contiguous()
+                .reshape(-1)
+                .cpu()
+                .view(torch.uint8)
+                .numpy()
+                .tobytes()
+            )
+            key = (
+                f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:ep{ep_rank}:{name}"
+            )
+            checksums[key] = hashlib.sha256(raw).hexdigest()
+        return checksums
+
+    def reset_weights(self) -> None:
+        """Randomize exactly the tensors covered by compute_weight_checksums."""
+        for _, tensor in _iter_checksum_targets(self.model_runner.model):
+            # Chunk so the float32 staging buffer stays bounded for large weights.
+            if tensor.numel() == 0:
+                continue
+            if tensor.is_contiguous():
+                chunks = tensor.data.view(-1).split(64 * 1024 * 1024)
+            elif tensor.ndim == 0:
+                chunks = (tensor.data,)
+            else:
+                row_numel = tensor[0].numel()
+                rows_per_chunk = max(1, (64 * 1024 * 1024) // row_numel)
+                chunks = tensor.data.split(rows_per_chunk, dim=0)
+            for chunk in chunks:
+                _fill_random_inplace_(chunk)
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

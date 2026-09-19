@@ -23,6 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.utils import combine_weight_checksums
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
@@ -397,6 +398,17 @@ class Executor(ABC):
             time_after_discard - time_before_discard,
             tags_to_discard,
         )
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        """Return SHA-256 digests for all checksum-covered tensors across workers."""
+        return combine_weight_checksums(
+            self.collective_rpc("compute_weight_checksums")
+        )
+
+    def reset_weights(self) -> None:
+        """Overwrite all weight-bearing tensors with random values on every
+        distributed worker (mirrors compute_weight_checksums coverage)."""
+        self.collective_rpc("reset_weights")
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

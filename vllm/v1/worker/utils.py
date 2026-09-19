@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -54,6 +55,65 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         if num_nans > 0
     }
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+
+
+def combine_weight_checksums(per_worker: list[dict[str, str]]) -> dict[str, str]:
+    """Merge per-worker checksum maps into one rank-qualified map.
+
+    Worker keys carry their parallel ranks, so the same logical weight appears
+    once per shard. An overlapping key means a worker failed to qualify it.
+
+    Raises:
+        RuntimeError: If two workers report the same key.
+    """
+    combined: dict[str, str] = {}
+    for worker_checksums in per_worker:
+        duplicate_keys = combined.keys() & worker_checksums.keys()
+        if duplicate_keys:
+            duplicates = ", ".join(sorted(duplicate_keys))
+            raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
+        combined.update(worker_checksums)
+    return combined
+
+
+def _iter_checksum_targets(model: nn.Module):
+    """Yield (name, tensor) for persistent weights: all parameters plus
+    persistent buffers (quantizers/adapters sometimes store weights there)."""
+    non_persistent_buffer_patterns = (
+        "cos_cached",
+        "sin_cached",
+        "cos_sin_cache",
+        "inv_freq",
+        "freqs_cis",
+    )
+    supported_dtypes = {
+        torch.bool,
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+
+    for name, tensor in model.named_parameters():
+        if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
+            continue
+        yield name, tensor
+
+    seen_buffers: set[int] = set()
+    for module_name, module in model.named_modules():
+        for buffer_name, tensor in module.named_buffers(recurse=False):
+            if id(tensor) in seen_buffers:
+                continue
+            seen_buffers.add(id(tensor))
+            if buffer_name in module._non_persistent_buffers_set:
+                continue
+            name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+            if any(pattern in name for pattern in non_persistent_buffer_patterns):
+                continue
+            if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
+                continue
+            yield name, tensor
 
 
 @triton.jit
