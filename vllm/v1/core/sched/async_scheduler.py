@@ -16,6 +16,11 @@ class AsyncScheduler(Scheduler):
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
         self.pp_size = self.parallel_config.pipeline_parallel_size
 
+    def _get_max_num_scheduled_decodes(self) -> int:
+        if not self.use_v2_model_runner or not self.use_pp:
+            return self.max_num_running_reqs
+        return (self.max_num_running_reqs + self.pp_size - 1) // self.pp_size
+
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
