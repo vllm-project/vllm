@@ -259,6 +259,49 @@ def test_cutlass_fp8_blockwise_scale_gemm(
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 
+# The SM120 blockwise caller dispatches swap_ab when M <= 64, so cover both
+# sides of that boundary in addition to a small odd M.
+@pytest.mark.parametrize("m", [3, 64, 128])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "pad_a,pad_b,pad_out",
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, True, True),
+    ],
+    ids=["packed", "padded-a", "padded-b", "padded-out", "padded-all"],
+)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="The blockwise leading-stride fix is specific to the SM120 caller.",
+)
+def test_cutlass_fp8_sm120_blockwise_strided_subsets(
+    m: int, out_dtype: torch.dtype, pad_a: bool, pad_b: bool, pad_out: bool
+):
+    """Padded operands must match packed GEMM without overwriting output padding."""
+    torch.manual_seed(0)
+    n, k, padding = 384, 256, 128
+    a = to_fp8(torch.randn((m, k + padding * pad_a), device="cuda"))[:, :k]
+    b = to_fp8(torch.randn((n, k + padding * pad_b), device="cuda")).t()[:k, :]
+    scale_a = torch.rand((k // 128, m), device="cuda").t()
+    scale_b = torch.rand((n // 128, k // 128), device="cuda").t()
+    output_storage = torch.full(
+        (m, n + padding * pad_out), -123.0, device="cuda", dtype=out_dtype
+    )
+    out = output_storage[:, :n]
+    reference = ops.cutlass_scaled_mm(
+        a.contiguous(), b.t().contiguous().t(), scale_a, scale_b, out_dtype
+    )
+
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+
+    torch.testing.assert_close(out, reference, rtol=0, atol=0)
+    assert torch.all(output_storage[:, n:] == -123.0)
+
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
