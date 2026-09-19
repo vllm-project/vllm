@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
@@ -133,6 +134,42 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        if self.allow_bf16x3_router_gemm:
+            from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+                _BF16X3_ROUTER_GEMM_KERNEL,
+                _BF16X3_SPLITK_REDUCE_KERNEL,
+            )
+
+            vllm_config = get_current_vllm_config()
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            num_sms = current_platform.num_compute_units()
+            _BF16X3_ROUTER_GEMM_KERNEL.register_warmup(
+                K=input_size,
+                M=output_size,
+                num_sms=num_sms,
+                max_tokens=max_tokens,
+            )
+            _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup(
+                M=output_size,
+                K=input_size,
+                max_tokens=max_tokens,
+            )
+
+        if self.allow_ll_bf16_gemm:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                _LL_BF16_GEMM_C1_PDL_KERNEL,
+                _LL_BF16_GEMM_KERNEL,
+            )
+
+            _LL_BF16_GEMM_C1_PDL_KERNEL.register_warmup(
+                shapes=((input_size, output_size),),
+                m_values=(1,),
+            )
+            _LL_BF16_GEMM_KERNEL.register_warmup(
+                shapes=((input_size, output_size),),
+                m_values=range(2, 17),
+            )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -161,6 +198,21 @@ class GateLinear(ReplicatedLinear):
                 and out_dtype == torch.float32
                 and is_available()
             )
+            if self.allow_ll_bf16_gemm:
+                from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                    _LL_BF16_GEMM_C1_PDL_KERNEL,
+                    _LL_BF16_GEMM_KERNEL,
+                )
+
+                shapes = ((self.weight.shape[1], self.weight.shape[0]),)
+                _LL_BF16_GEMM_C1_PDL_KERNEL.register_warmup(
+                    shapes=shapes,
+                    m_values=(1,),
+                )
+                _LL_BF16_GEMM_KERNEL.register_warmup(
+                    shapes=shapes,
+                    m_values=range(2, 17),
+                )
 
     def forward(
         self, x: torch.Tensor
