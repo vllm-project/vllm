@@ -802,7 +802,9 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl", "sycl"] | None = (
+        None
+    )
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
@@ -1790,9 +1792,9 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl"],
+            choices=["flashinfer", "triton", "cutedsl", "sycl"],
             default=None,
-            help="Select GDN prefill backend.",
+            help="Select GDN prefill backend. 'sycl' is XPU-only.",
         )
         parser.add_argument(
             "--kda-prefill-backend",
