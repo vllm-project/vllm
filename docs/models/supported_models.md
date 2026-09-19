@@ -604,6 +604,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
 | `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
+| `OmniAsrForConditionalGeneration` | omniASR-LLM-300M, omniASR-LLM-1B, omniASR-LLM-3B, omniASR-LLM-7B | T + A<sup>E</sup> | `ziywang50/omniASR-LLM-300M` | | |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
 | `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
 | `OpenVLAForActionPrediction` | OpenVLA | T + I | `openvla/openvla-7b` | | ✅︎ |
