@@ -31,7 +31,9 @@ Out of scope (extension points, not wired here): prefill context parallelism
 (PCP), sparse/indexer MLA, and the ROCm/aiter fp8/fp4 BMM fast paths.
 """
 
+import inspect
 import math
+import os
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -110,6 +112,27 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 logger = init_logger(__name__)
+
+# Kill switches for routing the DCP chunked-context K/V pack through the fused
+# cast+concat kernels; either one keeps the generic impl's cast/split/concat
+# tail: VLLM_K3_DCP_FUSED_KV_PACK=0 (enable polarity, default "1") or
+# VLLM_K3_DCP_FUSED_KV_PACK_DISABLE=1 (disable polarity, default "0", the
+# FLASHINFER_SPECIALIZED_KERNEL_DISABLE idiom that A/B harnesses set to "1").
+_DCP_FUSED_KV_PACK_ENV = "VLLM_K3_DCP_FUSED_KV_PACK"
+_DCP_FUSED_KV_PACK_DISABLE_ENV = "VLLM_K3_DCP_FUSED_KV_PACK_DISABLE"
+
+
+def _dcp_fused_kv_pack_enabled() -> bool:
+    """Whether no kill switch requests the stock tail.
+
+    ``VLLM_K3_DCP_FUSED_KV_PACK=0`` and ``VLLM_K3_DCP_FUSED_KV_PACK_DISABLE=1``
+    each disable the fused pack on their own; unset means fused.
+    """
+    return (
+        os.environ.get(_DCP_FUSED_KV_PACK_ENV, "1") != "0"
+        and os.environ.get(_DCP_FUSED_KV_PACK_DISABLE_ENV, "0") != "1"
+    )
+
 
 # Below this conservative threshold, overlap the gate projection with attention
 # on the auxiliary stream.
@@ -390,6 +413,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 is_lse_base_on_e=self.impl.lse_base_on_e,
                 use_pcp=False,
             )
+        self._dcp_fused_kv_pack = self._resolve_dcp_fused_kv_pack()
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
@@ -794,6 +818,57 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cos_sin_cache=cos_sin_cache,
         )
 
+    # Chunked context under decode context parallelism stays with the impl's
+    # generic loop (it owns the allgather and reorg), but that loop's per-chunk
+    # cast/split/concat tail is the same pack ``_compute_prefill_context``
+    # fuses below, so the layer hands the impl its fused packer instead.
+    def _resolve_dcp_fused_kv_pack(self) -> bool:
+        """Decide once, at init, whether DCP context chunks use the fused pack."""
+        if self.dcp_world_size <= 1:
+            return False
+        if not _dcp_fused_kv_pack_enabled():
+            if os.environ.get(_DCP_FUSED_KV_PACK_ENV, "1") == "0":
+                logger.info_once(
+                    "Kimi-K3 DCP chunked-context KV pack: stock "
+                    "(kill switch VLLM_K3_DCP_FUSED_KV_PACK=0)"
+                )
+            else:
+                logger.info_once(
+                    "Kimi-K3 DCP chunked-context KV pack: stock "
+                    "(kill switch VLLM_K3_DCP_FUSED_KV_PACK_DISABLE=1)"
+                )
+            return False
+        impl_loop = getattr(
+            self.impl, "_context_parallel_compute_prefill_context", None
+        )
+        if (
+            impl_loop is None
+            or "kv_pack" not in inspect.signature(impl_loop).parameters
+        ):
+            logger.info_once(
+                "Kimi-K3 DCP chunked-context KV pack: stock (impl accepts no kv_pack)"
+            )
+            return False
+        logger.info_once(
+            "Kimi-K3 DCP chunked-context KV pack: fused (VLLM_K3_DCP_FUSED_KV_PACK=1)"
+        )
+        return True
+
+    def _dcp_kv_pack_fn(self):
+        """The packer for the impl's DCP loop, or ``None`` for its stock tail."""
+        if not self._dcp_fused_kv_pack:
+            return None
+        return self._dcp_kv_pack
+
+    def _dcp_kv_pack(
+        self, kv_nope: torch.Tensor, k_pe: torch.Tensor, use_fp8_prefill: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack one DCP context chunk with the kernels ``run_chunk`` uses."""
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        if use_fp8_prefill:
+            return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+        return fused_mla_kv_concat(k_nope, k_pe), v
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -823,8 +898,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         copied per chunk.
 
         Decode context parallelism keeps using
-        ``impl._context_parallel_compute_prefill_context``; its extra allgather
-        and reorg are not fused here.
+        ``impl._context_parallel_compute_prefill_context`` for its extra
+        allgather and reorg; that loop's per-chunk pack goes through the same
+        fused kernels via ``_dcp_kv_pack`` (``VLLM_K3_DCP_FUSED_KV_PACK=0`` or
+        ``VLLM_K3_DCP_FUSED_KV_PACK_DISABLE=1`` restores the impl's tail).
         """
         prefill = attn_metadata.prefill
         assert prefill is not None
@@ -985,7 +1062,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         Replaces ``_concat_k_nope_k_pe`` and the prefill cache write with one
         fused kernel launch, dispatched by cache dtype. Chunked context runs
         through this layer's ``_compute_prefill_context``, except under DCP where
-        it is delegated to the impl.
+        it is delegated to the impl with this layer's fused K/V packer.
 
         Supported configs (K3 fp8 policy):
           - bf16 cache        -> bf16 prefill query
@@ -1083,6 +1160,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                         attn_metadata,
                         k_scale=self._k_scale,
                         dcp_world_size=self.dcp_world_size,
+                        kv_pack=self._dcp_kv_pack_fn(),
                     )
                 )
             else:
