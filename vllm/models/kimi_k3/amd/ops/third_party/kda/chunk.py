@@ -33,6 +33,11 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 # the `w` loop then reuses; at num_warps=4 that races on gfx950 and `u` comes
 # back with non-deterministic O(1e38) garbage once a batch reaches 4096 tokens.
 _RECOMPUTE_W_U_NUM_STAGES = [2, 3]
+if is_amd:
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        _RECOMPUTE_W_U_NUM_STAGES = [1]
 
 
 @triton.heuristics(
