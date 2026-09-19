@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-import math
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
@@ -29,6 +28,27 @@ except ImportError:
 
 
 WorkloadVariable = Literal["request_rate", "max_concurrency"]
+
+# Number of decimals to keep for continuous (`request_rate`) sweep levels.
+_REQUEST_RATE_DECIMALS = 3
+# Smallest positive `request_rate` we are willing to emit, so a sub-1 batch
+# throughput never collapses to a non-positive rate (see serve.py rate check).
+_MIN_REQUEST_RATE = 10**-_REQUEST_RATE_DECIMALS
+
+
+def _is_continuous_workload(workload_var: WorkloadVariable) -> bool:
+    # `request_rate` is a continuous quantity; `max_concurrency` must be an
+    # integer >= 1.
+    return workload_var == "request_rate"
+
+
+def _round_workload_value(
+    value: float,
+    workload_var: WorkloadVariable,
+) -> float | int:
+    if _is_continuous_workload(workload_var):
+        return max(_MIN_REQUEST_RATE, round(value, _REQUEST_RATE_DECIMALS))
+    return max(1, round(value))
 
 
 def _estimate_workload_value(
@@ -64,7 +84,7 @@ def run_comb_workload(
     num_runs: int,
     dry_run: bool,
     workload_var: WorkloadVariable,
-    workload_value: int,
+    workload_value: int | float,
 ) -> list[dict[str, object]] | None:
     bench_comb_workload = bench_comb | {workload_var: workload_value}
 
@@ -152,13 +172,15 @@ def explore_comb_workloads(
 
         return
 
-    serial_workload_value = math.ceil(
-        _estimate_workload_avg(serial_workload_data, workload_var)
+    serial_workload_value = _round_workload_value(
+        _estimate_workload_avg(serial_workload_data, workload_var),
+        workload_var,
     )
     print(f"Serial inference: {workload_var}={serial_workload_value}")
 
-    batch_workload_value = math.floor(
-        _estimate_workload_avg(batch_workload_data, workload_var)
+    batch_workload_value = _round_workload_value(
+        _estimate_workload_avg(batch_workload_data, workload_var),
+        workload_var,
     )
     print(f"Batch inference: {workload_var}={batch_workload_value}")
 
@@ -167,7 +189,9 @@ def explore_comb_workloads(
     inter_workload_values = np.linspace(
         serial_workload_value, batch_workload_value, workload_iters
     )[1:-1]
-    inter_workload_values = sorted(set(map(round, inter_workload_values)))
+    inter_workload_values = sorted(
+        {_round_workload_value(v, workload_var) for v in inter_workload_values}
+    )
 
     inter_workloads_data: list[dict[str, object]] = []
     for inter_workload_value in inter_workload_values:
