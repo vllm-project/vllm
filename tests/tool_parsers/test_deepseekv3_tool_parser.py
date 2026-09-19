@@ -8,6 +8,10 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import (
+    run_tool_extraction,
+    run_tool_extraction_streaming,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -90,3 +94,58 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_streaming_whole_tool_call_in_one_delta(
+        self,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+    ):
+        """A complete tool call delivered in a single streaming delta must be
+        emitted, matching the non-streaming result.
+
+        Chunk boundaries can batch a whole tool call (begin tag, name,
+        arguments, and end tag) into one delta -- e.g. under speculative
+        decoding or scheduler batching. Feeding the full output as a single
+        delta reproduces that case; before the fix the call was silently
+        dropped (streamed result was empty).
+        """
+        _, tools_non = run_tool_extraction(
+            tool_parser, test_config.single_tool_call_output, streaming=False
+        )
+
+        reconstructor = run_tool_extraction_streaming(
+            tool_parser, [test_config.single_tool_call_output]
+        )
+
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function.name == (
+            test_config.single_tool_call_expected_name
+        )
+        assert (
+            reconstructor.tool_calls[0].function.arguments
+            == tools_non[0].function.arguments
+        )
+
+    def test_streaming_parallel_tool_calls_in_one_delta(
+        self,
+        tool_parser,
+        test_config: ToolParserTestConfig,
+    ):
+        """Multiple complete tool calls in a single delta must all be emitted."""
+        _, tools_non = run_tool_extraction(
+            tool_parser, test_config.parallel_tool_calls_output, streaming=False
+        )
+
+        reconstructor = run_tool_extraction_streaming(
+            tool_parser,
+            [test_config.parallel_tool_calls_output],
+            assert_one_tool_per_delta=False,
+        )
+
+        assert len(reconstructor.tool_calls) == test_config.parallel_tool_calls_count
+        for streamed, expected_name in zip(
+            reconstructor.tool_calls, test_config.parallel_tool_calls_names
+        ):
+            assert streamed.function.name == expected_name
+        for streamed, non_streamed in zip(reconstructor.tool_calls, tools_non):
+            assert streamed.function.arguments == non_streamed.function.arguments
