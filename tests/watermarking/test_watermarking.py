@@ -945,6 +945,7 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
     speculator = object.__new__(StubSpeculator)
     speculator.model = StubModel()
     speculator.use_fp64_gumbel = False
+    speculator.acceptance_estimator = None
     draft_watermarker = object.__new__(DraftWatermarker)
     draft_watermarker.watermarker = StubWatermarker()
     draft_watermarker.contexts = torch.tensor([[1, 2], [3, 4]])
@@ -978,6 +979,7 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator.seeds = torch.zeros(2, dtype=torch.int64)
     speculator._step_cols = torch.tensor([0])
     speculator.use_fp64_gumbel = False
+    speculator.acceptance_estimator = None
     watermark_logits: list[torch.Tensor] = []
 
     def sample(logits, sampled, idx_map, temperature):
@@ -1012,6 +1014,7 @@ def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch
     speculator.seeds = torch.zeros(2, dtype=torch.int64)
     speculator._step_cols = torch.tensor([0])
     speculator.use_fp64_gumbel = False
+    speculator.acceptance_estimator = None
     speculator.draft_watermarker = None
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.gumbel_sample",
