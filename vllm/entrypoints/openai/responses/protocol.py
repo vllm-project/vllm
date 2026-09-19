@@ -73,6 +73,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    merge_request_extra_args,
 )
 from vllm.utils import random_uuid
 
@@ -430,11 +431,11 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
-        if self.ec_transfer_params:
-            extra_args["ec_transfer_params"] = self.ec_transfer_params
+        extra_args = merge_request_extra_args(
+            self.vllm_xargs,
+            kv_transfer_params=self.kv_transfer_params,
+            ec_transfer_params=self.ec_transfer_params,
+        )
 
         return SamplingParams.from_optional(
             temperature=temperature,

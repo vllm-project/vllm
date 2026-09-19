@@ -115,11 +115,13 @@ class Request:
                 self.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
             if sampling_params.extra_args is not None:
-                self.kv_transfer_params = sampling_params.extra_args.get(
-                    "kv_transfer_params"
+                kv_params = sampling_params.extra_args.get("kv_transfer_params")
+                self.kv_transfer_params = (
+                    kv_params if isinstance(kv_params, dict) else None
                 )
-                self.ec_transfer_params = sampling_params.extra_args.get(
-                    "ec_transfer_params"
+                ec_params = sampling_params.extra_args.get("ec_transfer_params")
+                self.ec_transfer_params = (
+                    ec_params if isinstance(ec_params, dict) else None
                 )
                 self.kv_cache_report_mode = sampling_params.extra_args.get(
                     "kv_cache_report_mode", "incremental"
