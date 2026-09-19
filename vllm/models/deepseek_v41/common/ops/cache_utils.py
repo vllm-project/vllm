@@ -730,8 +730,16 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    global_topk_indices = torch.empty_like(topk_indices)
-    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
+    global_topk_indices = torch.full_like(topk_indices, -1)
+    topk_lens = torch.zeros(num_tokens, dtype=torch.int32, device=topk_indices.device)
+    if num_tokens == 0:
+        return global_topk_indices, topk_lens
+
+    if not block_table.is_contiguous():
+        block_table = block_table.contiguous()
+
+    num_reqs = block_table.shape[0]
+    max_num_blocks = block_table.shape[1]
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
@@ -740,8 +748,10 @@ def compute_global_topk_indices_and_lens(
         topk_indices.stride(0),
         topk_indices.shape[-1],
         token_to_req_indices,
+        num_reqs,
         block_table,
         block_table.stride(0),
+        max_num_blocks,
         block_size,
         is_valid_token,
         TRITON_BLOCK_SIZE=1024,
@@ -758,8 +768,10 @@ def _compute_global_topk_indices_and_lens_kernel(
     topk_indices_stride: tl.constexpr,
     topk: tl.constexpr,
     token_to_req_indices_ptr,
+    num_reqs,
     block_table_ptr,
     block_table_stride: tl.constexpr,
+    max_num_blocks,
     block_size: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
@@ -767,6 +779,8 @@ def _compute_global_topk_indices_and_lens_kernel(
     token_idx = tl.program_id(0)
     is_valid_token = tl.load(is_valid_token_ptr + token_idx)
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    valid_req = is_valid_token & (req_idx >= 0) & (req_idx < num_reqs)
+    safe_req_idx = tl.where(valid_req, req_idx, 0)
 
     count = tl.zeros((), dtype=tl.int32)
     for i in range(0, topk, TRITON_BLOCK_SIZE):
@@ -781,23 +795,32 @@ def _compute_global_topk_indices_and_lens_kernel(
         is_valid = local_idx >= 0
 
         block_indices = local_idx // block_size
+        valid_block = (
+            valid_req
+            & is_valid
+            & (block_indices >= 0)
+            & (block_indices < max_num_blocks)
+        )
         block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=mask & is_valid,
+            block_table_ptr + safe_req_idx * block_table_stride + block_indices,
+            mask=mask & valid_block,
+            other=-1,
         )
         block_offsets = local_idx % block_size
 
         slot_ids = block_numbers * block_size + block_offsets
-        slot_ids = tl.where(is_valid, slot_ids, -1)
+        is_effective = valid_block & (block_numbers >= 0)
+        slot_ids = tl.where(is_effective, slot_ids, -1)
         tl.store(
             global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
             slot_ids,
             mask=mask,
         )
-        count += tl.sum(is_valid.to(tl.int32), axis=0)
+        count += tl.sum(is_effective.to(tl.int32), axis=0)
 
-    # Zero out length for padding tokens.
-    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+    # Zero out length for padding tokens and clamp at topk.
+    valid_count = tl.minimum(count, topk)
+    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, valid_count, 0))
 
 
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
