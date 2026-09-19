@@ -101,6 +101,15 @@ class TestCoerceToSchemaType:
             assert coerce_to_schema_type("5.0", "number") == 5
             assert isinstance(coerce_to_schema_type("5.0", "number"), int)
 
+        @pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 2**63 - 1])
+        @pytest.mark.parametrize(
+            "schema_type", ["number", "double", ["number", "string"]]
+        )
+        def test_large_integer_preserved(self, value, schema_type):
+            result = coerce_to_schema_type(str(value), schema_type)
+            assert isinstance(result, int)
+            assert json.loads(json.dumps(result)) == value
+
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
 
