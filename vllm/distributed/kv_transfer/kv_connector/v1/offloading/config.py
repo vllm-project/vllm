@@ -209,13 +209,7 @@ def build_offloading_config(
     )
     replicated_layout = (
         vllm_config.model_config.use_mla
-        # Every group must be TP-replicated (MLA with num_kv_heads==1, or Mamba
-        # with tp_replicated=True). Other wrappers and non-replicated types fail
-        # closed via _all_groups_are_replicated.
         and _all_groups_are_replicated(kv_cache_config.kv_cache_groups)
-        # worker_kv_bytes_per_block > 0 guards an empty/zero allocation.
-        # _all_groups_are_replicated already ensures no non-replicated data is
-        # packed into the block, so no further byte accounting is needed.
         and worker_kv_bytes_per_block > 0
         # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.tensor_parallel_size > 1
