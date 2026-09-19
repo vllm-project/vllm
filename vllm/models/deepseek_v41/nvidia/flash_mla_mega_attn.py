@@ -16,7 +16,7 @@ a single ``wo_a`` einsum covers the whole step.
 """
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -190,11 +190,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def accepts_unnormed_unroped_query(self) -> bool:
         return True
 
-    @property
-    def packed_kv_cache_dtype(self) -> CacheDType:
-        # This kernel is the only one that reads an NVFP4 compressed cache, so
-        # it is what an unspecific --kv-cache-dtype resolves to here.
-        return "nvfp4_ds_mla"
+    packed_kv_cache_dtype: ClassVar[CacheDType] = "nvfp4_ds_mla"
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
