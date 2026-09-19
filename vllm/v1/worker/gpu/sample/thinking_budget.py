@@ -107,6 +107,14 @@ class ThinkingBudgetState:
             self.thinking_token_budget.copy_to_uva()
             self._budget_dirty = False
 
+    def rewind_requests(self, req_indices: list[int]) -> None:
+        if not self.enabled:
+            return
+        idx = async_tensor_h2d(req_indices, dtype=torch.int64, device=self.device)
+        self.cached_last_start.index_fill_(0, idx, -1)
+        self.cached_last_end.index_fill_(0, idx, -1)
+        self.cached_scan_pos.index_fill_(0, idx, 0)
+
     def apply(
         self,
         logits: torch.Tensor,
