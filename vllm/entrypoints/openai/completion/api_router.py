@@ -60,7 +60,11 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         )
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=generator.model_dump(
+                exclude={"system_fingerprint"}
+                if generator.system_fingerprint is None
+                else None
+            ),
             headers=metrics_header(metrics_header_format),
         )
 
