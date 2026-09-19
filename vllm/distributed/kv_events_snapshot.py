@@ -144,7 +144,11 @@ class KVCacheSnapshot:
             return
         dependencies: set[int] = set()
         if event.parent_block_hash is not None:
-            dependencies.add(self._dependency(event.parent_block_hash))
+            parent_sources = self._known.get(
+                self._metadata_hash(event.parent_block_hash)
+            )
+            if parent_sources:
+                dependencies.add(next(reversed(parent_sources)))
         if not event.token_ids:
             dependencies.update(self._dependency(h) for h in event.block_hashes)
         # Account conservatively for decoded integers, containers and wire data.

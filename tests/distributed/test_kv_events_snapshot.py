@@ -142,7 +142,14 @@ def test_delayed_transfer_preserves_metadata():
 
 def test_missing_metadata_fails_closed():
     with pytest.raises(ValueError, match="Missing reconstruction"):
-        KVCacheSnapshot().apply([stored([2], parent=1)])
+        KVCacheSnapshot().apply([stored([2], parent=1, medium="CPU")])
+
+
+def test_self_describing_event_allows_unknown_parent():
+    event = stored([2], parent=1)
+    snap = KVCacheSnapshot()
+    snap.apply([event])
+    assert list(snap.export()) == [event]
 
 
 def test_store_metadata_is_preserved_verbatim():
