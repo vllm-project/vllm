@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 
 class OnlineMoEMethodBase(FusedMoEMethodBase):
@@ -125,6 +125,26 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             and layer.w2_bias.shape[1] > hidden_size
         ):
             layer.w2_bias[:, hidden_size:] = 0
+
+    @staticmethod
+    def _stage_humming_quantized_weights(
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        """Expose online-quantized tensors to Humming's layer-based converter.
+
+        Other MoE format converters consume the tensors passed to them directly.
+        Humming instead discovers its input through ``layer.state_dict()``.  Stage
+        the canonical tensors on the layer so it does not inspect the original
+        full-precision online-loading parameters.
+        """
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

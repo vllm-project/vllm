@@ -16,9 +16,9 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
         RoutedExperts,
     )
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
 
 
 class Mxfp8OnlineLinearMethod(OnlineLinearBase):
@@ -176,6 +175,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             make_fp8_moe_kernel,
         )
 
+        if self.fp8_backend == Fp8MoeBackend.HUMMING:
+            self._stage_humming_quantized_weights(layer, w13, w2, w13_scale, w2_scale)
+
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
@@ -235,9 +237,6 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
