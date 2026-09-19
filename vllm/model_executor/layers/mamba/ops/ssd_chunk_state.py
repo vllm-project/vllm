@@ -8,10 +8,20 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    pin_autotune_config,
+)
 from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
+
+_CUMSUM_BATCH_INVARIANT_CONFIG = triton.Config({"BLOCK_SIZE_H": 2})
+_CHUNK_STATE_BATCH_INVARIANT_CONFIG = triton.Config(
+    {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+    num_stages=4,
+    num_warps=2,
+)
 
 
 @triton.autotune(
@@ -112,6 +122,9 @@ def _chunk_cumsum_fwd_kernel(
         dA_cs,
         mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
     )
+
+
+pin_autotune_config(_chunk_cumsum_fwd_kernel, _CUMSUM_BATCH_INVARIANT_CONFIG)
 
 
 @triton.autotune(
@@ -298,6 +311,9 @@ def _chunk_state_fwd_kernel(
     )
     c_mask = (offs_m[:, None] < hdim) & (offs_n[None, :] < dstate)
     tl.store(states_ptrs, states, mask=c_mask)
+
+
+pin_autotune_config(_chunk_state_fwd_kernel, _CHUNK_STATE_BATCH_INVARIANT_CONFIG)
 
 
 def _chunk_cumsum_fwd(
