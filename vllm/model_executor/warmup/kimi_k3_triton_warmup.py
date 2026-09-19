@@ -52,7 +52,7 @@ def _warm_attn_res(worker: Worker) -> None:
 
     hidden_size = int(config.hidden_size)
     max_blocks = (int(config.num_hidden_layers) + block_size - 1) // block_size
-    if max_blocks < 2:
+    if max_blocks < 1:
         return
 
     dtype = worker.model_config.dtype
