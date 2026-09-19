@@ -2484,15 +2484,14 @@ class ModelOptLinearMethod(LinearMethodBase):
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
-        if not isinstance(w, QuantKey):
-            return False
-        if w.dtype == FP4_DTYPE:
-            return True
-        if w == kMxfp8Static:
-            return (
-                self.kernel is not None and self.kernel.supports_pre_processed_weights
+        return isinstance(w, QuantKey) and (
+            w.dtype == FP4_DTYPE
+            or (
+                w == kMxfp8Static
+                and self.kernel is not None
+                and self.kernel.supports_pre_processed_weights
             )
-        return False
+        )
 
     def create_weights(
         self,
