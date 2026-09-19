@@ -21,6 +21,7 @@ Covers two bugs:
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from openai.types.responses.tool_param import FunctionToolParam
@@ -348,3 +349,62 @@ def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
     result = _stream_partial_start_token(request)
     assert result is not None
     assert result.content == ""
+
+
+def test_whitespace_padded_tool_call_is_not_quadratic() -> None:
+    """A short model output must not take seconds to parse.
+
+    ``func_detail_regex`` used to allow the captured function name to match
+    whitespace, which overlapped with the ``\\s*`` runs around it. On a block
+    that cannot match, the engine then backtracked through every way of
+    splitting one run of spaces between those quantifiers, so a ~3 KB model
+    output cost more than a minute of CPU on the event loop.
+    """
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    # ``<x`` keeps ``func_detail_regex`` from matching, which is what forces
+    # the backtracking; ``func_call_regex`` still yields the block.
+    model_output = "<tool_call>" + " " * 4096 + "<x</tool_call>"
+
+    start = time.perf_counter()
+    result = parser.extract_tool_calls(model_output, request)
+    elapsed = time.perf_counter() - start
+
+    assert not result.tools_called
+    assert result.content == model_output
+    # Before the fix this took >100s; a generous bound keeps the test stable
+    # on slow CI machines while still failing on the old behaviour.
+    assert elapsed < 5.0, f"parsing took {elapsed:.1f}s"
+
+
+def test_whitespace_only_tool_call_name_is_rejected() -> None:
+    """A tool call whose name is only whitespace is skipped, not emitted.
+
+    The previous regex matched here and produced a ``ToolCall`` with an empty
+    function name.
+    """
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    result = parser.extract_tool_calls("<tool_call>   </tool_call>", request)
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+
+
+def test_function_name_with_internal_whitespace_still_parses() -> None:
+    """Pinning both ends of the name must not break names containing spaces."""
+    request = _build_weather_request(tool_choice="auto")
+    parser = _make_parser(request)
+
+    model_output = (
+        "<tool_call>  get weather  "
+        "<arg_key>city</arg_key><arg_value>Paris</arg_value>"
+        "</tool_call>"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "get weather"
