@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
+from vllm.v1.worker.gpu.sample.no_repeat_ngram import NoRepeatNGramState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
@@ -53,6 +54,9 @@ class Sampler:
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
+        self.no_repeat_ngram_state = NoRepeatNGramState(
+            req_states, num_speculative_tokens
+        )
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.trace_replay_state = (
@@ -72,6 +76,7 @@ class Sampler:
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
+        self.no_repeat_ngram_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         self.thinking_budget_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -83,6 +88,7 @@ class Sampler:
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
             or self.bad_words_state.num_bad_words.np[req_idx] > 0
+            or self.no_repeat_ngram_state.ngram_sizes.np[req_idx] > 0
             or (
                 self.thinking_budget_state.enabled
                 and self.thinking_budget_state.use_thinking_budget[req_idx]
@@ -98,6 +104,7 @@ class Sampler:
         self.penalties_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
+        self.no_repeat_ngram_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
         if self.trace_replay_state is not None:
@@ -256,6 +263,9 @@ class Sampler:
             input_ids,
             expanded_local_pos,
         )
+
+        # Apply exact output-only no-repeat n-gram masking in place.
+        self.no_repeat_ngram_state.apply(logits, expanded_idx_mapping, idx_mapping_np)
 
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
