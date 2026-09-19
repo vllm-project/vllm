@@ -62,7 +62,6 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
         assert speculative_config is not None
         config = speculative_config.draft_model_config.hf_config.text_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -70,7 +69,7 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
 
         self.device = current_platform.device_type
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         self.mtp_block = Glm4DecoderLayer(
             vllm_config=vllm_config, prefix=prefix, config=self.config

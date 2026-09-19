@@ -77,7 +77,7 @@ class SharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "head"),
         )
 
@@ -93,7 +93,6 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
         assert speculative_config is not None
         config = speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -122,7 +121,7 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
         )
 
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         self.mtp_block = Glm4MoeLiteDecoderLayer(
             vllm_config=vllm_config,

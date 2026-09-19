@@ -56,14 +56,13 @@ class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         assert speculative_config is not None
         config = speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.shared_head = SharedHead(
             config=config,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "shared_head"),
         )
         self.mtp_block = OpenPanguDecoderLayer(config, prefix, vllm_config)

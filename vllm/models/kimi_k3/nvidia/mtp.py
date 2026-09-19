@@ -60,7 +60,7 @@ class SharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "head"),
         )
 
@@ -77,7 +77,6 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -91,7 +90,7 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
         )
 
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         # The MTP block starts without the base model's AttnRes state.
         block_config = copy.copy(config)

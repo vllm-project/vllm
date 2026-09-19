@@ -69,7 +69,7 @@ class SharedHead(nn.Module):
         self.head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=maybe_prefix(prefix, "head"),
         )
 
@@ -91,7 +91,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config, prefix=prefix, quant_config=None
         )
         assert parallel_config is not None
         self.enable_eplb = parallel_config.enable_eplb
