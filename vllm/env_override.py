@@ -147,6 +147,8 @@ def _maybe_promote_torch_symbols_for_rocm():
 _maybe_set_cuda_compatibility_path()
 _maybe_promote_torch_symbols_for_rocm()
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.logger import init_logger
@@ -773,6 +775,47 @@ def _apply_cpp_indirect_assert_patch():
     CppVecKernel._vllm_indirect_assert_patched = True  # type: ignore[attr-defined]
 
 
+def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> None:
+    """Run ``callback`` right after ``module_name`` has been imported.
+
+    If the module is already in ``sys.modules`` the callback runs now.
+    Otherwise a one-shot ``MetaPathFinder`` wraps the module loader's
+    ``exec_module`` so the callback runs right after the module body has
+    finished executing, before the import machinery hands the module back
+    to the importer. This lets ``vllm.env_override`` patch Inductor
+    internals without importing the Inductor stack eagerly during
+    ``import vllm`` (~0.5-0.75 s, >1400 modules), which only processes that
+    actually compile should pay.
+    """
+    import sys
+
+    if module_name in sys.modules:
+        callback()
+        return
+
+    import importlib.abc
+    import importlib.util
+
+    class _AfterImportFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != module_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                callback()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _AfterImportFinder())
+
+
 def _patch_cpp_indirect_assert_if_needed():
     """Apply cpp codegen indirect_assert backport when on torch 2.11.x.
 
@@ -787,33 +830,9 @@ def _patch_cpp_indirect_assert_if_needed():
     if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.codegen.cpp"
-    if target_name in sys.modules:
-        _apply_cpp_indirect_assert_patch()
-        return
-
-    import importlib.abc
-
-    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_cpp_indirect_assert_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+    _run_after_module_import(
+        "torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch
+    )
 
 
 _patch_cpp_indirect_assert_if_needed()
@@ -884,11 +903,12 @@ class _VllmFallbackAllowList:
         return getattr(self._inner, name)
 
 
-def _patch_inductor_fallback_allow_list() -> None:
+def _apply_inductor_fallback_allow_list_patch() -> None:
     """Wrap torch._inductor.lowering.FALLBACK_ALLOW_LIST so any custom op in
     the ``vllm::`` or ``vllm_aiter::`` namespaces is treated as a member.
 
-    Idempotent: a sentinel attribute on the proxy prevents re-wrapping.
+    Idempotent: a sentinel attribute on the proxy prevents re-wrapping. Runs
+    once ``torch._inductor.lowering`` is imported (see the caller below).
     """
     try:
         from torch._inductor import lowering as _lowering
@@ -904,14 +924,28 @@ def _patch_inductor_fallback_allow_list() -> None:
     # torch/_inductor/graph.py imports the symbol at module load time:
     #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
     # so we also need to overwrite the local binding in the graph module if
-    # it has already been imported.
-    try:
-        from torch._inductor import graph as _graph
+    # it has already been imported. If it has not, its own import of the
+    # symbol picks up the proxy, so there is no need to import it here.
+    import sys
 
-        if hasattr(_graph, "FALLBACK_ALLOW_LIST"):
-            _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
-    except ImportError:
-        pass
+    _graph = sys.modules.get("torch._inductor.graph")
+    if _graph is not None and hasattr(_graph, "FALLBACK_ALLOW_LIST"):
+        _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
+
+
+def _patch_inductor_fallback_allow_list() -> None:
+    """Install the FALLBACK_ALLOW_LIST wrap lazily.
+
+    ``torch._inductor.graph`` (the only consumer of FALLBACK_ALLOW_LIST)
+    imports ``torch._inductor.lowering`` at module load, so applying the wrap
+    right after ``lowering`` finishes importing guarantees it is in place
+    before any GraphLowering runs, while keeping ``torch._inductor`` out of
+    ``import vllm`` (#40056 removed that eager import; #42129 reintroduced it
+    through this patch). tests/standalone_tests/lazy_imports.py guards this.
+    """
+    _run_after_module_import(
+        "torch._inductor.lowering", _apply_inductor_fallback_allow_list_patch
+    )
 
 
 _patch_inductor_fallback_allow_list()
