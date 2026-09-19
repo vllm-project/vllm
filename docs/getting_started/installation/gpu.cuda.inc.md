@@ -58,12 +58,32 @@ To install from nightly index, run:
 ```bash
 uv pip install -U vllm \
     --torch-backend=auto \
-    --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
+    --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory (e.g. /cu129 or /cu130) here if needed
 ```
+
+!!! warning "CUDA mismatch or resolving to CUDA 13 (`libcudart.so.13` error)"
+
+    When using `--extra-index-url`, package managers query both `wheels.vllm.ai` and PyPI. Under PEP 440 version ordering, if PyPI hosts a newer or final stable release (which defaults to CUDA 13), the resolver may prioritize the PyPI release over the development/nightly build on `wheels.vllm.ai`.
+
+    In a CUDA 12.9 environment, this results in an installed CUDA 13 binary and the runtime error:
+    ```text
+    ImportError: libcudart.so.13: cannot open shared object file: No such file or directory
+    ```
+
+    To ensure the nightly CUDA 12.9 wheel is selected instead of the PyPI release:
+    - Specify the target variant subdirectory explicitly (e.g., `https://wheels.vllm.ai/nightly/cu129`).
+    - Use `--index-strategy unsafe-first-match` to prioritize `wheels.vllm.ai` over PyPI:
+      ```bash
+      uv pip install -U vllm \
+          --torch-backend=auto \
+          --extra-index-url https://wheels.vllm.ai/nightly/cu129 \
+          --index-strategy unsafe-first-match
+      ```
+    - Alternatively, install the exact wheel directly by URL from <https://wheels.vllm.ai/nightly/cu129>.
 
 !!! warning "`pip` caveat"
 
-    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+    Using `pip` to install from nightly indices with `--extra-index-url` is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
 
     If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
 
