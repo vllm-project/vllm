@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from openai.types.responses import ResponseFunctionWebSearch
+from openai.types.responses import (
+    ResponseFunctionWebSearch,
+    response_text_delta_event,
+)
 from openai_harmony import Message, Role
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -151,3 +154,26 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestContentLogprobs:
+    def test_content_logprobs_carried_to_done_item(self):
+        top = response_text_delta_event.LogprobTopLogprob(token="hi", logprob=-0.5)
+        logprob = response_text_delta_event.Logprob(
+            token="hi", logprob=-0.5, top_logprobs=[top]
+        )
+        processor = SimpleStreamingEventProcessor()
+        events = processor.open(_StateType.CONTENT)
+        events += processor.emit_delta(
+            DeltaMessage(content="hi"), None, lambda _: [logprob]
+        )
+        events += processor.close_current()
+
+        delta = next(e for e in events if e.type == "response.output_text.delta")
+        assert delta.logprobs == [logprob]
+        part = events[-1].item.content[0]
+        assert [lp.token for lp in part.logprobs] == ["hi"]
+        assert part.logprobs[0].bytes == [104, 105]
+        assert part.logprobs[0].top_logprobs[0].bytes == [104, 105]
+        content_done = next(e for e in events if e.type == "response.content_part.done")
+        assert content_done.part == part
