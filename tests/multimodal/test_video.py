@@ -1593,8 +1593,10 @@ class TestDynamicVideoBackendFpsCap:
         assert self._count_walk(monkeypatch, 100_000) <= 3_000
 
     def test_capped_fps_matches_an_explicitly_capped_request(self, monkeypatch):
+        # 30 spelled out rather than `cls._MAX_FPS` so this also runs, and
+        # fails for the right reason, against an uncapped tree.
         assert self._count_walk(monkeypatch, 100_000) == self._count_walk(
-            monkeypatch, DynamicVideoBackend._MAX_FPS
+            monkeypatch, 30
         )
 
     def test_normal_fps_is_unchanged(self):
