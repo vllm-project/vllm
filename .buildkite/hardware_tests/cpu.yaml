@@ -218,6 +218,9 @@ steps:
   soft_fail: false
   device: arm_cpu
   no_plugin: true
+  source_file_dependencies:
+  - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
