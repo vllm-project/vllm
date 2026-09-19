@@ -93,6 +93,20 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - x86_64 - XPU"
+        depends_on: ~
+        id: build-wheel-x86-xpu
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg GIT_REPO_CHECK=1 --tag vllm-ci:xpu-build-image --target export_vllm_wheel_release --progress plain -f docker/Dockerfile.xpu ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:xpu-build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)" release-wheels'
+        env:
+          DOCKER_BUILDKIT: "1"
+
       - label: "Build wheel - macOS arm64 - CPU"
         depends_on: ~
         id: build-wheel-macos-arm64-cpu
