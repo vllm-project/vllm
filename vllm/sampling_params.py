@@ -289,6 +289,16 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    hidden_state_window: tuple[int, int] | None = None
+    """Capture hidden states for response-token positions in the
+    half-open range `[start, end)` and return them alongside the
+    output, e.g. `(1000, 2000)` captures response positions 1000
+    through 1999. Positions are 0-indexed from the start of the
+    *response*, not the prompt. Adds no overhead when left as `None`
+    (the default). Interacts correctly with speculative decoding: a
+    window can span steps that accept a variable number of draft
+    tokens, and each position is still captured exactly once,
+    regardless of how many tokens a given step advances by."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -637,6 +647,22 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
+        if self.hidden_state_window is not None:
+            window_start, window_end = self.hidden_state_window
+            if window_start < 0:
+                raise VLLMValidationError(
+                    f"hidden_state_window start must be non-negative, "
+                    f"got {window_start}.",
+                    parameter="hidden_state_window",
+                    value=self.hidden_state_window,
+                )
+            if window_end <= window_start:
+                raise VLLMValidationError(
+                    f"hidden_state_window end ({window_end}) must be "
+                    f"greater than start ({window_start}).",
+                    parameter="hidden_state_window",
+                    value=self.hidden_state_window,
+                )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise VLLMValidationError(
