@@ -48,6 +48,8 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+    replay_start: int = 0
 
     @classmethod
     def from_request(
@@ -73,6 +75,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            replay_start=request.replay_start,
         )
 
     @property
