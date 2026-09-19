@@ -11,6 +11,7 @@ import pybase64
 import pytest
 from PIL import Image
 
+from vllm import envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import (
     video_get_metadata,
@@ -137,6 +138,23 @@ def test_opencv_video_metadata_matches_sampled_frame_timeline(tmp_path):
     assert metadata["duration"] == pytest.approx(2.0)
     assert metadata["frames_indices"] == [0, 3, 6, 9]
     assert metadata["total_num_frames"] == 4
+
+
+def test_video_media_io_decode_frame_limit_rejected(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """VideoMediaIO rejects videos whose OpenCV walk exceeds the frame cap."""
+    monkeypatch.setattr(envs, "VLLM_MAX_VIDEO_DECODE_FRAMES", 5)
+    image_path = f"{tmp_path}/test_limit_image.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/test_limit_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=20, fps=10.0)
+
+    video_io = VideoMediaIO(ImageMediaIO())
+    with open(video_path, "rb") as f:
+        data = f.read()
+    with pytest.raises(ValueError, match="VLLM_MAX_VIDEO_DECODE_FRAMES"):
+        video_io.load_bytes(data)
 
 
 NUM_FRAMES = 10
