@@ -478,6 +478,208 @@ def test_synthetic_rejection_sample(
 
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_synthetic_zero_rate_suffix_compaction_matches_full_k6(temperature: float):
+    """Four target rows exactly reproduce K6 once position four has rate zero."""
+    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 1024
+    k = 6
+    physical_rows = 4
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    if temperature > 0:
+        target_logits_1d /= temperature
+
+    full = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        k,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    # Greedy draft sampling is represented as a one-hot proposal distribution.
+    full["draft_logits"] = None
+    rates = torch.tensor(
+        unconditional_to_conditional_rates([1.0, 1.0, 0.75, 0.0, 0.0, 0.0]),
+        dtype=torch.float32,
+        device=device,
+    )
+    full_sampled, full_num_sampled = rejection_sample(
+        **full,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+    )
+
+    full_draft_sampled = full["draft_sampled"].view(num_trials, k + 1)
+    compact = {
+        **full,
+        "target_logits": full["target_logits"]
+        .view(num_trials, k + 1, -1)[:, :physical_rows]
+        .reshape(num_trials * physical_rows, -1)
+        .contiguous(),
+        "draft_sampled": full_draft_sampled[:, :physical_rows].reshape(-1).contiguous(),
+        "cu_num_logits": torch.arange(num_trials + 1, dtype=torch.int32, device=device)
+        * physical_rows,
+        "pos": full["pos"]
+        .view(num_trials, k + 1)[:, :physical_rows]
+        .reshape(-1)
+        .contiguous(),
+        "expanded_idx_mapping": torch.arange(
+            num_trials, dtype=torch.int32, device=device
+        ).repeat_interleave(physical_rows),
+        "expanded_local_pos": torch.arange(
+            physical_rows, dtype=torch.int32, device=device
+        ).repeat(num_trials),
+    }
+    compact_sampled, compact_num_sampled = rejection_sample(
+        **compact,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+        synthetic_compaction_draft_sampled=full_draft_sampled[:, 1:],
+        synthetic_compaction_mask=torch.ones(
+            num_trials, dtype=torch.bool, device=device
+        ),
+    )
+
+    torch.testing.assert_close(compact_num_sampled, full_num_sampled, rtol=0, atol=0)
+    steps = torch.arange(k + 1, device=device).unsqueeze(0)
+    emitted = steps < full_num_sampled.unsqueeze(1)
+    torch.testing.assert_close(
+        compact_sampled[emitted],
+        full_sampled[emitted],
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_synthetic_suffix_compaction_supports_mixed_plain_request(
+    temperature: float,
+):
+    """A compact request and a plain bonus row retain independent semantics."""
+    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+    torch.manual_seed(42)
+    device = "cuda"
+    k = 6
+    compact_rows = 4
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    if temperature > 0:
+        target_logits_1d /= temperature
+
+    full = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        k,
+        temperature=temperature,
+        num_trials=1,
+    )
+    full["draft_logits"] = None
+    rates = torch.tensor(
+        unconditional_to_conditional_rates([1.0, 1.0, 0.75, 0.0, 0.0, 0.0]),
+        dtype=torch.float32,
+        device=device,
+    )
+    full_sampled, full_num_sampled = rejection_sample(
+        **full,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+    )
+
+    plain_pos = 100
+    plain = {
+        "target_logits": target_logits_1d.unsqueeze(0).contiguous(),
+        "draft_logits": None,
+        "draft_sampled": torch.zeros(1, dtype=torch.int64, device=device),
+        "cu_num_logits": torch.tensor([0, 1], dtype=torch.int32, device=device),
+        "pos": torch.tensor([plain_pos], dtype=torch.int32, device=device),
+        "idx_mapping": torch.tensor([1], dtype=torch.int32, device=device),
+        "expanded_idx_mapping": torch.tensor([1], dtype=torch.int32, device=device),
+        "expanded_local_pos": torch.zeros(1, dtype=torch.int32, device=device),
+        "temperature": torch.full(
+            (2,), temperature, dtype=torch.float32, device=device
+        ),
+        "seed": torch.tensor([0, 1], dtype=torch.int64, device=device),
+    }
+    plain_sampled, plain_num_sampled = rejection_sample(
+        **plain,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+    )
+
+    full_draft_sampled = full["draft_sampled"].view(1, k + 1)
+    mixed = {
+        "target_logits": torch.cat(
+            (
+                full["target_logits"][:compact_rows],
+                plain["target_logits"],
+            )
+        ).contiguous(),
+        "draft_logits": None,
+        "draft_sampled": torch.cat(
+            (full_draft_sampled[0, :compact_rows], plain["draft_sampled"])
+        ).contiguous(),
+        "cu_num_logits": torch.tensor(
+            [0, compact_rows, compact_rows + 1],
+            dtype=torch.int32,
+            device=device,
+        ),
+        "pos": torch.cat(
+            (
+                full["pos"][:compact_rows],
+                plain["pos"],
+            )
+        ).contiguous(),
+        "idx_mapping": torch.tensor([0, 1], dtype=torch.int32, device=device),
+        "expanded_idx_mapping": torch.tensor(
+            [0, 0, 0, 0, 1], dtype=torch.int32, device=device
+        ),
+        "expanded_local_pos": torch.tensor(
+            [0, 1, 2, 3, 0], dtype=torch.int32, device=device
+        ),
+        "temperature": plain["temperature"],
+        "seed": plain["seed"],
+    }
+    mixed_sampled, mixed_num_sampled = rejection_sample(
+        **mixed,
+        num_speculative_steps=k,
+        synthetic_conditional_rates=rates,
+        synthetic_compaction_draft_sampled=torch.cat(
+            (
+                full_draft_sampled[:, 1:],
+                torch.zeros(1, k, dtype=torch.int64, device=device),
+            )
+        ),
+        synthetic_compaction_mask=torch.tensor(
+            [True, False], dtype=torch.bool, device=device
+        ),
+    )
+
+    torch.testing.assert_close(
+        mixed_num_sampled,
+        torch.cat((full_num_sampled, plain_num_sampled)),
+        rtol=0,
+        atol=0,
+    )
+    full_count = int(full_num_sampled[0])
+    torch.testing.assert_close(
+        mixed_sampled[0, :full_count],
+        full_sampled[0, :full_count],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        mixed_sampled[1, :1],
+        plain_sampled[0, :1],
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
 def test_all_nan_target_logits_in_range(temperature: float):
     """Regression test for NaN breaking tl.argmax index bounds.
 
