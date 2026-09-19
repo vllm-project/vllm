@@ -34,6 +34,7 @@ from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -50,6 +51,34 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_call_input(tool_call: ToolCall) -> dict[str, Any]:
+    """Decode tool-call arguments into an Anthropic ``tool_use.input`` object.
+
+    Tool parsers are free to pass raw model text through without validating it
+    as JSON, so truncated or non-object arguments reach this converter intact.
+    Anthropic requires an object, so anything else is dropped rather than
+    raised, which would fail the whole response.
+    """
+    arguments = tool_call.function.arguments
+    if not arguments:
+        return {}
+
+    try:
+        decoded = json.loads(arguments)
+    except json.JSONDecodeError:
+        decoded = None
+
+    if isinstance(decoded, dict):
+        return decoded
+
+    logger.warning(
+        "Discarding unusable arguments for Anthropic tool call %s (%s)",
+        tool_call.id,
+        tool_call.function.name,
+    )
+    return {}
 
 
 def _build_anthropic_usage(
@@ -666,7 +695,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=_tool_call_input(tool_call),
             )
             content += [anthropic_tool_call]
 
