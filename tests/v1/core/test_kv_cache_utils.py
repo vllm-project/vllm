@@ -34,6 +34,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -3141,6 +3142,92 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     assert kv_cache_utils.resolve_kv_cache_block_sizes(
         kv_cache_config, vllm_config
     ) == (544, 136)
+
+
+@pytest.mark.skip_global_cleanup
+def test_hidden_state_extraction_group_billed_at_own_width():
+    """Hidden-state extraction must not pay for unused slots in a wide MLA group.
+
+    Regression for #56774: on the uniform-page-size hybrid path,
+    HiddenStateCacheSpec is appended as a singleton, but the shared pool billed
+    every block at the widest group width. Admission then multiplied the
+    extraction group's many small blocks by that width.
+    """
+    block_size = 16
+    max_model_len = 64
+    n_mla = 4
+    n_mamba = 4
+    mla_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    page = mla_spec.page_size_bytes
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((page // 4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+    )
+    assert mamba_spec.page_size_bytes == page
+    hidden_spec = HiddenStateCacheSpec(
+        block_size=block_size,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float32,
+    )
+
+    specs = {f"mla.{i}": mla_spec for i in range(n_mla)}
+    specs.update({f"mamba.{i}": mamba_spec for i in range(n_mamba)})
+    vllm_config = _grouping_config()
+    vllm_config.model_config = SimpleNamespace(max_model_len=max_model_len)
+    vllm_config.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=1, pipeline_parallel_size=1
+    )
+    vllm_config.attention_config = SimpleNamespace(hisparse_config=None)
+
+    groups_without_hidden = get_kv_cache_groups(vllm_config, specs)
+    assert any(len(group.layer_names) > 1 for group in groups_without_hidden)
+    wide_bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups_without_hidden)
+    assert wide_bytes_per_block == n_mla * page
+
+    specs["cache_only_layers.0"] = hidden_spec
+    groups = get_kv_cache_groups(vllm_config, specs)
+    assert all(len(group.layer_names) == 1 for group in groups)
+    assert len(groups) == n_mla + n_mamba + 1
+
+    hidden_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    )
+    assert hidden_group.kv_cache_spec.block_size < block_size
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    assert bytes_per_block == page
+
+    mla_blocks = cdiv(max_model_len, block_size)
+    mamba_blocks = cdiv(
+        mamba_spec.max_memory_usage_bytes(vllm_config), mamba_spec.page_size_bytes
+    )
+    hidden_blocks = cdiv(
+        hidden_group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+        hidden_group.kv_cache_spec.page_size_bytes,
+    )
+    required = kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+    expected = page * (n_mla * mla_blocks + n_mamba * mamba_blocks + hidden_blocks)
+    assert required == expected
+
+    # The unsplit pool would charge every extraction block at the MLA width.
+    legacy_required = wide_bytes_per_block * (mla_blocks + mamba_blocks + hidden_blocks)
+    assert required < legacy_required
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=page * 32
+    )
+    assert kv_cache_config.num_blocks == 32
+    assert {tensor.size for tensor in kv_cache_config.kv_cache_tensors} == {page * 32}
 
 
 def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
