@@ -310,7 +310,16 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
-            use_eagle=self.use_eagle_block_drop,
+            # Plain MTP proposes from target hidden states and shares the
+            # target KV: there is no draft group to find, and the
+            # coordinator's conservative all-groups eagle fallback then
+            # collapses get_replay_boundaries() to {0}, zeroing every
+            # prefix-cache insertion (see #54360). Only methods with a real
+            # draft KV (eagle/eagle3/draft_model/dflash/dspark) should
+            # trigger that fallback.
+            use_eagle=(self.use_eagle_block_drop
+                       and (speculative_config is None
+                            or speculative_config.method != "mtp")),
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
