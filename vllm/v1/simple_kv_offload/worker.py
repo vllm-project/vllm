@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+from collections import deque
 from typing import TYPE_CHECKING
 
 import torch
@@ -57,9 +58,9 @@ class SimpleCPUOffloadWorker:
 
         self._backend: DmaCopyBackend | DiskBackend | None = None
 
-        # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        # Ordered (event_idx, Event) queues populated by the backend threads.
+        self._load_events: deque[tuple[int, torch.Event]] = deque()
+        self._store_events: deque[tuple[int, torch.Event]] = deque()
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -73,9 +74,9 @@ class SimpleCPUOffloadWorker:
         # (get_finished runs once per step, copy queue is FIFO).
         self._store_compute_done: torch.Event | None = None
 
-        # Pending event index sets, populated in bind_connector_metadata
-        self._pending_load_event_indices: set[int] = set()
-        self._pending_store_event_indices: set[int] = set()
+        # Ordered pending event indices, populated in bind_connector_metadata.
+        self._pending_load_event_indices: deque[int] = deque()
+        self._pending_store_event_indices: deque[int] = deque()
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
 
@@ -248,9 +249,9 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = metadata
         self._store_submitted = False
         if metadata.load_event >= 0:
-            self._pending_load_event_indices.add(metadata.load_event)
+            self._pending_load_event_indices.append(metadata.load_event)
         if metadata.store_event >= 0:
-            self._pending_store_event_indices.add(metadata.store_event)
+            self._pending_store_event_indices.append(metadata.store_event)
 
     def clear_connector_metadata(self) -> None:
         # No-forward steps skip the normal wait_for_save hook.
@@ -321,8 +322,11 @@ class SimpleCPUOffloadWorker:
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
-            for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
-                self._pending_load_event_indices.discard(j)
+            while (
+                self._pending_load_event_indices
+                and self._pending_load_event_indices[0] <= load_wm
+            ):
+                j = self._pending_load_event_indices.popleft()
                 req_ids = (
                     metadata.load_event_to_reqs.get(j) if metadata is not None else None
                 )
@@ -331,8 +335,11 @@ class SimpleCPUOffloadWorker:
 
         if self._pending_store_event_indices:
             store_wm = self._poll_stream_events(is_store=True)
-            for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
-                self._pending_store_event_indices.discard(j)
+            while (
+                self._pending_store_event_indices
+                and self._pending_store_event_indices[0] <= store_wm
+            ):
+                j = self._pending_store_event_indices.popleft()
                 self._completed_store_events[j] = 1
 
         return None, finished_recving or None
@@ -357,15 +364,15 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        for event_idx, event in self._load_events:
+        while self._load_events:
+            event_idx, event = self._load_events.popleft()
             event.synchronize()
             self._load_hwm = event_idx
-        self._load_events.clear()
 
-        for event_idx, event in self._store_events:
+        while self._store_events:
+            event_idx, event = self._store_events.popleft()
             event.synchronize()
             self._store_hwm = event_idx
-        self._store_events.clear()
 
     def _poll_stream_events(self, is_store: bool) -> int:
         """Non-blocking poll for completed events and return the high-water mark."""
@@ -376,7 +383,7 @@ class SimpleCPUOffloadWorker:
             if not event.query():
                 break
             hwm = event_idx
-            events.pop(0)
+            events.popleft()
         if is_store:
             self._store_hwm = hwm
         else:
