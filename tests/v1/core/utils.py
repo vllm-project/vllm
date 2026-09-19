@@ -158,9 +158,7 @@ def create_scheduler(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
         if speculative_token_schedule is not None:
-            spec_kwargs["speculative_token_schedule"] = (
-                speculative_token_schedule
-            )
+            spec_kwargs["speculative_token_schedule"] = speculative_token_schedule
         if speculative_method is not None:
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
