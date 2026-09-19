@@ -17,6 +17,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
+    CopyRun,
     GPULoadStoreSpec,
     TransferResult,
 )
@@ -63,6 +65,60 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     ) is (ops.swap_blocks_batch)
+
+
+def _two_fragment_refs(
+    page: int, first_fragment: int
+) -> list[list[CanonicalKVCacheRef]]:
+    runs = (
+        CopyRun(0, 0, first_fragment, 1, first_fragment, first_fragment),
+        CopyRun(first_fragment, page, page - first_fragment, 1, page, page),
+    )
+    mapping = CanonicalPageMapping(2 * page, page, runs, 1, 0, True)
+    return [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page, mapping=mapping)]]
+
+
+@pytest.fixture
+def cuda_like_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not gpu_worker.HAS_TRITON:
+        pytest.skip("requires Triton")
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+
+def test_canonical_load_path_follows_fragment_size(cuda_like_platform) -> None:
+    """Canonical loads copy per fragment, so a page above the Triton threshold
+    whose fragments fall below it takes the Triton path."""
+    page = 32 * 1024
+    assert page >= gpu_worker.THRESHOLD_BYTES > page // 2
+    refs = _two_fragment_refs(page, page // 2)
+
+    direct = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    canonical = gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, canonical_layout=True
+    )
+
+    assert direct is ops.swap_blocks_batch
+    assert getattr(canonical, "func", None) is gpu_worker.swap_blocks_batch
+
+    # The kernel chunk keeps following the page, not the fragment: a 4 KiB
+    # page split into 2 KiB fragments still gets a 4 KiB chunk.
+    small = gpu_worker._select_swap_blocks_fn(
+        _two_fragment_refs(4096, 2048), gpu_to_cpu=False, canonical_layout=True
+    )
+    assert small.keywords["bytes_per_chunk"] == 4096
+
+
+def test_canonical_load_path_requires_aligned_fragments(cuda_like_platform) -> None:
+    """The Triton kernel copies whole 8-byte words per descriptor, so an aligned
+    page with unaligned fragments must stay on the DMA path."""
+    refs = _two_fragment_refs(page=1024, first_fragment=508)
+
+    canonical = gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, canonical_layout=True
+    )
+
+    assert canonical is ops.swap_blocks_batch
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
