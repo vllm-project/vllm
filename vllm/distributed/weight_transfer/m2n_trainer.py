@@ -14,7 +14,7 @@ in every caller.
 """
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -42,8 +42,9 @@ from vllm.distributed.weight_transfer.m2n_common import (
 )
 from vllm.distributed.weight_transfer.m2n_source import M2NWeightSource
 from vllm.distributed.weight_transfer.nccl_common import (
-    NCCLWeightTransferInitInfo,
+    decode_nccl_unique_id,
     trainer_init,
+    uid_init_process_group,
 )
 from vllm.logger import init_logger
 
@@ -60,7 +61,7 @@ def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).split(".")[-1]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class M2NTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for nccl_m2n.
 
@@ -71,8 +72,8 @@ class M2NTrainerInitInfo(TrainerInitInfo):
 
     backend: ClassVar[str] = "nccl_m2n"
 
-    master_address: str
-    master_port: int
+    master_address: str | None = None
+    master_port: int | None = None
     world_size: int
     """Trainer ranks + all inference workers."""
     num_trainer_ranks: int = 1
@@ -82,6 +83,7 @@ class M2NTrainerInitInfo(TrainerInitInfo):
     identically; defaults to a flat `(num_workers, 1)`, which is all a
     replicated destination needs."""
     max_cta: int | None = None
+    nccl_unique_id_b64: str | None = field(default=None, repr=False)
 
     @property
     def destination_mesh_dims(self) -> tuple[int, int]:
@@ -92,6 +94,7 @@ class M2NTrainerInitInfo(TrainerInitInfo):
 
     def __post_init__(self) -> None:
         """Reject rank counts or destination meshes that cannot form a group."""
+        _ = self.nccl_unique_id_bytes
         if not 0 < self.num_trainer_ranks < self.world_size:
             raise ValueError(
                 f"`num_trainer_ranks` ({self.num_trainer_ranks}) must leave at "
@@ -110,6 +113,15 @@ class M2NTrainerInitInfo(TrainerInitInfo):
                 f"trainer `rank` ({self.rank}) must be below "
                 f"`num_trainer_ranks` ({self.num_trainer_ranks})"
             )
+
+    @property
+    def nccl_unique_id_bytes(self) -> bytes | None:
+        return decode_nccl_unique_id(
+            master_address=self.master_address,
+            master_port=self.master_port,
+            nccl_unique_id_b64=self.nccl_unique_id_b64,
+            ctx="M2NTrainerInitInfo",
+        )
 
 
 class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitInfo]):
@@ -219,15 +231,25 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         # communicator. Trainer ranks take
         # [0, num_trainer_ranks) and the workers follow, which is the
         # contiguous-interval layout m2n requires of both meshes.
-        engine.group = trainer_init(
-            NCCLWeightTransferInitInfo(
-                master_address=init_info.master_address,
-                master_port=init_info.master_port,
-                rank_offset=init_info.num_trainer_ranks,
+        unique_id_bytes = init_info.nccl_unique_id_bytes
+        if unique_id_bytes is not None:
+            engine.group = uid_init_process_group(
+                unique_id_bytes,
+                rank=init_info.rank,
                 world_size=init_info.world_size,
-            ),
-            rank=init_info.rank,
-        )
+                device=torch.accelerator.current_device_index(),
+            )
+        else:
+            assert init_info.master_address is not None
+            assert init_info.master_port is not None
+            engine.group = trainer_init(
+                {
+                    "master_address": init_info.master_address,
+                    "master_port": init_info.master_port,
+                    "world_size": init_info.world_size,
+                },
+                rank=init_info.rank,
+            )
 
         # The trainer declares the inference topology; the worker uses exactly
         # this, so neither side has to infer the other's factorization.
@@ -288,9 +310,10 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
         """Handshake payload: rendezvous, both meshes, and the transfer plan."""
-        return {
+        payload: dict[str, Any] = {
             "master_address": init_info.master_address,
             "master_port": init_info.master_port,
+            "nccl_unique_id_b64": init_info.nccl_unique_id_b64,
             "rank_offset": init_info.num_trainer_ranks,
             "world_size": init_info.world_size,
             "src_mesh_dims": list(self._src_mesh.dims),
@@ -304,6 +327,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             ],
             "max_cta": init_info.max_cta,
         }
+        return {key: value for key, value in payload.items() if value is not None}
 
     def send_weights(self) -> None:
         """Drive one update round: start, reshard concurrently, then finish."""

@@ -19,7 +19,7 @@ inside `receive_weights` while the trainer is sending. Driving that from the
 trainer is the trainer engine's job.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -53,6 +53,7 @@ from vllm.distributed.weight_transfer.m2n_layout import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    decode_nccl_unique_id,
     worker_init_process_group,
 )
 
@@ -72,7 +73,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(kw_only=True)
 class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     """Worker-side init info: the rendezvous plus the full transfer plan.
 
@@ -81,8 +82,8 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     plain JSON so the HTTP control plane carries it unchanged.
     """
 
-    master_address: str
-    master_port: int
+    master_address: str | None = None
+    master_port: int | None = None
     rank_offset: int
     """First worker rank, i.e. the number of trainer ranks."""
     world_size: int
@@ -98,9 +99,11 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
     shapes: list[list[int]]
     src_placements: list[list[int] | None]
     """Per parameter, relative to `src_mesh_dims`; `None` means replicated."""
+    nccl_unique_id_b64: str | None = field(default=None, repr=False)
     max_cta: int | None = None
 
     def __post_init__(self) -> None:
+        _ = self.nccl_unique_id_bytes
         num_params = len(self.names)
         for label, values in (
             ("dtype_names", self.dtype_names),
@@ -124,6 +127,15 @@ class M2NWeightTransferInitInfo(WeightTransferInitInfo):
                 f"`dst_mesh_dims` {dst} must be {MESH_NDIMS} dims covering the "
                 f"{num_workers} inference workers"
             )
+
+    @property
+    def nccl_unique_id_bytes(self) -> bytes | None:
+        return decode_nccl_unique_id(
+            master_address=self.master_address,
+            master_port=self.master_port,
+            nccl_unique_id_b64=self.nccl_unique_id_b64,
+            ctx="M2NWeightTransferInitInfo",
+        )
 
 
 @dataclass
@@ -278,6 +290,7 @@ class M2NWeightTransferEngine(
             NCCLWeightTransferInitInfo(
                 master_address=init_info.master_address,
                 master_port=init_info.master_port,
+                nccl_unique_id_b64=init_info.nccl_unique_id_b64,
                 rank_offset=init_info.rank_offset,
                 world_size=init_info.world_size,
             ),

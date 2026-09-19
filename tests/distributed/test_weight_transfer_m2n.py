@@ -10,6 +10,7 @@ and multiple GPUs, so it is exercised separately.
 
 from unittest.mock import Mock
 
+import pybase64 as base64
 import pytest
 import ray
 import torch
@@ -42,7 +43,8 @@ from vllm.distributed.weight_transfer.m2n_source import (
 )
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_port
+
+VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
 
 
 class TestLayout:
@@ -128,6 +130,29 @@ class TestWireTypes:
 
     def test_accepts_a_consistent_plan(self):
         assert self._init_info().names == ["w"]
+
+    def test_accepts_pre_shared_nccl_unique_id(self):
+        info = self._init_info(
+            master_address=None,
+            master_port=None,
+            nccl_unique_id_b64=VALID_UID_B64,
+        )
+        assert info.nccl_unique_id_bytes == b"\x00" * 128
+        assert VALID_UID_B64 not in repr(info)
+
+    def test_rejects_both_rendezvous_modes(self):
+        with pytest.raises(ValueError, match="not both"):
+            self._init_info(nccl_unique_id_b64=VALID_UID_B64)
+
+    def test_trainer_accepts_pre_shared_nccl_unique_id(self):
+        info = M2NTrainerInitInfo(
+            nccl_unique_id_b64=VALID_UID_B64,
+            world_size=3,
+            num_trainer_ranks=1,
+            rank=0,
+        )
+        assert info.nccl_unique_id_bytes == b"\x00" * 128
+        assert VALID_UID_B64 not in repr(info)
 
     def test_ragged_plan_rejected(self):
         with pytest.raises(ValueError, match="`shapes`"):
@@ -261,7 +286,7 @@ def _assigned_device() -> "torch.device":
 
 
 @ray.remote(num_gpus=1)
-def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) -> bool:
+def _m2n_trainer_send(nccl_unique_id_b64: str, world_size: int) -> bool:
     """Send one parameter through the real trainer engine."""
     device = _assigned_device()
 
@@ -293,8 +318,7 @@ def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) ->
 
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=M2NTrainerInitInfo(
-            master_address=master_address,
-            master_port=master_port,
+            nccl_unique_id_b64=nccl_unique_id_b64,
             world_size=world_size,
             num_trainer_ranks=1,
             dst_mesh_dims=(1, world_size - 1),
@@ -311,8 +335,7 @@ def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) ->
 
 @ray.remote(num_gpus=1)
 def _m2n_worker_receive(
-    master_address: str,
-    master_port: int,
+    nccl_unique_id_b64: str,
     world_size: int,
     worker_rank: int = 0,
 ) -> dict:
@@ -372,8 +395,7 @@ def _m2n_worker_receive(
 
     engine.init_transfer_engine(
         M2NWeightTransferInitInfo(
-            master_address=master_address,
-            master_port=master_port,
+            nccl_unique_id_b64=nccl_unique_id_b64,
             rank_offset=1,  # trainer occupies rank 0
             world_size=world_size,
             src_mesh_dims=[1, 1],
@@ -424,12 +446,16 @@ def test_m2n_weight_transfer_between_processes():
     pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
     _init_ray()
 
-    master_address = "127.0.0.1"
-    master_port = get_open_port()
+    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+
+    nccl = NCCLLibrary()
+    nccl_unique_id_b64 = base64.b64encode(
+        bytes(nccl.ncclGetUniqueId().internal)
+    ).decode()
     world_size = 2  # 1 trainer + 1 inference worker
 
-    worker = _m2n_worker_receive.remote(master_address, master_port, world_size)
-    trainer = _m2n_trainer_send.remote(master_address, master_port, world_size)
+    worker = _m2n_worker_receive.remote(nccl_unique_id_b64, world_size)
+    trainer = _m2n_trainer_send.remote(nccl_unique_id_b64, world_size)
     trainer_ok, result = ray.get([trainer, worker])
 
     assert trainer_ok, "trainer engine did not complete"
@@ -448,15 +474,19 @@ def test_m2n_weight_transfer_to_tp2_shards():
     pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
     _init_ray()
 
-    master_address = "127.0.0.1"
-    master_port = get_open_port()
+    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+
+    nccl = NCCLLibrary()
+    nccl_unique_id_b64 = base64.b64encode(
+        bytes(nccl.ncclGetUniqueId().internal)
+    ).decode()
     world_size = 3
 
     workers = [
-        _m2n_worker_receive.remote(master_address, master_port, world_size, rank)
+        _m2n_worker_receive.remote(nccl_unique_id_b64, world_size, rank)
         for rank in range(2)
     ]
-    trainer = _m2n_trainer_send.remote(master_address, master_port, world_size)
+    trainer = _m2n_trainer_send.remote(nccl_unique_id_b64, world_size)
     trainer_ok, *results = ray.get([trainer, *workers])
 
     assert trainer_ok, "trainer engine did not complete"
