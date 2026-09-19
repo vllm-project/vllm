@@ -24,6 +24,10 @@ The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
 
+When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs the pinned
+AWS EFA userspace stack. The upstream installer detects amd64 or arm64 and
+skips kernel-module and host-limit changes, which must remain host-managed.
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>
