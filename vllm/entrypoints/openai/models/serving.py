@@ -229,6 +229,25 @@ class OpenAIServingModels:
             if error_check_ret is not None:
                 return error_check_ret
 
+            # Drop the adapter from the engine as well, otherwise its
+            # worker-side slot stays occupied until LRU eviction reclaims it.
+            lora_id = self.lora_requests[lora_name].lora_int_id
+            try:
+                removed = await self.engine_client.remove_lora(lora_id)
+            except Exception as e:
+                return create_error_response(
+                    message=str(e),
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            if not removed:
+                logger.debug(
+                    "LoRA adapter '%s' (id %d) was not registered in the engine; "
+                    "it had already been evicted.",
+                    lora_name,
+                    lora_id,
+                )
+
             # Safe to delete now since we hold the lock
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
