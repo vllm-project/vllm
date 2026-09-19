@@ -573,3 +573,48 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
+
+
+@pytest.mark.parametrize("quant_backend", ["humming", "marlin"])
+def test_quantization_only_backend_fallback_to_auto(quant_backend):
+    """Quantization-only backends (like 'humming' or 'marlin') should fall through
+    to 'auto' backend selection for unquantized layers (e.g. MTP draft MoE layers
+    or modules excluded via modules_to_not_convert) instead of raising ValueError.
+    """
+    with (
+        patch.object(current_platform, "is_cuda", return_value=False),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+    ):
+        moe_config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+        moe_config.moe_backend = quant_backend
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.CPU
+        assert experts_cls is not None
+
+
+@skipif_not_cuda_rocm
+@pytest.mark.parametrize("quant_backend", ["humming", "marlin"])
+def test_quantization_only_backend_fallback_on_gpu(quant_backend):
+    """Verify quantization-only backends fall back to auto on CUDA/ROCm."""
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = quant_backend
+
+    selected_backend, experts_cls = select_unquantized_moe_backend(
+        moe_config=moe_config
+    )
+
+    assert selected_backend in (
+        UnquantizedMoeBackend.TRITON,
+        UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+        UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+        UnquantizedMoeBackend.AITER,
+    )
+    assert experts_cls is not None

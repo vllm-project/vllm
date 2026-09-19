@@ -297,9 +297,10 @@ def select_unquantized_moe_backend(
         )
 
     runner_backend = moe_config.moe_backend
-    # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
-    # modules_to_not_convert) falls through to auto instead of erroring.
-    if runner_backend not in ["auto", "humming"]:
+    # 'humming' and 'marlin' are quantization-only; unquantized layers (e.g.
+    # draft MoE layers in speculative MTP or excluded via modules_to_not_convert)
+    # fall through to auto instead of erroring.
+    if runner_backend not in ["auto", "humming", "marlin"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts
