@@ -531,6 +531,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 "Video doesn't have audio track with `audio_in_video=True`"
             )
 
+        # No `modality` here: the synthesized `size` below is flat, and images
+        # and videos go through a single combined HF call, so overlaying a
+        # nested `videos_kwargs` would leak the video size onto the images.
+        # HF's own kwarg merging already scopes the nested dict correctly.
         merged = self.info.ctx.get_merged_mm_kwargs(normalized_kwargs)
         if hf_data.get("videos") and (
             merged.keys() & {"size", "min_pixels", "max_pixels"}
