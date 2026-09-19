@@ -211,6 +211,15 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    skip_writing_prefix_cache: bool | None = Field(
+        default=None,
+        description=(
+            "If true, this request may reuse existing prefix-cache entries but "
+            "will not add newly computed blocks to the local prefix cache or "
+            "native CPU KV offload cache."
+        ),
+    )
+
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -304,6 +313,7 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=self.skip_special_tokens,
+            skip_writing_prefix_cache=bool(self.skip_writing_prefix_cache),
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -363,6 +373,8 @@ class CompletionRequest(OpenAIBaseModel):
         echo_without_generation = self.echo and self.max_tokens == 0
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.skip_writing_prefix_cache is not None:
+            extra_args["skip_writing_prefix_cache"] = self.skip_writing_prefix_cache
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params

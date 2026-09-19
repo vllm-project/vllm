@@ -151,6 +151,14 @@ class AnthropicMessagesRequest(BaseModel):
             "to 256 bit)."
         ),
     )
+    skip_writing_prefix_cache: bool | None = Field(
+        default=None,
+        description=(
+            "If true, this request may reuse existing prefix-cache entries but "
+            "will not add newly computed blocks to the local prefix cache or "
+            "native CPU KV offload cache."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
