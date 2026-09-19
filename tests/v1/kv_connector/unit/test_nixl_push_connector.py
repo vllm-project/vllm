@@ -322,6 +322,32 @@ class TestPushScheduler:
         assert d_req.request_id not in sched._push_registration_deadlines
         assert d_req.request_id not in sched._push_pending_registrations
         assert d_req.request_id not in meta.push_registrations
+        assert meta.push_registration_expired == [d_req.request_id]
+
+    def test_registration_watchdog_no_expiry_leaves_field_empty(self):
+        """When nothing has expired, the metadata field stays empty rather
+        than a stale/leftover list from a previous step."""
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+
+        d_req = _make_request(request_id="req-d-fresh")
+        sched.update_state_after_alloc(
+            d_req, _BlocksMock(([7, 8],)), num_external_tokens=32
+        )
+
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_new_reqs = []
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], resumed_req_ids=set()
+        )
+        with patch.object(
+            sched.__class__.__mro__[1],
+            "build_connector_meta",
+            return_value=NixlConnectorMetadata(),
+        ):
+            meta = sched.build_connector_meta(scheduler_output)
+
+        assert meta.push_registration_expired == []
 
 
 # ----------------------------------------------------------------- #
@@ -391,6 +417,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
+        w.xfer_stats = NixlKVConnectorStats()
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -642,6 +669,27 @@ class TestPushWriterStartLoadKv:
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
+    def test_start_load_kv_records_expired_registrations(self):
+        """Registrations the scheduler's watchdog gave up on are recorded as
+        a stat on the D worker, one entry per expired request."""
+        w = _StubWriterWorker.fresh()
+        w._send_heartbeats = lambda metadata: None
+
+        meta = NixlConnectorMetadata()
+        meta.push_registration_expired = ["req-timed-out-1", "req-timed-out-2"]
+
+        w.start_load_kv(meta)
+
+        assert w.xfer_stats.data["num_registration_expired"] == [1, 1]
+
+    def test_start_load_kv_with_no_expired_registrations_records_nothing(self):
+        w = _StubWriterWorker.fresh()
+        w._send_heartbeats = lambda metadata: None
+
+        w.start_load_kv(NixlConnectorMetadata())
+
+        assert w.xfer_stats.data["num_registration_expired"] == []
+
     @pytest.mark.parametrize("sharded", [False, True])
     def test_noncanonical_pcp_rank_only_pushes_distinct_shards(self, sharded):
         w = _StubWriterWorker.fresh()
@@ -771,6 +819,31 @@ def test_writer_loop_drains_deferred_push_inbox():
 
     assert len(w.start_push_calls) == 1
     assert w.start_push_calls[0][0] == "req-retry"
+
+
+def test_writer_loop_records_and_survives_iteration_exception():
+    """An exception raised mid-iteration (W2) is recorded as a stat and the
+    loop keeps running rather than dying silently."""
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+    w.nixl_wrapper.get_new_notifs.side_effect = RuntimeError("nixl boom")
+
+    t = threading.Thread(target=w._push_writer_loop, daemon=True)
+    t.start()
+    try:
+        # No event to wait on for "an exception happened"; poll the stat.
+        deadline = time.perf_counter() + 2.0
+        while (
+            not w.xfer_stats.data["num_writer_loop_errors"]
+            and time.perf_counter() < deadline
+        ):
+            time.sleep(0.01)
+        assert w.xfer_stats.data["num_writer_loop_errors"] == [1]
+        assert t.is_alive(), "writer thread must survive a caught exception"
+    finally:
+        w._push_writer_stop.set()
+        w._push_writer_wake.set()
+        t.join(timeout=2)
 
 
 def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:

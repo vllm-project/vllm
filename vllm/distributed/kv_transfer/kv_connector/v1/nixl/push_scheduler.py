@@ -325,6 +325,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 rid,
                 self._push_registration_timeout,
             )
+        if expired:
+            meta.push_registration_expired = expired
 
         # D side: package pending registrations for D workers to send out.
         if self._push_pending_registrations:
