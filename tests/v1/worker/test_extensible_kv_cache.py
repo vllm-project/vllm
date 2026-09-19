@@ -7,6 +7,10 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.utils.extensible_tensor import (
+    granule_aligned_blocks,
+    granule_block_alignment,
+)
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
@@ -18,7 +22,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.extensible_kv_cache import (
     ExtensibleKVCache,
-    measure_kv_cache_blocks,
+    measure_kv_cache_bytes,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -111,7 +115,7 @@ def test_views_stay_valid_across_commits(vmm, layout):
         kv_cache.free()
 
 
-def test_measure_kv_cache_blocks():
+def test_measure_kv_cache_bytes():
     gib = 1 << 30
     # 10 GiB were free at startup; 3 GiB of non-KV memory is now resident and
     # 1 GiB is committed to the KV cache, leaving 6 GiB free. Budget is 9 GiB.
@@ -119,67 +123,76 @@ def test_measure_kv_cache_blocks():
         init_free_memory=10 * gib,
         free_memory=6 * gib,
         committed_bytes=1 * gib,
-        bytes_per_block=gib // 4,
         margin_floor_bytes=0,
         margin_fraction=0.0,
     )
     # Budget-bound: 9 - 3 = 6 GiB for the KV cache.
-    assert measure_kv_cache_blocks(requested_memory=9 * gib, **common) == 24
+    assert measure_kv_cache_bytes(requested_memory=9 * gib, **common) == 6 * gib
     # Headroom-bound: at most what is free plus what is already committed.
-    assert measure_kv_cache_blocks(requested_memory=20 * gib, **common) == 28
+    assert measure_kv_cache_bytes(requested_memory=20 * gib, **common) == 7 * gib
     # The measured transient peak is kept free in full, on either bound.
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=20 * gib, transient_peak_bytes=gib, **common
         )
-        == 24
+        == 6 * gib
     )
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=9 * gib, transient_peak_bytes=gib, **common
         )
-        == 20
+        == 5 * gib
     )
     # The margin is a share of that peak with a floor, taken off the headroom
     # (floor or fraction, whichever is larger), never off an explicit budget
     # that already leaves it free.
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=20 * gib,
             transient_peak_bytes=gib,
             **{**common, "margin_floor_bytes": gib},
         )
-        == 20
+        == 5 * gib
     )
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=20 * gib,
             transient_peak_bytes=2 * gib,
             **{**common, "margin_fraction": 0.5},
         )
-        == 16
+        == 4 * gib
     )
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=9 * gib, **{**common, "margin_floor_bytes": gib}
         )
-        == 24
+        == 6 * gib
     )
     # A small explicit budget (0.5 GiB) survives a floor larger than itself.
     assert (
-        measure_kv_cache_blocks(
+        measure_kv_cache_bytes(
             requested_memory=3 * gib + gib // 2, **{**common, "margin_floor_bytes": gib}
         )
-        == 2
+        == gib // 2
     )
-    # Extra margin always applies, and the result never goes negative.
-    assert (
-        measure_kv_cache_blocks(
-            requested_memory=9 * gib, extra_margin_bytes=gib, **common
-        )
-        == 20
-    )
-    assert measure_kv_cache_blocks(requested_memory=2 * gib, **common) == 0
+    # The result never goes negative.
+    assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
+
+
+def test_granule_aligned_blocks():
+    """Blocks per stride must span whole granules; with several strides the
+    count is a multiple of every stride's requirement."""
+    granule = 2 << 20
+    # 64 KiB blocks: 32 per granule.
+    assert granule_block_alignment([64 << 10], granule) == 32
+    assert granule_aligned_blocks(1000, [64 << 10], granule) == 992
+    # 96 KiB blocks: 3 blocks cover 288 KiB; the granule is reached at 64.
+    assert granule_block_alignment([96 << 10], granule) == 64
+    # Mixed strides: lcm(32, 64).
+    assert granule_aligned_blocks(1000, [64 << 10, 96 << 10], granule) == 960
+    # A stride that is a granule multiple needs no alignment.
+    assert granule_aligned_blocks(1000, [4 << 20], granule) == 1000
+    assert granule_aligned_blocks(31, [64 << 10], granule) == 0
 
 
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
@@ -351,24 +364,117 @@ def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
         kv_cache.free()
 
 
+def _segments_backed_by_one_chunk(kv_cache: ExtensibleKVCache) -> list[bool]:
+    """Whether each segment's committed bytes lie within one driver allocation."""
+    return kv_cache.buffer.segments_backed_by_one_chunk(
+        [kv_cache.num_committed_blocks * s for s in kv_cache.segment_strides]
+    )
+
+
+def _granule(layout: KVCacheLayout) -> int:
+    probe = ExtensibleKVCache(_make_config(layout)[0], torch.device("cuda"))
+    try:
+        return probe.buffer.granularity
+    finally:
+        probe.free()
+
+
 @requires_cuda
-def test_defragmenting_commit_leaves_one_allocation_per_segment(vmm):
+def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm):
     """Incremental commits map one driver allocation each; a defragmenting
-    commit remaps every segment as a single allocation (RDMA cannot span
-    several) and still ends up zero-filled and fully committed."""
-    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=1024)
+    commit of a granule-aligned count remaps every segment as a single
+    allocation (RDMA cannot span several) and still ends up zero-filled."""
+    granule = _granule(KVCacheLayout.LBNHC)
+    stride = _make_config(KVCacheLayout.LBNHC)[1].page_size_bytes
+    alignment = granule_block_alignment([stride], granule)
+    # An unaligned capacity puts segment offsets inside granules.
+    capacity = 2 * alignment + alignment // 2
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=capacity)
     kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
     try:
-        granule_blocks = kv_cache.buffer.granularity // kv_cache.segment_strides[0]
+        assert kv_cache.block_alignment == alignment
         kv_cache.commit(1)
-        kv_cache.commit(2 * granule_blocks + 1)
+        kv_cache.commit(alignment + 1)
         num_segments = kv_cache.buffer.num_segments
         assert kv_cache.buffer.num_physical_chunks == 2 * num_segments
 
-        kv_cache.commit(config.num_blocks, defragment=True)
-        assert kv_cache.num_committed_blocks == config.num_blocks
-        assert kv_cache.buffer.num_physical_chunks == num_segments
+        kv_cache.commit(capacity, defragment=True)
+        assert kv_cache.num_committed_blocks == capacity
         assert torch.count_nonzero(kv_cache.buffer.full_view()) == 0
+        # Segments after the first start mid-granule and share chunks.
+        assert not all(_segments_backed_by_one_chunk(kv_cache))
+    finally:
+        kv_cache.free()
+
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=2 * alignment)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    try:
+        kv_cache.commit(alignment + 1)
+        kv_cache.commit(
+            kv_cache.blocks_within(kv_cache.size, aligned=True), defragment=True
+        )
+        assert kv_cache.num_committed_blocks == 2 * alignment
+        buffer = kv_cache.buffer
+        assert buffer.num_physical_chunks == buffer.num_segments
+        assert all(_segments_backed_by_one_chunk(kv_cache))
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
+def test_aligned_capacity_config_allocates_and_defragments(vmm, layout):
+    """The engine-side alignment yields a config the cache can be built from,
+    with views over it, and whose full defragmenting commit backs each segment
+    with one allocation."""
+    from vllm.v1.core.kv_cache_utils import (
+        align_extensible_kv_cache_capacity,
+        generate_scheduler_kv_cache_config,
+    )
+
+    granule = _granule(layout)
+    config, spec = _make_config(layout, num_blocks=1000)
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    align_extensible_kv_cache_capacity(vllm_config, [config], scheduler_config, granule)
+    assert config.num_blocks < 1000
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        views = allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
+        assert all(v.shape[0] == config.num_blocks for v in views.values())
+        kv_cache.commit(3)
+        kv_cache.commit(config.num_blocks, defragment=True)
+        assert all(_segments_backed_by_one_chunk(kv_cache))
+        for view in views.values():
+            view.fill_(1.0)
+        torch.accelerator.synchronize()
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+def test_blocks_within_accounts_for_granule_rounding(vmm):
+    """The count that fits a byte budget is the most whose rounded-up
+    per-segment footprint fits, not the budget over the nominal block size;
+    aligned, it is the largest aligned count under the nominal footprint."""
+    config, spec = _make_config(KVCacheLayout.LBNHC, num_blocks=4096)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    try:
+        granule = kv_cache.buffer.granularity
+        alignment = kv_cache.block_alignment
+        num_segments = kv_cache.buffer.num_segments
+        # One granule per segment holds `alignment` blocks exactly; one more
+        # block per segment needs a whole extra granule each.
+        budget = num_segments * granule
+        assert kv_cache.blocks_within(budget) == alignment
+        assert kv_cache.blocks_within(budget + 1) == alignment
+        assert kv_cache.physical_bytes_for(alignment + 1) == 2 * budget
+        assert kv_cache.blocks_within(2 * budget - 1) == alignment
+        assert kv_cache.blocks_within(2 * budget) == 2 * alignment
+        nominal = (2 * alignment + 5) * kv_cache.bytes_per_block
+        assert kv_cache.blocks_within(nominal, aligned=True) == 2 * alignment
+        assert kv_cache.blocks_within(kv_cache.size * 2) == config.num_blocks
     finally:
         kv_cache.free()
 

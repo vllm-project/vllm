@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.extensible_tensor import ExtensibleTensor
+from vllm.utils.extensible_tensor import (
+    ExtensibleTensor,
+    granule_aligned_blocks,
+    granule_block_alignment,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
@@ -137,17 +141,16 @@ class ExtensibleKVCache:
         several allocations.
         """
         num_blocks = min(num_blocks, self.capacity_blocks)
+        sizes = [num_blocks * stride for stride in self.segment_strides]
         remap = (
-            defragment and self.buffer.num_physical_chunks > self.buffer.num_segments
+            defragment and not all(self.buffer.segments_backed_by_one_chunk(sizes))
         ) or (shrink and num_blocks < self.num_committed_blocks)
         if remap:
             self.buffer.release_physical()
             self.num_committed_blocks = 0
         if num_blocks <= self.num_committed_blocks:
             return
-        self.buffer.resize_segments_(
-            [num_blocks * stride for stride in self.segment_strides], zero_new=True
-        )
+        self.buffer.resize_segments_(sizes, zero_new=True)
         self.num_committed_blocks = num_blocks
         logger.debug(
             "Committed %d of %d KV cache blocks (%.2f GiB physical).",
@@ -216,19 +219,40 @@ class ExtensibleKVCache:
             KV_CACHE_MARGIN_FLOOR_BYTES, int(reserve * KV_CACHE_MARGIN_FRACTION)
         )
         budget = headroom - margin - reserve
-        budget -= self.commit_rounding_overhead
-        blocks = max(budget // self.bytes_per_block, self.num_committed_blocks)
-        return min(blocks, self.capacity_blocks)
+        return max(self.blocks_within(budget), self.num_committed_blocks)
 
     @property
     def physical_bytes(self) -> int:
         """Physically mapped bytes, including granule rounding."""
         return self.buffer.physical_bytes
 
+    def physical_bytes_for(self, num_blocks: int) -> int:
+        """Bytes a commit of ``num_blocks`` maps, each segment rounded to granules."""
+        granule = self.buffer.granularity
+        return sum(
+            -(-num_blocks * stride // granule) * granule
+            for stride in self.segment_strides
+        )
+
     @property
-    def commit_rounding_overhead(self) -> int:
-        """Upper bound on granule rounding for any commit."""
-        return self.buffer.num_segments * self.buffer.granularity
+    def block_alignment(self) -> int:
+        """Block count multiple at which every segment ends on a granule."""
+        return granule_block_alignment(self.segment_strides, self.buffer.granularity)
+
+    def blocks_within(self, num_bytes: int, aligned: bool = False) -> int:
+        """Most blocks whose physical footprint fits in ``num_bytes``.
+
+        ``aligned`` restricts the count to multiples of ``block_alignment``, so
+        that a defragmenting commit backs each segment with one chunk exactly.
+        """
+        num_blocks = min(num_bytes // self.bytes_per_block, self.capacity_blocks)
+        if aligned:
+            return granule_aligned_blocks(
+                num_blocks, self.segment_strides, self.buffer.granularity
+            )
+        while num_blocks > 0 and self.physical_bytes_for(num_blocks) > num_bytes:
+            num_blocks -= 1
+        return num_blocks
 
     def _locate(self, start: int) -> tuple[int, int]:
         """Segment index and offset within it of allocation byte ``start``."""
@@ -373,31 +397,29 @@ def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
     runner.kv_connector = get_kv_connector(runner.vllm_config, kv_caches)
 
 
-def measure_kv_cache_blocks(
+def measure_kv_cache_bytes(
     *,
     init_free_memory: int,
     free_memory: int,
     committed_bytes: int,
     requested_memory: int,
-    bytes_per_block: int,
     transient_peak_bytes: int = 0,
-    extra_margin_bytes: int = 0,
     margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
-    """Blocks that fit in the memory measured after warmup.
+    """Bytes the KV cache may occupy given the memory measured after warmup.
 
     Everything resident except the committed KV prefix is needed by the engine;
     the cache gets the rest of the budget, capped by the device headroom (free
     memory plus the committed prefix) less a margin of
     ``max(margin_floor_bytes, margin_fraction * transient_peak_bytes)``. The
-    measured ``transient_peak_bytes`` and ``extra_margin_bytes`` are then kept
-    free in full. The margin guards physical memory, so it never reduces an
-    explicit budget that already leaves that much free.
+    measured ``transient_peak_bytes`` are then kept free in full. The margin
+    guards physical memory, so it never reduces an explicit budget that already
+    leaves that much free.
     """
     non_kv_used = init_free_memory - free_memory - committed_bytes
     headroom = free_memory + committed_bytes
     margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
-    available -= transient_peak_bytes + extra_margin_bytes
-    return max(available // bytes_per_block, 0)
+    available -= transient_peak_bytes
+    return max(available, 0)
