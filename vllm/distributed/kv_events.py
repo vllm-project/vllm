@@ -6,7 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from itertools import count
 from queue import Queue
@@ -133,11 +133,47 @@ class BlockRemoved(KVCacheEvent):
 
 
 class AllBlocksCleared(KVCacheEvent):
-    pass
+    def __hash__(self) -> int:
+        return hash(type(self))
+
+
+class TierBlocksCleared(KVCacheEvent):
+    """Clear one cache tier without legacy readers widening the operation.
+
+    `medium` is required: a scoped clear with no tier has no meaning, and a
+    consumer must never fall back to an all-tier clear to interpret one.
+    `ownership` names the logical domain being reset and is omitted for the
+    framework's own cache, matching `BlockStored`/`BlockRemoved`. Physical tier
+    and ownership domain stay independent so a GPU reset does not disturb
+    separately owned host state.
+    """
+
+    medium: str
+    ownership: str | None = None
+
+    def __hash__(self) -> int:
+        return hash((self.medium, self.ownership))
 
 
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared | TierBlocksCleared]
+
+
+def isolate_tier_clear_batches(
+    events: Iterable[KVCacheEvent],
+) -> Iterator[list[KVCacheEvent]]:
+    """Keep scoped clears from collateral-dropping adjacent legacy events."""
+    ordinary: list[KVCacheEvent] = []
+    for event in events:
+        if isinstance(event, TierBlocksCleared):
+            if ordinary:
+                yield ordinary
+                ordinary = []
+            yield [event]
+        else:
+            ordinary.append(event)
+    if ordinary:
+        yield ordinary
 
 
 class KVEventAggregator:

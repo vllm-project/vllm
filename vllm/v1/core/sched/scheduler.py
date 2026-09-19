@@ -16,7 +16,13 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    EventPublisherFactory,
+    KVEventBatch,
+    TierBlocksCleared,
+    isolate_tier_clear_batches,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -2311,22 +2317,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self._publish_kv_cache_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2763,6 +2754,29 @@ class Scheduler(SchedulerInterface):
             )
         )
 
+    def _publish_kv_cache_events(self, all_tiers_cleared: bool = False) -> None:
+        events = self.kv_cache_manager.take_events()
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        if all_tiers_cleared:
+            events = [
+                event
+                for event in events or []
+                if not isinstance(event, (AllBlocksCleared, TierBlocksCleared))
+            ]
+            events.append(AllBlocksCleared())
+
+        if events:
+            for isolated_events in isolate_tier_clear_batches(events):
+                batch = KVEventBatch(ts=time.time(), events=isolated_events)
+                self.kv_event_publisher.publish(batch)
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
@@ -2800,32 +2814,77 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
+        connector_reset_successful = False
+        cleared_every_tier = False
+        if reset_connector and reset_successful:
+            connector_reset_successful, cleared_every_tier = (
+                self._reset_connector_cache()
+            )
+
+        if reset_successful:
+            # Utility calls can reset an idle engine without another scheduler
+            # step. Publish before returning so the router cannot select from
+            # stale cache state for the next request.
+            self._publish_kv_cache_events(all_tiers_cleared=cleared_every_tier)
+
         if reset_connector:
-            reset_successful = self.reset_connector_cache() and reset_successful
+            reset_successful = connector_reset_successful and reset_successful
 
         return reset_successful
 
     def reset_connector_cache(self) -> bool:
+        return self._reset_connector_cache()[0]
+
+    def _reset_connector_cache(self) -> tuple[bool, bool]:
+        """Reset the connector cache once and report two different things.
+
+        Returns ``(call_succeeded, cleared_every_tier)``.
+
+        ``call_succeeded`` is the long-standing "the call did not fail" answer
+        that ``reset_prefix_cache`` folds into its return value. It deliberately
+        treats a missing connector and an unimplemented ``reset_cache`` as
+        success so callers that unconditionally request a connector reset (the
+        cache-clearing cascade after a weight update) don't see
+        ``reset_prefix_cache()`` flip to False purely because they didn't
+        configure a connector.
+
+        ``cleared_every_tier`` is the stronger claim needed before widening the
+        router-visible invalidation from "the GPU pool" to "every tier", and the
+        two are not the same question:
+
+        * No connector attached -> nothing outside the GPU pool was cleared.
+          This is the common path, because ``EngineCore._reset_caches()``
+          hardcodes ``reset_connector=True``; widening here would publish an
+          all-tier clear for a GPU-only reset and make the router discard host
+          and storage records the engine never touched -- the exact
+          over-invalidation the scoped clear exists to remove.
+        * ``reset_cache`` not implemented -> returns ``None``, which is not
+          ``False`` and so reads as success while clearing nothing.
+
+        An explicit ``True`` is still only the connector's own claim:
+        ``OffloadingConnector`` returns ``True`` while ``TieringManager.reset()``
+        deliberately leaves persistent secondary tiers (FS, network) populated,
+        so a deployment with a secondary tier remains over-invalidated. Closing
+        that needs connectors to report which media they cleared, so this can
+        publish one ``TierBlocksCleared`` per medium instead of the all-tier
+        event.
+        """
         if self.connector is None:
-            # No connector attached -> nothing to reset, treat as success so
-            # callers that unconditionally request a connector reset (e.g. as
-            # part of a cache-clearing cascade after a weight update) don't
-            # see reset_prefix_cache() flip to False purely because they
-            # didn't configure a connector.
             logger.debug(
                 "reset_connector requested but no KV connector is configured; "
                 "treating as no-op success."
             )
-            return True
+            return True, False
 
-        if self.connector.reset_cache() is False:
-            return False
+        outcome = self.connector.reset_cache()
+        if outcome is False:
+            return False, False
 
         if self.log_stats:
             assert self.connector_prefix_cache_stats is not None
             self.connector_prefix_cache_stats.reset = True
 
-        return True
+        return True, outcome is True
 
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.

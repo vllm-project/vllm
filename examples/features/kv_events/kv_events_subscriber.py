@@ -59,8 +59,17 @@ class AllBlocksCleared(KVCacheEvent):
     pass
 
 
+class TierBlocksCleared(KVCacheEvent):
+    """Clear one cache tier. A consumer that tracks a single tier may treat
+    this as a full clear of that tier; one that tracks several must clear only
+    `medium` and keep the others."""
+
+    medium: str
+    ownership: str | None = None
+
+
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared | TierBlocksCleared]
 
 
 def process_event(event_batch):

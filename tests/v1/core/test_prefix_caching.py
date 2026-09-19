@@ -17,9 +17,9 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
-    AllBlocksCleared,
     BlockRemoved,
     BlockStored,
+    TierBlocksCleared,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
@@ -3285,8 +3285,15 @@ def test_kv_cache_events(blocks_to_cache: int):
     manager.reset_prefix_cache()
     events = manager.take_events()
 
-    assert isinstance(events[-1], AllBlocksCleared)
+    assert isinstance(events[-1], TierBlocksCleared)
+    assert events[-1].medium == "GPU"
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
+
+    # `take_events` hands over the queue rather than copying it, which is what
+    # lets the idle-reset path publish immediately without the next scheduler
+    # step republishing the same clear. Asserting it here, on the real queue,
+    # rather than in a scheduler test whose `take_events` is a Mock.
+    assert manager.take_events() == []
 
 
 def test_null_parent_block_hash():
