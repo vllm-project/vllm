@@ -72,6 +72,8 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 _IGNORE_MM_KEYS = {
+    # Dithering causes minor divergence
+    "cohere_asr": {"input_features"},
     # In Ultravox, the audio_features can be different depending on padding
     # The slight difference should not be a problem though, since
     # attention_mask lets us ignore the difference.
