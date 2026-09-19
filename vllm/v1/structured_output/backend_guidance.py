@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from transformers import PreTrainedTokenizerFast
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -32,6 +33,13 @@ else:
     llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
 
 logger = init_logger(__name__)
+
+
+def is_guidance_tokenizer_supported(tokenizer: Any) -> bool:
+    """Return whether GuidanceBackend can construct an LLTokenizer."""
+    if is_mistral_tokenizer(tokenizer):
+        return tokenizer.is_tekken
+    return isinstance(tokenizer, PreTrainedTokenizerFast)
 
 
 def _walk_json_for_additional_properties(data: object):
