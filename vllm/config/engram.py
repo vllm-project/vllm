@@ -74,12 +74,13 @@ class EngramConfig:
         if (
             model_config is None
             or field is None
-            or not current_platform.is_cuda()
+            or not current_platform.is_cuda_alike()
             or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings, non-empty n-gram layer ids, and CUDA."
+                "embeddings, non-empty n-gram layer ids, and a CUDA-alike "
+                "device (CUDA or ROCm)."
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
