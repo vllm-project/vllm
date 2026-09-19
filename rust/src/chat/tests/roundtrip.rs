@@ -714,7 +714,7 @@ async fn parse_completion(
     };
 
     let mut request = base_request.clone();
-    let processor = backends.chat_backend.new_chat_output_processor(
+    let mut processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
             tool_strict_level: vllm_chat::ToolStrictLevel::Auto,
@@ -722,6 +722,7 @@ async fn parse_completion(
             reasoning_parser: &case.reasoning_parser,
         },
     )?;
+    processor.initialize(&prompt_token_ids)?;
 
     let decoded = decoded_completion_stream(
         tokenizer.as_ref(),
