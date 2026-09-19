@@ -145,9 +145,11 @@ impl DeepSeekJsonToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_deepseek_json_event(input, &mut self.mode, self.format)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(Partial::new(self.buffer.as_str()), |input| {
+                parse_next_deepseek_json_event(input, &mut self.mode, self.format)
+            })?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }

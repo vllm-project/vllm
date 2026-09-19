@@ -189,7 +189,7 @@ impl UnifiedParser for Gemma4UnifiedParser {
         self.buffer.append(delta);
 
         while let Some((event, consumed_len)) = {
-            parse_buffered_event(&self.buffer.text, |input| {
+            parse_buffered_event(Partial::new(self.buffer.text.as_str()), |input| {
                 parse_next_gemma4_event(input, &mut self.mode)
             })?
         } {

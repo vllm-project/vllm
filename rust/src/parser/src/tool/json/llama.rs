@@ -5,6 +5,7 @@ use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::seq;
 use winnow::error::{ModalResult, StrContext};
 use winnow::prelude::*;
+use winnow::stream::Partial;
 use winnow::token::literal;
 
 use super::{
@@ -155,9 +156,11 @@ impl ToolParser for Llama3JsonToolParser {
             return Ok(());
         }
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_llama_json_event(input, &mut self.mode)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(Partial::new(self.buffer.as_str()), |input| {
+                parse_next_llama_json_event(input, &mut self.mode)
+            })?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
