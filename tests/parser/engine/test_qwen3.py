@@ -1175,3 +1175,61 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+class TestUnclosedLastParameter:
+    """#57699: the model sometimes closes </function> without </parameter>
+    on the last parameter. Its value must survive the final conversion."""
+
+    def test_nonstreaming_last_parameter_without_close(self, parser, mock_request):
+        text = (
+            "<tool_call>\n"
+            "<function=ThinQ_Connect>\n"
+            "<parameter=body>\n"
+            '{"airConJobMode": "AIR_CLEAN", "windStrength": "HIGH", '
+            '"monitoringEnabled": true}\n'
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {
+            "body": '{"airConJobMode": "AIR_CLEAN", "windStrength": "HIGH", '
+            '"monitoringEnabled": true}'
+        }
+
+    def test_nonstreaming_earlier_params_kept_with_unclosed_tail(
+        self, parser, mock_request
+    ):
+        text = (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "<parameter=days>5\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "Tokyo", "days": "5"}
+
+    def test_streaming_flush_does_not_truncate_streamed_args(
+        self, parser, mock_request
+    ):
+        # partial conversions already streamed the trailing value; the flush
+        # at TOOL_CALL_END must not emit a shorter "{}" that clips it away.
+        chunks = [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "<parameter=days>5\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        args_text = collect_tool_arguments(results)
+        assert json.loads(args_text) == {"city": "Tokyo", "days": "5"}
