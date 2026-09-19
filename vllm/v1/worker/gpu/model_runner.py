@@ -449,11 +449,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Initialize samplers. Model states may override via custom_sampler().
+        config_processors = self.model_config.logits_processors or ()
         custom_logits_processors = build_custom_logits_processors(
-            self.vllm_config,
-            self.req_states,
-            self.is_pooling_model,
-            self.model_config.logits_processors or (),
+            self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
             sampler_kwargs: dict[str, Any] = {

@@ -15,6 +15,7 @@ if not torch.cuda.is_available():
     )
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
@@ -78,11 +79,17 @@ def _apply(
     idx_mapping_np = idx_mapping.cpu().numpy()
     state.apply(
         logits,
-        expanded_idx_mapping,
-        idx_mapping,
-        idx_mapping_np,
-        torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
-        torch.tensor(local_pos, dtype=torch.int32, device=DEVICE),
+        LogitsContext(
+            expanded_idx_mapping=expanded_idx_mapping,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            expanded_local_pos=torch.tensor(
+                local_pos, dtype=torch.int32, device=DEVICE
+            ),
+            input_ids=torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(len(input_ids), dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(1, len(input_ids), dtype=np.int64),
+        ),
     )
     return logits.cpu()
 
