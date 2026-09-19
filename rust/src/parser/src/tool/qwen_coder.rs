@@ -161,9 +161,16 @@ impl ToolParser for Qwen3CoderToolParser {
         self.buffer.push_str(chunk);
         let config = self.config;
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, &mut self.mode, config, self.emitted_tool_count > 0)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(Partial::new(self.buffer.as_str()), |input| {
+                parse_next_qwen_coder_event(
+                    input,
+                    &mut self.mode,
+                    config,
+                    self.emitted_tool_count > 0,
+                )
+            })?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }

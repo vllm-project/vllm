@@ -238,9 +238,11 @@ impl UnifiedParser for InklingUnifiedParser {
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
-            parse_next_inkling_event(input, &mut self.mode)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(Partial::new(self.buffer.text.as_str()), |input| {
+                parse_next_inkling_event(input, &mut self.mode)
+            })?
+        {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.apply_event(event, piece, output)?;
         }

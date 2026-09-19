@@ -5,6 +5,7 @@ use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
+use winnow::stream::Partial;
 use winnow::token::{any, literal};
 
 use super::{
@@ -162,9 +163,11 @@ impl ToolParser for Granite4ToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_granite4_event(input, &mut self.mode)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(Partial::new(self.buffer.as_str()), |input| {
+                parse_next_granite4_event(input, &mut self.mode)
+            })?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
