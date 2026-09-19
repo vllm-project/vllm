@@ -10,6 +10,7 @@ from vllm.models.glm5next.cpu.mla import (
 )
 from vllm.models.glm5next.cpu.sparse_indexer import (
     SparseAttnIndexerKpool,
+    _dequantize_cache_vector,
     _expand_pool_ids,
     _pool_compress,
     _quantize_cache_vector,
@@ -191,6 +192,81 @@ def test_cpu_indexer_forward_writes_pool_and_expands_decode_topk(monkeypatch):
     assert result.data_ptr() == topk.data_ptr()
     assert result[0, 0].item() == 0
     assert torch.any(cache.kv_cache != 0)
+
+
+def test_cpu_indexer_completes_pool_from_tail_and_expands_tokens():
+    class Cache:
+        prefix = "glm.indexer.k_cache"
+
+        def __init__(self):
+            self.kv_cache = torch.zeros(1, 1, 132, dtype=torch.uint8)
+
+    class Tail:
+        prefix = "glm.indexer.tail_cache"
+
+        def __init__(self):
+            self.kv_cache = torch.zeros(1, 2, 4, 128, dtype=torch.bfloat16)
+
+    cache = Cache()
+    tail = Tail()
+    indexer = SparseAttnIndexerKpool(
+        cache,
+        quant_block_size=128,
+        scale_fmt="ue8m0",
+        topk_tokens=8,
+        head_dim=128,
+        max_model_len=16,
+        max_total_seq_len=16,
+        topk_indices_buffer=torch.full((1, 8), -1, dtype=torch.int32),
+        tail_cache=tail,
+    )
+    positions = torch.arange(4, dtype=torch.int32)
+    keys = torch.arange(4, dtype=torch.float32).unsqueeze(1).expand(4, 128)
+    gates = torch.zeros(4, 128)
+    metadata = type(
+        "Metadata", (), {"slot_mapping": torch.zeros(4, dtype=torch.int64)}
+    )()
+    tail_metadata = type(
+        "TailMetadata", (), {"slot_mapping": torch.arange(4, dtype=torch.int64)}
+    )()
+
+    indexer._write_pools(
+        keys.to(torch.bfloat16),
+        gates,
+        torch.zeros(4, 128),
+        metadata.slot_mapping,
+        4,
+        positions,
+        {cache.prefix: metadata, tail.prefix: tail_metadata},
+    )
+
+    assert torch.isfinite(_dequantize_cache_vector(cache.kv_cache[0, 0])).all()
+    assert torch.any(cache.kv_cache[0, 0] != 0)
+    torch.testing.assert_close(tail.kv_cache[0, 0, :, 0], keys[:, 0].to(torch.bfloat16))
+
+    decode = type(
+        "Decode",
+        (),
+        {
+            "requires_padding": False,
+            "seq_lens": torch.tensor([1], dtype=torch.int32),
+            "block_table": torch.tensor([[0]], dtype=torch.int32),
+        },
+    )()
+    metadata.decode = decode
+    metadata.num_decodes = 1
+    metadata.num_decode_tokens = 1
+    indexer._decode_topk(
+        torch.zeros(1, 1, 128, dtype=torch.float8_e4m3fn),
+        torch.ones(1, 1),
+        type("IndexerMetadata", (), {"decode": decode})(),
+        4,
+        torch.tensor([3]),
+    )
+    torch.testing.assert_close(
+        indexer.topk_indices_buffer[0, :4],
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
 
 
 @pytest.mark.parametrize(
