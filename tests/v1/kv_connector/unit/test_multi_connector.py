@@ -3,6 +3,7 @@
 import filecmp
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -215,6 +216,95 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
         if not _compare_directories(dir1 / sub_dir, dir2 / sub_dir):
             return False
     return True
+
+
+def test_multi_connector_forwards_lifecycle_hooks(mc):
+    """Lifecycle operations reach every configured child connector."""
+    children = [MagicMock(), MagicMock()]
+    mc._connectors = children
+
+    mc.quiesce(12.0)
+    mc.reinitialize()
+    mc.verify()
+
+    for child in children:
+        assert child.quiesce.call_count == 1
+        assert child.quiesce.call_args.args[0] <= 12.0
+        child.reinitialize.assert_called_once_with()
+        child.verify.assert_called_once_with()
+
+
+def test_multi_connector_quiesces_children_in_parallel(mc):
+    entered = threading.Barrier(3)
+    children = [MagicMock(), MagicMock(), MagicMock()]
+
+    def quiesce(timeout):
+        assert timeout == 10.0
+        entered.wait(timeout=1)
+
+    for child in children:
+        child.quiesce.side_effect = quiesce
+    mc._connectors = children
+
+    mc.quiesce(10.0)
+
+    for child in children:
+        child.quiesce.assert_called_once_with(10.0)
+
+
+def test_multi_connector_reinitialize_quiesces_completed_children_on_failure(mc):
+    first, second = MagicMock(), MagicMock()
+    second.reinitialize.side_effect = RuntimeError("reinitialize failed")
+    mc._connectors = [first, second]
+
+    with pytest.raises(RuntimeError, match="reinitialize failed"):
+        mc.reinitialize()
+
+    first.reinitialize.assert_called_once_with()
+    first.quiesce.assert_called_once_with()
+    second.reinitialize.assert_called_once_with()
+
+
+def test_multi_connector_reinitializes_children_in_parallel(mc):
+    """Independent child transports are rebuilt concurrently."""
+    entered = threading.Barrier(2)
+    children = [MagicMock(), MagicMock()]
+
+    def reinitialize():
+        entered.wait(timeout=1)
+
+    for child in children:
+        child.reinitialize.side_effect = reinitialize
+    mc._connectors = children
+
+    mc.reinitialize()
+
+    for child in children:
+        child.reinitialize.assert_called_once_with()
+
+
+def test_multi_connector_rolls_back_all_successful_children(mc):
+    """Every child rebuilt before a failure is quiesced during rollback."""
+    first, second, third = MagicMock(), MagicMock(), MagicMock()
+    third.reinitialize.side_effect = RuntimeError("reinitialize failed")
+    mc._connectors = [first, second, third]
+
+    with pytest.raises(RuntimeError, match="reinitialize failed"):
+        mc.reinitialize()
+
+    first.quiesce.assert_called_once_with()
+    second.quiesce.assert_called_once_with()
+
+
+def test_multi_connector_preserves_reinitialize_error_if_rollback_fails(mc):
+    """A rollback failure must not hide the original child failure."""
+    first, second = MagicMock(), MagicMock()
+    first.quiesce.side_effect = RuntimeError("rollback failed")
+    second.reinitialize.side_effect = RuntimeError("reinitialize failed")
+    mc._connectors = [first, second]
+
+    with pytest.raises(RuntimeError, match="reinitialize failed"):
+        mc.reinitialize()
 
 
 def test_multi_example_connector_consistency():

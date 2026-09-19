@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -485,6 +486,61 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if metadata is not None:
                 return metadata
         return None
+
+    def _run_on_connectors(
+        self, operation: Callable[[KVConnectorBase_V1], None]
+    ) -> tuple[list[KVConnectorBase_V1], BaseException | None]:
+        completed: list[KVConnectorBase_V1] = []
+        first_error: BaseException | None = None
+        if not self._connectors:
+            return completed, first_error
+
+        with ThreadPoolExecutor(max_workers=len(self._connectors)) as executor:
+            futures = [
+                (connector, executor.submit(operation, connector))
+                for connector in self._connectors
+            ]
+            for connector, future in futures:
+                try:
+                    future.result()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    completed.append(connector)
+
+        return completed, first_error
+
+    def quiesce(self, timeout: float | None = None) -> None:
+        _, first_error = self._run_on_connectors(
+            lambda connector: connector.quiesce(timeout)
+        )
+        if first_error is not None:
+            raise first_error.with_traceback(first_error.__traceback__)
+
+    def release_for_checkpoint(self) -> None:
+        for connector in self._connectors:
+            connector.release_for_checkpoint()
+
+    def reinitialize(self) -> None:
+        reinitialized, first_error = self._run_on_connectors(
+            lambda connector: connector.reinitialize()
+        )
+
+        if first_error is not None:
+            # A child may have rebuilt its transport before a later child
+            # failed. Quiesce completed children so the wrapper does not keep
+            # a mixture of live and retired child transports.
+            for connector in reinitialized:
+                try:
+                    connector.quiesce()
+                except Exception:
+                    logger.exception("Failed to roll back connector reinitialize")
+            raise first_error.with_traceback(first_error.__traceback__)
+
+    def verify(self) -> None:
+        for connector in self._connectors:
+            connector.verify()
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]

@@ -419,6 +419,26 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def quiesce(self, timeout: float | None = None) -> None:
+        """Quiesce connector-owned asynchronous transfer resources.
+
+        Connectors without external resources have nothing to quiesce.
+        """
+        del timeout
+        return None
+
+    def release_for_checkpoint(self) -> None:
+        """Release resources that cannot cross a checkpoint boundary."""
+        return None
+
+    def reinitialize(self) -> None:
+        """Rebuild connector-owned transport state while retaining KV caches."""
+        return None
+
+    def verify(self) -> None:
+        """Verify connector-owned transport state is ready for transfers."""
+        return None
+
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """Get the KV connector stats collected during the last interval."""
         return None
