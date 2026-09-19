@@ -15,7 +15,7 @@ from openai_harmony import (
 from transformers import AutoTokenizer, GenerationConfig
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
-from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall, TokenPhaseCounts
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
@@ -814,6 +814,95 @@ class TestProcessChunk:
         assert [
             (s.channel, s.recipient, s.delta) for s in result.segments if s.delta
         ] == [("final", None, "Hello")]
+
+    def test_count_reasoning_tokens_after_reparse(self, harmony_parser, chat_request):
+        token_ids = get_model_output_tokens(
+            [assistant("Thinking", "analysis"), assistant("Done", "final")]
+        )
+
+        phase_counts = harmony_parser.process_chunk(token_ids)
+        harmony_parser.flush()
+        assert phase_counts.reasoning_token_count > 0
+        expected_classification = harmony_parser.classify_token_phases(token_ids)
+        assert expected_classification == TokenPhaseCounts(
+            reasoning=1,
+            content=1,
+            unclassified=len(token_ids) - 2,
+        )
+        assert (
+            harmony_parser.count_reasoning_tokens(token_ids)
+            == phase_counts.reasoning_token_count
+        )
+
+        # The non-streaming metrics path first consumes deltas for timing and
+        # then parses the complete output to build the response.
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert (
+            harmony_parser.count_reasoning_tokens(token_ids)
+            == phase_counts.reasoning_token_count
+        )
+        assert (
+            harmony_parser.classify_token_phases(token_ids) == expected_classification
+        )
+
+    def test_tool_call_tokens_are_unclassified_for_output_metrics(
+        self, harmony_parser, chat_request
+    ):
+        token_ids = get_model_output_tokens(
+            [tool_call("functions.get_weather", '{"location": "SF"}')]
+        )
+
+        harmony_parser.process_chunk(token_ids)
+        expected = TokenPhaseCounts(
+            reasoning=0,
+            content=0,
+            unclassified=len(token_ids),
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
+        # A subsequent full parse must retain the same classification instead
+        # of treating the addressed commentary as reasoning output.
+        harmony_parser.flush()
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
+    @pytest.mark.parametrize(
+        ("channel", "reasoning_tokens", "content_tokens"),
+        [("analysis", 5, 0), ("final", 0, 5)],
+    )
+    def test_multibyte_payload_tokens_are_classified_before_utf8_decode(
+        self,
+        harmony_parser,
+        chat_request,
+        channel,
+        reasoning_tokens,
+        content_tokens,
+    ):
+        token_ids = get_model_output_tokens([assistant("😀😃😄", channel)])
+        expected = TokenPhaseCounts(
+            reasoning=reasoning_tokens,
+            content=content_tokens,
+            unclassified=len(token_ids) - reasoning_tokens - content_tokens,
+        )
+
+        harmony_parser.process_chunk(token_ids)
+        assert harmony_parser.classify_token_phases(token_ids) == expected
+
+        harmony_parser.flush()
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert harmony_parser.classify_token_phases(token_ids) == expected
 
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
         result = harmony_parser.process_chunk(
