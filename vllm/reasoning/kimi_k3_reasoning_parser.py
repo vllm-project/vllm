@@ -134,6 +134,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        self._response_open_ids = tokenizer.encode(
+            self._response_open, add_special_tokens=False
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -166,9 +169,15 @@ class KimiK3ReasoningParser(ReasoningParser):
         # marker). A missing open marker (e.g. it was consumed as the generation
         # prefix) means a close marker alone ends reasoning, which is what
         # "close is the newest marker" already encodes.
-        return (
-            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
-        )
+        # A response opener newer than every think marker means the model
+        # skipped the think channel entirely (#57714): reasoning never
+        # started, so it ends here — otherwise the structured-output gate
+        # never engages and the response body is generated unconstrained.
+        last_open = _subseq_index(input_ids, self._think_open_ids)
+        last_close = _subseq_index(input_ids, self._think_close_ids)
+        last_response = _subseq_index(input_ids, self._response_open_ids)
+        newest_end = max(last_close, last_response)
+        return newest_end != -1 and newest_end > last_open
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -189,10 +198,23 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                len(self._response_open_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        # Same end rule as is_reasoning_end, on the step window: a response
+        # opener with no newer think marker ends reasoning (#57714).
+        last_open = _subseq_index(window, self._think_open_ids)
+        last_close = _subseq_index(window, self._think_close_ids)
+        last_response = _subseq_index(window, self._response_open_ids)
+        newest_end = max(last_close, last_response)
+        return newest_end != -1 and newest_end > last_open
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
