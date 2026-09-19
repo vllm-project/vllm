@@ -11,7 +11,14 @@ fi
 
 REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv_connectors.txt}"
 
-uv pip install --system -r "${REQUIREMENTS_FILE}"
+# lmcache wheels on PyPI are compiled against a single pinned torch ABI. When
+# the CI image ships a different torch, the wheel install succeeds but
+# lmcache.c_ops fails to load at runtime (C++ ABI mismatch). Build lmcache
+# from source against the torch in this image instead; --no-build-isolation
+# makes the PEP 517 build reuse the installed torch.
+grep -v '^lmcache' "${REQUIREMENTS_FILE}" > /tmp/kv_connectors_rest.txt
+uv pip install --system -r /tmp/kv_connectors_rest.txt
+uv pip install --system 'lmcache >= 0.3.9' --no-binary lmcache --no-build-isolation-package lmcache
 
 KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
