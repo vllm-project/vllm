@@ -324,6 +324,137 @@ def _replicated_layout(
     return build_offloading_config(config, kv_cache_config).replicated_layout
 
 
+_SWA_MLA_PAGE = SlidingWindowMLASpec(
+    block_size=16,
+    num_kv_heads=1,
+    head_size=512,
+    dtype=torch.float32,
+    sliding_window=128,
+).page_size_bytes
+
+
+def _make_swa_mla_kv_cache_config(
+    num_blocks: int = 4,
+) -> KVCacheConfig:
+    """Single SlidingWindowMLASpec group — DSV4 sliding-window layers."""
+    spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=_SWA_MLA_PAGE * num_blocks,
+                layers=["layer"],
+                layer_stride=_SWA_MLA_PAGE * num_blocks,
+                block_stride=_SWA_MLA_PAGE,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+
+def _make_dsv4_flash_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
+    """Minimal fake of DeepSeek-V4-Flash's five UniformTypeKVCacheSpecs groups.
+
+    The real model has the following groups (layer counts from runtime logs);
+    2 per group is enough to exercise the structural properties that govern
+    replicated_layout:
+        group[0]: 22 SlidingWindowMLASpec layers, sliding_window=128
+        group[1]: 21 SlidingWindowMLASpec layers, sliding_window=128
+        group[2]: 62 MLAAttentionSpec layers  (MLA + indexer.k_cache)
+        group[3]: 42 SlidingWindowMLASpec layers, sliding_window=8
+        group[4]: 20 SlidingWindowMLASpec layers, sliding_window=128
+    All inner specs have num_kv_heads=1 → every group is TP-replicated.
+    """
+    block_size = 16
+    dtype = torch.float32
+    head_size = 512
+
+    def _swa_group(tag: str, sw: int) -> KVCacheGroupSpec:
+        names = [f"{tag}_0", f"{tag}_1"]
+        spec = SlidingWindowMLASpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=head_size,
+            dtype=dtype,
+            sliding_window=sw,
+        )
+        return KVCacheGroupSpec(
+            names,
+            UniformTypeKVCacheSpecs(
+                block_size=block_size,
+                kv_cache_specs={name: spec for name in names},
+            ),
+        )
+
+    def _mla_group(tag: str) -> KVCacheGroupSpec:
+        names = [f"{tag}_0", f"{tag}_1"]
+        spec = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=head_size,
+            dtype=dtype,
+        )
+        return KVCacheGroupSpec(
+            names,
+            UniformTypeKVCacheSpecs(
+                block_size=block_size,
+                kv_cache_specs={name: spec for name in names},
+            ),
+        )
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        # Empty tensors: triggers the sum-based worker_kv_bytes_per_block path.
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            _swa_group("swa_128a", 128),  # group[0]: SWA-MLA, sw=128
+            _swa_group("swa_128b", 128),  # group[1]: SWA-MLA, sw=128
+            _mla_group("mla"),  # group[2]: MLA + indexer layers
+            _swa_group("swa_8", 8),  # group[3]: SWA-MLA, sw=8
+            _swa_group("swa_128c", 128),  # group[4]: SWA-MLA, sw=128
+        ],
+    )
+
+
+def _make_dsv3_2_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
+    """Minimal fake of DeepSeek-V3.2-Exp's single UniformTypeKVCacheSpecs group.
+
+    The real model has 1 group (layer counts from runtime logs):
+        group[0]: 122 MLAAttentionSpec layers (self_attn.attn + indexer.k_cache)
+    All inner specs have num_kv_heads=1 → the group is TP-replicated.
+
+    GLM-5.3 has the same topology (one UniformType group of MLAAttentionSpec
+    layers, num_kv_heads=1) with 99 layers instead of 122, so this config
+    covers both models.
+    """
+    block_size = 16
+    names = [f"mla_{i}" for i in range(4)]  # 4 layers; real model has 122
+    spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+    )
+    group = KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(
+            block_size=block_size,
+            kv_cache_specs={name: spec for name in names},
+        ),
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[group],
+    )
+
+
 @pytest.mark.parametrize("packed", [False, True])
 def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     config = _make_vllm_config(
@@ -588,85 +719,6 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
     )
 
 
-_SWA_MLA_PAGE = SlidingWindowMLASpec(
-    block_size=16,
-    num_kv_heads=1,
-    head_size=512,
-    dtype=torch.float32,
-    sliding_window=128,
-).page_size_bytes
-
-
-def _make_swa_mla_kv_cache_config(
-    num_blocks: int = 4,
-) -> KVCacheConfig:
-    """Single SlidingWindowMLASpec group — DSV4 sliding-window layers."""
-    spec = SlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=512,
-        dtype=torch.float32,
-        sliding_window=128,
-    )
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=_SWA_MLA_PAGE * num_blocks,
-                layers=["layer"],
-                layer_stride=_SWA_MLA_PAGE * num_blocks,
-                block_stride=_SWA_MLA_PAGE,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
-    )
-
-
-def _make_dsv4_style_kv_cache_config(num_blocks: int = 4) -> KVCacheConfig:
-    """Multi-group config with both MLAAttentionSpec and SlidingWindowMLASpec
-    groups, mirroring the DSV4 layout (regular MLA + sliding-window MLA).
-
-    KV cache groups alias the same backing allocation from byte 0 — a block is
-    owned by exactly one group at a time — so the physical block is sized to
-    the *largest* group (max), not the sum of all groups.
-    """
-    mla_spec = _mla_spec()
-    swa_spec = SlidingWindowMLASpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=512,
-        dtype=torch.float32,
-        sliding_window=128,
-    )
-    mla_layers = ["mla_0", "mla_1"]
-    swa_layers = ["swa_0", "swa_1"]
-    mla_bytes = mla_spec.page_size_bytes * len(mla_layers)
-    swa_bytes = swa_spec.page_size_bytes * len(swa_layers)
-    # Groups alias: physical block sized to the largest group.
-    max_bytes = max(mla_bytes, swa_bytes)
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=max_bytes * num_blocks,
-                layers=mla_layers,
-                layer_stride=mla_spec.page_size_bytes * num_blocks,
-                block_stride=mla_spec.page_size_bytes,
-            ),
-            KVCacheTensor(
-                size=max_bytes * num_blocks,
-                layers=swa_layers,
-                layer_stride=swa_spec.page_size_bytes * num_blocks,
-                block_stride=swa_spec.page_size_bytes,
-            ),
-        ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(mla_layers, mla_spec),
-            KVCacheGroupSpec(swa_layers, swa_spec),
-        ],
-    )
-
-
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_replicated_layout_enabled_for_swa_mla(world_size: int):
     """SlidingWindowMLASpec groups are also replicated and qualify."""
@@ -676,11 +728,23 @@ def test_replicated_layout_enabled_for_swa_mla(world_size: int):
     )
 
 
-@pytest.mark.parametrize("world_size", [2, 4])
-def test_replicated_layout_enabled_for_dsv4_style_multi_group(world_size: int):
-    """DSV4-style config: MLAAttentionSpec + SlidingWindowMLASpec groups."""
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_replicated_layout_dsv4_flash(world_size: int):
+    """DeepSeek-V4-Flash: all 5 UniformType groups are MLA/SWA-MLA with
+    num_kv_heads=1, so replicated_layout must be True under TP/mp single-node."""
     assert _replicated_layout(
-        _make_dsv4_style_kv_cache_config(),
+        _make_dsv4_flash_kv_cache_config(),
+        tensor_parallel_size=world_size,
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_replicated_layout_dsv3_2(world_size: int):
+    """DeepSeek-V3.2 / GLM-5.3: single UniformType group of MLAAttentionSpec
+    layers (122 and 99 respectively), num_kv_heads=1 → replicated_layout must
+    be True under TP/mp single-node."""
+    assert _replicated_layout(
+        _make_dsv3_2_kv_cache_config(),
         tensor_parallel_size=world_size,
     )
 

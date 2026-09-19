@@ -14,7 +14,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
-    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -74,13 +73,14 @@ def _is_replicated_mla_spec(spec: KVCacheSpec) -> bool:
     )
 
 
-def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
-    """Per-layer specs of an all-MLA group, or ``None`` if it is not all-MLA.
+def _as_replicated_mla_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
+    """Unwrap *spec* and return its per-layer specs iff they are all replicated-MLA.
 
-    ``UniformTypeKVCacheSpecs`` groups several layers of one attention type,
-    so unwrap it and check each layer. Both ``MLAAttentionSpec`` and
-    ``SlidingWindowMLASpec`` qualify when they have ``num_kv_heads == 1`` —
-    a single latent vector with no head dimension to shard across TP ranks.
+    Returns ``None`` when any layer fails the check or the group is empty.
+    ``UniformTypeKVCacheSpecs`` groups several layers of one attention type;
+    both ``MLAAttentionSpec`` and ``SlidingWindowMLASpec`` qualify when they
+    have ``num_kv_heads == 1`` — a single latent vector with no head dimension
+    to shard across TP ranks.
     """
     if isinstance(spec, UniformTypeKVCacheSpecs):
         layer_specs = list(spec.kv_cache_specs.values())
@@ -97,38 +97,15 @@ def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
 def _is_replicated_group(group: "KVCacheGroupSpec") -> bool:
     """True when every layer in the group is TP-replicated.
 
-    Two cases qualify:
-    - All-MLA groups: every layer spec is an MLA type with ``num_kv_heads == 1``
-      (no head dimension to shard across TP ranks).
-    - Mamba groups with ``tp_replicated=True``: the SSM state is not sharded
-      (e.g. GLM5 PLE conv state); every TP rank holds the full state.
+    Only all-MLA groups qualify: every layer spec must be an MLA type with
+    ``num_kv_heads == 1`` (no head dimension to shard across TP ranks).
     """
-    spec = group.kv_cache_spec
-    if isinstance(spec, MambaSpec):
-        return spec.tp_replicated
-    return _mla_layer_specs(spec) is not None
+    return _as_replicated_mla_specs(group.kv_cache_spec) is not None
 
 
 def _all_groups_are_replicated(groups) -> bool:
-    """Whether every KV cache group is TP-replicated (MLA or Mamba)."""
+    """Whether every KV cache group is TP-replicated (all-MLA)."""
     return bool(groups) and all(_is_replicated_group(g) for g in groups)
-
-
-def _expected_mla_bytes_per_block(groups) -> int:
-    """Bytes one physical block must accommodate across all aliased groups.
-
-    KV cache groups alias the same backing allocation from byte 0; a block is
-    owned by exactly one group at a time.  The physical block must therefore be
-    large enough for the *largest* group, not the sum of all groups.  This
-    mirrors the allocator's ``_get_kv_cache_bytes_per_block`` which also uses
-    ``max``.
-    """
-    return max(
-        spec.page_size_bytes
-        if isinstance(spec := group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        else spec.page_size_bytes * len(group.layer_names)
-        for group in groups
-    )
 
 
 def build_offloading_config(
