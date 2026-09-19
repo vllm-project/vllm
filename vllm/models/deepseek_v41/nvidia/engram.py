@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVIDIA Engram DP sharding, shared host storage, and asynchronous prefetch."""
 
+import ctypes
+import errno
 import mmap
+import os
 import tempfile
+import time
 import weakref
 from contextlib import ExitStack
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -22,6 +27,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
@@ -39,6 +45,117 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def _allocate_engram_host_storage(
+    num_bytes: int, checkpoint_dir: Path | None = None
+) -> torch.Tensor | None:
+    """Prefault and register a private mapping, requesting huge pages if available."""
+    if num_bytes < 2 * 1024**2:
+        return None
+    mapping = owner = tensor = finalizer = None
+    try:
+        mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        try:
+            mapping.madvise(mmap.MADV_HUGEPAGE)
+        except OSError as exc:
+            logger.warning("Engram MADV_HUGEPAGE failed: %s", exc)
+        _drop_engram_checkpoint_cache(checkpoint_dir)
+        owner = np.frombuffer(mapping, dtype=np.uint8)
+        # Fault in place before CUDA pins base pages, without a table-sized copy.
+        for start in range(0, num_bytes, 256 * 1024**2):
+            owner[start : start + 256 * 1024**2 : mmap.PAGESIZE] = 0
+            time.sleep(0)
+        tensor = torch.from_numpy(owner)
+        pointer = tensor.data_ptr()
+        result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
+        if result.value != 0:
+            raise RuntimeError(f"cudaHostRegister failed: {result}")
+        finalizer = weakref.finalize(
+            owner, DPSharedEngramStorage._unregister, mapping, pointer
+        )
+        finalizer.atexit = False  # type: ignore[misc]
+        if not tensor.is_pinned():
+            raise RuntimeError("CUDA did not recognize the Engram registration")
+    except (OSError, RuntimeError) as exc:
+        if finalizer is not None:
+            finalizer()
+        tensor = owner = None
+        if mapping is not None:
+            mapping.close()
+        logger.warning_once(
+            "Engram huge-page allocation failed (%s); using Torch pinned memory.", exc
+        )
+        return None
+    return tensor
+
+
+def _engram_checkpoint_dir() -> Path | None:
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    config = get_current_vllm_config()
+    model = config.model_config
+    if model is None:
+        return None
+    model_path = model.model_weights or model.model
+    if Path(model_path).is_dir():
+        return Path(model_path)
+    try:
+        return Path(
+            hf_api().snapshot_download(
+                model_path,
+                revision=model.revision,
+                cache_dir=config.load_config.download_dir,
+                local_files_only=True,
+            )
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _drop_engram_checkpoint_cache(checkpoint_dir: Path | None) -> None:
+    if checkpoint_dir is None or not hasattr(os, "posix_fadvise"):
+        return
+    files, num_bytes = 0, 0
+    for path in checkpoint_dir.glob("*.safetensors"):
+        try:
+            with path.open("rb") as file:
+                size = os.fstat(file.fileno()).st_size
+                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            files += 1
+            num_bytes += size
+        except OSError as exc:
+            logger.warning(
+                "Could not release Engram checkpoint cache for %s: %s", path, exc
+            )
+    logger.info(
+        "Requested page-cache release for %d checkpoint files (%.2f GiB) "
+        "before Engram host-table allocation/collapse.",
+        files,
+        num_bytes / 1024**3,
+    )
+
+
+def _finish_engram_host_pages(
+    storage: torch.Tensor, checkpoint_dir: Path | None
+) -> None:
+    # Loading weights repopulates the checkpoint page cache.
+    _drop_engram_checkpoint_cache(checkpoint_dir)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    libc.madvise.restype = ctypes.c_int
+    # MADV_COLLAPSE (Linux >= 6.1) is not exposed by Python mmap.
+    for attempt in range(3):
+        if libc.madvise(storage.data_ptr(), storage.numel(), 25) == 0:
+            return
+        error = ctypes.get_errno()
+        if error != errno.EAGAIN or attempt == 2:
+            logger.warning(
+                "Engram MADV_COLLAPSE failed; keeping existing pages: %s",
+                os.strerror(error),
+            )
+            return
+        time.sleep(1)
 
 
 def engram_head_shard_rank() -> int:
@@ -227,7 +344,16 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         block_size: int = 32,
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
+        thp_packing: bool = False,
+        checkpoint_dir: Path | None = None,
     ) -> None:
+        if thp_packing and (not cpu_offload or dp_shared_memory):
+            raise ValueError(
+                "thp_packing requires cpu_offload=True and dp_shared_memory=False"
+            )
+        self.thp_packing = thp_packing
+        self._checkpoint_dir = checkpoint_dir
+        self._host_page_storage: torch.Tensor | None = None
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.dp_size = get_engram_dp_size()
@@ -278,6 +404,20 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             return storage.weight, storage.weight_scale_inv
         if not self.cpu_offload:
             return super()._allocate_weights()
+        if self.thp_packing:
+            weight_bytes = self.part_num_embeddings * self.dim
+            host_storage = _allocate_engram_host_storage(
+                weight_bytes + weight_bytes // self.block_size,
+                self._checkpoint_dir,
+            )
+            if host_storage is not None:
+                self._host_page_storage = host_storage
+                return (
+                    host_storage[:weight_bytes]
+                    .view(torch.float8_e4m3fn)
+                    .view(-1, self.dim),
+                    host_storage[weight_bytes:].view(-1, self.dim // self.block_size),
+                )
         # Model initialization may be inside a CUDA device context.
         return (
             torch.empty(
@@ -295,6 +435,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
                 pin_memory=True,
             ),
         )
+
+    def finish_weight_loading(self) -> None:
+        if self._host_page_storage is not None:
+            _finish_engram_host_pages(self._host_page_storage, self._checkpoint_dir)
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._shared_memory is not None:
@@ -351,6 +495,28 @@ class Engram(BaseEngram):
     """NVIDIA Engram with asynchronous offload and node-local DP lookup."""
 
     _prefetch_stream: torch.cuda.Stream | None = None
+    _prefetch_done: torch.cuda.Event | None = None
+
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None,
+        layout: EngramLayout,
+        layer_hash_index: int,
+        use_sequence_parallel: bool,
+        prefix: str,
+        *,
+        prefetch_stream: torch.cuda.Stream | None,
+    ) -> None:
+        self._prefetch_stream = prefetch_stream
+        super().__init__(
+            config,
+            quant_config,
+            layout,
+            layer_hash_index,
+            use_sequence_parallel,
+            prefix,
+        )
 
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
@@ -363,12 +529,22 @@ class Engram(BaseEngram):
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=engram_config.dp_shared_memory,
+            thp_packing=engram_config.thp_packing,
+            checkpoint_dir=(
+                _engram_checkpoint_dir() if engram_config.thp_packing else None
+            ),
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
-            self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
+            if self._prefetch_stream is None:
+                raise ValueError(
+                    "CPU-offloaded Engram requires a caller-provided prefetch stream"
+                )
+            self._prefetch_done = torch.cuda.Event()
+        else:
+            self._prefetch_stream = None
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
@@ -388,14 +564,17 @@ class Engram(BaseEngram):
         hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
             self.embed_tokens.lookup(hash_ids, rows, background=True)
+            assert self._prefetch_done is not None
+            self._prefetch_done.record(stream)
 
     @eager_break_during_capture
-    def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
-        torch.cuda.current_stream().wait_stream(stream)
+    def _finish_prefetch(self, event: torch.cuda.Event) -> None:
+        torch.cuda.current_stream().wait_event(event)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
         if self._prefetch_stream is not None:
-            self._finish_prefetch(self._prefetch_stream)
+            assert self._prefetch_done is not None
+            self._finish_prefetch(self._prefetch_done)
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]

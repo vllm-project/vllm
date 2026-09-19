@@ -82,7 +82,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
+from .engram import Engram, ParallelEngramEmbedding, gather_engram_hashes
 from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
@@ -188,6 +188,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        engram_prefetch_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
 
@@ -206,6 +207,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_layout.layer_ids.index(layer_id),
                     use_sequence_parallel=self.use_sequence_parallel,
                     prefix=f"{prefix}.engram",
+                    prefetch_stream=engram_prefetch_stream,
                 )
 
         self.rms_norm_eps = config.rms_norm_eps
@@ -531,6 +533,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        # One stream for every Engram layer, so the offloaded lookups take
+        # turns instead of jointly starving decoder compute of SMs.
+        self.engram_prefetch_stream = (
+            torch.cuda.Stream()
+            if self.engram_layout is not None
+            and vllm_config.engram_config is not None
+            and vllm_config.engram_config.cpu_offload
+            else None
+        )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -541,6 +552,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                engram_prefetch_stream=self.engram_prefetch_stream,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1223,6 +1235,9 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        for module in self.model.modules():
+            if isinstance(module, ParallelEngramEmbedding):
+                module.finish_weight_loading()
         self.process_weights_after_loading()
         return loaded_params
 

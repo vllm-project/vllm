@@ -1350,7 +1350,12 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
     if supported:
         config.verify_model_config(model)
     else:
-        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        message = (
+            "requires model_config; got None"
+            if model is None
+            else "requires a model with supported Engram"
+        )
+        with pytest.raises(ValueError, match=message):
             config.verify_model_config(model)
 
     resolved = cast(
@@ -1411,10 +1416,11 @@ def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size
         VllmConfig._resolve_and_verify_engram_config(config)
 
 
-def test_engram_explicit_config_requires_supported_model():
-    """Explicit all-false settings still opt into model validation."""
-    with pytest.raises(ValueError, match="requires a model with supported Engram"):
-        VllmConfig(engram_config=EngramConfig(cpu_offload=False))
+@pytest.mark.parametrize("thp_packing", [False, True])
+def test_engram_explicit_config_requires_model_config(thp_packing):
+    """A missing model is diagnosed before architecture-specific restrictions."""
+    with pytest.raises(ValueError, match="requires model_config; got None"):
+        VllmConfig(engram_config=EngramConfig(thp_packing=thp_packing))
 
 
 @pytest.mark.parametrize("target_has_ple", [False, True])
@@ -3623,3 +3629,11 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    "options", [{"cpu_offload": False}, {"cpu_offload": True, "dp_shared_memory": True}]
+)
+def test_engram_thp_packing_requires_private_cpu_storage(options):
+    with pytest.raises(ValueError, match="thp_packing requires"):
+        EngramConfig(thp_packing=True, **options)

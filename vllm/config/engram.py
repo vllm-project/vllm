@@ -56,24 +56,33 @@ class EngramConfig:
     memory without per-step Engram DP collectives. Requires sufficient
     /dev/shm capacity and a shared IPC namespace."""
 
+    thp_packing: bool = False
+    """Request transparent huge pages for private CPU-offloaded host tables.
+    May increase startup latency and discards the cached checkpoint pages.
+    Falls back to ordinary pinned pages when huge pages are unavailable.
+    Requires cpu_offload; incompatible with dp_shared_memory."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
+        if self.thp_packing and (not self.cpu_offload or self.dp_shared_memory):
+            raise ValueError(
+                "thp_packing requires cpu_offload=True and dp_shared_memory=False"
+            )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
         from vllm.platforms import current_platform
 
-        field = (
-            _NGRAM_LAYER_FIELDS.get(model_config.architecture)
-            if model_config is not None
-            else None
-        )
+        if model_config is None:
+            raise ValueError("EngramConfig requires model_config; got None.")
+        field = _NGRAM_LAYER_FIELDS.get(model_config.architecture)
+        if self.thp_packing and model_config.architecture != "DeepseekV41ForCausalLM":
+            raise ValueError("thp_packing requires DeepseekV41ForCausalLM")
         if (
-            model_config is None
-            or field is None
+            field is None
             or not current_platform.is_cuda()
             or not getattr(model_config.hf_text_config, field, None)
         ):

@@ -677,6 +677,55 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("storage_mode", ["packed", "registration_fails"])
+def test_engram_registered_storage_lookup_and_fallback(monkeypatch, storage_mode):
+    """Packed host storage and its pinned fallback give exact lookup rows."""
+    from vllm.config import EngramConfig
+
+    config = EngramConfig(cpu_offload=True)
+    config.thp_packing = True
+    monkeypatch.setattr(nvidia_engram_ops, "_engram_checkpoint_dir", lambda: None)
+    monkeypatch.setattr(
+        nvidia_engram_ops,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(engram_config=config),
+    )
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    if storage_mode == "registration_fails":
+        monkeypatch.setattr(
+            torch.cuda.cudart(),
+            "cudaHostRegister",
+            lambda *args: SimpleNamespace(value=1),
+        )
+    rows = 32769
+    with torch.device("cuda"):
+        module = Engram.__new__(Engram)
+        layer = module._create_embedding(
+            SimpleNamespace(num_embeddings=(rows,), head_dim=64, primes=(((rows,),),)),
+            0,
+        )
+    assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+    assert (layer._host_page_storage is not None) == (storage_mode == "packed")
+    layer.weight.weight_loader(
+        layer.weight, torch.full_like(layer.weight, 2, device="cpu")
+    )
+    layer.weight_scale_inv.weight_loader(
+        layer.weight_scale_inv,
+        torch.full_like(layer.weight_scale_inv, 127, device="cpu"),
+    )
+    layer.finish_weight_loading()
+    ids = torch.tensor(
+        [[0], [rows - 1], [-1], [rows]], device="cuda", dtype=torch.int32
+    )
+    out = torch.empty(4, 1, 64, device="cuda", dtype=torch.bfloat16)
+    layer.lookup(ids, out, background=True)
+    expected = torch.zeros_like(out)
+    expected[:2].fill_(2)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_engram_lookup_reuses_jit_across_token_shapes():
     """Runtime token counts and launch grids must share one JIT variant."""
     layer = _make_embedding(cpu_offload=False)
@@ -728,8 +777,11 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 @pytest.mark.parametrize(
     "backend,cpu_offload", [("nvidia", None), ("nvidia", False), ("common", False)]
 )
-def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
-    """Default offload uses pinned storage and a side stream; False uses HBM."""
+@pytest.mark.parametrize("shared_stream", [False, True])
+def test_engram_constructor_honors_offload(
+    monkeypatch, backend, cpu_offload, shared_stream
+):
+    """Offload requires the supplied stream; HBM lookup runs on the main stream."""
     from vllm.config import EngramConfig
 
     config = SimpleNamespace(hidden_size=16, hc_mult=1, rms_norm_eps=1e-6)
@@ -758,9 +810,17 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
     monkeypatch.setattr(
         engram_ops, "ReplicatedLinear", lambda *a, **k: torch.nn.Identity()
     )
+    stream = torch.cuda.Stream() if shared_stream else None
+    kwargs = {"prefetch_stream": stream} if backend == "nvidia" else {}
     with torch.device("cuda"):
         cls = Engram if backend == "nvidia" else CommonEngram
-        module = cls(config, None, layout, 0, False, "engram")
+        if offloaded and stream is None:
+            with pytest.raises(ValueError, match="caller-provided prefetch stream"):
+                cls(config, None, layout, 0, False, "engram", **kwargs)
+            return
+        module = cls(config, None, layout, 0, False, "engram", **kwargs)
+    if offloaded and shared_stream:
+        assert module._prefetch_stream is stream
     layer = module.embed_tokens
     if offloaded:
         assert layer.weight.device.type == "cpu" and layer.weight.is_pinned()
@@ -812,6 +872,75 @@ def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_engram_shared_prefetch_stream():
+    """Two layers share one prefetch stream; per-layer events decouple consumers.
+
+    Consuming the first layer must not wait for a later layer's lookup still in
+    flight on the shared stream (a stream-wide wait is the regression the
+    per-layer completion event prevents), and graph replays must return each
+    layer's own rows.
+    """
+    stream = torch.cuda.Stream()
+    modules = []
+    for _ in range(2):
+        module = Engram.__new__(Engram)
+        torch.nn.Module.__init__(module)
+        module._prefetch_stream = stream
+        module.embed_tokens = _make_embedding(cpu_offload=True)
+        module.use_sequence_parallel = False
+        with torch.device("cuda"):
+            module._init_staging(8, module.embed_tokens.dim)
+        modules.append(module)
+
+    slow_layer = modules[1].embed_tokens
+    real_lookup = slow_layer.lookup
+
+    def slow_lookup(indices, out, background=False):
+        # ~50 ms at 2 GHz: long enough that a stream-wide wait is unmistakable.
+        torch.cuda._sleep(100_000_000)
+        real_lookup(indices, out, background=background)
+
+    slow_layer.lookup = slow_lookup
+    hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
+    for index, module in enumerate(modules):
+        module.prepare_embeddings(hashes[:, index])
+    modules[0].embed(hashes[:, 0])
+    torch.cuda.current_stream().synchronize()
+    assert not modules[1]._prefetch_done.query(), (
+        "consuming the first layer waited for the second layer's lookup"
+    )
+    torch.accelerator.synchronize()
+
+    slow_layer.lookup = real_lookup
+    outputs = [torch.empty_like(module.staged_rows) for module in modules]
+
+    def step():
+        for index, module in enumerate(modules):
+            module.prepare_embeddings(hashes[:, index])
+        for index, module in enumerate(modules):
+            outputs[index].copy_(module.embed(hashes[:, index]))
+
+    step()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+    for _ in range(3):
+        hashes.random_(1024, 3072)
+        graph.replay()
+        for index, module in enumerate(modules):
+            layer = module.embed_tokens
+            expected = _reference_lookup(
+                layer.weight.cuda(),
+                layer.weight_scale_inv.cuda(),
+                hashes[:, index],
+                layer.vocab_start_idx,
+                layer.vocab_end_idx,
+            )
+            torch.testing.assert_close(outputs[index], expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "missing_dependency", ["record_stream", "producer_wait", "consumer_wait"]
 )
@@ -832,8 +961,9 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
             hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
             self.embed_tokens.lookup(hash_ids, rows, background=True)
+            self._prefetch_done.record(stream)
 
-    def finish(self, stream):
+    def finish(self, event):
         pass
 
     monkeypatch.setattr(Engram, "_start_prefetch", start)
@@ -875,6 +1005,7 @@ def _run_engram_prepared_rows(
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
     engram._prefetch_stream = torch.cuda.Stream() if cpu_offload else None
+    engram._prefetch_done = torch.cuda.Event() if cpu_offload else None
     # Exercise the production eager boundaries even when the test process
     # imported Engram before breakable graphs were enabled.
     if capture == "breakable":
