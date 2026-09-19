@@ -408,6 +408,29 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
     return configs
 
 
+def prune_cuda_wna16_search_space(
+    search_space: list[dict[str, int]],
+    num_valid_tokens: int,
+    num_experts: int,
+    group_size: int,
+) -> list[dict[str, int]]:
+    if not should_moe_wna16_use_cuda(
+        num_valid_tokens=num_valid_tokens,
+        group_size=group_size,
+        num_experts=num_experts,
+        bit=4,
+    ):
+        return search_space
+
+    return [
+        config
+        for config in search_space
+        if config["BLOCK_SIZE_M"] <= 64
+        and config["BLOCK_SIZE_K"] % group_size == 0
+        and config["BLOCK_SIZE_K"] // group_size in (1, 2, 4, 8)
+    ]
+
+
 def prune_rocm_search_space(
     num_tokens, shard_intermediate_size, hidden_size, search_space, is_fp16, topk
 ):
@@ -618,6 +641,14 @@ class BenchmarkWorker:
                 search_space,
                 is_fp16,
                 topk,
+            )
+        if use_int4_w4a16:
+            assert block_quant_shape is not None
+            search_space = prune_cuda_wna16_search_space(
+                search_space,
+                num_valid_tokens=num_tokens * topk,
+                num_experts=num_experts,
+                group_size=block_quant_shape[1],
             )
 
         need_device_guard = False
