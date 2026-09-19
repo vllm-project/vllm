@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
+    is_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -36,6 +37,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -66,6 +68,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         del num_ngram_heads, max_total_tokens
         super().__init__(
@@ -76,6 +79,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             prefix=prefix,
             quant_method=embedding_method,
             parallel_group=get_etp_group(),
+            reduce_results=reduce_results,
         )
         self.embedding_method = embedding_method
         self.data_parallel_rank = data_parallel_rank
@@ -149,12 +153,13 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
     @abstractmethod
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Start an asynchronous lookup when supported."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Return prefetched embeddings for the full input token set."""
         raise NotImplementedError
 
 
@@ -334,16 +339,16 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         """Allocate the complete PLE weight on the active device."""
         return torch.empty(num_embeddings, embedding_dim, dtype=dtype)
 
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Resident embedding prefetch is a no-op."""
         return None
 
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Reject prefetch finalization for resident embeddings."""
+        raise RuntimeError("Device PLE embedding does not support prefetch")
+
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        """Gather ETP inputs, look up embeddings, and select local rows."""
+        """Gather ETP IDs, optionally reduce lookup results, and select local rows."""
         slot_size, slot_offset = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
         embeddings = super().forward(gathered_ids)
@@ -401,6 +406,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         num_ngram_heads: int = 1,
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
+        reduce_results: bool = True,
     ) -> None:
         if not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
@@ -414,6 +420,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             num_ngram_heads=num_ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
         self._block_d = triton.next_power_of_2(self.embedding_dim)
@@ -490,11 +497,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         return self.parallel_group.all_reduce(embeddings)
 
     @eager_break_during_capture
-    def start_prefetch(
-        self,
-        hidden_states: torch.Tensor,
-        ngram_ids: torch.Tensor,
-    ) -> None:
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Gather ETP IDs and launch their UVA lookup on the side stream."""
         slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
         gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
@@ -511,11 +514,15 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         prefetch_output: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Join the side stream, reduce ETP shards, and select local rows."""
+        """Join the side stream, optionally reduce ETP shards, and select rows."""
         torch.cuda.current_stream().wait_stream(self._prefetch_stream)
         slot_size, slot_offset = self._get_dp_gather_slot(output.shape[0])
-        active_output = prefetch_output[: slot_size * self.etp_data_parallel_size]
-        embeddings = self._reduce_etp_embeddings(active_output)
+        embeddings = prefetch_output[: slot_size * self.etp_data_parallel_size]
+        if self.reduce_results:
+            embeddings = self._reduce_etp_embeddings(embeddings)
+        else:
+            # The outer TP reduce-scatter requires ETP=TP.
+            assert self.etp_data_parallel_size == 1
         embeddings = self._select_embeddings(
             embeddings,
             output.shape[0],
@@ -523,13 +530,18 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         )
         output.copy_(embeddings.flatten(-2))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Finish the pinned lookup into graph-owned output storage."""
-        output = self._prefetch_buffer.new_empty(
-            (hidden_states.shape[0], self._output_dim)
-        )
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        """Finalize the full-token pinned lookup with optional ETP reduction."""
+        # total_tokens counts this DP rank's tokens before SP sharding.
+        output = self._prefetch_buffer.new_empty((total_tokens, self._output_dim))
         self._finalize_prefetch(self._prefetch_buffer, output)
         return output
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError(
+            "Pinned-host PLE embedding requires "
+            "start_prefetch() and finalize_prefetch()."
+        )
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -640,8 +652,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         prefix: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
+        self.use_sequence_parallel = use_sequence_parallel
         self.embedding_dim = embedding_dim
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
@@ -705,6 +719,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
+        # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
+        self.use_reduce_scatter = (
+            self.use_sequence_parallel
+            and get_etp_group().world_size == get_tp_group().world_size
+        )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
             self.head_dim,
@@ -715,6 +734,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             num_ngram_heads=self.ngram_heads,
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
+            reduce_results=not self.use_reduce_scatter,
         )
         weight = self.ngram_embedding.weight
         logger.info(
@@ -836,6 +856,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             id_blocks.append(ids[request_indices, adjusted_columns])
         return torch.cat(id_blocks, dim=-1)
 
+    def _sp_shard_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Shard embedding token rows, optionally reducing vocabulary contributions."""
+        # Each embedding element has one vocabulary owner, including FP8 bytes.
+        output_dtype = embeddings.dtype
+        if is_fp8(embeddings):
+            embeddings = embeddings.view(torch.int8)
+        if self.use_reduce_scatter:
+            embeddings = sp_reduce_scatter(embeddings)
+        else:
+            embeddings = sp_shard(embeddings)
+        return embeddings.view(output_dtype)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -843,15 +875,22 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
+        """Return full embeddings or a token shard after combining vocabulary owners."""
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
-            return embedding(hidden_states)
-        ngram_ids = self.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
-        return self.ngram_embedding(ngram_ids).flatten(-2)
+            # Prefetch contains full tokens even when hidden states are sharded.
+            embeddings = embedding.finalize_prefetch(total_tokens=input_ids.shape[0])
+        else:
+            ngram_ids = self.compute_ngram_ids(
+                input_ids, query_start_loc, ngram_context
+            )
+            embeddings = embedding(ngram_ids).flatten(-2)
+        if not self.use_sequence_parallel:
+            return embeddings
+        return self._sp_shard_embeddings(embeddings)
 
     def start_prefetch(
         self,
-        hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
@@ -865,7 +904,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             query_start_loc,
             ngram_context,
         )
-        embedding.start_prefetch(hidden_states, ngram_ids)
+        embedding.start_prefetch(ngram_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
