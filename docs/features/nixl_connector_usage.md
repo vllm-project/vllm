@@ -234,7 +234,7 @@ Additional configuration options in `kv_connector_extra_config`:
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `bidirectional_kv_xfer` | `false` | Enable bidirectional D→P KV transfer. |
-| `kv_recompute_threshold` | `64` | Minimum number of remote tokens required to trigger a D→P pull. Below this threshold, P recomputes locally instead of pulling (to amortize transfer latency). |
+| `kv_recompute_threshold` | `64` for bidirectional KV transfer, `0` otherwise | Minimum number of remote tokens required to trigger a NIXL KV pull. Below this threshold, the request recomputes locally instead of pulling (to amortize transfer latency). Applies to both standard P→D remote-prefill requests and bidirectional D→P requests when configured. Set to `0` to disable this policy. |
 | `decoder_kv_blocks_ttl` | `480` | TTL (seconds) for KV blocks cached on D for bidirectional reuse. Blocks are released after this duration. Not renewed via heartbeats. |
 
 ### Multi-turn proxy setup
