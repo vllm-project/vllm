@@ -53,6 +53,10 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "AiterFlashAttnPrefillBackend"
     )
     CPU = "vllm.v1.attention.backends.mla.prefill.cpu_sdpa.CPUSDPAMLAPrefillBackend"
+    ZEN_CPU = (
+        "vllm.v1.attention.backends.mla.prefill.zen_cpu_sdpa."
+        "ZenCPUSDPAMLAPrefillBackend"
+    )
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
