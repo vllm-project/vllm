@@ -599,9 +599,16 @@ class MoRIIOConnectorScheduler:
 
         token_ids = request.prompt_token_ids or []
         if self.mode == MoRIIOMode.WRITE:
-            # MoriiO in write mode, no remote prefill
-
-            return len(token_ids) - num_computed_tokens, True
+            # Only ask for a push while the request still expects a remote
+            # prefill. update_state_after_alloc clears the flag once the
+            # transfer is triggered, so re-arming here would put a request
+            # whose KV already landed back into WAITING_FOR_REMOTE_KVS.
+            params = request.kv_transfer_params
+            if params is not None and params.get("do_remote_prefill"):
+                count = len(token_ids) - num_computed_tokens
+                if count > 0:
+                    return count, True
+            return 0, False
 
         return len(token_ids) - 1 - num_computed_tokens, False
 
@@ -864,12 +871,6 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
-
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
@@ -892,14 +893,22 @@ class MoRIIOConnectorScheduler:
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
-
-                        self.send_notify_block(
-                            req_id=request.request_id,
-                            transfer_id=request.kv_transfer_params["transfer_id"],
-                            block_notify_list=block_notify_list,
-                            host=_notify_host,
-                            port=target_port,
-                        )
+                        transfer_id = request.kv_transfer_params["transfer_id"]
+                        if num_external_tokens > 0:
+                            self.send_notify_block(
+                                req_id=request.request_id,
+                                transfer_id=transfer_id,
+                                block_notify_list=blocks.get_block_ids()[0],
+                                host=_notify_host,
+                                port=target_port,
+                            )
+                        else:
+                            # Nothing left to fetch (full local prefix hit), so
+                            # release the producer's blocks instead of sending
+                            # an empty allocation, which it rejects.
+                            self._send_transfer_release(
+                                transfer_id, _notify_host, target_port
+                            )
 
             # Only trigger 1 KV transfer per request.
 
