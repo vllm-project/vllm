@@ -54,6 +54,22 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+!!! warning "Models with a nested `text_config`"
+    For multimodal and other composite models whose Hugging Face config nests the language
+    model settings under `text_config` (for example the Qwen3-VL series), the override must
+    target the nested config:
+
+    ```bash
+    vllm serve Qwen/Qwen3-VL-8B-Instruct \
+      --hf-overrides '{"text_config": {"rope_parameters": {"factor": 4.0, "original_max_position_embeddings": 32768, "rope_theta": 1000000, "rope_type": "yarn"}}}' \
+      --max-model-len 131072
+    ```
+
+    A top-level `"rope_parameters"` override is applied to the outer config, while vLLM reads
+    RoPE settings from `text_config`, so the extension is silently not applied. This typically
+    surfaces as a startup error saying that the requested `max_model_len` is greater than the
+    derived `max_model_len`.
+
 ### Key Parameters
 
 The available parameters depend on the `rope_type` you choose. For detailed information about all supported RoPE types and their specific parameters, please refer to the [Hugging Face Transformers RoPE documentation](https://huggingface.co/docs/transformers/main/en/internal/rope_utils#transformers.RopeParameters).
