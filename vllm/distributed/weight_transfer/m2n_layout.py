@@ -20,6 +20,7 @@ Correctness never depends on a parameter resolving — the fallback is always
 available and is the same path the existing backend uses.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -135,11 +136,25 @@ def resolve_parameter_destinations(
             )
 
     num_direct = sum(d.direct for d in destinations)
+    parameter_bytes = [
+        math.prod(shape) * dtype.itemsize for dtype, shape in zip(dtypes, shapes)
+    ]
+    total_bytes = sum(parameter_bytes)
+    direct_bytes = sum(
+        nbytes
+        for destination, nbytes in zip(destinations, parameter_bytes)
+        if destination.direct
+    )
+    direct_byte_percentage = 100 * direct_bytes / total_bytes if total_bytes else 0
     logger.info(
         "nccl_m2n destination plan: %d/%d parameters resharded directly into "
-        "the model, %d via full-tensor fallback",
+        "the model, %d via full-tensor fallback; direct byte coverage: "
+        "%d/%d bytes (%.1f%%)",
         num_direct,
         len(destinations),
         len(destinations) - num_direct,
+        direct_bytes,
+        total_bytes,
+        direct_byte_percentage,
     )
     return destinations

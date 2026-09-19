@@ -8,6 +8,7 @@ there is a hang rather than an error. The transfer itself needs the m2n runtime
 and multiple GPUs, so it is exercised separately.
 """
 
+import logging
 from unittest.mock import Mock
 
 import pybase64 as base64
@@ -575,3 +576,21 @@ class TestDestinationResolution:
             allow_direct=False,
         )
         assert not any(d.direct for d in destinations)
+
+    def test_plan_reports_byte_coverage(self, caplog_vllm):
+        """A small direct parameter must not hide a large fallback tensor."""
+        with caplog_vllm.at_level(
+            logging.INFO,
+            logger="vllm.distributed.weight_transfer.m2n_layout",
+        ):
+            _resolve(
+                ["norm", "missing_fused_weight"],
+                [torch.float32, torch.bfloat16],
+                [(16,), (1024, 1024)],
+            )
+
+        assert (
+            "1/2 parameters resharded directly into the model, 1 via "
+            "full-tensor fallback; direct byte coverage: 64/2097216 bytes "
+            "(0.0%)" in caplog_vllm.text
+        )

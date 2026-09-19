@@ -9,9 +9,10 @@ occupy `[0, T)`, workers `[T, T + N)`. Each parameter is moved with a single
 local shards and never all-gathers a full tensor, which is what the broadcast
 NCCL backend forces it to do.
 
-Each worker currently receives the whole tensor and loads it through
-`load_weights`, exactly as the broadcast backend does, so the two are directly
-comparable. Resharding into each worker's own shard is a follow-up.
+When an incoming checkpoint parameter maps directly to a live vLLM parameter,
+M2N reshards into that worker's local model storage. Parameters whose names or
+layouts cannot be resolved receive a full tensor and fall back to
+`load_weights`, preserving the existing backend's loading behavior.
 
 Both meshes participate in every reshard, in the same order, so this backend has
 the same concurrency shape as the broadcast NCCL backend: the worker must be
@@ -160,12 +161,10 @@ class M2NWeightTransferEngine(
 ):
     """Inference-side engine: receives each parameter with one reshard.
 
-    Every reshard gathers the parameter from whatever layout the trainer holds
-    it in and delivers the **whole** tensor to each worker, which then hands it
-    to `load_weights` — the same thing the broadcast NCCL backend does, and
-    therefore the same behavior to compare against. The win over broadcast is on
-    the trainer side: it sends its local shards and never materializes a full
-    tensor. Resharding straight into each worker's own shard is a follow-up.
+    Resolvable parameters are resharded from the trainer layout directly into
+    each worker's live local model storage. Unresolvable parameters receive a
+    full tensor and use `load_weights`. In both cases, the trainer sends its
+    local shards without materializing a full tensor.
     """
 
     init_info_cls = M2NWeightTransferInitInfo
