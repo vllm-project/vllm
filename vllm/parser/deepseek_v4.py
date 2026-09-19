@@ -238,6 +238,10 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
+        # Orphan structural closers emitted by long-context degeneration are
+        # markup, never client-visible text; the engine drops them in a
+        # content state instead of echoing them (see _on_terminal).
+        absorb_terminals=frozenset({"PARAM_CLOSE", "INVOKE_END", "TOOL_END"}),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )
