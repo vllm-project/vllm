@@ -59,6 +59,8 @@ class EncoderCacheManager:
             reference the cached entry. If the set is empty, the entry exists
             but is not referenced by any request and is eligible for
             reclamation.
+        num_embeds_by_hash: Mapping from mm_hash to the number of encoder
+            embeddings stored for that cache entry.
         freeable: List of tuples (mm_hash, num_encoder_embeds) representing entries
             whose no current running request is needed and that can be freed to
             make space when needed.
@@ -80,6 +82,8 @@ class EncoderCacheManager:
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
+        # mm_hash of mm_data => number of cached encoder embeddings
+        self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
         self.request_cached_ids: dict[str, set[int]] = {}
 
@@ -94,6 +98,7 @@ class EncoderCacheManager:
         Called when model weights are updated to invalidate stale embeddings.
         """
         self.cached.clear()
+        self.num_embeds_by_hash.clear()
         self.request_cached_ids.clear()
         self.freeable.clear()
         self.freed.clear()
@@ -129,6 +134,13 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request.request_id)
         self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
         return True
+
+    def get_cached_num_encoder_embeds(
+        self, request: Request, input_id: int
+    ) -> int | None:
+        """Return the encoder-embedding count stored for a cached input."""
+        mm_hash = request.mm_features[input_id].identifier
+        return self.num_embeds_by_hash.get(mm_hash)
 
     def can_allocate(
         self,
@@ -188,6 +200,7 @@ class EncoderCacheManager:
         while num_embeds > self.num_free_slots:
             mm_hash, num_free_embeds = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
+            del self.num_embeds_by_hash[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_embeds
         return True
@@ -209,6 +222,12 @@ class EncoderCacheManager:
             self.cached[mm_hash] = set()
 
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+        cached_num_encoder_embeds = self.num_embeds_by_hash.setdefault(
+            mm_hash, num_encoder_embeds
+        )
+        # _try_schedule_encoder_inputs rejects local-hit and same-step
+        # identifier/count mismatches before allocation.
+        assert cached_num_encoder_embeds == num_encoder_embeds
 
         # NOTE: Encoder cache should always have enough space for encoder inputs
         # that are scheduled since eviction takes place at can_allocate().
@@ -258,7 +277,7 @@ class EncoderCacheManager:
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
-            num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+            num_encoder_embeds = self.num_embeds_by_hash[mm_hash]
             self.freeable[mm_hash] = num_encoder_embeds
             self.num_freeable_slots += num_encoder_embeds
 
@@ -352,12 +371,14 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
+        self.num_embeds_by_hash: dict[str, int] = {}
         self.allocated: list[str] = []
         self.to_free: list[str] = []
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state."""
         self.num_free_slots = self.cache_size
+        self.num_embeds_by_hash.clear()
         self.allocated.clear()
         self.to_free.clear()
 
