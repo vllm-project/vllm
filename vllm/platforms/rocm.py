@@ -1367,7 +1367,7 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
-            and not on_rdna4()
+            and not on_rdna()  # subsumes rdna4; no RDNA module_rmsnorm_quant
             and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
