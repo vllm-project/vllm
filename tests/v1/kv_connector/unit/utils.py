@@ -264,6 +264,8 @@ def create_model_runner_output(
     finished_sending: set[str] | None = None,
     finished_recving: set[str] | None = None,
     invalid_block_ids: set[int] | None = None,
+    failed_recving: set[str] | None = None,
+    failed_recving_block_ids: dict[str, tuple[set[int], ...]] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
@@ -283,12 +285,16 @@ def create_model_runner_output(
             finished_sending is None
             and finished_recving is None
             and invalid_block_ids is None
+            and failed_recving is None
+            and failed_recving_block_ids is None
             and kv_connector_worker_meta is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
+            failed_recving=failed_recving or set(),
+            failed_recving_block_ids=failed_recving_block_ids or {},
             kv_connector_worker_meta=kv_connector_worker_meta,
         )
     )

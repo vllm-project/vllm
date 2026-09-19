@@ -11,6 +11,7 @@ These tests verify correct behavior in three scenarios:
 """
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -474,3 +475,66 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+def _request_failure_scheduler(request: Request) -> Scheduler:
+    scheduler = object.__new__(Scheduler)
+    scheduler.requests = {request.request_id: request}
+    scheduler.block_size = 32
+    scheduler.recompute_kv_load_failures = True
+    scheduler.failed_recving_kv_req_ids = set()
+    scheduler.kv_cache_manager = SimpleNamespace(
+        get_block_ids=Mock(return_value=([7, 8, 9, 10], [20, 8])),
+        group_block_sizes=(16, 32),
+        null_block_id=-1,
+    )
+    return scheduler
+
+
+def test_request_scoped_group_failure_uses_group_identity():
+    request = create_request(num_tokens=64)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    request.num_computed_tokens = 64
+    scheduler = _request_failure_scheduler(request)
+
+    # Block 8 is at token 16 in group 0 and token 32 in group 1. The group
+    # identity must prevent the group-0 occurrence from shortening recovery.
+    failed = scheduler._handle_failed_recving(
+        {request.request_id},
+        {request.request_id: (set(), {8})},
+        {},
+    )
+
+    assert failed == set()
+    assert request.num_computed_tokens == 32
+    assert request.request_id in scheduler.failed_recving_kv_req_ids
+
+
+def test_request_scoped_failure_without_block_details_recomputes_all():
+    request = create_request(num_tokens=64)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    request.num_computed_tokens = 48
+    scheduler = _request_failure_scheduler(request)
+
+    failed = scheduler._handle_failed_recving({request.request_id}, {}, {})
+
+    assert failed == set()
+    assert request.num_computed_tokens == 0
+    assert request.request_id in scheduler.failed_recving_kv_req_ids
+
+
+def test_request_scoped_failure_with_bad_group_count_recomputes_all():
+    request = create_request(num_tokens=64)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    request.num_computed_tokens = 48
+    scheduler = _request_failure_scheduler(request)
+
+    failed = scheduler._handle_failed_recving(
+        {request.request_id},
+        {request.request_id: ({8},)},
+        {},
+    )
+
+    assert failed == set()
+    assert request.num_computed_tokens == 0
+    assert request.request_id in scheduler.failed_recving_kv_req_ids

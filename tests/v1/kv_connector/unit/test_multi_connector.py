@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorTransferResults,
     SupportsHMA,
     supports_hma,
 )
@@ -1201,3 +1202,27 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+def test_transfer_results_merge_request_group_failures():
+    connector = object.__new__(MultiConnector)
+    connector._extra_async_saves = {}
+    first = MagicMock()
+    first.get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"req"},
+        failed_recving={"req"},
+        failed_recving_block_ids={"req": ({1}, {7})},
+    )
+    second = MagicMock()
+    second.get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"req"},
+        failed_recving={"req"},
+        failed_recving_block_ids={"req": ({2}, {7, 8})},
+    )
+    connector._connectors = [first, second]
+
+    results = connector.get_transfer_results(set())
+
+    assert results.finished_recving == {"req"}
+    assert results.failed_recving == {"req"}
+    assert results.failed_recving_block_ids == {"req": ({1, 2}, {7, 8})}

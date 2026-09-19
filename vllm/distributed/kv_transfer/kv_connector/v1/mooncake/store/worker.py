@@ -35,6 +35,7 @@ from vllm.distributed import (
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
+    merge_failed_recving_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -1178,6 +1179,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # are only unique within a group, so failures are reported per request.
         self._is_hma_required = is_hma_required
         self._failed_requests: set[str] = set()
+        self._failed_request_block_ids: dict[str, tuple[set[int], ...]] = {}
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
             None
@@ -1192,9 +1194,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
-    def set_failed_request(self, req_id: str):
+    def set_failed_request(
+        self, req_id: str, block_ids: tuple[list[int], ...] | None = None
+    ) -> None:
         with self.done_task_lock:
             self._failed_requests.add(req_id)
+            if block_ids is not None:
+                merge_failed_recving_block_ids(
+                    self._failed_request_block_ids,
+                    {req_id: tuple(set(group) for group in block_ids)},
+                )
 
     def get_and_clear_failed_requests(self) -> set[str]:
         with self.done_task_lock:
@@ -1202,9 +1211,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self._failed_requests.clear()
         return failed
 
-    def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
+    def get_and_clear_failed_request_block_ids(
+        self,
+    ) -> dict[str, tuple[set[int], ...]]:
+        with self.done_task_lock:
+            failed = self._failed_request_block_ids.copy()
+            self._failed_request_block_ids.clear()
+        return failed
+
+    def _report_load_error(self, req_meta: ReqMeta, block_ids: list[int]) -> None:
         if self._is_hma_required:
-            self.set_failed_request(req_id)
+            failed_ids = set(block_ids)
+            self.set_failed_request(
+                req_meta.req_id,
+                tuple(
+                    [block_id for block_id in group if block_id in failed_ids]
+                    for group in req_meta.block_ids
+                ),
+            )
         else:
             self._add_load_error_block_ids(block_ids)
 
@@ -1302,7 +1326,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     # Mark every block: we skip the whole request, and the
                     # tp_rank rotation means oversized_key isn't necessarily
                     # the first block in the request's original order.
-                    self._report_load_error(req_id, block_id_list_c)
+                    self._report_load_error(req_meta, block_id_list_c)
                     oversized_key_bytes = _estimate_disk_offload_staging_bytes(
                         size_list_c[oversized_key_index]
                     )
@@ -1376,7 +1400,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 )
                 if failed:
                     self._report_load_error(
-                        req_id, [block_id for _, _, block_id in failed]
+                        req_meta, [block_id for _, _, block_id in failed]
                     )
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
@@ -1387,7 +1411,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     break
         except Exception as e:
-            self._report_load_error(req_id, current_batch_block_ids)
+            self._report_load_error(req_meta, current_batch_block_ids)
             self._record_operation(
                 "load_get",
                 load_get_start,
@@ -2097,14 +2121,21 @@ class MooncakeStoreWorker:
             return KVConnectorTransferResults(done_sending, done_recving)
 
         failed_recving: set[str] = set()
+        failed_recving_block_ids: dict[str, tuple[set[int], ...]] = {}
         if self.load_async:
             for recv_thread in self.kv_recv_threads:
                 failed_recving |= recv_thread.get_and_clear_failed_requests()
+                merge_failed_recving_block_ids(
+                    failed_recving_block_ids,
+                    recv_thread.get_and_clear_failed_request_block_ids(),
+                )
+        failed_recving.update(failed_recving_block_ids)
 
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
             failed_recving=failed_recving,
+            failed_recving_block_ids=failed_recving_block_ids,
         )
 
     def _record_kv_connector_operation(

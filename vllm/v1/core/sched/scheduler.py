@@ -1950,7 +1950,11 @@ class Scheduler(SchedulerInterface):
         failed_kv_load_req_ids: set[str] = set()
         if kv_connector_output and kv_connector_output.failed_recving:
             failed_kv_load_req_ids.update(
-                self._handle_failed_recving(kv_connector_output.failed_recving)
+                self._handle_failed_recving(
+                    kv_connector_output.failed_recving,
+                    kv_connector_output.failed_recving_block_ids,
+                    num_scheduled_tokens,
+                )
             )
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
@@ -3237,8 +3241,68 @@ class Scheduler(SchedulerInterface):
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
-    def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
-        """Fail closed for layouts whose block IDs are not globally unique."""
+    def _request_recompute_boundary(
+        self,
+        request: Request,
+        failed_block_ids: tuple[set[int], ...],
+        num_scheduled_tokens: dict[str, int],
+    ) -> int:
+        """Return the common safe prefix before this request's failed blocks."""
+        request_block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        group_block_sizes = self.kv_cache_manager.group_block_sizes
+        if not (
+            len(failed_block_ids) == len(request_block_ids) == len(group_block_sizes)
+        ):
+            logger.error(
+                "KV load failure group count mismatch for request %s: "
+                "reported=%d allocated=%d configured=%d; recomputing from zero",
+                request.request_id,
+                len(failed_block_ids),
+                len(request_block_ids),
+                len(group_block_sizes),
+            )
+            return 0
+
+        prior_computed_tokens = max(
+            0,
+            request.num_computed_tokens
+            - num_scheduled_tokens.get(request.request_id, 0),
+        )
+        invalid_boundaries: list[int] = []
+        null_block_id = self.kv_cache_manager.null_block_id
+        for group_idx, (invalid_ids, allocated_ids, group_block_size) in enumerate(
+            zip(failed_block_ids, request_block_ids, group_block_sizes, strict=True)
+        ):
+            if not invalid_ids:
+                continue
+            num_computed_blocks = cdiv(prior_computed_tokens, group_block_size)
+            matching_indices = [
+                index
+                for index, block_id in enumerate(allocated_ids[:num_computed_blocks])
+                if block_id != null_block_id and block_id in invalid_ids
+            ]
+            if not matching_indices:
+                logger.error(
+                    "KV load failure blocks do not belong to request %s group %d; "
+                    "recomputing from zero",
+                    request.request_id,
+                    group_idx,
+                )
+                return 0
+            invalid_boundaries.append(min(matching_indices) * group_block_size)
+
+        if not invalid_boundaries:
+            return 0
+        first_invalid_token = min(invalid_boundaries)
+        return first_invalid_token - first_invalid_token % self.block_size
+
+    def _handle_failed_recving(
+        self,
+        failed_req_ids: set[str],
+        failed_block_ids_by_req: dict[str, tuple[set[int], ...]],
+        num_scheduled_tokens: dict[str, int],
+    ) -> set[str]:
+        """Recover request-scoped failures without losing cache-group identity."""
         affected_req_ids: set[str] = set()
         for req_id in failed_req_ids:
             request = self.requests.get(req_id)
@@ -3248,7 +3312,11 @@ class Scheduler(SchedulerInterface):
             ):
                 affected_req_ids.add(req_id)
                 if self.recompute_kv_load_failures:
-                    request.num_computed_tokens = 0
+                    request.num_computed_tokens = self._request_recompute_boundary(
+                        request,
+                        failed_block_ids_by_req.get(req_id, ()),
+                        num_scheduled_tokens,
+                    )
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
