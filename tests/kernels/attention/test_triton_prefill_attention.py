@@ -6,7 +6,14 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+from vllm.triton_utils import triton
+from vllm.v1.attention.ops import triton_prefill_attention as prefill_attn
+from vllm.v1.attention.ops.triton_prefill_attention import (
+    _get_encoder_launch,
+    _get_head_dim_blocks,
+    _split_head_dim,
+    context_attention_fwd,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -79,7 +86,7 @@ def ref_masked_attention(
 @pytest.mark.parametrize("max_seq_len", [1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [64, 72, 80, 96, 128])
 @pytest.mark.parametrize("is_causal", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention(
@@ -157,7 +164,7 @@ def test_context_attention(
 @pytest.mark.parametrize("max_seq_len", [1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [64, 72, 80, 96, 128])
 @pytest.mark.parametrize("sliding_window", [(32, 32), (32, 0), (0, 32)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention_sliding_window(
@@ -230,3 +237,144 @@ def test_context_attention_sliding_window(
 
     # Compare outputs
     torch.testing.assert_close(o, o_ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("D", [72, 128])
+def test_context_attention_non_contiguous_heads(D: int):
+    """A head stride the 16-byte alignment hint must not be applied to.
+
+    The hint is keyed off the runtime strides, not head_dim, so a view whose
+    head axis is not 8-element aligned has to fall back and stay correct.
+    """
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    dtype = torch.bfloat16
+    total_tokens = B * S
+
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    # Slicing a padded head axis keeps D contiguous but breaks the 8-element
+    # alignment of the head stride.
+    q, k, v, o = (
+        torch.randn(total_tokens, H, D + 4, dtype=dtype, device=DEVICE_TYPE)[..., :D]
+        for _ in range(4)
+    )
+    assert q.stride(1) % 8 != 0
+
+    context_attention_fwd(
+        q, k, v, o, b_start_loc, seq_lens, S, is_causal=True, sliding_window_q=None
+    )
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
+def test_split_head_dim_never_widens_the_dot():
+    """Whatever the head dim, the split is never worse than one block.
+
+    A tail pass costs an extra dot, two extra loads and an accumulator, so it
+    has to buy a strictly narrower extent or not happen at all.
+    """
+    for Lk in range(1, 513):
+        main, tail = _split_head_dim(Lk)
+        npo2 = triton.next_power_of_2(Lk)
+
+        assert main & (main - 1) == 0, Lk
+        assert tail & (tail - 1) == 0, Lk
+        assert main + tail >= Lk, f"Lk={Lk} is not covered"
+
+        if tail == 0:
+            assert main == npo2, Lk
+        else:
+            assert main + tail < npo2, f"Lk={Lk} tail pass does not narrow"
+
+
+def test_split_head_dim_vit_shapes():
+    """Real vision head dims, covering both tail widths the kernel can emit."""
+    assert _split_head_dim(72) == (64, 16)  # SigLIP, Qwen3-VL
+    assert _split_head_dim(80) == (64, 16)  # Qwen2.5-VL
+    assert _split_head_dim(96) == (64, 32)
+
+
+@pytest.mark.parametrize("Lk", [12, 24, 100, 112, 120])
+def test_split_head_dim_declines_when_it_would_not_pay(Lk: int):
+    """Head dims whose tail block would cover no fewer lanes keep one block."""
+    assert _split_head_dim(Lk) == (triton.next_power_of_2(Lk), 0)
+
+
+@pytest.mark.parametrize("on_gfx115x", [True, False])
+def test_get_head_dim_blocks_is_gated(monkeypatch: pytest.MonkeyPatch, on_gfx115x):
+    """The split is only taken where it has been measured."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", on_gfx115x)
+    assert _get_head_dim_blocks(72) == ((64, 16) if on_gfx115x else (128, 0))
+    assert _get_head_dim_blocks(128) == (128, 0)
+
+
+@pytest.mark.parametrize("D", [72, 96])
+def test_context_attention_split_d_forced(monkeypatch: pytest.MonkeyPatch, D: int):
+    """Exercise the split-D kernel even off gfx115x, so CI always covers it."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", True)
+    assert _get_head_dim_blocks(D)[1] > 0
+
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    q, k, v = (
+        torch.randn(B * S, H, D, dtype=torch.bfloat16, device=DEVICE_TYPE)
+        for _ in range(3)
+    )
+    o = torch.zeros_like(q)
+    context_attention_fwd(q, k, v, o, b_start_loc, seq_lens, S, is_causal=True)
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "head_dim,expected",
+    [(64, (16, 4)), (72, (16, 4)), (80, (16, 4)), (96, (32, 8)), (128, (32, 8))],
+)
+def test_gfx115x_encoder_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    head_dim: int,
+    expected: tuple[int, int],
+    dtype: torch.dtype,
+):
+    """gfx115x takes a narrow KV tile, widening it past a head dim of 80."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", True)
+    assert _get_encoder_launch(head_dim, dtype) == expected
+
+
+@pytest.mark.parametrize(
+    "on_gfx115x,dtype",
+    [
+        (False, torch.bfloat16),  # any other architecture
+        (True, torch.float32),  # untuned dtype
+    ],
+)
+def test_get_encoder_launch_declines(
+    monkeypatch: pytest.MonkeyPatch, on_gfx115x: bool, dtype: torch.dtype
+):
+    """Everything outside the measured envelope keeps the generic config."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", on_gfx115x)
+    assert _get_encoder_launch(72, dtype) is None
