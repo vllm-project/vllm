@@ -307,7 +307,9 @@ class KVCacheManager:
             and self.enable_kv_cache_events
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):
-            self.coordinator.emit_cached_block_events(request, computed_blocks)
+            self.coordinator.emit_cached_block_events(
+                request, computed_blocks, num_new_computed_tokens
+            )
 
         # The junction to pin is where the lagging sparse-retention group stops
         # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.

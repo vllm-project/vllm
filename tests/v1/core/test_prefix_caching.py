@@ -3821,6 +3821,64 @@ def test_emit_cached_block_events_zero_cached():
     assert pool.take_events() == []
 
 
+def test_emit_cached_block_events_for_sparse_mamba_hit():
+    """Full reporting emits the actual sparse Mamba hit without overrunning."""
+    hash_block_size = 16
+    block_size = 64
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(
+            block_size, num_blocks=64, spec_types=["full", "mamba_align"]
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    num_hit_tokens = block_size + hash_block_size
+    producer = make_request(
+        "producer", list(range(num_hit_tokens)), hash_block_size, sha256
+    )
+    computed, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    assert (
+        manager.allocate_slots(
+            producer, len(producer.all_token_ids), num_computed, computed
+        )
+        is not None
+    )
+    manager.free(producer)
+    manager.new_step_starts()
+    manager.take_events()
+
+    consumer = make_request(
+        "consumer", list(range(num_hit_tokens + 1)), hash_block_size, sha256
+    )
+    consumer.kv_cache_report_mode = "full"
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+
+    assert num_computed == num_hit_tokens
+    assert blocks.blocks[1][0].is_null
+    events = [
+        event
+        for event in manager.take_events()
+        if isinstance(event, BlockStored) and event.group_idx == 1
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(
+            consumer.block_hashes[num_hit_tokens // hash_block_size - 1]
+        )
+    ]
+    assert event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+        consumer.block_hashes[num_hit_tokens // hash_block_size - 2]
+    )
+    assert event.token_ids == list(
+        consumer.all_token_ids[num_hit_tokens - hash_block_size : num_hit_tokens]
+    )
+    assert event.block_size == hash_block_size
+
+
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""

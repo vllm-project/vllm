@@ -377,6 +377,9 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        *,
+        cached_blocks: Sequence[KVCacheBlock] | None = None,
+        num_cached_tokens: int | None = None,
     ) -> None:
         """Generate BlockStored events for blocks reused from prefix cache.
 
@@ -389,9 +392,30 @@ class BlockPool:
             num_cached_blocks: Number of blocks that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+            cached_blocks: Actual blocks covering the reused prefix. Required
+                to report sparse or partial hits accurately.
+            num_cached_tokens: Exact number of reused tokens. Required to
+                report sparse or partial hits accurately.
 
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
+            return
+
+        if (
+            cached_blocks is not None
+            and num_cached_tokens is not None
+            and (
+                num_cached_tokens != num_cached_blocks * block_size
+                or any(block.is_null for block in cached_blocks)
+            )
+        ):
+            self._emit_sparse_cached_block_events(
+                request,
+                cached_blocks,
+                num_cached_tokens,
+                block_size,
+                kv_cache_group_id,
+            )
             return
 
         block_hashes = resolve_block_hashes(
@@ -443,6 +467,51 @@ class BlockPool:
                 extra_keys_list=extra_keys_list,
             )
         )
+
+    def _emit_sparse_cached_block_events(
+        self,
+        request: Request,
+        cached_blocks: Sequence[KVCacheBlock],
+        num_cached_tokens: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> None:
+        assert len(cached_blocks) == (num_cached_tokens + block_size - 1) // block_size
+        assert num_cached_tokens % self.hash_block_size == 0
+        assert num_cached_tokens <= len(request.block_hashes) * self.hash_block_size
+
+        for block_idx, block in enumerate(cached_blocks):
+            if block.is_null:
+                continue
+            start_token_idx = block_idx * block_size
+            end_token_idx = min(start_token_idx + block_size, num_cached_tokens)
+            block_hash = request.block_hashes[end_token_idx // self.hash_block_size - 1]
+            assert self.cached_block_hash_to_block.contain(
+                make_block_hash_with_group_id(block_hash, kv_cache_group_id),
+                block.block_id,
+            )
+            parent_block_hash = (
+                maybe_convert_block_hash(
+                    request.block_hashes[start_token_idx // self.hash_block_size - 1]
+                )
+                if start_token_idx > 0
+                else None
+            )
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request, start_token_idx, end_token_idx, 0
+            )
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=start_token_idx,
+                    end_token_idx=end_token_idx,
+                    block_size=end_token_idx - start_token_idx,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                )
+            )
 
     def cache_partial_block(
         self,
