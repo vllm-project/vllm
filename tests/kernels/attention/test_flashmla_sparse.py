@@ -172,6 +172,8 @@ def test_sparse_flashmla_decode_matches_cache_writer_scales():
         (batch_size, seqlen_q, topk), -1, dtype=torch.int32, device=device
     )
     indices[..., 0] = 0
+    # SM90 sparse decode only supports a fixed top-k width. Padding with -1
+    # exercises the same cache data on SM90 and SM100 without topk_length.
 
     block_table = torch.zeros((batch_size, 128), dtype=torch.int32, device=device)
     out, lse = fm.flash_mla_with_kvcache(
@@ -183,7 +185,6 @@ def test_sparse_flashmla_decode_matches_cache_writer_scales():
         tile_md,
         num_splits,
         indices=indices,
-        topk_length=torch.ones(batch_size, dtype=torch.int32, device=device),
         is_fp8_kvcache=True,
     )
     assert out.shape[0] == batch_size
