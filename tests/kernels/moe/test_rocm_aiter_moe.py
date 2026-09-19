@@ -769,6 +769,66 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     _assert_deterministic(run_mxfp4_moe, n_runs=4)
 
 
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_fused_moe_tolerates_padding_sentinel():
+    """Padding rows carrying the -1 sentinel must not reach the AITER kernels.
+
+    ``VLLM_MOE_SKIP_PADDING`` makes the topk kernels write -1 into ``topk_ids``
+    for cudagraph padding rows. AITER indexes expert weights with those ids
+    directly, so an unhandled -1 reads out of bounds and trips a GPU memory
+    access fault. Padding rows must instead contribute nothing.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    num_tokens = 32
+    case = _make_aiter_mxfp4_moe_case(
+        num_tokens=num_tokens,
+        hidden_dim=512,
+        intermediate_dim=1024,
+        num_experts=4,
+        topk=2,
+        seed=17,
+    )
+
+    num_real = num_tokens // 2
+    topk_ids = case.topk_ids.clone()
+    topk_ids[num_real:] = -1
+
+    out = rocm_aiter_fused_experts(
+        hidden_states=case.hidden_states,
+        w1=case.w1_kernel,
+        w2=case.w2_kernel,
+        topk_weights=case.topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SWIGLUOAI,
+        quant_config=case.quant_config,
+        moe_config=case.moe_config,
+        expert_mask=None,
+    )
+
+    assert out.shape == case.hidden_states.shape
+    assert torch.isfinite(out).all()
+    # Padding rows contribute nothing.
+    assert torch.equal(out[num_real:], torch.zeros_like(out[num_real:]))
+    # Real rows are unaffected by the presence of padding rows.
+    ref_out = rocm_aiter_fused_experts(
+        hidden_states=case.hidden_states,
+        w1=case.w1_kernel,
+        w2=case.w2_kernel,
+        topk_weights=case.topk_weights,
+        topk_ids=case.topk_ids,
+        activation=MoEActivation.SWIGLUOAI,
+        quant_config=case.quant_config,
+        moe_config=case.moe_config,
+        expert_mask=None,
+    )
+    torch.testing.assert_close(out[:num_real], ref_out[:num_real])
+
+
 # FP8 group-quant tests ---------------------------------------------------
 
 
