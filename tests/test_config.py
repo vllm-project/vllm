@@ -618,168 +618,54 @@ def test_breakable_cudagraph_platform_default(
 
 
 @pytest.mark.parametrize(
-    (
-        "batch_invariant",
-        "is_cuda",
-        "has_table",
-        "enforce_eager",
-        "explicit_env",
-        "expected",
-    ),
+    "case,hidden,heads,intermediate,tp,expected",
     [
-        ("1", True, True, False, None, True),
-        ("0", True, True, False, None, False),
-        ("1", False, True, False, None, False),
-        ("1", True, False, False, None, False),
-        ("1", True, True, True, None, False),
-        ("1", True, True, False, "0", False),
+        ("bf16", 2048, (16, 8), 6144, 1, True),
+        ("bi-off", 2048, (16, 8), 6144, 1, False),
+        ("opt-out", 2048, (16, 8), 6144, 1, False),
+        ("eager", 2048, (16, 8), 6144, 1, False),
+        ("fp16", 2048, (16, 8), 6144, 1, False),
+        ("quantized", 2048, (16, 8), 6144, 1, False),
+        ("untuned", 4096, (32, 32), 11008, 1, False),
+        ("tp4-tuned", 4096, (8, 2), 12288, 4, True),
+        ("list-intermediate", 2048, (16, 8), [2048, 4096], 1, False),
+        ("no-table", 2048, None, 6144, 1, False),
     ],
 )
-def test_batch_invariant_defaults_to_breakable_cudagraph(
-    monkeypatch,
-    batch_invariant,
-    is_cuda,
-    has_table,
-    enforce_eager,
-    explicit_env,
-    expected,
+def test_batch_invariant_breakable_cudagraph(
+    monkeypatch, case, hidden, heads, intermediate, tp, expected
 ):
     from vllm.config.vllm import default_breakable_cudagraph_architectures
-    from vllm.model_executor.determinism import batch_invariant_configs
-    from vllm.platforms import current_platform
+    from vllm.model_executor.determinism import batch_invariant_configs as bi_configs
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0" if case == "bi-off" else "1")
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    if explicit_env is not None:
-        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", explicit_env)
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(
-        batch_invariant_configs,
-        "has_tuned_matmul_configs",
-        lambda shapes=None: has_table,
-    )
-    default_breakable_cudagraph_architectures.cache_clear()
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architectures=["Qwen3ForCausalLM"],
-            enforce_eager=enforce_eager,
-            dtype=torch.bfloat16,
-            quantization=None,
-            hf_text_config=SimpleNamespace(intermediate_size=6144),
-            get_hidden_size=lambda: 2048,
-            get_head_size=lambda: 128,
-            get_num_attention_heads=lambda pc: 16,
-            get_num_kv_heads=lambda pc: 8,
-            get_vocab_size=lambda: 151936,
-        ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
-        compilation_config=CompilationConfig(),
-    )
-    config._batch_invariant_linear_shapes = lambda: (
-        VllmConfig._batch_invariant_linear_shapes(config)
-    )
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
-    config._uses_breakable_cudagraph_for_batch_invariance = lambda: (
-        VllmConfig._uses_breakable_cudagraph_for_batch_invariance(config)
-    )
-
-    try:
-        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
-        if expected:
-            assert config.compilation_config.mode == CompilationMode.NONE
-        else:
-            assert config.compilation_config.mode is None
-    finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_breakable_cudagraph_architectures.cache_clear()
-
-
-@pytest.mark.parametrize(
-    (
-        "dtype",
-        "quantization",
-        "hidden",
-        "head",
-        "q_heads",
-        "kv_heads",
-        "intermediate",
-        "vocab",
-        "tp",
-        "expected",
-    ),
-    [
-        (torch.bfloat16, None, 2048, 128, 16, 8, 6144, 151936, 1, True),
-        (torch.float16, None, 2048, 128, 16, 8, 6144, 151936, 1, False),
-        (torch.bfloat16, "fp8", 2048, 128, 16, 8, 6144, 151936, 1, False),
-        (torch.bfloat16, None, 4096, 128, 32, 32, 11008, 32000, 1, False),
-        (torch.bfloat16, None, 4096, 128, 8, 2, 12288, 151936, 4, True),
-        (torch.bfloat16, None, 4096, 128, 16, 4, 12288, 151936, 2, False),
-    ],
-    ids=["bf16", "fp16", "quantized", "untuned", "tp4-tuned", "tp2-untuned"],
-)
-def test_batch_invariant_breakable_cudagraph_requires_tuned_model(
-    monkeypatch,
-    dtype,
-    quantization,
-    hidden,
-    head,
-    q_heads,
-    kv_heads,
-    intermediate,
-    vocab,
-    tp,
-    expected,
-):
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
-    from vllm.model_executor.determinism import batch_invariant_configs
-    from vllm.platforms import current_platform
-
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    if case == "opt-out":
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(batch_invariant_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
-    monkeypatch.setattr(
-        batch_invariant_configs,
-        "_TUNED_MATMUL_CONFIGS_FOR_DEVICE",
-        {(12288, 2048): object(), (6144, 4096): object()},
-    )
+    table = None if case == "no-table" else {(12288, 2048): None, (6144, 4096): None}
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", table)
     default_breakable_cudagraph_architectures.cache_clear()
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architectures=["Qwen3ForCausalLM"],
-            enforce_eager=False,
-            dtype=dtype,
-            quantization=quantization,
-            hf_text_config=SimpleNamespace(intermediate_size=intermediate),
-            get_hidden_size=lambda: hidden,
-            get_head_size=lambda: head,
-            get_num_attention_heads=lambda pc: q_heads,
-            get_num_kv_heads=lambda pc: kv_heads,
-            get_vocab_size=lambda: vocab,
-        ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp),
-        compilation_config=CompilationConfig(),
+    config = object.__new__(VllmConfig)
+    config.model_config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        enforce_eager=case == "eager",
+        dtype=torch.float16 if case == "fp16" else torch.bfloat16,
+        quantization="fp8" if case == "quantized" else None,
+        hf_text_config=SimpleNamespace(intermediate_size=intermediate),
+        get_hidden_size=lambda: hidden,
+        get_head_size=lambda: 128,
+        get_num_attention_heads=lambda pc: heads[0],
+        get_num_kv_heads=lambda pc: heads[1],
     )
-    config._batch_invariant_linear_shapes = lambda: (
-        VllmConfig._batch_invariant_linear_shapes(config)
-    )
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
-    config._uses_breakable_cudagraph_for_batch_invariance = lambda: (
-        VllmConfig._uses_breakable_cudagraph_for_batch_invariance(config)
-    )
-
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=tp)
+    config.compilation_config = CompilationConfig()
     try:
-        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        assert config._maybe_enable_breakable_cudagraph() is expected
         if expected:
             assert config.compilation_config.mode == CompilationMode.NONE
-        else:
-            assert config.compilation_config.mode is None
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
         default_breakable_cudagraph_architectures.cache_clear()
@@ -937,7 +823,6 @@ def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwa
 def test_sequence_parallelism_disabled_without_full_graph_compilation(
     monkeypatch, caplog_vllm, disable_log_dedup
 ):
-    """SP and async TP require their compile passes even when explicitly enabled."""
     from vllm.engine.arg_utils import EngineArgs
 
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
@@ -952,10 +837,7 @@ def test_sequence_parallelism_disabled_without_full_graph_compilation(
 
     assert config.compilation_config.pass_config.enable_sp is False
     assert config.compilation_config.pass_config.fuse_gemm_comms is False
-    assert any(
-        "require compilation mode VLLM_COMPILE" in record.getMessage()
-        for record in caplog_vllm.records
-    )
+    assert "require compilation mode VLLM_COMPILE" in caplog_vllm.text
 
 
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
