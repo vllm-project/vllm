@@ -1727,3 +1727,149 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
+
+
+# ======================================================================
+# Mid-conversation tool changes (tool_addition / tool_removal)
+# ======================================================================
+
+
+class TestDynamicToolChanges:
+    """Tests for dynamic mid-conversation tool change content blocks
+    (tool_addition and tool_removal), used by Claude Code tool search
+    and the mid-conversation-tool-changes beta header.
+    """
+
+    @staticmethod
+    def _make_api_app(handler: MagicMock):
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+        app.state.anthropic_serving_messages = handler
+        return app
+
+    def test_tool_addition_block_conversion(self):
+        """tool_addition block is accepted without 400 and passed over
+        during OpenAI conversion so text is preserved."""
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "name": "Bash",
+                                "description": "Run shell commands",
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {"command": {"type": "string"}},
+                                    "required": ["command"],
+                                },
+                            },
+                        },
+                        {"type": "text", "text": "Run ls"},
+                    ],
+                }
+            ]
+        )
+        result = _convert(request)
+        user_msgs = [m for m in result.messages if m.get("role") == "user"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0].get("content") == "Run ls"
+
+    def test_tool_removal_block_conversion(self):
+        """tool_removal block is accepted without 400 and passed over
+        during OpenAI conversion."""
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_removal",
+                            "tool": {"name": "Bash"},
+                        },
+                        {"type": "text", "text": "Tool removed"},
+                    ],
+                }
+            ]
+        )
+        result = _convert(request)
+        user_msgs = [m for m in result.messages if m.get("role") == "user"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0].get("content") == "Tool removed"
+
+    def test_tool_addition_and_removal_multi_turn(self):
+        """Full multi-turn conversation containing both tool_addition and
+        tool_removal blocks converts without error."""
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "name": "Calculator",
+                                "input_schema": {"type": "object"},
+                            },
+                        },
+                        {"type": "text", "text": "Calculate 2+2"},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_removal",
+                            "tool": {"name": "Calculator"},
+                        },
+                        {"type": "text", "text": "Result is 4"},
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+        assert len(result.messages) == 2
+        assert result.messages[0]["content"] == "Calculate 2+2"
+        assert result.messages[1]["content"] == "Result is 4"
+
+    def test_api_endpoint_accepts_tool_addition_request(self):
+        """Endpoint /v1/messages should parse and accept tool_addition
+        request payload without returning a 400 Bad Request."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        response_mock = MagicMock()
+        handler.create_messages.return_value = response_mock
+
+        app = self._make_api_app(handler)
+        body = {
+            "model": "test-model",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "name": "Bash",
+                                "description": "Run shell commands",
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {"command": {"type": "string"}},
+                                    "required": ["command"],
+                                },
+                            },
+                        },
+                        {"type": "text", "text": "Hello, world!"},
+                    ],
+                }
+            ],
+        }
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=body)
+
+        assert response.status_code == HTTPStatus.OK
+        assert handler.create_messages.called
