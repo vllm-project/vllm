@@ -4,6 +4,7 @@
 import io
 from collections.abc import Iterable
 
+import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -55,6 +56,31 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+_DRAFT_LAYER_PATTERN = re.compile(r"(?<![A-Za-z0-9_.])layers\.(\d+)")
+
+
+def _add_global_draft_layer_exclusions(
+    quant_config: QuantizationConfig | None,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Add runtime layer aliases for checkpoint-local quant exclusions."""
+    if quant_config is None or start_layer_id == 0:
+        return
+    exclusions = getattr(quant_config, "exclude_modules", None)
+    if not isinstance(exclusions, list):
+        return
+
+    def offset_local_layer(match: re.Match[str]) -> str:
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_hidden_layers:
+            return match.group(0)
+        return f"layers.{layer_idx + start_layer_id}"
+
+    for exclusion in tuple(exclusions):
+        global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
+        if global_exclusion != exclusion and global_exclusion not in exclusions:
+            exclusions.append(global_exclusion)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -395,6 +421,9 @@ class DFlashQwen3Model(nn.Module):
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        _add_global_draft_layer_exclusions(
+            self.quant_config, start_layer_id, self.config.num_hidden_layers
+        )
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))

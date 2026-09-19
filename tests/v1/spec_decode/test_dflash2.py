@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.models.qwen3_dflash import (
+    _add_global_draft_layer_exclusions,
+)
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -83,6 +86,24 @@ def test_grouped_conv_triton_matches_reference(
         rtol=1e-2 if dtype is torch.bfloat16 else 1e-5,
         atol=1e-2 if dtype is torch.bfloat16 else 1e-5,
     )
+
+
+def test_draft_quant_exclusions_include_global_layer_indices():
+    quant_config = SimpleNamespace(
+        exclude_modules=[
+            "layers.0.mlp_conv*",
+            "*layers.4.self_attn.q_proj",
+            "layers.88.already_global",
+            "lilicorr.layers.0.mlp.0",
+        ]
+    )
+
+    _add_global_draft_layer_exclusions(quant_config, 88, 5)
+
+    assert "layers.88.mlp_conv*" in quant_config.exclude_modules
+    assert "*layers.92.self_attn.q_proj" in quant_config.exclude_modules
+    assert quant_config.exclude_modules.count("layers.88.already_global") == 1
+    assert "lilicorr.layers.88.mlp.0" not in quant_config.exclude_modules
 
 
 def test_selector_edges_match_sequential_reference():
