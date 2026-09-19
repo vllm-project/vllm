@@ -332,6 +332,9 @@ class StreamingParserEngine:
                 self._message_header_buffer = ""
                 self._message_header_token_count = 0
             self.state = ParserState.CONTENT
+        elif self.state == ParserState.FENCED:
+            # An unterminated fence stays content, it never turns into a call.
+            self.state = ParserState.CONTENT
 
         self._record_reasoning_tokens(events)
         return events
