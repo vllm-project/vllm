@@ -186,16 +186,14 @@ class FusedMMInputNorm(CustomOp):
     """Module that applies rescaling and normalisation to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
 
-    Note on dtype semantics:
-
-    * ``dtype`` controls the *internal compute precision* — the dtype in which
-      the per-channel ``weight`` / ``bias`` are stored and applied. It should
-      normally be ``torch.float32``; other compute dtypes can introduce
-      precision loss during rescale + normalise.
-    * ``visual_dtype`` (passed to :meth:`forward`) controls the *output tensor
-      dtype* only. It is completely independent of the compute dtype and can
-      legitimately differ from it (e.g. compute in fp32, emit bf16 for the
-      vision tower).
+    Dtype semantics:
+    ``inputs_dtype`` — ``uint8`` when ``mm_device_do_normalize`` is enabled
+    (raw bytes travel to the device unprocessed); equals ``outputs_dtype``
+    otherwise.
+    ``compute`` (the constructor's ``dtype``) — precision used to store and
+    apply ``weight``/``bias``; normally ``torch.float32``.
+    ``outputs_dtype`` (a.k.a. ``visual_dtype``) — output tensor dtype only;
+    independent of ``compute`` (e.g. compute fp32, emit bf16).
 
     Platform dispatch:
 
@@ -235,9 +233,13 @@ class FusedMMInputNorm(CustomOp):
         # moved to the caller's default device.
         inv_rescale = 1.0 / rescale_factor
         image_mean_cpu = (
-            torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu") * inv_rescale
+            torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu")
+            * inv_rescale
         )
-        image_std_cpu = torch.tensor(image_std, dtype=self.compute_dtype, device="cpu") * inv_rescale
+        image_std_cpu = (
+            torch.tensor(image_std, dtype=self.compute_dtype, device="cpu")
+            * inv_rescale
+        )
         weight_cpu = 1.0 / image_std_cpu
         bias_cpu = -image_mean_cpu / image_std_cpu
         self.is_identity = bool(
@@ -481,7 +483,7 @@ class FusedMMInputNorm(CustomOp):
             not HAS_TRITON
             or grid_thw.dtype not in _SUPPORTED_INPUTS
             or visual_dtype not in _SUPPORTED_OUTPUTS
-            or self.weight.dtype is torch.float32
+            or self.weight.dtype is not torch.float32
             or not self.weight.is_contiguous()
             or not self.bias.is_contiguous()
         ):
@@ -552,4 +554,4 @@ class FusedMMInputNorm(CustomOp):
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Out-of-tree platform override entrypoint."""
-        return self.forward_native(grid_thw, visual_dtype, out)
+        retur
