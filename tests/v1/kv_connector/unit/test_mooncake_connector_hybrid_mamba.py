@@ -9,7 +9,7 @@ validated by this test module.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 import torch
@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferMetadata,
     SendBlockMeta,
     TransferRegion,
+    group_concurrent_contiguous,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -526,9 +527,14 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             ),
         ]
 
-        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
-            build_transfer_params()
-        )
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.group_concurrent_contiguous",
+            wraps=group_concurrent_contiguous,
+        ) as group_spy:
+            src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
+                build_transfer_params()
+            )
 
         assert err_reqs == []
         assert err_msg is None
@@ -541,6 +547,10 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             0x2000 + 30 * block_len,
         ]
         assert lengths == [block_len, 2 * block_len]
+        assert group_spy.call_args_list == [
+            call([4], [7]),
+            call([10, 11], [30, 31]),
+        ]
 
         worker.shutdown()
         worker.shutdown = noop_shutdown
