@@ -60,6 +60,7 @@ class GumbelWatermarker(Watermarker):
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> WatermarkSample:
+
         if type(self.prf) is PhiloxPRF and logits.device.type == "cuda":
             from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 
