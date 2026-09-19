@@ -8,6 +8,7 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
@@ -29,6 +30,7 @@ steps:
       - vllm/v1/attention/selector.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/fused_moe/flashinfer.py
 
 - label: ":amd: (MI300) LM Eval Small Models Harness"
   key: amd-lm-eval-small-models-harness
@@ -110,6 +112,7 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
     - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
@@ -143,6 +146,7 @@ steps:
   optional: true
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
@@ -156,6 +160,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
@@ -177,6 +182,7 @@ steps:
       - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/fused_moe/flashinfer.py
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
@@ -210,6 +216,7 @@ steps:
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
@@ -344,6 +351,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
@@ -804,6 +812,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
@@ -818,6 +827,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - csrc/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
@@ -917,6 +927,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
+  - vllm/model_executor/layers/fused_moe/flashinfer.py
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
