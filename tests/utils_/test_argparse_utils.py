@@ -153,6 +153,74 @@ def test_config_file(parser_with_config):
 
 
 def test_no_model_tag(parser_with_config, cli_config_file):
+
+def test_empty_yaml_config(parser_with_config, tmp_path):
+    """An empty YAML file must be treated as an empty configuration
+    rather than raising ``AttributeError`` from ``None.items()`` (#51618)."""
+    config_path = tmp_path / "empty.yaml"
+    config_path.write_text("")
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(config_path)]
+    )
+    # Defaults from parser_with_config are preserved.
+    assert args.tensor_parallel_size is None
+    assert not args.trust_remote_code
+
+
+def test_comments_only_yaml_config(parser_with_config, tmp_path):
+    """Comments-only YAML documents yield ``None`` from safe_load
+    and must behave the same as an empty config (#51618)."""
+    config_path = tmp_path / "comments.yaml"
+    config_path.write_text("# just a comment\n# another comment\n")
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(config_path)]
+    )
+    assert args.tensor_parallel_size is None
+    assert not args.trust_remote_code
+
+
+def test_empty_yaml_config_with_cli_overrides(parser_with_config, tmp_path):
+    """Empty YAML combined with explicit CLI args must only keep CLI args (#51618)."""
+    config_path = tmp_path / "empty.yaml"
+    config_path.write_text("")
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "mymodel",
+            "--config",
+            str(config_path),
+            "--tensor-parallel-size",
+            "8",
+            "--port",
+            "9000",
+        ]
+    )
+    assert args.tensor_parallel_size == 8
+    assert args.port == 9000
+    assert not args.trust_remote_code
+
+
+def test_yaml_top_level_list_rejected(parser_with_config, tmp_path):
+    """A top-level YAML list is not a mapping and must raise ValueError
+    with an actionable message rather than crashing later (#51618)."""
+    config_path = tmp_path / "list.yaml"
+    config_path.write_text("- 1\n- 2\n- 3\n")
+    with pytest.raises(ValueError, match="YAML mapping"):
+        parser_with_config.parse_args(
+            ["serve", "mymodel", "--config", str(config_path)]
+        )
+
+
+def test_yaml_top_level_scalar_rejected(parser_with_config, tmp_path):
+    """A top-level YAML scalar must raise ValueError instead of an
+    obscure ``NoneType.items`` AttributeError (#51618)."""
+    config_path = tmp_path / "scalar.yaml"
+    config_path.write_text("42\n")
+    with pytest.raises(ValueError, match="YAML mapping"):
+        parser_with_config.parse_args(
+            ["serve", "mymodel", "--config", str(config_path)]
+        )
+
     with pytest.raises(ValueError):
         parser_with_config.parse_args(["serve", "--config", cli_config_file])
 
