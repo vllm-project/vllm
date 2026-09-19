@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TokenSpeed CuTe DSL MLA decode backend (Blackwell, FP8 KV cache only)."""
 
+import inspect
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -24,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -42,13 +45,39 @@ _g_workspace: dict[torch.device, torch.Tensor] = {}
 
 
 def _get_workspace(
-    device: torch.device, num_heads: int, kv_lora_rank: int
+    device: torch.device,
+    num_heads: int,
+    kv_lora_rank: int,
+    min_split_kv: int,
+    num_decode_tokens: int,
+    max_decode_tokens: int,
 ) -> torch.Tensor:
     from tokenspeed_mla import get_num_sm
 
     needed = (
         get_num_sm(device) * num_heads * _TOKENSPEED_MAX_Q_LEN * (kv_lora_rank + 1) * 4
     )
+    if min_split_kv > 1:
+        # Query/head folding preserves the number of rows, including padding.
+        needed = max(
+            needed,
+            num_decode_tokens * num_heads * min_split_kv * (kv_lora_rank + 1) * 4,
+        )
+        if needed >= 1 << 31:
+            raise ValueError(
+                "VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV requires >=2 GiB of decode "
+                "workspace. Reduce the split floor or decode batch size."
+            )
+        # Cover eager batches above the capture ladder before the manager locks.
+        # Reserve only addressable scratch; the check above rejects unsupported
+        # actual launches, not small batches in a generously sized configuration.
+        capacity_bytes = (
+            max_decode_tokens * num_heads * min_split_kv * (kv_lora_rank + 1) * 4
+        )
+        needed = max(needed, min(capacity_bytes, (1 << 31) - 256))
+        # The manager grows during warmup and locks before graph execution.
+        # Fetch each time: another backend may grow the shared allocation.
+        return current_workspace_manager().get_simultaneous(((needed,), torch.int8))[0]
     existing = _g_workspace.get(device)
     if existing is None or existing.numel() < needed:
         _g_workspace[device] = torch.empty(needed, dtype=torch.int8, device=device)
@@ -212,6 +241,35 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 f"got kv_cache_dtype={self.kv_cache_dtype!r}."
             )
 
+        self._min_split_kv = envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV
+        self._decode_kwargs: dict[str, int] = {}
+        self._max_decode_tokens = 0
+        if not 1 <= self._min_split_kv <= 256:
+            raise ValueError("VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV must be in [1, 256]")
+        if self._min_split_kv > 1:
+            from tokenspeed_mla import tokenspeed_mla_decode
+
+            if (
+                "min_split_kv"
+                not in inspect.signature(tokenspeed_mla_decode).parameters
+            ):
+                raise ValueError(
+                    "VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV requires a tokenspeed-mla "
+                    "version with the min_split_kv API. Upgrade tokenspeed-mla "
+                    "or leave the variable unset."
+                )
+            self._decode_kwargs["min_split_kv"] = self._min_split_kv
+            config = get_current_vllm_config()
+            spec = config.speculative_config
+            query_len = 1 + (spec.num_speculative_tokens if spec else 0)
+            self._max_decode_tokens = max(
+                min(
+                    config.scheduler_config.max_num_batched_tokens,
+                    config.scheduler_config.max_num_seqs * query_len,
+                ),
+                config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+
         # Allocate (or fetch the cached) workspace lazily on first forward —
         # __init__ runs before the device is necessarily set on the worker;
         # we know it for sure at forward time when we see the input tensor.
@@ -290,10 +348,15 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
             self.output_scale = layer._k_scale_float
 
-        if self._workspace_buffer is None:
+        if self._workspace_buffer is None or self._min_split_kv > 1:
             # Parallelism can change the runtime query head count.
             self._workspace_buffer = _get_workspace(
-                q.device, q.shape[-2], self.kv_lora_rank
+                q.device,
+                q.shape[-2],
+                self.kv_lora_rank,
+                self._min_split_kv,
+                q.shape[0] * q.shape[1],
+                self._max_decode_tokens,
             )
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
@@ -317,6 +380,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             cp_world=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_interleave_size=self._parallel_config.cp_kv_cache_interleave_size,
+            **self._decode_kwargs,
         )
         if return_lse:
             o, lse = kernel_out

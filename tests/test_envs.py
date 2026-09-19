@@ -23,6 +23,19 @@ def test_object_storage_shm_default_name():
     assert len(envs._generate_shm_name()) <= 30
 
 
+def test_tokenspeed_min_split_default_override_and_compile_key(monkeypatch):
+    key = "VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV"
+    monkeypatch.delenv(key, raising=False)
+    assert envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV == 1
+    assert envs.compile_factors()[key] == 1
+    monkeypatch.setenv(key, "8")
+    assert envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV == 8
+    assert envs.compile_factors()[key] == 8
+    monkeypatch.setenv(key, "8.0")
+    with pytest.raises(ValueError):
+        _ = envs.VLLM_TOKENSPEED_MLA_MIN_SPLIT_KV
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
