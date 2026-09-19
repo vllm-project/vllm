@@ -111,9 +111,13 @@ class LogitsProcessor(PluggableLayer):
             )
         if logits is not None:
             if self.soft_cap is not None:
-                logits = logits / self.soft_cap
-                logits = torch.tanh(logits)
-                logits = logits * self.soft_cap
+                if self.logits_as_input or logits.requires_grad:
+                    logits = logits / self.soft_cap
+                    logits = torch.tanh(logits)
+                    logits = logits * self.soft_cap
+                else:
+                    # Reuse the projection without changing per-operation rounding.
+                    logits.div_(self.soft_cap).tanh_().mul_(self.soft_cap)
 
             if self.scale != 1.0:
                 logits *= self.scale
