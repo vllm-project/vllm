@@ -34,9 +34,18 @@ class _FailingExecutor:
         self.shutdown_called = True
 
 
+class _FailingScheduler:
+    def __init__(self, *args, **kwargs) -> None:
+        raise RuntimeError("boom: simulated scheduler init failure")
+
+
 def _make_vllm_config() -> SimpleNamespace:
     return SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_rank_local=None),
+        scheduler_config=SimpleNamespace(
+            get_scheduler_cls=lambda: _FailingScheduler,
+            enable_chunked_prefill=False,
+        ),
     )
 
 
@@ -50,6 +59,43 @@ def test_init_failure_shuts_down_executor():
             EngineCore,
             "_initialize_kv_caches",
             side_effect=RuntimeError("boom: simulated KV cache init failure"),
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        EngineCore(
+            vllm_config=vllm_config,
+            executor_class=_FailingExecutor,
+            log_stats=False,
+        )
+
+    assert len(_FailingExecutor.instances) == 1
+    assert _FailingExecutor.instances[0].shutdown_called
+
+
+def test_scheduler_init_failure_shuts_down_executor():
+    """A failure at scheduler construction (the issue's repro) is also cleaned up.
+
+    The steps before ``Scheduler(...)`` are made to succeed so the exception is
+    raised inside ``self.scheduler = Scheduler(...)``, after
+    ``structured_output_manager`` is already set -- the exact point where the
+    old code leaked the spawned workers.
+    """
+    _FailingExecutor.instances.clear()
+    vllm_config = _make_vllm_config()
+
+    with (
+        patch.object(
+            EngineCore,
+            "_initialize_kv_caches",
+            return_value=SimpleNamespace(kv_cache_groups=[]),
+        ),
+        patch(
+            "vllm.v1.engine.core.StructuredOutputManager",
+            return_value=SimpleNamespace(clear_backend=lambda: None),
+        ),
+        patch(
+            "vllm.v1.engine.core.resolve_kv_cache_block_sizes",
+            return_value=(1, 1),
         ),
         pytest.raises(RuntimeError, match="boom"),
     ):
