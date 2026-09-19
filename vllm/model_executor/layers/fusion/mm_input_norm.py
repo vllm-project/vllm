@@ -554,4 +554,4 @@ class FusedMMInputNorm(CustomOp):
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Out-of-tree platform override entrypoint."""
-        retur
+        return self.forward_native(grid_thw, visual_dtype, out)
