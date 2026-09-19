@@ -4299,3 +4299,60 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def test_get_kv_cache_config_glm5_with_dflash_draft_group():
+    """A plain-attention draft (DFlash) attached to GLM-5.3-Flash keeps the
+    slot-sharing layout: draft layers form their own group with their own
+    page, land in a separate layer-outermost region, and the per-block
+    accounting includes them."""
+    model_config = ModelConfig(max_model_len=8192)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    kv_cache_spec, _ = _glm5_like_kv_cache_spec()
+    for i in range(5):
+        kv_cache_spec[f"draft.layers.{i}.attn"] = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+    mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
+    idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
+    draft_page = kv_cache_spec["draft.layers.0.attn"].page_size_bytes
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    draft_groups = [
+        g
+        for g in groups
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and all(
+            isinstance(s, SlidingWindowSpec)
+            for s in g.kv_cache_spec.kv_cache_specs.values()
+        )
+    ]
+    assert len(draft_groups) == 1
+    assert sorted(draft_groups[0].layer_names) == [
+        f"draft.layers.{i}.attn" for i in range(5)
+    ]
+    # MLA/indexer group and 4 mamba groups are unchanged.
+    assert len(groups) == 6
+
+    layout = kv_cache_utils._glm5_next_tensor_layout(groups)
+    assert layout is not None and layout[8] is draft_groups[0]
+
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    assert bytes_per_block == 11 * mla_page + 11 * idx_page + 5 * draft_page
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+    assert kv_cache_config.num_blocks == 100
+    tensors = _tensor_by_layer(kv_cache_config)
+    target_region = (11 * mla_page + 11 * idx_page) * 100
+    for i in range(5):
+        t = tensors[f"draft.layers.{i}.attn"]
+        assert t.block_stride == draft_page
+        assert t.offset == target_region + i * draft_page * 100
+    assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
