@@ -188,7 +188,7 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
             return {}
 
         feature_extractor = self.get_feature_extractor()
-        chunk_length = min(feature_extractor.chunk_length, 30)
+        chunk_length = feature_extractor.chunk_length
         audio_len = int(chunk_length * feature_extractor.sampling_rate)
         hop_length = feature_extractor.hop_length
         max_mel_seq_len = audio_len // hop_length

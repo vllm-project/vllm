@@ -167,7 +167,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
 
         feature_extractor = self.info.get_feature_extractor()
         target_audio_length = (
-            min(feature_extractor.chunk_length, 30) * feature_extractor.sampling_rate
+            feature_extractor.chunk_length * feature_extractor.sampling_rate
         )
 
         return {
