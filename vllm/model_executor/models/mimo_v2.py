@@ -511,20 +511,17 @@ def _shard_fp8_qkv_proj(
     k_rows_per_group = head_dim
     v_rows_per_group = v_head_dim
     rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
-    scale_rows_per_group = s_full.shape[0] // num_kv_heads
+    s_full_expanded = s_full.repeat_interleave(block, dim=0).repeat_interleave(
+        block, dim=1
+    )[: w_full.shape[0], : w_full.shape[1]]
     qs, ks, vs = [], [], []
     for g_idx in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
         row_start = g_idx * rows_per_group
-        scale_row_start = g_idx * scale_rows_per_group
         # Dequantize this group's weights.
         w_g = w_full[row_start : row_start + rows_per_group].to(torch.float32)
-        s_g = s_full[scale_row_start : scale_row_start + scale_rows_per_group].to(
-            torch.float32
-        )
-        s_g_expanded = s_g.repeat_interleave(block, dim=0).repeat_interleave(
-            block, dim=1
-        )[:rows_per_group]
-        w_g_dequant = w_g * s_g_expanded
+        w_g_dequant = w_g * s_full_expanded[
+            row_start : row_start + rows_per_group
+        ]
         # Track the dequantized q, k, and v weights separately.
         qs.append(w_g_dequant[:q_rows_per_group])
         ks.append(w_g_dequant[q_rows_per_group : q_rows_per_group + k_rows_per_group])
