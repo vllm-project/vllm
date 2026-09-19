@@ -339,6 +339,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
+        engram_rows: torch.Tensor | None = None,
         *,
         capture_previous_aux: bool = False,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
@@ -402,6 +403,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 previous_post,
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
+                prepared_rows=engram_rows,
             )
             post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
                 residual,
@@ -643,6 +645,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # profile runs (KV cache unbound).
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
+        engram_rows: dict[int, torch.Tensor] = {}
+        engram_lookup_overlap = False
         if (
             self.engram_hash is not None
             and input_ids is not None
@@ -656,6 +660,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 swa_metadata = typing.cast(
                     "DeepseekSparseSWAMetadata", attn_metadata[self.engram_swa_prefix]
                 )
+                engram_lookup_overlap = swa_metadata.engram_lookup_overlap
                 # Image-span tokens are dead: they break n-grams (hash op
                 # takes True=dead) and their gate is zeroed (Engram.forward
                 # takes True=keep).
@@ -694,8 +699,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     engram = getattr(layer, "engram", None)
                     if engram is not None:
-                        engram.prepare_embeddings(
-                            gathered_hashes[:, engram.layer_hash_index]
+                        engram_rows[engram.layer_hash_index] = (
+                            engram.prepare_embeddings(
+                                gathered_hashes[:, engram.layer_hash_index],
+                                allow_overlap=engram_lookup_overlap,
+                            )
                         )
 
         full_num_tokens = positions.shape[0]
@@ -730,6 +738,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            prepared_rows = None
+            if layer.engram is not None and engram_hashes is not None:
+                layer.engram.wait_for_embeddings()
+                prepared_rows = engram_rows[layer.engram.layer_hash_index]
             hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = layer(
                 hidden_states,
                 positions,
@@ -740,6 +752,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
+                prepared_rows,
                 capture_previous_aux=idx in self.aux_hidden_state_layers,
                 mega_gate_metadata=mega_gate_metadata,
             )

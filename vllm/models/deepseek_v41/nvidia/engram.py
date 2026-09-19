@@ -10,7 +10,10 @@ from contextlib import ExitStack
 import numpy as np
 import torch
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
+    eager_break_during_capture,
+)
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
@@ -350,8 +353,6 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
 class Engram(BaseEngram):
     """NVIDIA Engram with asynchronous offload and node-local DP lookup."""
 
-    _prefetch_stream: torch.cuda.Stream | None = None
-
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
@@ -367,16 +368,64 @@ class Engram(BaseEngram):
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
-        if self.embed_tokens.cpu_offload:
-            self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Prefetch local shared rows or the DP group's gathered hash IDs."""
-        if self._prefetch_stream is None:
-            return super().prepare_embeddings(hash_ids)
-        rows = self.staged_rows[: hash_ids.shape[0]]
+    def _init_lookup_staging(self, num_slots: int, overlap: bool | None = None) -> None:
+        super()._init_lookup_staging(num_slots)
+        if overlap is None:
+            config = get_current_vllm_config()
+            engram_config = config.engram_config
+            overlap = bool(
+                engram_config is not None
+                and engram_config.lookup_overlap
+                and engram_config.cpu_offload
+                and engram_config.lookup_overlap_max_seq_len > 0
+                and config.model_config.enforce_eager
+                and not config.use_v2_model_runner
+            )
+        self._lookup_streams = (
+            [
+                torch.cuda.Stream(device=self.staged_rows.device)
+                for _ in range(num_slots)
+            ]
+            if overlap
+            else []
+        )
+        self._lookup_ready = [torch.cuda.Event() for _ in self._lookup_streams]
+        self._lookup_pending = [False] * num_slots
+
+    def wait_for_embeddings(self) -> None:
+        if (
+            getattr(self, "_lookup_pending", None)
+            and self._lookup_pending[self._lookup_slot()]
+            and not BreakableCUDAGraphCapture.is_active()
+        ):
+            self._finish_prefetch(self._lookup_ready[self._lookup_slot()])
+
+    def prepare_embeddings(
+        self, hash_ids: torch.Tensor, *, allow_overlap: bool = False
+    ) -> torch.Tensor:
+        """Prefetch gathered DP hashes only for runner-approved eager batches."""
+        slot = self._lookup_slot()
+        rows = self._lookup_staging()[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
-        self._start_prefetch(hash_ids, rows, self._prefetch_stream)
+        streams = getattr(self, "_lookup_streams", None)
+        overlap = bool(
+            streams
+            and allow_overlap
+            and not BreakableCUDAGraphCapture.is_active()
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        pending = getattr(self, "_lookup_pending", None)
+        if pending is not None:
+            pending[slot] = overlap
+        if overlap:
+            assert streams is not None
+            stream = streams[slot]
+            self._start_prefetch(hash_ids, rows, stream)
+            self._lookup_ready[slot].record(stream)
+        else:
+            self.embed_tokens.lookup(hash_ids, rows)
+        return rows
 
     @eager_break_during_capture
     def _start_prefetch(
@@ -390,14 +439,18 @@ class Engram(BaseEngram):
             self.embed_tokens.lookup(hash_ids, rows, background=True)
 
     @eager_break_during_capture
-    def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
-        torch.cuda.current_stream().wait_stream(stream)
+    def _finish_prefetch(self, event: torch.cuda.Event) -> None:
+        torch.cuda.current_stream().wait_event(event)
 
-    def _ready_rows(self, num_tokens: int) -> torch.Tensor:
-        if self._prefetch_stream is not None:
-            self._finish_prefetch(self._prefetch_stream)
+    def _ready_rows(
+        self, num_tokens: int, prepared_rows: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if prepared_rows is None:
+            self.wait_for_embeddings()
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
-            staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
+            staged = super()._ready_rows(
+                slot * self.embed_tokens.dp_size, prepared_rows
+            )
             return _gather_engram_rows(staged, num_tokens)
-        return super()._ready_rows(num_tokens)
+        return super()._ready_rows(num_tokens, prepared_rows)
