@@ -171,11 +171,19 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    additional_config = vllm_config.additional_config
+    pp_sp_enabled = isinstance(additional_config, dict) and additional_config.get(
+        "deepseek_v41_pp_sp", False
+    )
     return (
-        parallel_config.pipeline_parallel_size == 1
+        (parallel_config.pipeline_parallel_size == 1 or pp_sp_enabled)
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
-        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+        and (
+            use_mega_moe
+            or parallel_config.data_parallel_size > 1
+            or parallel_config.enable_sequence_parallel_moe
+        )
     )
 
 
@@ -376,6 +384,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                if self.engram is not None and engram_hashes is not None:
+                    residual = self.engram(
+                        residual,
+                        engram_hashes[:, self.engram.layer_hash_index],
+                        engram_mask,
+                    )
                 post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
                     residual,
                     self.hc_attn_fn,
@@ -699,6 +713,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         )
 
         full_num_tokens = positions.shape[0]
+        pre_mix: torch.Tensor | None = None
+        if not get_pp_group().is_first_rank:
+            assert intermediate_tensors is not None
+            pre_mix = intermediate_tensors["pre_mix"]
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -706,7 +724,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     forward_context.is_padding, hidden_states
                 )
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
+            if pre_mix is not None:
+                pre_mix = sp_shard(pre_mix)
 
         mega_gate_metadata = None
         if self.use_mega_moe:
@@ -719,10 +740,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
 
         residual, post_mix, res_mix = None, None, None
-        pre_mix: torch.Tensor | None = None
-        if not get_pp_group().is_first_rank:
-            assert intermediate_tensors is not None
-            pre_mix = intermediate_tensors["pre_mix"]
         # Every layer's post runs inside the next layer's fused pre, so aux
         # hidden states are read back from there instead of recomputed.
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
@@ -766,6 +783,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ]
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                assert pre_mix is not None
+                pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "pre_mix": pre_mix}
             )
