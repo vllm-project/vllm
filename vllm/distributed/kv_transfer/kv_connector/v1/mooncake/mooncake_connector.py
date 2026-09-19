@@ -62,7 +62,10 @@ from vllm.v1.kv_cache_interface import (
     KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.block_table import BlockTable
@@ -97,6 +100,9 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+    # Hybrid/HMA packed allocations can back more than one KV group.
+    # Empty means "this region only belongs to group_index".
+    source_groups: tuple[int, ...] = ()
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -127,6 +133,7 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     group_indices: list[int] | None = None,
+    source_groups: list[list[int]] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -148,6 +155,12 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if source_groups is None:
+        source_groups = [[g] for g in group_indices]
+    assert len(source_groups) == len(layer_names), (
+        "Mooncake transfer regions require matching packed-group metadata, "
+        f"got source_groups={len(source_groups)}, layer_names={len(layer_names)}."
+    )
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -156,6 +169,7 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
+        region_groups,
     ) in zip(
         base_addrs,
         block_lens,
@@ -163,6 +177,7 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
+        source_groups,
     ):
         regions.append(
             TransferRegion(
@@ -172,6 +187,7 @@ def _expand_transfer_regions(
                 block_len=block_len,
                 kv_block_len=kv_block_len,
                 group_index=group_index,
+                source_groups=tuple(region_groups),
             )
         )
     return regions
@@ -246,6 +262,37 @@ def _can_coalesce_block_transfers(
         and transfer_len == local_region_block_len
         and transfer_len == remote_region_block_len
     )
+
+
+def _paired_blocks_for_region(
+    local_block_ids_by_group: list[list[int]],
+    remote_block_ids_by_group: list[list[int]],
+    source_groups: tuple[int, ...] | list[int],
+    fallback_group: int,
+) -> tuple[list[int], list[int]]:
+    """Deduplicate (local, remote) block pairs across groups sharing a region.
+
+    Packed HMA allocations back multiple KV groups. Sending the packed page
+    once per unique block is equivalent to NIXL's storage-row transfer.
+    """
+    groups = source_groups or (fallback_group,)
+    local_ids: list[int] = []
+    remote_ids: list[int] = []
+    seen: set[tuple[int, int]] = set()
+    for group_index in groups:
+        if group_index >= len(local_block_ids_by_group):
+            continue
+        for local_id, remote_id in zip(
+            local_block_ids_by_group[group_index],
+            remote_block_ids_by_group[group_index],
+        ):
+            key = (local_id, remote_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            local_ids.append(local_id)
+            remote_ids.append(remote_id)
+    return local_ids, remote_ids
 
 
 def _validate_asymmetric_region_lengths(
@@ -403,6 +450,7 @@ class MooncakeXferMetadata(
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
+    registered_source_groups: list[list[int]] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
 
 
@@ -997,6 +1045,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
         self.registered_group_indices: list[int] = []
+        self.registered_source_groups: list[list[int]] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
@@ -1257,6 +1306,7 @@ class MooncakeConnectorWorker:
             self.registered_layer_names,
             self.registered_layer_indices,
             self.registered_group_indices,
+            self.registered_source_groups,
         )
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
@@ -1265,6 +1315,7 @@ class MooncakeConnectorWorker:
             meta.registered_layer_names,
             meta.registered_layer_indices,
             meta.registered_group_indices,
+            meta.registered_source_groups or None,
         )
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions,
@@ -1588,8 +1639,12 @@ class MooncakeConnectorWorker:
                 assert group_index < len(local_block_ids_by_group), (
                     "Transfer region references a missing KV group."
                 )
-                local_block_ids = local_block_ids_by_group[group_index]
-                remote_block_ids = remote_block_ids_by_group[group_index]
+                local_block_ids, remote_block_ids = _paired_blocks_for_region(
+                    local_block_ids_by_group,
+                    remote_block_ids_by_group,
+                    local_region.source_groups,
+                    group_index,
+                )
                 if not local_block_ids:
                     continue
 
@@ -1722,6 +1777,13 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
+        self.registered_source_groups = []
+
+        packed_storage_to_region: dict[int, int] = {}
+        collapsed_views = 0
+        num_blocks = self.kv_cache_config.num_blocks
+        if self._physical_blocks_per_logical_kv_block > 1:
+            num_blocks *= self._physical_blocks_per_logical_kv_block
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -1732,9 +1794,67 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
+            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                layer_spec = layer_spec.kv_cache_specs.get(layer_name, layer_spec)
             # One raw page tensor per layer; for Mamba that page holds all the
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
+            group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            storage = cache.untyped_storage()
+            storage_addr = storage.data_ptr()
+            if storage_addr not in seen_storage_ptrs:
+                seen_storage_ptrs.add(storage_addr)
+                kv_data_ptrs.append(storage_addr)
+                kv_data_lens.append(storage.nbytes())
+
+            is_mla_region = isinstance(
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            )
+            tensor_blocks = cache.shape[0] if cache.ndim > 1 else num_blocks
+            if cache.ndim == 1:
+                block_stride = storage.nbytes() // tensor_blocks if tensor_blocks else 0
+                storage_is_block_major = tensor_blocks > 0 and block_stride > 0
+                hnc_contiguous = False
+            else:
+                block_stride = cache.stride(0) * cache.element_size()
+                storage_is_block_major = (
+                    tensor_blocks > 0
+                    and tensor_blocks * block_stride == storage.nbytes()
+                )
+                hnc_contiguous = (
+                    cache.ndim == 4
+                    and cache.stride(2) == cache.shape[3]
+                    and cache.stride(1) == cache.shape[2] * cache.shape[3]
+                )
+            packed_row = (
+                storage.nbytes() // tensor_blocks if tensor_blocks else block_stride
+            )
+            # NIXL-style packed pages: one region per allocation, block_len
+            # equals the contiguous storage row so consecutive blocks coalesce.
+            use_packed_row = (
+                not isinstance(layer_spec, (MambaSpec, KpoolTailSpec))
+                and storage_is_block_major
+                and packed_row > 0
+                and (is_mla_region or not hnc_contiguous)
+            )
+            if use_packed_row:
+                region_idx = packed_storage_to_region.get(storage_addr)
+                if region_idx is not None:
+                    groups = self.registered_source_groups[region_idx]
+                    if group_index not in groups:
+                        groups.append(group_index)
+                    collapsed_views += 1
+                    continue
+                packed_storage_to_region[storage_addr] = len(region_base_addresses)
+                region_base_addresses.append(storage_addr)
+                self.block_len_per_layer.append(packed_row)
+                self.kv_block_len_per_layer.append(packed_row)
+                self.registered_layer_names.append(layer_name)
+                self.registered_layer_indices.append(layer_index)
+                self.registered_group_indices.append(group_index)
+                self.registered_source_groups.append([group_index])
+                continue
+
             block_is_contiguous = is_non_overlapping_and_dense(cache[0])
             if not block_is_contiguous:
                 # Non-block-compact layouts scatter a block across per-head
@@ -1775,21 +1895,23 @@ class MooncakeConnectorWorker:
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
-                self.registered_group_indices.append(
-                    self.kv_cache_config.transfer_group_index_by_layer[layer_name]
-                )
-            storage = cache.untyped_storage()
-            storage_addr = storage.data_ptr()
-            if storage_addr not in seen_storage_ptrs:
-                seen_storage_ptrs.add(storage_addr)
-                kv_data_ptrs.append(storage_addr)
-                kv_data_lens.append(storage.nbytes())
+                self.registered_group_indices.append(group_index)
+                self.registered_source_groups.append([group_index])
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
+
+        if collapsed_views:
+            logger.info(
+                "Mooncake packed KV xfer: collapsed %s extra layer views into "
+                "%s storage regions (%s total regions).",
+                collapsed_views,
+                len(packed_storage_to_region),
+                len(region_base_addresses),
+            )
 
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
@@ -1928,6 +2050,7 @@ class MooncakeConnectorWorker:
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
             registered_group_indices=self.registered_group_indices,
+            registered_source_groups=self.registered_source_groups,
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -2208,6 +2331,7 @@ class MooncakeConnectorWorker:
         layer_names: list[str],
         layer_indices: list[int],
         group_indices: list[int] | None = None,
+        source_groups: list[list[int]] | None = None,
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
@@ -2221,6 +2345,7 @@ class MooncakeConnectorWorker:
             layer_names=layer_names,
             layer_indices=layer_indices,
             group_indices=group_indices,
+            source_groups=source_groups,
         )
 
     def _get_sender_transfer_plan(
