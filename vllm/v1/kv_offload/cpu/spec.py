@@ -190,6 +190,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                calibrate_load_path=bool(
+                    self.extra_config.get("calibrate_load_path", False)
+                ),
             )
         except Exception:
             if mmap_region is not None:
