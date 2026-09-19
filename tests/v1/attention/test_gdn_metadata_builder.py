@@ -16,7 +16,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config import SpeculativeConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -196,6 +196,96 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+def test_grouped_metadata_carries_state_source_and_destinations():
+    """A fake grouped batch can describe shared and private state ownership."""
+    meta = GDNAttentionMetadata(
+        num_prefills=2,
+        num_prefill_tokens=4,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=6,
+        prefix_producer_ranges=torch.tensor([[0, 2]], dtype=torch.int32),
+        producer_token_indices=torch.tensor([0, 1]),
+        producer_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        consumer_ranges=torch.tensor([[2, 4], [4, 6]], dtype=torch.int32),
+        consumer_token_indices=torch.tensor([2, 3, 4, 5]),
+        consumer_query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+        shared_initial_state_source=torch.tensor([7], dtype=torch.int32),
+        shared_state_destinations=torch.tensor([8], dtype=torch.int32),
+        consumer_shared_state_sources=torch.tensor([8, 8], dtype=torch.int32),
+        private_final_state_destination=torch.tensor([9, 10], dtype=torch.int32),
+    )
+
+    assert meta.prefix_producer_ranges.tolist() == [[0, 2]]
+    assert meta.producer_token_indices.tolist() == [0, 1]
+    assert meta.producer_query_start_loc.tolist() == [0, 2]
+    assert meta.consumer_ranges.tolist() == [[2, 4], [4, 6]]
+    assert meta.consumer_token_indices.tolist() == [2, 3, 4, 5]
+    assert meta.consumer_query_start_loc.tolist() == [0, 2, 4]
+    assert meta.shared_initial_state_source.tolist() == [7]
+    assert meta.private_final_state_destination.tolist() == [9, 10]
+
+
+def test_grouped_metadata_builder_builds_mixed_batch():
+    """Real GDNAttentionMetadataBuilder.build() execution for mixed grouped batch.
+
+    Verifies packing and state assignment for:
+    - Request 0: Consumer (16 prefill tokens, checkpoint source block 77)
+    - Request 1: Ordinary Request (20 prefill tokens, no checkpoint)
+    """
+    from types import SimpleNamespace
+
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        speculative_config=None,
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_seqs=64),
+        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+        additional_config={},
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+    batch = BatchSpec(seq_lens=[48, 20], query_lens=[16, 20])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common.mamba_prefix_producer_indices = torch.tensor(
+        [-1, -1], dtype=torch.int32, device=DEVICE
+    )
+    common.mamba_checkpoint_positions = torch.tensor(
+        [32, 0], dtype=torch.int32, device=DEVICE
+    )
+    common.mamba_checkpoint_source_block_ids = torch.tensor(
+        [77, -1], dtype=torch.int32, device=DEVICE
+    )
+
+    meta = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert meta.consumer_ranges is not None
+    assert meta.consumer_ranges.tolist() == [[0, 16], [16, 36]]
+    assert meta.consumer_token_indices.tolist() == list(range(0, 36))
+    assert meta.consumer_query_start_loc.tolist() == [0, 16, 36]
+
+    # Consumer inherits checkpoint block 77; ordinary request uses its own dest.
+    consumer_dest = int(meta.prefill_state_indices[0].item())
+    ordinary_dest = int(meta.prefill_state_indices[1].item())
+    assert meta.consumer_shared_state_sources.tolist() == [77, ordinary_dest]
+    assert meta.private_final_state_destination.tolist() == [
+        consumer_dest,
+        ordinary_dest,
+    ]
 
 
 def test_full_cudagraph_spec_metadata_uses_request_count():
