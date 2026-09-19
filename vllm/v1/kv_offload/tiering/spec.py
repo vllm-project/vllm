@@ -65,6 +65,8 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    OffloadingStartupError,
+    retain_until_exit,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -389,7 +391,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     secondary_tiers=secondary_tiers,
                 )
                 self._manager = tiering_manager
-            except Exception:
+            except BaseException as exc:
+                if not isinstance(exc, Exception) or isinstance(
+                    exc, OffloadingStartupError
+                ):
+                    # Keep _scheduler_mmap too: native work may still use this view.
+                    retain_until_exit(primary_tier, scheduler_mmap, *secondary_tiers)
+                    raise
                 for tier in reversed(secondary_tiers):
                     try:
                         tier.shutdown()
@@ -461,6 +469,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 canonical_layout=self.config.canonical_layout,
             )
         except Exception:
+            # Worker-local view; NIXL registers the separate scheduler-side mapping.
             worker_mmap.cleanup()
             raise
 

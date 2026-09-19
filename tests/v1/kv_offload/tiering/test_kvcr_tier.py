@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import mmap
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -17,6 +19,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
+    KVCRStartupError,
     MemDescriptor,
     OpEntryResult,
     OpEntryStatus,
@@ -30,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
+    OffloadingStartupError,
     OffloadKey,
     ReqContext,
     make_offload_key,
@@ -170,6 +174,7 @@ def _make_tier(
     monkeypatch,
     kvcr: RecordingKVCR,
     *,
+    startup_error: BaseException | None = None,
     enable_telemetry: bool = False,
     secondary_g2_slots: int = 0,
     kvcr_service_socket_path: str | None = None,
@@ -192,6 +197,8 @@ def _make_tier(
         kvcr.constructor_bindings = bindings
         kvcr.framework_control = bindings.framework_control
         kvcr.inventory_sink = bindings.inventory_sink
+        if startup_error is not None:
+            raise startup_error
         return kvcr
 
     monkeypatch.setattr(kvcr_manager, "KVCR", make_kvcr)
@@ -223,6 +230,40 @@ def _make_tier(
         local_dram_backend="UCX",
         remote_fw_dram_backend="UCX",
     )
+
+
+@pytest.mark.parametrize(
+    "error_type", [RuntimeError, KVCRStartupError, KeyboardInterrupt]
+)
+def test_startup_failure_cleanup(monkeypatch, error_type):
+    """Unsafe failures must retain buffers: native work may still touch them."""
+    retained: list[object] = []
+    monkeypatch.setattr("vllm.v1.kv_offload.base._RETAINED_RESOURCES", retained)
+
+    close = Mock()
+    monkeypatch.setattr(_StubControlChannel, "close", close)
+    unsafe = error_type is not RuntimeError
+    expected = OffloadingStartupError if error_type is KVCRStartupError else error_type
+    try:
+        with pytest.raises(expected, match="startup failed"):
+            _make_tier(
+                monkeypatch,
+                RecordingKVCR(),
+                startup_error=error_type("startup failed"),
+                secondary_g2_slots=1,
+                enable_kv_cache_events=True,
+                self_describing_kv_events=True,
+            )
+        assert close.call_count == (0 if unsafe else 1)
+        assert bool(retained) == unsafe
+        if unsafe:
+            [region] = [item for item in retained if isinstance(item, mmap.mmap)]
+            assert not region.closed
+            assert any(isinstance(item, memoryview) for item in retained)
+    finally:
+        for item in retained:
+            if isinstance(item, mmap.mmap):
+                item.close()
 
 
 def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
