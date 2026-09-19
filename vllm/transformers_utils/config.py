@@ -300,6 +300,11 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
 
     @wraps(_original_validate_rope)
     def patched_validate_rope(self, *args, **kwargs):
+        # The wrapper stays installed for the process, so gate on the model
+        # type here as well: a later config of another type keeps
+        # transformers' own validation.
+        if getattr(self, "model_type", None) not in _PATCH_HF_NESTED_ROPE_VALIDATION:
+            return _original_validate_rope(self, *args, **kwargs)
         rope_parameters = getattr(self, "rope_parameters", None)
         if isinstance(rope_parameters, dict):
             layer_types = set(rope_parameters) & set(
