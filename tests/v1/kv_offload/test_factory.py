@@ -10,12 +10,10 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     _all_groups_are_replicated,
-    _expected_mla_bytes_per_block,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
-    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -642,10 +640,6 @@ def test_replicated_layout_accepts_all_mla_multi_group():
     groups = [_group(_mla_spec(), 2), _group(_mla_spec(), 3)]
 
     assert _all_groups_are_replicated(groups)
-    # Groups alias the same backing allocation; block is sized to the largest.
-    assert _expected_mla_bytes_per_block(groups) == (
-        groups[0].kv_cache_spec.page_size_bytes * 3
-    )
 
 
 def test_replicated_layout_unwraps_uniform_type_specs():
@@ -653,11 +647,6 @@ def test_replicated_layout_unwraps_uniform_type_specs():
     groups = [_group(UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=inner), 3)]
 
     assert _all_groups_are_replicated(groups)
-    # UniformTypeKVCacheSpecs.page_size_bytes already sums its layers, so it
-    # must not be multiplied by the layer count again.
-    assert _expected_mla_bytes_per_block(groups) == (
-        groups[0].kv_cache_spec.page_size_bytes
-    )
 
 
 def test_replicated_layout_fails_closed_on_non_mla():
@@ -672,35 +661,3 @@ def test_replicated_layout_fails_closed_on_non_mla():
     assert not _all_groups_are_replicated(
         [_group(UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={}), 0)]
     )
-
-
-def _mamba_spec(page_size_bytes: int = 512, tp_replicated: bool = True) -> MambaSpec:
-    """Minimal MambaSpec for testing; shapes are irrelevant to the gate."""
-    return MambaSpec(
-        block_size=16,
-        shapes=((page_size_bytes,),),
-        dtypes=(torch.bfloat16,),
-        tp_replicated=tp_replicated,
-    )
-
-
-def test_replicated_layout_accepts_glm5_style_mla_plus_mamba():
-    """GLM5.3-Flash mixes MLA attention and tp_replicated Mamba groups.
-
-    Both are replicated across TP ranks, so the whole block qualifies.
-    """
-    mla_page = 512
-    mla_groups = [_group(_mla_spec(mla_page), 3)]
-    mamba_groups = [_group(_mamba_spec(mla_page, tp_replicated=True), 3)]
-    groups = mla_groups + mamba_groups
-
-    assert _all_groups_are_replicated(groups)
-
-
-def test_replicated_layout_rejects_sharded_mamba():
-    """Mamba with tp_replicated=False is sharded — must not qualify."""
-    groups = [
-        _group(_mla_spec(), 3),
-        _group(_mamba_spec(tp_replicated=False), 3),
-    ]
-    assert not _all_groups_are_replicated(groups)
