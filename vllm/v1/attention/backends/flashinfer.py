@@ -47,6 +47,7 @@ from vllm.utils.flashinfer import (
     pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
+    warn_flashinfer_jit_cache_sm75,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -508,12 +509,11 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # FlashInfer supports SM75+, but is currently broken on SM75 (Turing):
-        # https://github.com/flashinfer-ai/flashinfer/issues/3620 (fix:
-        # https://github.com/flashinfer-ai/flashinfer/pull/3621). Temporarily
-        # raise the floor to SM80 so it is not auto-selected on SM75 until
-        # that fix lands; revert to DeviceCapability(7, 5) once it does.
-        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
+        # FlashInfer supports SM75+. The SM75 64 KiB smem limit for
+        # HEAD_DIM 256 prefill was fixed in flashinfer PR #3526
+        # (shipped in v0.6.16). HEAD_DIM > 256 is not supported on
+        # SM75 due to the 64 KiB opt-in smem ceiling.
+        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
             12, 1
         )
 
@@ -1797,6 +1797,7 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        warn_flashinfer_jit_cache_sm75()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
