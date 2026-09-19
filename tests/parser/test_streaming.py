@@ -89,11 +89,14 @@ HISTORY_MESSAGES = [
 
 @pytest.fixture
 def request_obj():
+    # Special-token text is streamed below, as it is in serving only after
+    # adjust_request() cleared skip_special_tokens.
     return ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "hi"}],
         tools=TOOLS,
         tool_choice="auto",
+        skip_special_tokens=False,
     )
 
 
