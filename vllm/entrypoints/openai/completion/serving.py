@@ -35,6 +35,7 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.engine.serving import resolve_cache_salt_header
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
@@ -133,6 +134,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
             )
+
+        resolve_cache_salt_header(request, raw_request)
 
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):

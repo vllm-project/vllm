@@ -549,7 +549,7 @@ An attacker sharing the same backend can measure differences in Time to First To
 
 vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
 
-`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint. It can be sent either as a request body parameter or as the `X-Cache-Salt` HTTP header.
 
 #### Usage with the OpenAI Python client
 
@@ -575,6 +575,31 @@ response = client.chat.completions.create(
 }
 ```
 
+#### Usage with the `X-Cache-Salt` header
+
+The salt can also be supplied as the `X-Cache-Salt` HTTP header, which is
+accepted by the same endpoints as the body parameter:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Cache-Salt: per-user-or-per-tenant-secret" \
+  -d '{"model": "meta-llama/Llama-3-8b", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The header takes precedence over a `cache_salt` body parameter. This lets an
+authenticating proxy or gateway pin each request to a cache partition derived
+from the authenticated identity, without trusting the client to send the right
+salt in the body, and without rewriting request bodies. A malformed header
+value (empty, longer than 128 characters, or containing `@`, `/`, `\`, or NUL)
+is rejected with HTTP 400 rather than silently ignored, so a misconfigured
+proxy cannot quietly drop the isolation boundary. Sending the header to an
+endpoint whose request type has no `cache_salt` field (the Cohere `/v2/embed`
+endpoint) is likewise a 400 rather than an unsalted request.
+
+When a proxy injects the header, strip any client-supplied `X-Cache-Salt` at
+the edge so callers cannot select their own partition.
+
 ### How to choose a salt value
 
 Treat the salt as a secret. An attacker who can guess or obtain the salt used by another tenant can still mount the timing attack against that tenant, so use random values that are long enough to be unpredictable (e.g. 43 base64 characters, 256 bits) rather than predictable identifiers such as a user name or account ID.
@@ -587,7 +612,7 @@ Scope the salt to the isolation boundary you need:
 
 ### Recommendations
 
-- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
+- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce. Prefer injecting the `X-Cache-Salt` header from a trusted proxy over relying on clients to set the body parameter.
 - **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
 - Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
 

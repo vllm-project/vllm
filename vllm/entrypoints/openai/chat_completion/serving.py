@@ -49,6 +49,7 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.engine.serving import resolve_cache_salt_header
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -273,6 +274,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=self.model_config,
             )
+        resolve_cache_salt_header(request, raw_request)
+
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
