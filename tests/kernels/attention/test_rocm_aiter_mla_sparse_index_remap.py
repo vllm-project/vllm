@@ -43,10 +43,11 @@ def _make_metadata():
         ),
         block_size=1,
         topk_tokens=TOPK_TOKENS,
+        remapped_buf=None,
     )
 
 
-def _patch_init_deps(monkeypatch, *, speculative: bool):
+def _patch_init_deps(monkeypatch, *, speculative: bool = False):
     monkeypatch.setattr(
         sparse_mod.AiterMLAHelper,
         "check_num_heads_validity",
@@ -90,37 +91,11 @@ def _build_impl(indexer, topk_indices_buffer):
     )
 
 
-@pytest.mark.parametrize(
-    "has_indexer,speculative,expected",
-    [
-        (True, False, True),
-        (False, False, False),
-        # Spec decode permutes the buffer, so skip layers must remap too.
-        (False, True, True),
-        (True, True, True),
-    ],
-)
-def test_needs_index_remap_gate(monkeypatch, has_indexer, speculative, expected):
-    _patch_init_deps(monkeypatch, speculative=speculative)
-    buffer = torch.zeros(NUM_TOKENS, TOPK_TOKENS, dtype=torch.int32, device="cpu")
-    indexer = SimpleNamespace(topk_indices_buffer=buffer) if has_indexer else None
-
-    impl = _build_impl(indexer, buffer)
-
-    assert impl.needs_index_remap is expected
-    assert impl.topk_indices_buffer is buffer
+def _new_buffer():
+    return torch.zeros(NUM_TOKENS, TOPK_TOKENS, dtype=torch.int32, device="cpu")
 
 
-@pytest.mark.parametrize("needs_index_remap", [True, False])
-def test_forward_mqa_remaps_only_when_layer_owns_indexer(
-    monkeypatch, needs_index_remap
-):
-    _patch_init_deps(monkeypatch, speculative=needs_index_remap)
-    buffer = torch.zeros(NUM_TOKENS, TOPK_TOKENS, dtype=torch.int32, device="cpu")
-    impl = _build_impl(None, buffer)
-    assert impl.needs_index_remap is needs_index_remap
-
-    remap_calls: list[tuple] = []
+def _patch_forward_deps(monkeypatch, impl, remap_calls):
     monkeypatch.setattr(
         sparse_mod,
         "triton_convert_req_index_to_global_index",
@@ -137,14 +112,109 @@ def test_forward_mqa_remaps_only_when_layer_owns_indexer(
         "_forward_mla",
         lambda self, layer, q, kv_cache, attn_metadata: attn_out,
     )
+    return attn_out
 
-    out, lse = impl.forward_mqa(
+
+def _run_forward(impl, metadata):
+    return impl.forward_mqa(
         torch.zeros(NUM_TOKENS, NUM_HEADS, HEAD_SIZE, device="cpu"),
         torch.zeros(4, 1, HEAD_SIZE, device="cpu"),
-        _make_metadata(),
+        metadata,
         SimpleNamespace(_q_scale=None, _k_scale=None),
     )
 
+
+@pytest.mark.parametrize("has_indexer", [True, False])
+def test_owns_indexer_is_structural(monkeypatch, has_indexer):
+    """owns_indexer reflects the layer, not the serving config."""
+    _patch_init_deps(monkeypatch)
+    buffer = _new_buffer()
+    indexer = SimpleNamespace(topk_indices_buffer=buffer) if has_indexer else None
+
+    impl = _build_impl(indexer, buffer)
+
+    assert impl.owns_indexer is has_indexer
+    assert impl.topk_indices_buffer is buffer
+
+
+def test_forward_mqa_remaps_once_per_metadata(monkeypatch):
+    """Skip layers sharing a metadata share its remap; the first one pays.
+
+    All layers read one top-k buffer, so the reuse has to key off the metadata
+    that owns ``paged_kv_indices``, not off the buffer being distinct.
+    """
+    _patch_init_deps(monkeypatch)
+    buffer = _new_buffer()
+    first = _build_impl(None, buffer)
+    second = _build_impl(None, buffer)
+
+    remap_calls: list[tuple] = []
+    attn_out = _patch_forward_deps(monkeypatch, first, remap_calls)
+    metadata = _make_metadata()
+
+    out, lse = _run_forward(first, metadata)
     assert out is attn_out
     assert lse is None
-    assert len(remap_calls) == (1 if needs_index_remap else 0)
+    assert len(remap_calls) == 1
+    assert metadata.remapped_buf is buffer
+
+    _run_forward(second, metadata)
+    assert len(remap_calls) == 1
+
+
+def test_forward_mqa_remaps_for_each_metadata(monkeypatch):
+    """Skip layers on a second metadata must remap its own paged_kv_indices.
+
+    Regression: gating on ``indexer is not None`` skipped every layer in the
+    non-indexer metadata group, leaving its ``paged_kv_indices`` unwritten.
+    """
+    _patch_init_deps(monkeypatch)
+    buffer = _new_buffer()
+    indexer_layer = _build_impl(SimpleNamespace(topk_indices_buffer=buffer), buffer)
+    skip_layer = _build_impl(None, buffer)
+
+    remap_calls: list[tuple] = []
+    _patch_forward_deps(monkeypatch, indexer_layer, remap_calls)
+
+    indexer_metadata = _make_metadata()
+    _run_forward(indexer_layer, indexer_metadata)
+    assert len(remap_calls) == 1
+    assert indexer_metadata.remapped_buf is buffer
+
+    # A distinct metadata instance carries its own, still-unwritten indices.
+    skip_metadata = _make_metadata()
+    _run_forward(skip_layer, skip_metadata)
+    assert len(remap_calls) == 2
+    assert skip_metadata.remapped_buf is buffer
+
+
+def test_forward_mqa_remaps_when_buffer_differs(monkeypatch):
+    """A layer reading a different buffer cannot reuse the metadata's remap."""
+    _patch_init_deps(monkeypatch)
+    remapped_buffer = _new_buffer()
+    other_buffer = _new_buffer()
+    layer = _build_impl(None, other_buffer)
+
+    remap_calls: list[tuple] = []
+    _patch_forward_deps(monkeypatch, layer, remap_calls)
+    metadata = _make_metadata()
+    metadata.remapped_buf = remapped_buffer
+
+    _run_forward(layer, metadata)
+    assert len(remap_calls) == 1
+    assert metadata.remapped_buf is other_buffer
+
+
+def test_forward_mqa_indexer_layer_always_remaps(monkeypatch):
+    """The indexer rewrites its buffer in place, so its remap is never stale."""
+    _patch_init_deps(monkeypatch)
+    buffer = _new_buffer()
+    impl = _build_impl(SimpleNamespace(topk_indices_buffer=buffer), buffer)
+
+    remap_calls: list[tuple] = []
+    _patch_forward_deps(monkeypatch, impl, remap_calls)
+    metadata = _make_metadata()
+    metadata.remapped_buf = buffer
+
+    _run_forward(impl, metadata)
+    assert len(remap_calls) == 1

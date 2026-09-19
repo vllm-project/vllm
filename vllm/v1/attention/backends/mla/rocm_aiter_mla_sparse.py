@@ -390,6 +390,13 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     block_size: int = 1
     topk_tokens: int = 2048
 
+    # Top-k buffer whose remap currently occupies this metadata's
+    # paged_kv_indices, or None before the first remap of the forward pass.
+    # Layers sharing a metadata instance also share paged_kv_indices, so only
+    # the first of them has to run the remap; a layer reading a different
+    # buffer must redo it.
+    remapped_buf: object = None
+
     # Fields read by the shared MLA forward. This impl has no dense-MHA prefill
     # path (supports_dense_mha_prefill=False), so it always runs the MQA path;
     num_decodes: int = 0
@@ -802,10 +809,11 @@ class ROCMAiterMLASparseImpl(
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
         vllm_config = get_current_vllm_config()
-        # Skip layers would remap unchanged indices; spec decode permutes them.
-        self.needs_index_remap: bool = (
-            indexer is not None or vllm_config.speculative_config is not None
-        )
+        # Indexer layers own the buffer they read and may rewrite it between
+        # their own forwards, so they always remap. Layers without an indexer
+        # decide per forward instead: whether a remap is redundant depends on
+        # what was last remapped into this metadata, not on the layer itself.
+        self.owns_indexer: bool = indexer is not None
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -1049,7 +1057,9 @@ class ROCMAiterMLASparseImpl(
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
-        if self.needs_index_remap:
+        if self.owns_indexer or attn_metadata.remapped_buf is not (
+            self.topk_indices_buffer
+        ):
             # Get topk indices
             assert self.topk_indices_buffer is not None
             topk_indices = fit_kpool_indices_to_aiter(
@@ -1065,6 +1075,7 @@ class ROCMAiterMLASparseImpl(
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
             )
+            attn_metadata.remapped_buf = self.topk_indices_buffer
 
         # write the latent and rope to kv cache
         if fp8_attention:
