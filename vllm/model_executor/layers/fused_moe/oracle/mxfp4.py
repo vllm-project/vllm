@@ -31,7 +31,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    mx_scale_kwargs as _mx_scale_kwargs,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
 )
@@ -45,7 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -54,9 +59,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-if has_triton_kernels():
+triton_kernels_version = get_triton_kernels_version()
+
+if triton_kernels_version is not None:
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        if triton_kernels_version == "3.8":
+            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+        else:
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -348,14 +358,14 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
 
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
+    """Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
     TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
@@ -366,6 +376,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         ]
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
+    if current_platform.is_cpu():
+        return [Mxfp4MoeBackend.CPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -523,8 +535,7 @@ def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary MXFP4 MoE backend.
+    """Select the primary MXFP4 MoE backend.
 
     Args:
         config: MoE configuration
@@ -533,6 +544,7 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
+
     """
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
@@ -627,17 +639,6 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cpu():
-        backend = Mxfp4MoeBackend.CPU
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
-            Mxfp4MoeBackend.CPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
     unsupported_log = "; ".join(
         [
             f"backend: {backend.value}, reason: {reason}"
@@ -656,8 +657,7 @@ def select_mxfp4_moe_backend(
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the MXFP4 MoE backend with MXFP8 activation as top priority.
+    """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
     activation_format = (
@@ -670,7 +670,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backends = _get_requested_backends(runner_backend, None)
+        if runner_backend == "b12x":
+            requested_backends = _get_requested_backends(runner_backend, None)
+        else:
+            # Try every variant of the alias in priority order. Narrowing to
+            # the BF16 variant would drop SM100+ W4A8 variants on devices where
+            # the BF16 variant is gated to SM90.
+            requested_backends = map_mxfp4_backend(runner_backend)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -759,18 +765,31 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
-            activation == MoEActivation.SITU or activation == MoEActivation.SILU
-        ):
-            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-            # which would inflate weights and OOM.
-            intermediate_size = round_up(intermediate_size, 128)
-            hidden_size = round_up(hidden_size, 128)
-        else:
-            intermediate_size = round_up(intermediate_size, 256)
-            hidden_size = round_up(hidden_size, 256)
+        from vllm.platforms.rocm import get_cdna_version
+
+        is_situ_or_silu = activation in (
+            MoEActivation.SITU,
+            MoEActivation.SILU,
+        )
+
+        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
+        # rather than the generic ROCm 256 round-up, which would inflate
+        # weights and OOM.
+        aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+
+        # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
+        # CDNA4's F16xMXFP4 configuration uses block_k=256.
+        triton_uses_128 = (
+            backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
+        )
+
+        alignment = (
+            128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
+        )
+
+        intermediate_size = round_up(intermediate_size, alignment)
+        hidden_size = round_up(hidden_size, alignment)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -801,7 +820,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
 ]:
     """Convert loaded weights into backend-specific kernel format."""
-
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
@@ -1187,7 +1205,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations (triton kernel)
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
         from triton_kernels.numerics import InFlexData
 
         if w13_bias is not None:
@@ -1222,11 +1239,11 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         # Create PrecisionConfig with both weight and activation info
         w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale,
+            **_mx_scale_kwargs(w13_scale),
             flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13),
         )
         w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale,
+            **_mx_scale_kwargs(w2_scale),
             flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
         )
 
@@ -1243,8 +1260,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend in TRITON_BACKENDS:
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-
         if w13_bias is not None:
             w13_bias = w13_bias.to(torch.float32)
         if w2_bias is not None:
@@ -1260,10 +1275,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
         w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+            **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
         w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+            **_mx_scale_kwargs(w2_scale), flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
         # The original mxfp4 block scales have been swizzled into the
@@ -1574,12 +1589,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        import os
-
-        # TODO: Remove this once AITER is fixed
-        # Necessary for AITER side from crashing
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
-
         if activation == MoEActivation.SITU:
             from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1587,9 +1596,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # a8w4 uses gate/up-interleaved flydsl kernels;
-            # default a16w4 keeps the separated layout.
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
+            guinterleave = False
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -1607,6 +1615,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13.is_shuffled = True
             w2.is_shuffled = True
             return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        import os
+
+        # Interleaved a16w4 only (DeepSeekV4 etc.). AITER uses this bound to
+        # pick bf16 vs fp8 activations when gate_mode is INTERLEAVE. SiTUv2
+        # a4w4 is separated and selects q_dtype_a independently, so the bound
+        # is unused on that path.
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
@@ -1657,8 +1673,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in TRITON_BACKENDS or (
         mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
     ):
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-
         if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
             # AITER moe_gemm_a16w4 needs gate/up interleaved
             def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
@@ -1702,10 +1716,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
         w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+            **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
         w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+            **_mx_scale_kwargs(w2_scale), flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
         # The original mxfp4 block scales have been swizzled into the
@@ -1807,11 +1821,36 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_mxfp4_moe_layer_for_cpu,
+        )
+
+        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
+            prepare_mxfp4_moe_layer_for_cpu(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            )
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            packed_w13,
+            packed_w2,
+            packed_w13_scale,
+            packed_w2_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, or "
-            "emulation backend."
+            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, "
+            "CPU, or emulation backend."
         )
 
 

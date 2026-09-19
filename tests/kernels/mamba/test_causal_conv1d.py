@@ -36,8 +36,7 @@ def causal_conv1d_ref(
     final_states_out: torch.Tensor | None = None,
     activation: str | None = "silu",
 ):
-    """
-    x: (batch, dim, seqlen)
+    """x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
     initial_states: (batch, dim, width - 1)
@@ -72,8 +71,7 @@ def causal_conv1d_ref(
 def causal_conv1d_update_ref(
     x, conv_state, weight, bias=None, activation=None, cache_seqlens=None
 ):
-    """
-    x: (batch, dim) or (batch, dim, seqlen)
+    """x: (batch, dim) or (batch, dim, seqlen)
     conv_state: (batch, dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
@@ -136,8 +134,7 @@ def causal_conv1d_opcheck_fn(
     activation: str | None = "silu",
     null_block_id: int = NULL_BLOCK_ID,
 ):
-    """
-    x: (batch, dim, seqlen)
+    """x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
     seq_idx: (batch, seqlen)
