@@ -277,6 +277,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub shutdown_timeout: u64,
+    /// Seconds to keep accepting gRPC requests after reporting NOT_SERVING on
+    /// shutdown, allowing discovery updates to propagate. Included in
+    /// --shutdown-timeout, which must be longer. Requires --grpc-port.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub grpc_shutdown_grace_period: u64,
     /// Maximum idle time (seconds) on a keep-alive HTTP connection before the
     /// server closes it (default 5).
     #[arg(long = "http-timeout-keep-alive", env = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE")]
@@ -547,6 +553,7 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            grpc_shutdown_grace_period: Duration::from_secs(self.grpc_shutdown_grace_period),
             keep_alive_timeout,
             profiler,
         }
@@ -605,6 +612,7 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            grpc_shutdown_grace_period: Duration::from_secs(self.grpc_shutdown_grace_period),
             keep_alive_timeout,
             profiler,
         }

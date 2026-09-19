@@ -459,6 +459,23 @@ async fn start_grpc_test_server(
     engine_health: tokio::sync::watch::Receiver<bool>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
+    start_grpc_test_server_with_grace(
+        inference_service,
+        control_service,
+        engine_health,
+        shutdown,
+        Duration::ZERO,
+    )
+    .await
+}
+
+async fn start_grpc_test_server_with_grace(
+    inference_service: InferenceServer<InferenceServiceImpl>,
+    control_service: ControlServer<ControlServiceImpl>,
+    engine_health: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio_util::sync::CancellationToken,
+    withdrawal_grace: Duration,
+) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
     health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
     health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
@@ -468,13 +485,19 @@ async fn start_grpc_test_server(
 
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+        let stop_accepting = tokio_util::sync::CancellationToken::new();
         let server = TonicServer::builder()
             .add_service(health_service)
             .add_service(control_service)
             .add_service(inference_service)
-            .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-        let health_monitor =
-            super::monitor_health(health_reporter, engine_health, shutdown.clone());
+            .serve_with_incoming_shutdown(incoming, stop_accepting.clone().cancelled_owned());
+        let health_monitor = super::monitor_health(
+            health_reporter,
+            engine_health,
+            shutdown.clone(),
+            stop_accepting,
+            withdrawal_grace,
+        );
         let server = async move {
             let result = server.await;
             shutdown.cancel();
@@ -2387,6 +2410,127 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
     }
 
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_withdrawal_accepts_late_requests_and_drains_existing_streams() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let engine_release = release.clone();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-withdrawal".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let frames = recv_engine_message(dealer).await;
+                let first: EngineCoreRequest = rmp_serde::from_slice(&frames[1]).unwrap();
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(&first.request_id, vec![(vec![b'a' as u32], None)]),
+                )
+                .await;
+                let frames = recv_engine_message(dealer).await;
+                let late: EngineCoreRequest = rmp_serde::from_slice(&frames[1]).unwrap();
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &late.request_id,
+                        vec![(vec![b'b' as u32], Some(EngineCoreFinishReason::Stop))],
+                    ),
+                )
+                .await;
+                engine_release.notified().await;
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(
+                        &first.request_id,
+                        vec![(vec![b'c' as u32], Some(EngineCoreFinishReason::Stop))],
+                    ),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (channel, server_task) = start_grpc_test_server_with_grace(
+        inference,
+        control,
+        health,
+        shutdown.clone(),
+        Duration::from_secs(2),
+    )
+    .await;
+    let mut health = HealthClient::new(channel.clone());
+    let mut watch = health
+        .watch(HealthCheckRequest {
+            service: "vllm.Inference".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        watch.message().await.unwrap().unwrap().status,
+        HealthServingStatus::Serving as i32
+    );
+    let mut client = InferenceClient::new(channel);
+    let request = |id: &str| pb::GenerateRequest {
+        request_id: id.into(),
+        model: "test-model".into(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".into())),
+        ..Default::default()
+    };
+    let mut active = client.generate_stream(request("active")).await.unwrap().into_inner();
+    assert!(active.message().await.unwrap().is_some());
+    shutdown.cancel();
+    let update = tokio::time::timeout(Duration::from_secs(1), watch.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.status, HealthServingStatus::NotServing as i32);
+
+    // The health update is observable before inference admission closes.
+    let late = client.generate(request("late")).await.unwrap().into_inner();
+    assert!(late.outputs.unwrap().finish_info.is_some());
+    let mut reconnect = health
+        .watch(HealthCheckRequest {
+            service: "vllm.Inference".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        reconnect.message().await.unwrap().unwrap().status,
+        HealthServingStatus::NotServing as i32
+    );
+    drop(reconnect);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), watch.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+
+    // Expiring grace must not cancel the stream accepted before SIGTERM.
+    assert!(!server_task.is_finished());
+    release.notify_one();
+    let mut finished = false;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(2), active.message())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        finished |= chunk.outputs.is_some_and(|output| output.finish_info.is_some());
+    }
+    assert!(finished);
+    engine_task.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

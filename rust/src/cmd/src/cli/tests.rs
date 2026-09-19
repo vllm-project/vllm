@@ -11,6 +11,44 @@ use vllm_server::{
 use super::{BenchCommand, Cli, Command};
 
 #[test]
+fn grpc_withdrawal_grace_requires_a_listener_and_remaining_drain_budget() {
+    for (extra, expected_error) in [
+        (vec![], Some("requires --grpc-port")),
+        (
+            vec!["--grpc-port", "50051"],
+            Some("shorter than --shutdown-timeout"),
+        ),
+        (
+            vec!["--grpc-port", "50051", "--shutdown-timeout", "5"],
+            Some("shorter than --shutdown-timeout"),
+        ),
+        (
+            vec!["--grpc-port", "50051", "--shutdown-timeout", "30"],
+            None,
+        ),
+    ] {
+        let mut argv = vec![
+            "vllm-rs",
+            "serve",
+            "test-model",
+            "--grpc-shutdown-grace-period",
+            "5",
+        ];
+        argv.extend(extra);
+        let Command::Serve(args) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected serve args");
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:62100".into());
+        match expected_error {
+            Some(expected) => {
+                assert!(format!("{:#}", config.validate().unwrap_err()).contains(expected))
+            }
+            None => config.validate().unwrap(),
+        }
+    }
+}
+
+#[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -190,6 +228,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        grpc_shutdown_grace_period: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
@@ -1030,6 +1069,7 @@ fn frontend_args_accept_json() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        grpc_shutdown_grace_period: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
@@ -1701,6 +1741,7 @@ fn serve_args_accept_handshake_aliases() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        grpc_shutdown_grace_period: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
@@ -1885,6 +1926,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            grpc_shutdown_grace_period: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
         }
@@ -1978,6 +2020,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            grpc_shutdown_grace_period: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
         }
@@ -2092,6 +2135,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            grpc_shutdown_grace_period: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
         }

@@ -272,6 +272,9 @@ pub struct Config {
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Time to keep accepting gRPC requests after publishing NOT_SERVING.
+    /// Included in `shutdown_timeout`; zero preserves immediate withdrawal.
+    pub grpc_shutdown_grace_period: Duration,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
@@ -298,6 +301,17 @@ impl Config {
             );
         }
         self.transport_mode.validate()?;
+
+        if !self.grpc_shutdown_grace_period.is_zero() {
+            anyhow::ensure!(
+                self.grpc_port.is_some(),
+                "gRPC shutdown grace requires --grpc-port"
+            );
+            anyhow::ensure!(
+                self.grpc_shutdown_grace_period < self.shutdown_timeout,
+                "gRPC shutdown grace must be shorter than --shutdown-timeout"
+            );
+        }
 
         Ok(())
     }

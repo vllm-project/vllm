@@ -55,6 +55,7 @@ vllm-proto.workspace = true
 vllm-text.workspace = true
 
 [dev-dependencies]
+prost.workspace = true
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
