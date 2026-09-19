@@ -1007,7 +1007,7 @@ def check_enough_kv_cache_memory(
         # of the specs since grouping may unify them in-place.
         groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
         check_memory = (
-            available_memory - _pool_bytes_per_block(groups)
+            available_memory - _pool_bytes_per_block_for_config(vllm_config, groups)
             if groups
             else available_memory
         )
@@ -1125,6 +1125,15 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     capacity once `num_gpu_blocks_override` is applied.
     """
     return _get_kv_cache_bytes_per_block(kv_cache_groups)
+
+
+def _pool_bytes_per_block_for_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    if _use_dspark_heterogeneous_kv_cache(vllm_config, kv_cache_groups):
+        return _get_dspark_kv_cache_bytes_per_block(kv_cache_groups)
+    return _pool_bytes_per_block(kv_cache_groups)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1588,6 +1597,101 @@ def _get_per_layer_spec(
     return spec
 
 
+def _bucket_layers_by_page_size(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> dict[int, list[list[str]]]:
+    """Bucket layers by page size and their slot within each cache group."""
+    buckets: dict[int, list[list[str]]] = defaultdict(list)
+    for group in kv_cache_groups:
+        slot_count: dict[int, int] = defaultdict(int)
+        for layer_name in group.layer_names:
+            page_size = _get_per_layer_spec(group, layer_name).page_size_bytes
+            slot_idx = slot_count[page_size]
+            slot_count[page_size] += 1
+            if slot_idx == len(buckets[page_size]):
+                buckets[page_size].append([])
+            buckets[page_size][slot_idx].append(layer_name)
+    return buckets
+
+
+def _uses_dspark(vllm_config: VllmConfig) -> bool:
+    spec_config = vllm_config.speculative_config
+    return spec_config is not None and getattr(spec_config, "method", None) == "dspark"
+
+
+def _use_dspark_heterogeneous_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    page_sizes = {
+        _get_per_layer_spec(group, layer_name).page_size_bytes
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    return _uses_dspark(vllm_config) and len(page_sizes) > 1
+
+
+def _get_dspark_kv_cache_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    return sum(page_size * len(slots) for page_size, slots in buckets.items())
+
+
+def _get_dspark_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Allocate independent page-size buckets for DSpark hybrid models.
+
+    DSpark verification can add recurrent states that are physically larger
+    than the target model's logical cache page. Layers at the same page-size
+    slot but in different cache groups alias one range in the shared backing
+    allocation because their block-id namespaces never collide.
+    """
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not layout.is_block_compact:
+        raise ValueError(
+            "DSpark heterogeneous KV pages require a block-compact KV cache "
+            f"layout, got {layout.name}."
+        )
+
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    bytes_per_block = _get_dspark_kv_cache_bytes_per_block(kv_cache_groups)
+    num_blocks = may_override_num_blocks(
+        vllm_config, available_memory // bytes_per_block
+    )
+    total_size = bytes_per_block * num_blocks
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    byte_offset = 0
+    for page_size, slots in buckets.items():
+        slot_size = page_size * num_blocks
+        for layer_names in slots:
+            for layer_name in layer_names:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=total_size,
+                        layers=[layer_name],
+                        layer_stride=slot_size,
+                        block_stride=page_size,
+                        offset=byte_offset,
+                    )
+                )
+            byte_offset += slot_size
+
+    assert byte_offset == total_size
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=(
+            vllm_config.cache_config.prefix_cache_retention_interval
+        ),
+    )
+
+
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
@@ -1752,6 +1856,11 @@ def get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
+        )
+
+    if _use_dspark_heterogeneous_kv_cache(vllm_config, kv_cache_groups):
+        return _get_dspark_kv_cache_config(
+            vllm_config, kv_cache_groups, available_memory
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
@@ -2311,7 +2420,14 @@ def get_kv_cache_groups(
         if not isinstance(v, HiddenStateCacheSpec)
     }
 
-    if packed_groups := _get_packed_kv_cache_groups(vllm_config, filtered_spec):
+    # DSpark keeps the target model's logical block granularity even when its
+    # speculative recurrent state needs a larger physical page. Keep those
+    # pages separate instead of padding every group to the largest draft page.
+    use_dspark_heterogeneous_pages = _uses_dspark(vllm_config)
+
+    if not use_dspark_heterogeneous_pages and (
+        packed_groups := _get_packed_kv_cache_groups(vllm_config, filtered_spec)
+    ):
         # Block-outermost blocks are strided by the widest group, so hidden
         # groups need no page alignment.
         packed_groups += [
@@ -2319,15 +2435,20 @@ def get_kv_cache_groups(
         ]
         return packed_groups
 
-    # Prefer preserving each layer's cache semantics. If physical pages cannot
-    # be unified, try a supported allocation-only fallback before failing.
-    try:
-        filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
-    except NotImplementedError:
-        fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
-        if fallback_groups is None:
-            raise
-        return fallback_groups
+    if use_dspark_heterogeneous_pages:
+        assert not hidden_specs, (
+            "DSpark heterogeneous KV pages do not support hidden-state cache layers"
+        )
+    else:
+        # Prefer preserving each layer's cache semantics. If physical pages
+        # cannot be unified, try a supported allocation-only fallback.
+        try:
+            filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+        except NotImplementedError:
+            fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
+            if fallback_groups is None:
+                raise
+            return fallback_groups
     groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
     # Add hidden-state layers back with page aligned to the common page.
@@ -2454,7 +2575,7 @@ def _max_memory_usage_bytes_from_groups(
             total_blocks += 1
         return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
 
-    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _pool_bytes_per_block_for_config(vllm_config, kv_cache_groups)
     total_blocks = 0
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
@@ -2708,7 +2829,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block_for_config(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2724,7 +2845,9 @@ def get_kv_cache_configs(
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem - _pool_bytes_per_block_for_config(vllm_config, groups)
+        if groups
+        else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2768,7 +2891,9 @@ def get_kv_cache_configs(
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config,
+            groups,
+            min_num_blocks * _pool_bytes_per_block_for_config(vllm_config, groups),
         )
 
     return kv_cache_configs

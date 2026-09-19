@@ -4222,6 +4222,73 @@ def test_draft_group_not_annotated_without_spec_decode():
     assert not any(g.is_eagle_group for g in groups)
 
 
+def test_dspark_heterogeneous_pages_use_independent_buckets():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5")),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            use_dspark=lambda: True,
+            use_eagle=lambda: True,
+            use_eagle_block_drop=lambda: False,
+        ),
+    )
+    attention_page = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    mamba_page = new_mamba_spec(
+        block_size=16,
+        shapes=((2048,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    specs = {
+        "attention.0": attention_page,
+        "attention.1": attention_page,
+        "mamba.0": mamba_page,
+        "mamba.1": mamba_page,
+    }
+
+    groups = get_kv_cache_groups(config, specs)
+
+    # DSpark must keep the target block size instead of scaling the attention
+    # pages up to the larger speculative recurrent-state page.
+    assert {group.kv_cache_spec.block_size for group in groups} == {16}
+    assert {group.kv_cache_spec.page_size_bytes for group in groups} == {
+        attention_page.page_size_bytes,
+        mamba_page.page_size_bytes,
+    }
+
+    bytes_per_block = 2 * (attention_page.page_size_bytes + mamba_page.page_size_bytes)
+    available_memory = 10 * bytes_per_block
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory
+    )
+
+    assert kv_cache_config.num_blocks == 10
+    assert all(
+        tensor.size == available_memory for tensor in kv_cache_config.kv_cache_tensors
+    )
+    ranges = sorted(
+        (tensor.offset, tensor.offset + tensor.layer_stride)
+        for tensor in kv_cache_config.kv_cache_tensors
+    )
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == available_memory
+    assert all(
+        end == next_start for (_, end), (next_start, _) in zip(ranges, ranges[1:])
+    )
+
+
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     # No group carries the draft marker, so consumers fall back to
     # conservative behavior that silently breaks reuse for Mamba groups.

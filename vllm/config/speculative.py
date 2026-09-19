@@ -1921,7 +1921,13 @@ class SpeculativeConfig:
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
-        return self.use_eagle() and not self.disable_eagle_block_drop
+        # DSpark consumes target hidden states like EAGLE, but its block-parallel
+        # draft does not require EAGLE's trailing prefix-cache block drop.
+        return (
+            self.use_eagle()
+            and not self.use_dspark()
+            and not self.disable_eagle_block_drop
+        )
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

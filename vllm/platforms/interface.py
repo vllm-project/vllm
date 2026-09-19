@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import enum
 import functools
 import os
@@ -852,21 +853,35 @@ class Platform:
             model_config.architecture,
             model_config=model_config,
         )
-        # Qwen4Exp has multiple Mamba state layouts with different sizes.
-        if hasattr(model_cls, "get_mamba_specs_from_config"):
-            mamba_page_size = max(
-                spec.page_size_bytes
-                for spec in model_cls.get_mamba_specs_from_config(vllm_config)
-            )
-        else:
-            mamba_page_size = MambaSpec(
-                shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-                dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
+
+        def get_mamba_page_size(config: "VllmConfig") -> int:
+            # Qwen4Exp has multiple Mamba state layouts with different sizes.
+            if hasattr(model_cls, "get_mamba_specs_from_config"):
+                return max(
+                    spec.page_size_bytes
+                    for spec in model_cls.get_mamba_specs_from_config(config)
+                )
+            return MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(config),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(config),
                 block_size=-1,
             ).page_size_bytes
 
+        mamba_page_size = get_mamba_page_size(vllm_config)
+
         if mamba_page_size == 0:
             return
+
+        # DSpark expands the recurrent state during verification. Size the
+        # logical attention block from the target state alone so adding a
+        # drafter does not coarsen the target's prefix-cache granularity.
+        logical_mamba_page_size = mamba_page_size
+        spec_config = vllm_config.speculative_config
+        use_dspark = spec_config is not None and spec_config.use_dspark()
+        if use_dspark:
+            target_only_config = copy.copy(vllm_config)
+            target_only_config.speculative_config = None
+            logical_mamba_page_size = get_mamba_page_size(target_only_config)
 
         # mamba_block_size here should either be user specified value or None
         mamba_block_size = (
@@ -898,7 +913,9 @@ class Platform:
             # mamba2 kernels.
             base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
             assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
+            attn_tokens_per_mamba_state = cdiv(
+                logical_mamba_page_size, attn_page_size_1_token
+            )
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
@@ -906,7 +923,7 @@ class Platform:
             # Without prefix caching, use minimum block size that satisfies
             # both backend alignment and mamba page size compatibility
             attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
+                logical_mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
             indexer_align = cls._get_indexer_block_alignment(vllm_config)
@@ -926,7 +943,9 @@ class Platform:
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
-        assert attn_page_size >= mamba_page_size
+        if attn_page_size < mamba_page_size:
+            assert use_dspark
+            return
 
         if attn_page_size == mamba_page_size:
             return
