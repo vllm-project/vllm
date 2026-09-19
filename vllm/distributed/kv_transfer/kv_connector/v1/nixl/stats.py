@@ -41,6 +41,8 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_failed_notifications": [],
             "num_failed_handshakes": [],
             "num_kv_expired_reqs": [],
+            "num_registration_expired": [],
+            "num_writer_loop_errors": [],
         }
 
     def record_transfer(self, res: "nixlXferTelemetry"):
@@ -66,6 +68,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         """Record a request that had its KV blocks expire."""
         self.data["num_kv_expired_reqs"].append(1)
 
+    def record_registration_expired(self):
+        """Record a push-mode D-side registration whose watchdog deadline
+        passed without a corresponding push completion."""
+        self.data["num_registration_expired"].append(1)
+
+    def record_writer_loop_error(self):
+        """Record an exception caught by the push connector's writer
+        thread loop (the loop continues, but the iteration was lost)."""
+        self.data["num_writer_loop_errors"].append(1)
+
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
@@ -79,6 +91,8 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_failed_notifications"]) == 0
             and len(self.data["num_failed_handshakes"]) == 0
             and len(self.data["num_kv_expired_reqs"]) == 0
+            and len(self.data.get("num_registration_expired", [])) == 0
+            and len(self.data.get("num_writer_loop_errors", [])) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -102,6 +116,15 @@ class NixlKVConnectorStats(KVConnectorStats):
             + len(self.data["num_failed_notifications"]),
             "Num KV expired reqs": len(self.data["num_kv_expired_reqs"]),
         }
+        # Push-mode-only reliability signals; distinct from the transport
+        # failure/KV-expiry grouping above since neither is a transfer
+        # failure or an autoscaler signal.
+        push_reliability_counts = {
+            "Num registration expired": len(
+                self.data.get("num_registration_expired", [])
+            ),
+            "Num writer loop errors": len(self.data.get("num_writer_loop_errors", [])),
+        }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
             # all requests in the interval were unsuccessful, the failure
@@ -116,6 +139,7 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "Throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
                 **failure_counts,
+                **push_reliability_counts,
             }
 
         xfer_time = np.asarray(self.data["transfer_duration"])
@@ -142,6 +166,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Throughput (MB/s)": round(throughput_mb_s.item(), 3),
             "Avg number of descriptors": round(descs.mean().item(), 1),
             **failure_counts,
+            **push_reliability_counts,
         }
 
     @property
@@ -262,6 +287,27 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
+        counter_nixl_num_registration_expired = self._counter_cls(
+            name="vllm:nixl_num_registration_expired",
+            documentation="Number of push-mode D-side registrations whose "
+            "watchdog deadline passed without a push completion. "
+            "NOTE: This metric is tracked on the D instance.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_registration_expired = create_metric_per_engine(
+            counter_nixl_num_registration_expired, self.per_engine_labelvalues
+        )
+
+        counter_nixl_num_writer_loop_errors = self._counter_cls(
+            name="vllm:nixl_num_writer_loop_errors",
+            documentation="Number of exceptions caught by the push "
+            "connector's writer thread loop.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_writer_loop_errors = create_metric_per_engine(
+            counter_nixl_num_writer_loop_errors, self.per_engine_labelvalues
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
@@ -284,6 +330,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_failed_transfers,
                 self.counter_nixl_num_failed_notifications,
                 self.counter_nixl_num_kv_expired_reqs,
+                self.counter_nixl_num_registration_expired,
+                self.counter_nixl_num_writer_loop_errors,
             ],
             [
                 # Transfer, handshake and notification failures are grouped:
@@ -297,6 +345,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 ),
                 ("num_failed_notifications",),
                 ("num_kv_expired_reqs",),
+                ("num_registration_expired",),
+                ("num_writer_loop_errors",),
             ],
         ):
             for counter_item_key in counter_item_keys:
