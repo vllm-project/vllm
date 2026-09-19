@@ -2392,6 +2392,67 @@ def get_kv_cache_capacity(
     return int(max_concurrency * max_model_len), max_concurrency
 
 
+def warn_if_decode_exceeds_cudagraph_capture_size(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> None:
+    """Estimate graph coverage for short, unshared attention/Mamba requests."""
+    compilation = vllm_config.compilation_config
+    capture_size = compilation.max_cudagraph_capture_size
+    if (
+        vllm_config.model_config.enforce_eager
+        or not compilation.cudagraph_mode
+        or not capture_size
+        or not kv_cache_config.kv_cache_groups
+    ):
+        return
+
+    query_len = vllm_config.uniform_decode_query_len
+    blocks_per_request = 0
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        # Limit this estimate to ordinary full-attention and Mamba pools.
+        # Other layouts need their own residency accounting.
+        if type(spec) is MambaSpec:
+            if (
+                spec.mamba_cache_mode not in ("none", "align")
+                or spec.num_prefill_checkpoint_blocks
+                or query_len > spec.block_size
+            ):
+                return
+            blocks_per_request += 1 + spec.num_speculative_blocks
+        elif type(spec) is FullAttentionSpec:
+            blocks_per_request += cdiv(query_len, spec.block_size)
+        else:
+            return
+
+    scheduler = vllm_config.scheduler_config
+    # The shared pool reserves one null block.
+    estimated_requests = min(
+        max(0, kv_cache_config.num_blocks - 1) // blocks_per_request,
+        scheduler.max_num_seqs,
+        scheduler.max_num_batched_tokens // query_len,
+    )
+    decode_tokens = estimated_requests * query_len
+    if decode_tokens > capture_size:
+        logger.warning_once(
+            "Estimated short-request decode coverage is %d tokens "
+            "(%d resident requests x %d tokens/request; %d cache blocks, "
+            "%d blocks/request), exceeding max_cudagraph_capture_size=%d. "
+            "Larger decode batches may execute without CUDA graphs and reduce "
+            "throughput. This estimate assumes short, unshared requests; "
+            "prompt lengths, prefix sharing and dynamic speculation can change "
+            "residency and decode width. Consider increasing "
+            "--max-cudagraph-capture-size after checking observed decode batch "
+            "sizes and GPU memory headroom.",
+            decode_tokens,
+            estimated_requests,
+            query_len,
+            kv_cache_config.num_blocks,
+            blocks_per_request,
+            capture_size,
+        )
+
+
 def update_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
