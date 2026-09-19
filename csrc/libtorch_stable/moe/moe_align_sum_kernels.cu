@@ -663,6 +663,8 @@ void moe_align_block_size(
     torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
     torch::stable::Tensor num_tokens_post_pad,
     std::optional<torch::stable::Tensor> maybe_expert_map) {
+  STD_TORCH_CHECK(topk_ids.is_contiguous(), "topk_ids must be contiguous");
+
   const torch::stable::accelerator::DeviceGuard device_guard(
       topk_ids.get_device_index());
   const cudaStream_t stream =
