@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -365,6 +366,43 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     alongside the hf configs so the rewrite lands before resolution; otherwise
     the main model still resolves to compressed-tensors.
     """
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # ROCm only: the measurements below are MI355X (gfx950, 8-rank xGMI).
+        # The tradeoff is fabric-dependent -- a2a is one all_to_all_single
+        # against allgather(lse) + reduce_scatter(out), and whether that wins
+        # depends on the interconnect -- so the default is not changed on
+        # platforms where it has not been measured.
+        if not current_platform.is_rocm():
+            return
+
+        # Prefer the a2a DCP combine over the default ag_rs. Measured on
+        # MI355X (gfx950, 8-rank xGMI), wall ms per combine call:
+        #   T=5    ag_rs 0.107   a2a 0.095  (1.13x)
+        #   T=48   ag_rs 0.111   a2a 0.097  (1.15x)
+        #   T=144  ag_rs 0.136   a2a 0.101  (1.35x)
+        # a2a wins at every token count and the margin grows with T: it is one
+        # all_to_all_single instead of allgather(lse) + reduce_scatter(out).
+        # combine runs per MLA layer per decode step, so this multiplies by the
+        # layer count. Cosine similarity vs ag_rs was >= 0.999994 across the
+        # sweep.
+        #
+        # Leave the default alone under prefill context parallelism. a2a has a
+        # known caveat there: #56677 pins --dcp-comm-backend ag_rs for a GLM-5.2
+        # PCP4+DCP4 eval config, and GLM already defaults to a2a. Everything
+        # measured above is DCP-only with PCP off, so a PCP user keeps upstream's
+        # ag_rs and can still opt in explicitly.
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            return
+
+        # NB set_dcp_defaults also resolves dcp_q_replicate from None to its
+        # default False -- it is not left as None. That is the same value the
+        # consumer (MLAAttention) already defaults to, so behaviour is unchanged,
+        # but this hook does decide it. Deliberately NOT passing q_replicate=True,
+        # which GlmMoeDsa does: that changes weight loading and is an
+        # independent, unmeasured question.
+        vllm_config.parallel_config.set_dcp_defaults(comm_backend="a2a")
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
