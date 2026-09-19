@@ -322,6 +322,20 @@ class CuMemAllocator:
                 "already-asleep allocations; the existing policy was kept."
             )
 
+    def _wake_one(self, ptr: int, data: AllocationData) -> None:
+        """Recreate and map one allocation, restoring its CPU backup if any."""
+        create_and_map(data.handle)
+        data.is_asleep = False
+        if data.cpu_backup_tensor is not None:
+            cpu_backup_tensor = data.cpu_backup_tensor
+            size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+            cpu_ptr = cpu_backup_tensor.data_ptr()
+            # cudaMemcpy (not the Async variant) blocks until the copy is
+            # complete, so it is safe to drop the backup reference right
+            # after this call returns.
+            libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+            data.cpu_backup_tensor = None
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
@@ -336,22 +350,33 @@ class CuMemAllocator:
         gc.collect()
         torch.accelerator.empty_cache()
 
+        # Restore CPU-backed allocations (e.g. weights) before remapping
+        # discarded ones (e.g. KV cache), regardless of insertion order, so
+        # the host cache can be released in between (see below).
+        backed_up: list[tuple[int, AllocationData]] = []
+        discarded: list[tuple[int, AllocationData]] = []
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
-            if tags is None or data.tag in tags:
-                handle = data.handle
-                create_and_map(handle)
-                data.is_asleep = False
-                if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+            if tags is not None and data.tag not in tags:
+                continue
+            if data.cpu_backup_tensor is not None:
+                backed_up.append((ptr, data))
+            else:
+                discarded.append((ptr, data))
+
+        for ptr, data in backed_up:
+            self._wake_one(ptr, data)
+
+        if backed_up:
+            # PyTorch caches freed pinned-host blocks. On unified-memory
+            # systems, those pages compete with remapped device allocations,
+            # so release the cache after restoring backups and before
+            # mapping discarded allocations.
+            torch.accelerator.empty_host_cache()
+
+        for ptr, data in discarded:
+            self._wake_one(ptr, data)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
