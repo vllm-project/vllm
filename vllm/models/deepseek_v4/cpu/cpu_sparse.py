@@ -287,7 +287,9 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         self._wo_a_packed: torch.Tensor | None = None
         self._wrap_wo_a_process_weights_after_loading()
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype | None = None
+    ) -> None:
         """Cache fp32-contiguous copies of tensors CPU kernels want that way
         but that arrive bf16 (rotary cos/sin table, compressor RMSNorm
         weights) -- cast once here instead of per forward call.
@@ -295,7 +297,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         Runs after every quantized layer's own
         ``process_weights_after_loading`` (see ``is_deferred_attention_layer``);
         ``wo_a``'s packing must happen *before* that phase instead, so it's a
-        separate monkeypatch in ``__init__``.
+        separate monkeypatch in ``__init__``. ``act_dtype`` is unused.
         """
         self.rotary_emb.cos_sin_cache = self.rotary_emb.cos_sin_cache.to(
             torch.float32
