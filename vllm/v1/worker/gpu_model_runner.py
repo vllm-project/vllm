@@ -189,6 +189,13 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
+from vllm.v1.worker.target_token_scoring import (
+    CompactLMHeadCache,
+    TargetTokenScoringState,
+    compact_sample,
+    evaluate_wave_admission,
+    project_target_token_logits,
+)
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -491,6 +498,10 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    target_token_scoring: TargetTokenScoringState | None = None
+    """Compact-scoring contract when the wave took the target-token fast path.
+    When set, ``logits`` holds the compact ``[B, K]`` tensor and ``sample_tokens``
+    runs :func:`compact_sample` instead of the generic sampler."""
 
 
 class GPUModelRunner(
@@ -717,6 +728,9 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        # Compact target-token-scoring weight-row cache; lives for the worker's
+        # lifetime so the index_select of candidate rows is not a per-wave cost.
+        self._tts_cache: CompactLMHeadCache = CompactLMHeadCache()
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
@@ -4193,6 +4207,54 @@ class GPUModelRunner(
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
+    def _resolve_lm_head(self) -> nn.Module | None:
+        """Resolve the LM head module for compact projection.
+
+        Most text-generation models expose ``self.lm_head``; VL/encoder
+        wrappers commonly delegate to ``self.language_model.lm_head``. Returns
+        ``None`` (native fallback) when neither pattern matches.
+        """
+        model = self.model
+        lm_head = getattr(model, "lm_head", None)
+        if lm_head is not None:
+            return lm_head
+        inner = getattr(model, "language_model", None)
+        if inner is not None:
+            return getattr(inner, "lm_head", None)
+        return None
+
+    def _maybe_target_token_scoring(
+        self,
+        sample_hidden_states: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> tuple[torch.Tensor | None, TargetTokenScoringState | None]:
+        """Try the compact target-token-scoring fast path.
+
+        Returns ``(compact_logits[B, K], state)`` when the wave is eligible,
+        else ``(None, None)`` and the caller runs the native path. Eligibility
+        is wave-level: any single failure downgrades the whole wave to native.
+        """
+        if not self.model_config.target_token_scoring:
+            return None, None
+        lm_head = self._resolve_lm_head()
+        if lm_head is None:
+            return None, None
+        decision = evaluate_wave_admission(
+            self.model_config,
+            self.input_batch,
+            self.requests,
+            lm_head,
+            spec_decode_metadata=spec_decode_metadata,
+        )
+        if not decision.ok:
+            return None, None
+        result = project_target_token_logits(
+            self.model, sample_hidden_states, decision, self._tts_cache
+        )
+        if result is None:
+            return None, None
+        return result
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -4489,6 +4551,7 @@ class GPUModelRunner(
                 hidden_states = model_output
                 aux_hidden_states = None
 
+            tts_state: TargetTokenScoringState | None = None
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -4507,7 +4570,13 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                tts_logits, tts_state = self._maybe_target_token_scoring(
+                    sample_hidden_states, spec_decode_metadata
+                )
+                if tts_logits is not None:
+                    logits = tts_logits
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4549,6 +4618,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            target_token_scoring=tts_state,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4600,18 +4670,32 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            tts_state,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
 
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
+        # Apply structured output bitmasks if present. Admission rejects every
+        # guided/structured-output request, so when the compact path was taken
+        # (tts_state set) grammar_output must be None; the tts_state guard keeps
+        # a vocab-shaped bitmask from ever touching the compact [B, K] logits.
+        if grammar_output is not None and tts_state is None:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if tts_state is not None:
+                # Compact fast path: logits is the [B, K] projection; bypass
+                # the generic sampler (argmax + remap + target-set
+                # log-softmax). Admission guarantees greedy, single-token,
+                # no-processors, no structured output, so sampling_metadata is
+                # unused beyond presence.
+                sampler_output = compact_sample(
+                    logits, tts_state, self.input_batch.sampling_metadata
+                )
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

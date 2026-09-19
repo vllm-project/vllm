@@ -251,6 +251,18 @@ class ModelConfig:
     """Whether to return routed experts."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    target_token_scoring: bool = False
+    """Whether to enable the compact target-token-scoring fast path. When on,
+    a wave in which every request sets identical ``logprob_token_ids`` with
+    greedy single-token sampling AND explicitly opts in with
+    ``target_token_scoring_normalization="target_set"`` skips the full-vocab
+    LM Head: the K candidate weight rows are index-selected into a compact
+    ``[B, K]`` linear and the generic sampler is bypassed (argmax + target-set
+    log-softmax). Requests that leave normalization at the default
+    ``"full_vocab"`` always take the native path unchanged, so the flag cannot
+    silently change the logprobs semantics of an existing request. Ineligible
+    waves fall back to the native path. See
+    ``vllm/v1/worker/target_token_scoring``."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -440,6 +452,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",
+            "target_token_scoring",
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",

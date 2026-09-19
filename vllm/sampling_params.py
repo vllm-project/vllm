@@ -295,6 +295,17 @@ class SamplingParams(
     When set, logprobs for exactly these token IDs will be returned,
     in addition to the sampled token. This is useful for scoring tasks
     where you want to compare probabilities of specific label tokens."""
+    target_token_scoring_normalization: str = "full_vocab"
+    """Normalization semantics for the logprobs returned alongside
+    ``logprob_token_ids``. ``"full_vocab"`` (default) normalizes over the full
+    vocabulary — the existing, unchanged behavior; the native full-vocab LM Head
+    runs and the K requested columns are gathered from it. ``"target_set"``
+    normalizes over the candidate set only and, with the ``target_token_scoring``
+    engine flag on, opts the request into the compact fast path (the K candidate
+    weight rows are projected directly, skipping the full-vocab MatMul). These
+    are different probability semantics, not approximations: a caller that wants
+    full-vocab logprobs must leave this at ``"full_vocab"`` so the compact path
+    is never taken for that request."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -410,6 +421,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        target_token_scoring_normalization: str = "full_vocab",
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
@@ -465,6 +477,7 @@ class SamplingParams(
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
             logprob_token_ids=logprob_token_ids,
+            target_token_scoring_normalization=target_token_scoring_normalization,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
