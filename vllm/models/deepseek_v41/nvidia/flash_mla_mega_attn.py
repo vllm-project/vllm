@@ -15,6 +15,8 @@ and decode segments write disjoint token ranges of one output buffer pair, so
 a single ``wo_a`` einsum covers the whole step.
 """
 
+import functools
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -23,6 +25,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.models.deepseek_v41.common.ops import (
@@ -48,6 +51,8 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+logger = init_logger(__name__)
 
 _HEAD_DIM_V = 512
 _ROPE_DIM = 64
@@ -138,6 +143,79 @@ def _token_slice(out: QuantizedActivation, start: int, end: int) -> QuantizedAct
     """The ``[start, end)`` token slice of a mega-attention output buffer."""
     data = out.data[start:end]
     return replace(out, data=data, scale=out.scale[start:end], orig_shape=data.shape)
+
+
+# ---- split-KV decode (opt-in, experimental) --------------------------------
+# The mega decode kernel runs one cluster per query token, so a small decode
+# batch leaves most of the GPU idle. With a FlashMLA build that supports it,
+# the kernel can instead emit fp32 per-split partials which this combine
+# merges, trading a second kernel for real KV parallelism.
+#
+#   VLLM_DSV41_MEGA_SPLITKV              max splits (0/1 disables, default 0)
+#   VLLM_DSV41_MEGA_SPLITKV_MAX_TOKENS   only split at or below this token
+#                                        count (default 8)
+#
+# The token cap matters: the partials cost num_splits * s_q * h_q * d_v * 4
+# bytes per layer per step, so splitting a batch that already fills the GPU
+# is a large net loss.
+_SPLIT_BUFS: dict = {}
+
+
+@functools.cache
+def _splitkv_supported() -> bool:
+    """Whether the linked FlashMLA exposes the partial-output arguments."""
+    try:
+        schema = str(
+            torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode.default._schema
+        )
+    except Exception:
+        return False
+    return "mega_num_splits" in schema
+
+
+def _splitkv_cap() -> int:
+    cap = int(os.environ.get("VLLM_DSV41_MEGA_SPLITKV", "0") or 0)
+    if cap > 1 and not _splitkv_supported():
+        logger.warning_once(
+            "VLLM_DSV41_MEGA_SPLITKV is set but the linked FlashMLA build has "
+            "no split-KV support; falling back to the fused decode path."
+        )
+        return 0
+    return cap
+
+
+def _splitkv_max_tokens() -> int:
+    return int(os.environ.get("VLLM_DSV41_MEGA_SPLITKV_MAX_TOKENS", "8") or 8)
+
+
+def _ensure_split_bufs(h_q: int, device: torch.device) -> None:
+    """Allocate the partial buffers during warmup, never under graph capture."""
+    cap = _splitkv_cap()
+    if cap <= 1:
+        return
+    key = (str(device), h_q)
+    if key in _SPLIT_BUFS:
+        return
+    max_tokens = _splitkv_max_tokens()
+    _SPLIT_BUFS[key] = (
+        torch.zeros(
+            cap, max_tokens, h_q, _HEAD_DIM_V, dtype=torch.float32, device=device
+        ),
+        torch.empty(cap, max_tokens, h_q, dtype=torch.float32, device=device),
+    )
+
+
+def _pick_num_splits(layer: "DeepseekV4MegaAttnAttention", s_q: int) -> int:
+    cap = _splitkv_cap()
+    if cap <= 1 or s_q <= 0 or s_q > _splitkv_max_tokens():
+        return 1
+    if layer.topk_indices_buffer is None:
+        return 1
+    topk = int(layer.topk_indices_buffer.shape[-1]) + int(layer.window_size)
+    n_blocks = max(1, -(-topk // 64))
+    sms = torch.cuda.get_device_properties(layer.attn_sink.device).multi_processor_count
+    n = max(1, min(cap, n_blocks, sms // s_q))
+    return 1 << (n.bit_length() - 1)  # the combine's tl.arange needs a power of two
 
 
 class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
@@ -264,6 +342,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, produce zeros.
             self._reserve_prefill_workspace(q)
+            _ensure_split_bufs(q.shape[1], q.device)
             output.data.zero_()
             output.scale.zero_()
             return
@@ -358,6 +437,41 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             flashmla_metadata, swa_metadata
         )
         assert swa_metadata.decode_swa_indices is not None
+        num_splits = _pick_num_splits(self, q.shape[0])
+        if num_splits > 1:
+            from vllm.models.deepseek_v41.nvidia.mega_splitkv_combine import (
+                mega_combine,
+            )
+
+            oa_full, la_full = _SPLIT_BUFS[(str(q.device), q.shape[1])]
+            oa = oa_full[:num_splits, : q.shape[0]]
+            la = la_full[:num_splits, : q.shape[0]]
+            torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
+                q,
+                self.swa_cache_layer.kv_cache.unsqueeze(-2),
+                swa_metadata.decode_swa_indices.view(q.shape[0], -1),
+                self.scale,
+                _HEAD_DIM_V,
+                self.attn_sink,
+                swa_metadata.decode_swa_lens,
+                extra_cache,
+                extra_idx,
+                extra_len,
+                False,  # enable_q_norm
+                0.0,  # rms_norm_eps
+                positions_int32,
+                *_ROPE_ARGS,
+                self.rotary_emb.cos_sin_cache,
+                self.n_wv_group,
+                *_SF_ARGS,
+                out.data,
+                out.scale,
+                num_splits,
+                oa,
+                la,
+            )
+            mega_combine(oa, la, out.data, out.scale, self.attn_sink)
+            return
         torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
             q,
             self.swa_cache_layer.kv_cache.unsqueeze(-2),
