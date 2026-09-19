@@ -691,6 +691,7 @@ def calculate_metrics(
         duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
+        concurrency_events: list[tuple[float, int]] = []
 
         for i, output in enumerate(successful_outputs):
             # Calculate token generation timestamp using
@@ -707,20 +708,44 @@ def calculate_metrics(
                 if 0 <= second_bucket < duration_seconds:
                     tokens_per_second[second_bucket] += 1
 
-            # Track concurrent requests for each second this request was active
+            # Use half-open intervals so a request ending at a bucket boundary
+            # does not overlap with one starting at that same boundary.
             request_start_second = int(output.start_time - min_start_time)
             request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
+                np.ceil(output.start_time + output.latency - min_start_time)
             )
 
-            for second in range(request_start_second, request_end_second + 1):
+            for second in range(request_start_second, request_end_second):
                 concurrent_requests_per_second[second] += 1
+
+            # Calculate the scalar peak over continuous time separately from
+            # the per-second series used for plotting. Under half-open
+            # semantics, zero-latency requests are empty intervals and do not
+            # contribute to instantaneous concurrency.
+            if output.latency > 0:
+                concurrency_events.append(
+                    (output.start_time - min_start_time, 1)
+                )
+                concurrency_events.append(
+                    (
+                        output.start_time + output.latency - min_start_time,
+                        -1,
+                    )
+                )
+
+        # Use a sweep-line for exact continuous-time peak concurrency. Sorting
+        # departures before arrivals at the same timestamp preserves [start,
+        # end) semantics for boundary-touching requests.
+        concurrency_events.sort(key=lambda event: (event[0], event[1]))
+        active_requests = 0
+        for _, delta in concurrency_events:
+            active_requests += delta
+            max_concurrent_requests = max(max_concurrent_requests, active_requests)
 
         # Find the maximum tokens per second and corresponding
         # concurrent requests
         if len(tokens_per_second) > 0:
             max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
