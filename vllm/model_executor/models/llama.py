@@ -220,6 +220,11 @@ class LlamaAttention(nn.Module):
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
         )
+        self._use_fused_rope_kvcache = False
+        if isinstance(self.attn, Attention):
+            self._use_fused_rope_kvcache = (
+                self.attn.manual_rope_kvcache_fusion_supported(self.rotary_emb)
+            )
 
     def forward(
         self,
@@ -228,8 +233,23 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        # Keep compiled call graphs independent of token-count guards. Attention
+        # applies the fusion threshold at runtime inside the custom op.
+        if (
+            self._use_fused_rope_kvcache
+            and positions.dim() == 1
+            and (
+                torch.compiler.is_compiling()
+                or q.shape[0] <= self.attn.rope_kvcache_fusion_max_token_num
+            )
+        ):
+            assert isinstance(self.attn, Attention)
+            attn_output = self.attn.forward_with_fused_rope_kvcache(
+                positions, q, k, v, self.rotary_emb
+            )
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
