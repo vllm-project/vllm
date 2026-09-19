@@ -318,6 +318,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
     is_act_and_mul: bool,
+    trtllm_hidden_alignment: int = 256,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -372,7 +373,13 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
         w13, w13_scale, w2, w2_scale, padded_hidden = (
-            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+            align_trtllm_fp4_moe_hidden_dim_for_fi(
+                w13,
+                w13_scale,
+                w2,
+                w2_scale,
+                min_alignment=trtllm_hidden_alignment,
+            )
         )
         if layer.moe_config.hidden_dim_unpadded is None:
             layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim

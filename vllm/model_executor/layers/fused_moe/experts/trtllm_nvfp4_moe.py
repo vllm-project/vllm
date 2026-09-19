@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import torch
 
@@ -55,6 +56,15 @@ class TrtLlmNvFp4ExpertsBase:
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
+        if per_token_activation and not moe_config.is_act_and_mul:
+            # FlashInfer's per-token NVFP4 requant of the FC1 output
+            # (nvfp4QuantAndPerTokenScaleKernel) takes rcp(0) = inf for an
+            # all-zero row in its fast-math path and emits NaN block scales.
+            # Non-gated RELU^2 experts routinely produce all-zero rows, which
+            # poisons the token's output (GSM8K 0.69 -> 0.84 on Nemotron 3.5
+            # Lightning). The exact-math path guards rowAmax == 0.
+            # TODO: remove once FlashInfer fixes the fast-math path.
+            os.environ.setdefault("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -316,22 +326,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        if self.per_token_activation:
-            # Deferred input quant leaves K unpacked here, breaking the
-            # workspace assumptions below. Per-token NVFP4 is only supported on
-            # the monolithic (non-EP) path for now.
-            raise NotImplementedError(
-                "NVFP4 per-token activation is only supported on the monolithic "
-                "(non-EP) FlashInfer TRTLLM MoE path."
-            )
-
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Hidden states are Nvfp4, packed into int8 dtype, so we
-        # need to multiply K by 2 to get the output shape right.
-        assert self.hidden_dim == K * 2
+        # Hidden states are Nvfp4, packed into int8 dtype, so we need to
+        # multiply K by 2 to get the output shape right. Per-token defers the
+        # input quant to the kernel, so K is the unpacked hidden dim there.
+        if not self.per_token_activation:
+            assert self.hidden_dim == K * 2
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)

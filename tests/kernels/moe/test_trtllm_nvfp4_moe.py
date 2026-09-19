@@ -16,6 +16,7 @@ from tests.kernels.moe.utils import make_test_quant_config
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
+    convert_swizzled_to_linear,
     dequantize_nvfp4_to_dtype,
 )
 from tests.kernels.utils import torch_moe
@@ -35,6 +36,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    prepare_static_weights_for_trtllm_fp4_moe,
+    reorder_w1w3_to_w3w1,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -61,6 +66,7 @@ MNK_FACTORS = [
 
 _SWIGLU_LIMIT = 0.1
 _LARGE_OUTPUT1_SCALE = 32768.0
+_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX)
 _CLAMP_OP_NAME = "test_silu_and_mul_with_clamp"
 _SITU_OP_NAME = "test_situ_and_mul"
 
@@ -93,16 +99,37 @@ SITU = op_registry[_SITU_OP_NAME]
 
 
 ACTIVATION_CASES = [
-    pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, id="silu"),
-    pytest.param(MoEActivation.SILU, SILU_WITH_CLAMP, _SWIGLU_LIMIT, id="silu_clamp"),
-    pytest.param(MoEActivation.SITU, SITU, None, id="situ"),
+    pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, False, id="silu"),
+    pytest.param(
+        MoEActivation.SILU,
+        MoEActivation.SILU,
+        None,
+        True,
+        id="silu_per_token",
+    ),
+    pytest.param(
+        MoEActivation.SILU,
+        SILU_WITH_CLAMP,
+        _SWIGLU_LIMIT,
+        False,
+        id="silu_clamp",
+    ),
+    pytest.param(MoEActivation.SITU, SITU, None, False, id="situ"),
     pytest.param(
         MoEActivation.RELU2_NO_MUL,
         MoEActivation.RELU2_NO_MUL,
         None,
+        False,
         id="relu2_no_mul",
     ),
-    pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, id="gelu"),
+    pytest.param(
+        MoEActivation.RELU2_NO_MUL,
+        MoEActivation.RELU2_NO_MUL,
+        None,
+        True,
+        id="relu2_no_mul_per_token",
+    ),
+    pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, False, id="gelu"),
 ]
 
 
@@ -110,7 +137,10 @@ ACTIVATION_CASES = [
 @pytest.mark.parametrize("e", [128])
 @pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("activation,torch_activation,swiglu_limit", ACTIVATION_CASES)
+@pytest.mark.parametrize(
+    "activation,torch_activation,swiglu_limit,per_token_activation",
+    ACTIVATION_CASES,
+)
 @torch.inference_mode()
 def test_trtllm_fp4_moe_no_graph(
     m: int,
@@ -122,6 +152,7 @@ def test_trtllm_fp4_moe_no_graph(
     activation: MoEActivation,
     torch_activation: MoEActivation | type[SiluAndMulWithClamp] | type[SituAndMul],
     swiglu_limit: float | None,
+    per_token_activation: bool,
     workspace_init,
 ):
     # FlashInfer's trtllm_batched_gemm_runner has no precompiled tile
@@ -169,6 +200,42 @@ def test_trtllm_fp4_moe_no_graph(
             # clamp/output-scale coupling in the FlashInfer kernel wrapper.
             quant_config.g1_alphas.fill_(_LARGE_OUTPUT1_SCALE)
 
+        w1_q_linear = w1_q
+        w2_q_linear = w2_q
+        w1_scale_reference = quant_config.w1_scale
+        w2_scale_reference = quant_config.w2_scale
+        assert w1_scale_reference is not None
+        assert w2_scale_reference is not None
+        w1_scale_linear = torch.stack(
+            [
+                convert_swizzled_to_linear(scale, w1_q.size(1), k, quant_blocksize)
+                for scale in w1_scale_reference
+            ]
+        )
+        w2_scale_linear = torch.stack(
+            [
+                convert_swizzled_to_linear(scale, w2_q.size(1), n, quant_blocksize)
+                for scale in w2_scale_reference
+            ]
+        )
+        w1_q_for_kernel = w1_q
+        if is_gated_act:
+            w1_q_for_kernel, w1_scale_linear = reorder_w1w3_to_w3w1(
+                w1_q.clone(), w1_scale_linear
+            )
+        w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+            w1_q_for_kernel,
+            w2_q,
+            w1_scale_linear,
+            w2_scale_linear,
+            hidden_size=k,
+            intermediate_size=n,
+            num_experts=e,
+            is_gated_activation=is_gated_act,
+        )
+        quant_config._w1.scale = w1_scale
+        quant_config._w2.scale = w2_scale
+
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
@@ -192,7 +259,9 @@ def test_trtllm_fp4_moe_no_graph(
         )
 
         trtllm_inner = TrtLlmNvFp4ExpertsModular(
-            moe_config=moe_config, quant_config=quant_config
+            moe_config=moe_config,
+            quant_config=quant_config,
+            per_token_activation=per_token_activation,
         )
         # Mimic the production weight-loader path so per-expert tensors that
         # are normally precomputed in process_weights_after_loading (g1_scale_c
@@ -235,10 +304,20 @@ def test_trtllm_fp4_moe_no_graph(
         # Reference: round-trip activations and weights through FP4
         # quant/dequant so the comparison isolates kernel/activation behavior
         # from quantization error.
-        a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / a.abs().max()).to(
-            torch.float32
-        )
-        a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
+        if per_token_activation:
+            from flashinfer import SfLayout, nvfp4_quantize
+
+            a_fp4, a_scale_interleaved, per_token_scale = nvfp4_quantize(
+                a,
+                _PER_TOKEN_BASE_GLOBAL_SCALE,
+                sfLayout=SfLayout.layout_linear,
+                per_token_activation=True,
+            )
+            a_global_scale = 1.0 / per_token_scale.unsqueeze(1)
+        else:
+            assert quant_config.a1_gscale is not None
+            a_global_scale = quant_config.a1_gscale[0]
+            a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
         a_in_dtype = dequantize_nvfp4_to_dtype(
             a_fp4,
             a_scale_interleaved,
@@ -246,6 +325,7 @@ def test_trtllm_fp4_moe_no_graph(
             dtype=a.dtype,
             device=a.device,
             block_size=quant_blocksize,
+            is_sf_linear_layout=per_token_activation,
         )
 
         w1_d = torch.empty(
@@ -254,16 +334,16 @@ def test_trtllm_fp4_moe_no_graph(
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
         for idx in range(e):
             w1_d[idx] = dequantize_nvfp4_to_dtype(
-                w1_q[idx],
-                quant_config.w1_scale[idx],
+                w1_q_linear[idx],
+                w1_scale_reference[idx],
                 (1 / quant_config.g1_alphas[idx]),
                 dtype=dtype,
                 device=w1_q.device,
                 block_size=quant_blocksize,
             )
             w2_d[idx] = dequantize_nvfp4_to_dtype(
-                w2_q[idx],
-                quant_config.w2_scale[idx],
+                w2_q_linear[idx],
+                w2_scale_reference[idx],
                 (1 / quant_config.g2_alphas[idx]),
                 dtype=dtype,
                 device=w2_q.device,
@@ -274,6 +354,13 @@ def test_trtllm_fp4_moe_no_graph(
             a_in_dtype, w1_d, w2_d, score, topk, activation=torch_activation
         )
 
+        if swiglu_limit is None:
+            cosine = torch.nn.functional.cosine_similarity(
+                torch_output.float().flatten(),
+                trtllm_output.float().flatten(),
+                dim=0,
+            )
+            assert cosine > 0.99
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
 
 
@@ -288,5 +375,6 @@ if __name__ == "__main__":
         MoEActivation.GELU,
         MoEActivation.GELU,
         None,
+        False,
         None,
     )

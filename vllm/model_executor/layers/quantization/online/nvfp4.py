@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    trtllm_nvfp4_hidden_alignment,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
 )
@@ -156,6 +159,9 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=True, is_act_and_mul=self.moe.is_act_and_mul
+            ),
         )
 
         replace_parameter(layer, "w13_weight", w13)

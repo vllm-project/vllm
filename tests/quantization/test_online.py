@@ -124,11 +124,15 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 
 
+@pytest.mark.parametrize(
+    ("is_act_and_mul", "expected_hidden_alignment"),
+    [(True, 256), (False, 512)],
+)
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
-    monkeypatch,
+    monkeypatch, is_act_and_mul, expected_hidden_alignment
 ) -> None:
     method = object.__new__(Nvfp4OnlineMoEMethod)
-    method.moe = SimpleNamespace(is_act_and_mul=True)
+    method.moe = SimpleNamespace(is_act_and_mul=is_act_and_mul)
     method.nvfp4_backend = object()
     method.experts_cls = object
     method.moe_quant_config = None
@@ -166,6 +170,10 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
 
     assert method.moe_kernel is kernel
     assert convert_weights.call_count == 2
+    assert all(
+        call.kwargs["trtllm_hidden_alignment"] == expected_hidden_alignment
+        for call in convert_weights.call_args_list
+    )
     make_kernel.assert_called_once()
     get_quant_config.assert_called_once()
     assert process_weights.call_count == 2
