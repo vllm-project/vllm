@@ -26,7 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -70,6 +70,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
@@ -160,8 +161,7 @@ def _pad_flashinfer_cu_seqlens_buffer(
 
 
 class Qwen2_5_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - ni: Number of images
         - cps: Number of channels * patch_size * patch_size
@@ -187,8 +187,7 @@ class Qwen2_5_VLImagePixelInputs(TensorSchema):
 
 
 class Qwen2_5_VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of image features
         - hs: Hidden size
         - ni: Number of images
@@ -221,8 +220,7 @@ Qwen2_5_VLImageInputs: TypeAlias = (
 
 
 class Qwen2_5_VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - np: Number of patches
         - nv: Number of videos
         - ctps: Number of channels * temporal_patch_size * patch_size *
@@ -261,8 +259,7 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
 
 
 class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - nf: Number of video features
         - hs: Hidden size
         - nv: Number of videos
@@ -630,6 +627,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -660,6 +658,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             temporal_patch_size=temporal_patch_size,
             in_channels=in_channels,
             hidden_size=self.hidden_size,
+        )
+        self.input_norm = (
+            input_norm if input_norm is not None else FusedInputNorm.identity()
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -805,7 +806,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        window_index_thw_dev = async_tensor_h2d(window_index_thw, cos_thw.device)
         cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
         sin_thw = sin_thw[window_index_thw_dev, :, :]
@@ -911,8 +912,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_window_seqlens (needed for CUDA graph capture to
                 cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
-        """
 
+        """
         if device is None:
             device = self.device
         metadata: dict[str, torch.Tensor] = {}
@@ -1053,7 +1054,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
-        window_index = window_index.to(device=device, non_blocking=True)
+        window_index = async_tensor_h2d(window_index, device)
         reverse_indices = reverse_indices.to(device=device, non_blocking=True)
 
         metadata["rotary_pos_emb_cos"] = rotary_pos_emb_cos
@@ -1076,7 +1077,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.input_norm(x.to(device=self.device), self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         seq_len = hidden_states.shape[0]
@@ -1256,14 +1257,14 @@ class Qwen2_5_VLForConditionalGeneration(
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int, float]]:
-        """
-        Iterate over multimodal features and yield grid information.
+        """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
             Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
@@ -1359,9 +1360,9 @@ class Qwen2_5_VLForConditionalGeneration(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1436,11 +1437,13 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                    self.visual,
+                    pixel_values,
+                    grid_thw_list,
+                    rope_type="rope_3d",
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -1455,8 +1458,7 @@ class Qwen2_5_VLForConditionalGeneration(
         image_embeds_split: tuple[torch.Tensor, ...],
         image_input: Qwen2_5_VLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Append mrope positions for each for images.
+        """Append mrope positions for each for images.
         This is necessary to recover correct mrope
         positions after video pruning
 
@@ -1469,14 +1471,15 @@ class Qwen2_5_VLForConditionalGeneration(
             Tuple of image embeddings for each image item.
             Resulting embeddings will have extra 4 channels for
             computed mrope positions.
+
         """
         merge_size = self.visual.spatial_merge_size
         grid_thw = image_input["image_grid_thw"]
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(
-                emb.device, non_blocking=True
+            positions = async_tensor_h2d(
+                compute_mrope_for_media(size, merge_size), emb.device
             )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
@@ -1494,9 +1497,6 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            pixel_values_videos = self.input_norm(
-                pixel_values_videos, self.visual.dtype
-            )
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
@@ -1518,8 +1518,7 @@ class Qwen2_5_VLForConditionalGeneration(
         video_embeds_split: tuple[torch.Tensor, ...],
         video_input: Qwen2_5_VLVideoInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Prunes video embeddings via Efficient Video Sampling (EVS)
+        """Prunes video embeddings via Efficient Video Sampling (EVS)
         and then appends mrope positions for each retained embeddings
 
         Args:
@@ -1530,6 +1529,7 @@ class Qwen2_5_VLForConditionalGeneration(
             Tuple of video embeddings for each video item.
             Resulting embeddings will have extra 4 channels for
             computed mrope positions.
+
         """
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1558,12 +1558,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 spatial_merge_size=self.visual.spatial_merge_size,
                 q=self.video_pruning_rate,
             )
-            positions = compute_mrope_for_media(
+            positions_cpu = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device, non_blocking=True)
+            )
+            positions = async_tensor_h2d(positions_cpu, emb.device)
 
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
@@ -1579,8 +1580,7 @@ class Qwen2_5_VLForConditionalGeneration(
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -1597,6 +1597,7 @@ class Qwen2_5_VLForConditionalGeneration(
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
@@ -1852,6 +1853,7 @@ class Qwen2_5_VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2012,8 +2014,10 @@ class Qwen2_5_VLForConditionalGeneration(
                 batch. **NOTE**: If mrope is enabled (default setting for
                 Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-        """
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2036,30 +2040,22 @@ class Qwen2_5_VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger.",
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
-
-        return num_image_tokens * merge_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_vision_tokens // merge_size**2
+        return num_mm_embeds * merge_size**2, num_mm_embeds

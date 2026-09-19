@@ -23,6 +23,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -106,13 +107,18 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
+    left_visible_ptr,
+    right_visible_ptr,
     M,
     N,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
+    SWA_WIDTH: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    PADDED_SWA_WIDTH: tl.constexpr,
+    HAS_IMAGE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -131,7 +137,20 @@ def _combine_topk_swa_indices_kernel(
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        if HAS_IMAGE:
+            left = tl.load(left_visible_ptr + token_idx)
+            right = tl.load(right_visible_ptr + token_idx)
+        else:
+            left = 0
+            right = 0
+        left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
+        # Prefix caching can resume inside an image span. Do not generate
+        # indices outside the SWA rows present in the gathered workspace.
+        swa_start = tl.maximum(
+            tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0), gather_start
+        )
+        swa_end = tl.minimum(pos + right + 1, seq_len)
+        swa_len = tl.maximum(swa_end - swa_start, 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -149,14 +168,14 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        swa_offset = tl.arange(0, PADDED_SWA_WIDTH)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
             + topk_len
             + swa_offset,
-            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-            mask=swa_offset < swa_len,
+            M * batch_idx + N + swa_offset + swa_start - gather_start,
+            mask=(swa_offset < swa_len) & (swa_offset < SWA_WIDTH),
         )
 
         tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
@@ -172,12 +191,21 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    max_image_tokens: int = 0,
+    left_visible: torch.Tensor | None = None,
+    right_visible: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (left_visible is None) != (right_visible is None):
+        raise ValueError("left_visible and right_visible must be provided together")
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
+    has_image = left_visible is not None
+    # Keep the row shape fixed for a vision model even when a particular batch
+    # has no image.
+    swa_width = window_size + max_image_tokens
     combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + swa_width + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -201,13 +229,18 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
+        left_visible if left_visible is not None else topk_indices,
+        right_visible if right_visible is not None else topk_indices,
         M,
         N,
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        SWA_WIDTH=swa_width,
         TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+        PADDED_SWA_WIDTH=triton.next_power_of_2(swa_width),
+        HAS_IMAGE=has_image,
     )
     return combined_indices, combined_lens
 
@@ -462,11 +495,13 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
     ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
+            replay_start=replay_start,
         )
 
         ragged_indices = None
@@ -524,6 +559,225 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
+        if self.indexer is None:
+            # Dense layers have no compressor work to overlap; HCA layers
+            # (compressor, no indexer) keep the streams for the dual-stream
+            # fork below.
+            if self.compressor is None:
+                self.aux_stream_list = None
+        else:
+            # Disable indexer inner overlap.
+            self.indexer.aux_stream = None
+
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gates: streams and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks. Covers both the HCA and CSA forks.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        return self.aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
+        )
+
+    def _run_sequential_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Disable ROCm streams when the current execution region cannot overlap."""
+        aux_streams = self.aux_stream_list
+        self.aux_stream_list = None
+        try:
+            qr_kv, kv_score, indexer_kv_score, indexer_weights = (
+                self._run_parallel_input_projections(hidden_states)
+            )
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            self._prepare_and_attn_fn(
+                hidden_states,
+                qr,
+                kv,
+                qr_scale,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+        finally:
+            self.aux_stream_list = aux_streams
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Pre-allocate attention output with FlashMLA-padded head count.
+        # The op writes into `o_padded`; we slice to n_local_heads after.
+        num_tokens = hidden_states.shape[0]
+        o_padded = torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        if self._enable_multi_stream_overlap():
+            # The ROCm override consumes these sentinels inside the capture
+            # boundary, moving the stream fan-out ahead of the projections.
+            self._prepare_and_attn_fn(
+                hidden_states,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                positions,
+                o_padded,
+            )
+        else:
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | None,
+        kv: torch.Tensor | None,
+        qr_scale: torch.Tensor | None,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Run the ROCm fork/join (HCA or CSA) inside the capture boundary."""
+        aux_streams = self.aux_stream_list
+        # The sequential pipeline disables aux_stream_list before calling
+        # back with real projection inputs; aux_streams is None ends that
+        # recursion here.
+        if aux_streams is None:
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                super()._prepare_and_attn(
+                    hidden_states,
+                    cast(torch.Tensor, qr),
+                    cast(torch.Tensor, kv),
+                    qr_scale,
+                    cast(torch.Tensor, kv_score),
+                    cast(torch.Tensor, indexer_kv_score),
+                    cast(torch.Tensor, indexer_weights),
+                    positions,
+                    o_padded,
+                )
+            finally:
+                self.aux_stream_list = saved_streams
+            return
+
+        # Re-check: forward's gate ran inside a captured segment that
+        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
+        if not self._enable_multi_stream_overlap():
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+            return
+
+        indexer = self.indexer
+        compressor = self.compressor
+        assert compressor is not None
+
+        def default_chain():
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr_out, qr_scale_out, kv_out = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr_out, qr_scale_out).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            attn_metadata = get_forward_context().attn_metadata
+            q = self._fused_qnorm_rope_kv_insert(q, kv_out, positions, attn_metadata)
+            return q, qr_out, qr_scale_out, kv_out
+
+        def main_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            compressor(score, positions, self.rotary_emb)
+
+        if indexer is None:
+            # HCA dual-stream: the main compressor runs on aux stream 0 while
+            # the default stream produces q and inserts KV into the SWA cache.
+            # Both branches only read hidden_states, so the join merely has to
+            # precede the sparse attention that consumes the compressed KV.
+            (q, _qr_out, _qr_scale_out, kv_out), _ = execute_in_parallel(
+                default_chain,
+                [main_compressor_chain],
+                self.ln_events[0],
+                [self.ln_events[1]],
+                aux_streams[:1],
+                enable=True,
+            )
+            self._sparse_indexer_and_attn(
+                hidden_states, None, None, None, q, kv_out, positions, o_padded
+            )
+            return
+
+        def indexer_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                indexer.compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            indexer.compressor(score, positions, self.indexer_rotary_emb)
+
+        # CSA three-stream: the main and indexer compressors run on aux
+        # streams 0 and 1 while the default stream produces q and inserts KV
+        # into the SWA cache. Every branch only reads hidden_states plus its
+        # own state, so the join merely has to precede the indexer op and the
+        # sparse attention, which consume the compressed KV caches.
+        (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
+            default_chain,
+            [main_compressor_chain, indexer_compressor_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+        )
+
+        indexer_weights_out, _ = indexer.weights_proj(hidden_states)
+        # The indexer compressor already ran on aux stream 1; build queries only.
+        index_q, index_q_scale, weights = indexer(
+            hidden_states,
+            qr_out,
+            None,
+            indexer_weights_out,
+            positions,
+            self.indexer_rotary_emb,
+            qr_scale_out,
+            skip_compressor=True,
+        )
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            weights,
+            q,
+            kv_out,
+            positions,
+            o_padded,
+        )
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
@@ -535,6 +789,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
+            get_fp8_block_weight_scale,
         )
         from vllm.model_executor.utils import replace_parameter
 
@@ -545,7 +800,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
             if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
                 return None
-            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            ws = get_fp8_block_weight_scale(linear)
             if ws is None:
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
@@ -909,6 +1164,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
+        left_visible = swa_metadata.prefill_left_visible
+        right_visible = swa_metadata.prefill_right_visible
+        if left_visible is not None:
+            left_visible = left_visible[num_decode_tokens:]
+            assert right_visible is not None
+            right_visible = right_visible[num_decode_tokens:]
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -987,6 +1248,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 top_k,
                 M,
                 N,
+                max_image_tokens=self.max_image_tokens,
+                left_visible=(
+                    left_visible[query_start:query_end]
+                    if left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    right_visible[query_start:query_end]
+                    if right_visible is not None
+                    else None
+                ),
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
