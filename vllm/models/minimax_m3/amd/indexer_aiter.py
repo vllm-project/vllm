@@ -590,6 +590,23 @@ def select_aiter_indexer_impl_cls(
     if reason is not None:
         logger.info_once("MiniMax M3 indexer: AITER unavailable (%s)", reason)
         return None
+    # Context-parallel AITER indexer for ROCm TP>1 (opt-in via env var).
+    from vllm import envs
+    from vllm.distributed import get_tensor_model_parallel_world_size
+    if (
+        get_tensor_model_parallel_world_size() > 1
+        and envs.VLLM_ROCM_MINIMAX_INDEXER_CP
+    ):
+        from vllm.models.minimax_m3.amd.indexer_aiter_cp import (
+            MiniMaxM3IndexerAiterCPImpl,
+        )
+        logger.info_once(
+            "MiniMax M3 indexer: selected AITER CP (context-parallel fp8) "
+            "[topk_blocks=%d, tp=%d]",
+            topk_blocks,
+            get_tensor_model_parallel_world_size(),
+        )
+        return MiniMaxM3IndexerAiterCPImpl
     logger.info_once(
         "MiniMax M3 indexer: selected AITER (fp8 MFMA score + top-k) "
         "[topk_blocks=%d, indexer_kv_dtype=%s]",
