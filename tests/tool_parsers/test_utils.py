@@ -14,6 +14,7 @@ from vllm.tool_parsers.utils import (
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
     get_parameter_value,
+    get_properties,
     handle_single_tool,
     make_valid_python,
     normalize_leading_zero_ints,
@@ -204,6 +205,17 @@ class TestCoerceToSchemaType:
         def test_list_alias(self):
             assert coerce_to_schema_type("[1]", "list") == [1]
 
+        def test_array_not_accepted_as_object(self):
+            """`[1,2]` parses as JSON but `object` means a map, not any value."""
+            assert coerce_to_schema_type("[1,2]", "object") == "[1,2]"
+
+        def test_object_not_accepted_as_array(self):
+            assert coerce_to_schema_type('{"a": 1}', "array") == '{"a": 1}'
+
+        def test_declared_alternative_used_when_parse_mistypes(self):
+            """A rejected object parse must leave the declared string in play."""
+            assert coerce_to_schema_type("[1,2]", ["object", "string"]) == "[1,2]"
+
     class TestMultiType:
         def test_null_takes_priority_over_string(self):
             assert coerce_to_schema_type("null", ["string", "null"]) is None
@@ -227,6 +239,59 @@ class TestCoerceToSchemaType:
 
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
+
+        def test_declared_type_blocks_json_guess(self):
+            """A real declared type rules the guess out; only unknown names keep it."""
+            assert coerce_to_schema_type('{"a": 1}', "integer") == '{"a": 1}'
+
+    class TestPR57005Regressions:
+        """Note(arpera):
+        List of regressions that were caught during review of PR #57005
+        """
+
+        @pytest.mark.parametrize(
+            ("value", "expected"),
+            [("3.0", 3), ("1e3", 1000), ("-0.0", 0), ("3", 3), ("2.0e2", 200)],
+        )
+        def test_zero_fraction_number_coerces_to_integer(self, value, expected):
+            result = coerce_to_schema_type(value, "integer")
+            assert result == expected
+            assert isinstance(result, int)
+
+        @pytest.mark.parametrize(
+            ("value", "expected"), [("3.5", 3.5), ("-2.25", -2.25)]
+        )
+        def test_fractional_number_is_never_truncated_to_integer(self, value, expected):
+            """A real fraction is not an integer, and must not be rounded into one.
+
+            The declared type is not satisfiable here, so the value is handed
+            over decoded rather than narrowed or stringified.
+            """
+            result = coerce_to_schema_type(value, "integer")
+            assert result == expected
+            assert isinstance(result, float)
+
+        @pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e999"])
+        def test_non_finite_never_becomes_an_integer(self, value):
+            """``int(float("inf"))`` raises and ``Infinity`` is not valid JSON."""
+            result = coerce_to_schema_type(value, "integer")
+            assert result == value
+            assert isinstance(result, str)
+
+        def test_integer_still_outranks_string_for_zero_fraction(self):
+            """Priority order is unchanged: integer is tried before string."""
+            assert coerce_to_schema_type("3.0", ["integer", "string"]) == 3
+
+        @pytest.mark.parametrize("value", ["9" * 320, "1" + "0" * 320])
+        def test_integer_beyond_double_range_satisfies_number(self, value):
+            """An integer is a number, so the tail must not reject it by name.
+
+            ``float()`` overflows to inf for these, so the number branch gives
+            up and the fallback sees an exact Python int.
+            """
+            result = coerce_to_schema_type(value, "number")
+            assert result == int(value)
+            assert isinstance(result, int)
 
 
 class TestExtractTypesFromSchema:
@@ -272,6 +337,42 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
+    class TestConst:
+        """Note(arpera):
+        These checks were implemented during PR 57005 review process
+        to verify that "const" behavior is correct.
+        """
+
+        @pytest.mark.parametrize(
+            ("const", "expected"),
+            [
+                (3, "integer"),
+                (3.0, "number"),
+                ("a", "string"),
+                (None, "null"),
+                ([1], "array"),
+                ({"a": 1}, "object"),
+            ],
+        )
+        def test_const_names_its_type(self, const, expected):
+            assert extract_types_from_schema({"const": const}) == [expected]
+
+        @pytest.mark.parametrize("const", [True, False])
+        def test_boolean_const_is_not_an_integer(self, const):
+            """``bool`` subclasses ``int``, so the order of the checks matters."""
+            assert extract_types_from_schema({"const": const}) == ["boolean"]
+
+        @pytest.mark.parametrize(
+            ("const", "expected"), [(0, "integer"), (0.0, "number")]
+        )
+        def test_falsy_const_is_still_inferred(self, const, expected):
+            """The lookup must test membership, not truthiness."""
+            assert extract_types_from_schema({"const": const}) == [expected]
+
+        def test_const_adds_to_a_declared_type(self):
+            schema = {"type": "number", "const": 3}
+            assert set(extract_types_from_schema(schema)) == {"number", "integer"}
+
     def test_none_schema_defaults_to_string(self):
         assert extract_types_from_schema(None) == ["string"]
 
@@ -290,6 +391,151 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestGetProperties:
+    def test_direct_properties(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    @pytest.mark.parametrize("keyword", ["allOf", "anyOf", "oneOf"])
+    def test_properties_inside_combinator(self, keyword):
+        """Schema generators spell composed models this way; a flat
+        ``.get("properties")`` reads {} and skips coercion entirely."""
+        schema = {
+            "type": "object",
+            keyword: [{"properties": {"a": {"type": "string"}}}],
+        }
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    def test_direct_properties_merge_with_a_combinator(self):
+        """Direct properties contribute alongside the branches, not instead."""
+        schema = {
+            "properties": {"a": {"type": "string"}},
+            "allOf": [{"properties": {"b": {"type": "integer"}}}],
+        }
+        assert get_properties(schema) == {
+            "a": {"type": "string"},
+            "b": {"type": "integer"},
+        }
+
+    def test_branch_without_properties_is_skipped(self):
+        schema = {
+            "anyOf": [{"type": "null"}, {"properties": {"a": {"type": "string"}}}]
+        }
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    def test_deeper_nesting_left_alone(self):
+        """One level only -- this runs on every streaming delta."""
+        schema = {"allOf": [{"allOf": [{"properties": {"a": {"type": "string"}}}]}]}
+        assert get_properties(schema) == {}
+
+    @pytest.mark.parametrize("schema", [None, "string", {}, {"type": "object"}])
+    def test_missing_properties_returns_empty(self, schema):
+        assert get_properties(schema) == {}
+
+    class TestPR57005Regressions:
+        """``anyOf``/``oneOf`` are alternatives, not ordered fallbacks.
+
+        Taking the first branch that carries ``properties`` coerces arguments
+        by a branch the value does not belong to, so a valid discriminated
+        union comes out matching no branch at all. A name may only be used
+        when every branch declaring it agrees on its schema.
+        """
+
+        DISCRIMINATED = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "count"},
+                        "value": {"type": "integer"},
+                    },
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "label"},
+                        "value": {"type": "string"},
+                    },
+                },
+            ]
+        }
+
+        def test_conflicting_names_are_dropped(self):
+            """Coercing ``value`` by either branch corrupts the other one."""
+            assert get_properties(self.DISCRIMINATED) == {}
+
+        def test_only_the_conflicting_name_is_dropped(self):
+            schema = {
+                "anyOf": [
+                    {
+                        "properties": {
+                            "shared": {"type": "string"},
+                            "clash": {"type": "integer"},
+                        }
+                    },
+                    {
+                        "properties": {
+                            "shared": {"type": "string"},
+                            "clash": {"type": "string"},
+                        }
+                    },
+                ]
+            }
+            assert get_properties(schema) == {"shared": {"type": "string"}}
+
+        def test_names_unique_to_one_branch_are_kept(self):
+            """OpenAI's user-or-address shape: no name is declared twice."""
+            schema = {
+                "anyOf": [
+                    {
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                        }
+                    },
+                    {"properties": {"city": {"type": "string"}}},
+                ]
+            }
+            assert get_properties(schema) == {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+                "city": {"type": "string"},
+            }
+
+        def test_identical_declarations_are_kept(self):
+            """Agreement across branches makes the name unambiguous."""
+            schema = {
+                "anyOf": [
+                    {"properties": {"value": {"type": "integer"}}},
+                    {"properties": {"value": {"type": "integer"}}},
+                ]
+            }
+            assert get_properties(schema) == {"value": {"type": "integer"}}
+
+        def test_all_of_refines_direct_properties(self):
+            """``allOf`` is a conjunction: its members apply on top, not instead.
+
+            Returning early on the direct properties left every name declared
+            by the refinement uncoerced -- the shape schema generators emit.
+            """
+            schema = {
+                "properties": {"a": {"type": "integer"}},
+                "allOf": [{"properties": {"b": {"type": "integer"}}}],
+            }
+            assert get_properties(schema) == {
+                "a": {"type": "integer"},
+                "b": {"type": "integer"},
+            }
+
+        def test_direct_and_branch_disagreement_is_dropped(self):
+            """Both constraints apply at once, so neither can be picked."""
+            schema = {
+                "properties": {"a": {"type": "integer"}},
+                "allOf": [{"properties": {"a": {"type": "string"}}}],
+            }
+            assert get_properties(schema) == {}
 
 
 def _value_of(expr: str):
