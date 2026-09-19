@@ -61,6 +61,40 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     )
 
 
+def _process_inputs_with_max_model_len(
+    params: SamplingParams, max_model_len: int = 2048
+):
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    processor.model_config = Mock()
+    processor.model_config.max_model_len = max_model_len
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    return InputProcessor.process_inputs(
+        processor, "req", prompt, params, ("generate",)
+    )
+
+
+def test_unset_max_tokens_rejects_oversized_min_tokens():
+    """Reject min_tokens that only becomes invalid after max_tokens is filled."""
+    params = SamplingParams(max_tokens=None, min_tokens=2147483648)
+    with pytest.raises(
+        VLLMValidationError,
+        match="min_tokens must be less than or equal to max_tokens",
+    ):
+        _process_inputs_with_max_model_len(params)
+
+
+def test_unset_max_tokens_accepts_min_tokens_within_filled_max():
+    params = SamplingParams(max_tokens=None, min_tokens=10)
+    request = _process_inputs_with_max_model_len(params)
+    assert request.sampling_params.max_tokens == 2045
+    assert request.sampling_params.min_tokens == 10
+
+
 # --- Stop strings: public requests cap the number of stop strings ---------
 
 
