@@ -340,6 +340,7 @@ class Scheduler(SchedulerInterface):
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
+        self.max_concurrent_prefills = self.scheduler_config.max_concurrent_prefills
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -567,6 +568,50 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+
+    def _get_remaining_token_demand(
+        self,
+        running_index: int,
+        threshold: int,
+        defer_prefills: bool
+    ) -> int:
+        demand = 0
+        # 1. Add demand from remaining RUNNING requests
+        if running_index >= 0:
+            for i in range(running_index + 1, len(self.running)):
+                req = self.running[i]
+                if defer_prefills and req.is_prefill_chunk:
+                    continue
+                req_demand = (
+                    req.num_tokens_with_spec
+                    + req.num_output_placeholders
+                    - req.num_computed_tokens
+                )
+                if req_demand > 0:
+                    demand += min(req_demand, threshold) if threshold > 0 else req_demand
+
+        if defer_prefills:
+            return demand
+
+        # 2. Add demand from WAITING requests
+        num_concurrent_prefills = len(self._inflight_prefills)
+
+        for req in self.skipped_waiting + self.waiting:
+            if self.max_concurrent_prefills > 0 and num_concurrent_prefills >= self.max_concurrent_prefills:
+                break
+
+            req_demand = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
+            if req_demand > 0:
+                if self.max_concurrent_prefills <= 0:
+                    # Heuristic to prevent massive over-reservation when concurrency cap is disabled.
+                    req_demand = req_demand // 2
+                    
+                if req_demand > 0:
+                    demand += min(req_demand, threshold) if threshold > 0 else req_demand
+                num_concurrent_prefills += 1
+
+        return demand
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -667,8 +712,16 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            threshold = self.scheduler_config.long_prefill_token_threshold
+            if 0 < threshold < num_new_tokens:
+                remaining_demand = self._get_remaining_token_demand(
+                    running_index=req_index,
+                    threshold=threshold,
+                    defer_prefills=defer_prefills
+                )
+                allowed_tokens = max(threshold, token_budget - remaining_demand)
+                if num_new_tokens > allowed_tokens:
+                    num_new_tokens = allowed_tokens
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -862,10 +915,18 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+            # Requests still prefilling from earlier steps already hold blocks,
+            # so they count against the cap alongside this step's admissions.
+            num_concurrent_prefills = len(self._inflight_prefills)
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
+                    break
+                if (
+                    self.max_concurrent_prefills
+                    and num_concurrent_prefills >= self.max_concurrent_prefills
+                ):
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
@@ -1109,7 +1170,14 @@ class Scheduler(SchedulerInterface):
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                        remaining_demand = self._get_remaining_token_demand(
+                            running_index=-1,
+                            threshold=threshold,
+                            defer_prefills=defer_prefills
+                        )
+                        allowed_tokens = max(threshold, token_budget - remaining_demand)
+                        if num_new_tokens > allowed_tokens:
+                            num_new_tokens = allowed_tokens
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -1277,6 +1345,7 @@ class Scheduler(SchedulerInterface):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    num_concurrent_prefills += 1
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
@@ -1290,6 +1359,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
+                # This request now holds blocks for a prefill, whether or not
+                # the prefill finishes within this step's chunk.
+                num_concurrent_prefills += 1
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
