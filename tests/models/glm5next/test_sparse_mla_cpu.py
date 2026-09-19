@@ -3,16 +3,22 @@
 import pytest
 import torch
 
+from vllm.forward_context import ForwardContext
 from vllm.models.glm5next.cpu.mla import (
     Glm5NextCPUIndexerMetadataBuilder,
     Glm5NextCPUSparseImpl,
 )
 from vllm.models.glm5next.cpu.sparse_indexer import (
+    SparseAttnIndexerKpool,
     _expand_pool_ids,
     _pool_compress,
     _quantize_cache_vector,
     _weighted_indexer_score,
     fwht128_quant_fp8,
+)
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
+    DeepseekV32IndexerMetadata,
 )
 
 
@@ -124,6 +130,67 @@ def test_cpu_indexer_metadata_expands_requests_without_triton():
         torch.tensor([4, 5, 6, 1, 2], dtype=torch.int32),
     )
     assert metadata.decode.block_table.shape == (5, 2)
+
+
+def test_cpu_indexer_forward_writes_pool_and_expands_decode_topk(monkeypatch):
+    class Cache:
+        prefix = "glm.indexer.k_cache"
+
+        def __init__(self):
+            self.kv_cache = torch.zeros(1, 1, 132, dtype=torch.uint8)
+
+    cache = Cache()
+    topk = torch.full((1, 8), -1, dtype=torch.int32)
+    indexer = SparseAttnIndexerKpool(
+        cache,
+        quant_block_size=128,
+        scale_fmt="ue8m0",
+        topk_tokens=8,
+        head_dim=128,
+        max_model_len=16,
+        max_total_seq_len=16,
+        topk_indices_buffer=topk,
+    )
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=DeepSeekV32IndexerDecodeMetadata(
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            seq_lens=torch.tensor([1], dtype=torch.int32),
+            decode_lens=torch.tensor([1], dtype=torch.int32),
+            requires_padding=False,
+            schedule_metadata=torch.empty((0, 2), dtype=torch.int32),
+        ),
+    )
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={cache.prefix: metadata},
+        slot_mapping={},
+    )
+    monkeypatch.setattr(
+        "vllm.models.glm5next.cpu.sparse_indexer.get_forward_context",
+        lambda: context,
+    )
+
+    result = indexer(
+        hidden_states=torch.zeros(1, 4),
+        q_quant=torch.zeros(1, 1, 128, dtype=torch.float8_e4m3fn),
+        k=torch.ones(1, 128, dtype=torch.bfloat16),
+        weights=torch.ones(1, 1),
+        gate_score=torch.zeros(1, 128),
+        compress_ape=torch.zeros(1, 128),
+        index_kpool=1,
+        positions=torch.tensor([0]),
+    )
+
+    assert result.data_ptr() == topk.data_ptr()
+    assert result[0, 0].item() == 0
+    assert torch.any(cache.kv_cache != 0)
 
 
 @pytest.mark.parametrize(
