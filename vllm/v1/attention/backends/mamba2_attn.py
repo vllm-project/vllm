@@ -16,7 +16,10 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+    compute_mamba_prefill_checkpoints,
+)
 
 
 def compute_varlen_chunk_metadata(
@@ -109,6 +112,11 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
+    # Internal prefill checkpoints, compacted to the checkpointing rows. The
+    # token offset is cu_chunk_seqlen_p[checkpoint_chunk_idx + 1].
+    checkpoint_chunk_idx: torch.Tensor | None = None
+    checkpoint_block_idx: torch.Tensor | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -146,6 +154,8 @@ class Mamba2AttentionMetadataBuilder(
         seq_idx_p = None
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
+        checkpoint_chunk_idx = None
+        checkpoint_block_idx = None
         prep_initial_states = False
 
         # Compute seq_idx for prefill only
@@ -160,12 +170,51 @@ class Mamba2AttentionMetadataBuilder(
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
-                self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
-                    common_attn_metadata,
+            checkpoint_offsets_p = None
+            cache_config = self.vllm_config.cache_config
+            if (
+                cache_config.mamba_cache_mode == "align"
+                and self.kv_cache_spec.num_prefill_checkpoint_blocks
+            ):
+                # Offsets feed the chunk split below so a chunk ends on the
+                # checkpoint; block_idx is compacted to the rows that take one.
+                spec_config = self.vllm_config.speculative_config
+                block_size = self.kv_cache_spec.block_size
+                first = common.num_reqs - common.num_prefills
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+                assert seq_lens_cpu is not None
+                _, qsl = self._prefill_cpu_metadata(common, common_attn_metadata)
+                offsets, cols = compute_mamba_prefill_checkpoints(
+                    seq_lens_cpu[first : first + common.num_prefills].tolist(),
+                    (qsl[1:] - qsl[:-1]).tolist(),
+                    hash_block_size=cache_config.prefix_match_unit or block_size,
+                    mamba_block_size=block_size,
+                    checkpoint_alignment=(
+                        self.kv_cache_spec.prefill_checkpoint_alignment
+                    ),
+                    drop_eagle_block=(
+                        spec_config is not None and spec_config.use_eagle_block_drop()
+                    ),
                 )
+                rows = [i for i, offset in enumerate(offsets) if offset]
+                if rows:
+                    checkpoint_offsets_p = offsets
+                    dev = common_attn_metadata.query_start_loc.device
+                    checkpoint_block_idx = common_attn_metadata.block_table_tensor[
+                        async_tensor_h2d([first + i for i in rows], dev),
+                        async_tensor_h2d([cols[i] for i in rows], dev),
+                    ]
+
+            (
+                cu_chunk_seqlen_p,
+                seq_idx_p,
+                last_chunk_indices_p,
+                checkpoint_chunk_idx,
+            ) = self._build_chunk_metadata_tensors(
+                self.chunk_size,
+                common,
+                common_attn_metadata,
+                checkpoint_offsets_p,
             )
 
         return replace(
@@ -175,4 +224,6 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            checkpoint_chunk_idx=checkpoint_chunk_idx,
+            checkpoint_block_idx=checkpoint_block_idx,
         )

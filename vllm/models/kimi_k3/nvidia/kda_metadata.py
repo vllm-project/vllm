@@ -20,7 +20,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -39,8 +38,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
+    compute_mamba_prefill_checkpoints,
 )
 
 if TYPE_CHECKING:
@@ -648,34 +646,17 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 speculative_config is not None
                 and speculative_config.use_eagle_block_drop()
             )
-            checkpoint_splits = []
-            checkpoint_cols = []
-            for row, query_len in zip(request_rows, query_lens):
-                seq_len = seq_lens[row]
-                query_start = seq_len - query_len
-                checkpoint_position = get_mamba_prefill_checkpoint_position(
-                    seq_len,
-                    hash_block_size,
-                    drop_eagle_block=drop_eagle_block,
-                )
-                offset = checkpoint_position - query_start
-                valid = is_mamba_prefill_checkpoint_valid(
-                    query_start=query_start,
-                    query_end=seq_len,
-                    checkpoint_position=checkpoint_position,
-                    hash_block_size=hash_block_size,
-                    mamba_block_size=block_size,
-                    checkpoint_alignment=(
-                        self.kv_cache_spec.prefill_checkpoint_alignment
-                    ),
-                )
-                offset = offset if valid else 0
-                first_len = offset or query_len
-                checkpoint_splits.append((first_len, query_len - first_len))
-                checkpoint_cols.append(cdiv(seq_len, block_size) - 2 if valid else -1)
-            if any(tail for _, tail in checkpoint_splits):
+            checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
+                [seq_lens[row] for row in request_rows],
+                query_lens,
+                hash_block_size=hash_block_size,
+                mamba_block_size=block_size,
+                checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+                drop_eagle_block=drop_eagle_block,
+            )
+            if any(checkpoint_offsets):
                 checkpoint_offsets_tensor = async_tensor_h2d(
-                    [first if tail else 0 for first, tail in checkpoint_splits],
+                    checkpoint_offsets,
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
