@@ -4,9 +4,11 @@
 
 import json
 from collections.abc import Generator
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -357,3 +359,61 @@ def test_extract_tool_calls_streaming_incremental(
     assert len(actual_tool_calls) > 0
     # check tool call format
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+def _ernie_parser_with_mock_tokenizer() -> Ernie45ToolParser:
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = {}
+    return Ernie45ToolParser(tokenizer)
+
+
+def test_regex_timeout_treated_as_no_tool_call():
+    parser = _ernie_parser_with_mock_tokenizer()
+    model_output = "<tool_call>{" + "d" * 100
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    with patch.object(parser, "tool_call_regex", mock_regex):
+        result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called is False
+    assert result.tool_calls == []
+    assert result.content == model_output
+    mock_regex.findall.assert_called_once()
+    assert (
+        mock_regex.findall.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_streaming_regex_timeout_is_not_retried_on_later_delta():
+    parser = _ernie_parser_with_mock_tokenizer()
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+    current_text = "<tool_call>{" + "d" * 100 + "}</tool_call>"
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    with patch.object(parser, "tool_call_regex", mock_regex):
+        first = parser.extract_tool_calls_streaming(
+            "",
+            current_text,
+            current_text,
+            [],
+            [],
+            [],
+            request,
+        )
+        second = parser.extract_tool_calls_streaming(
+            current_text,
+            current_text + "x",
+            "x",
+            [],
+            [],
+            [],
+            request,
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.findall.assert_called_once()
