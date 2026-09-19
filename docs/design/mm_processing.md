@@ -73,7 +73,7 @@ The kernel takes raw pixel values (`uint8`), performs one fused multiply-add per
 
 The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_mm_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
 
-Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_mm_input_norm_triton` (fp32 compute) → `visual_dtype` output.
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_mm_input_norm_triton` (fp32 compute) → `visual_dtype` (bf16) output.
 
 #### Toggle: `mm_device_do_normalize`
 
