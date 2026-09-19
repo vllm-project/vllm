@@ -126,8 +126,8 @@ class MiniMaxVLAttention(nn.Module):
         )
         # ApplyRotaryEmb handles the internal cos/sin repeat and partial
         # rotation (ro_dim = half_rot_dim * 2 < head_dim for MiniMax).
-        # enable_fp32_compute=True runs the rotation in fp32 (q/k upcast,
-        # fp32 cos/sin), matching the reference ``_minimax_rope_applier``.
+        # enable_fp32_compute=True keeps cos/sin and rotary arithmetic in fp32,
+        # matching the reference ``_minimax_rope_applier``.
         self.apply_rotary_emb = ApplyRotaryEmb(
             enforce_enable=True, enable_fp32_compute=True
         )
