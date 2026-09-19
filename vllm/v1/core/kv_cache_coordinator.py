@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -55,11 +56,59 @@ def _validate_prefix_cache_retention_interval(
             "attention)."
         )
 
-    if retention_interval < 0 or retention_interval % scheduler_block_size != 0:
+    if retention_interval < 0:
+        raise ValueError(
+            f"prefix_cache_retention_interval ({retention_interval}) "
+            "must be non-negative."
+        )
+
+    # The finer hash_block_size alignment is only validated on ROCm, where it
+    # has been tested (see _validate_retention_alignment). Everywhere else keep
+    # today's check unchanged -- deferring it without replacing it would leave
+    # those platforms with no alignment validation at all, which is weaker than
+    # the status quo rather than safer.
+    if not current_platform.is_rocm() and (
+        retention_interval % scheduler_block_size != 0
+    ):
         raise ValueError(
             f"prefix_cache_retention_interval ({retention_interval}) "
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
+        )
+
+
+def _validate_retention_alignment(
+    retention_interval: int | None,
+    alignment_tokens: int,
+) -> None:
+    """Check the retention interval against the *effective* hit granularity.
+
+    A retention checkpoint is only useful where a prefix-cache hit can actually
+    land, so the interval has to be a multiple of the alignment a hit is
+    reported at. That alignment is ``scheduler_block_size`` only when
+    fine-grained partial hash hits are off; when they are on it is
+    ``hash_block_size`` (see ``_cache_hit_alignment_tokens``), which under
+    decode context parallelism is ``scheduler_block_size // dcp_world_size``.
+
+    Validating against ``scheduler_block_size`` unconditionally therefore
+    rejects intervals that are legal, and does so exactly where the feature is
+    most useful: with DCP=8 a group whose hits land every 1536 tokens is forced
+    to an 8x coarser 12288, quantising every hit to a span the cache never
+    reports.
+
+    ``enable_partial_hash_hits`` is only settled by the concrete coordinator, so
+    this runs once that has happened rather than in the base constructor.
+    """
+    if not retention_interval:
+        return
+    if not current_platform.is_rocm():
+        # Off ROCm the base validator has already applied the
+        # scheduler_block_size check; do not apply a second, different one.
+        return
+    if retention_interval % alignment_tokens != 0:
+        raise ValueError(
+            f"prefix_cache_retention_interval ({retention_interval}) must be a "
+            f"multiple of the cache-hit alignment ({alignment_tokens})."
         )
 
 
@@ -158,8 +207,11 @@ class KVCacheCoordinator(ABC):
             manager.block_size for manager in self.single_type_managers
         )
 
-        # A positive retention interval must be a multiple of the base hit granularity
-        # (``scheduler_block_size``) to land on real cache-hit boundaries.
+        # A positive retention interval must be a multiple of the granularity a
+        # prefix-cache hit is actually reported at. That depends on
+        # ``enable_partial_hash_hits``, which the concrete coordinator has not
+        # resolved yet, so only the alignment-independent checks run here and
+        # ``_validate_retention_alignment`` is called once it is known.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
         _validate_prefix_cache_retention_interval(
@@ -505,6 +557,17 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+
+        # With prefix caching off there are no cache hits to align to, so there
+        # is no finer granularity to defer to. Keep the historical
+        # scheduler_block_size check rather than skipping validation: the base
+        # validator now defers alignment, and silently accepting an interval
+        # that used to be rejected would be a behaviour change this PR does not
+        # intend.
+        _validate_retention_alignment(
+            self.retention_interval,
+            self.scheduler_block_size,
+        )
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
@@ -570,6 +633,13 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         )
         # Single group; useless but just set ``use_eagle`` for consistency regardless.
         self.single_type_managers[0].use_eagle = 0 in self.eagle_group_ids
+        # A unitary coordinator never turns on partial hash hits (that is a
+        # HybridKVCacheCoordinator property), so the effective alignment is
+        # scheduler_block_size. Checked here for parity with the hybrid path
+        # rather than in the base constructor.
+        _validate_retention_alignment(
+            self.retention_interval, self.scheduler_block_size
+        )
 
     def find_longest_cache_hit(
         self,
@@ -713,6 +783,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
         for manager in self.single_type_managers:
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
+        # enable_partial_hash_hits is settled above, so the effective hit
+        # granularity is final and the retention interval can be checked
+        # against it rather than against scheduler_block_size.
+        _validate_retention_alignment(
+            self.retention_interval, cache_hit_alignment_tokens
+        )
         self.verify_and_split_kv_cache_groups()
 
     @property
