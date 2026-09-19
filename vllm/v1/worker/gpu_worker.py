@@ -57,6 +57,7 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
@@ -69,6 +70,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
@@ -543,6 +545,13 @@ class Worker(WorkerBase):
 
         """
         maybe_apply_startup_plan(self)
+
+        # DeepGEMM's synthetic shapes can exceed inference's scratch needs.
+        # Release warmup scratch before measuring the model's memory peak.
+        if is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip":
+            deep_gemm_warmup(
+                self.get_model(), self.scheduler_config.max_num_batched_tokens
+            )
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for

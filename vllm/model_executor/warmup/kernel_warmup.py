@@ -15,7 +15,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
-from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -41,7 +40,6 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
@@ -221,15 +219,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
-
-    # Deep GEMM warmup
-    do_deep_gemm_warmup = (
-        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
-    )
-    if do_deep_gemm_warmup:
-        model = worker.get_model()
-        max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
