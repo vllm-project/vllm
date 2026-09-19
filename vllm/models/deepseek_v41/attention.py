@@ -539,6 +539,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             and speculative_config.use_dspark()
             else None
         )
+        if dspark_layered_replay_tokens is not None:
+            logger.info_once(
+                "DeepSeek-V4.1 DSpark uses %d-token layered SWA replay "
+                "(%d layers x %d tokens)",
+                dspark_layered_replay_tokens,
+                config.num_hidden_layers,
+                self.window_size,
+            )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
