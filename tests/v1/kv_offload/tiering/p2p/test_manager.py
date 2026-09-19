@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import numpy as np
@@ -1107,6 +1108,14 @@ class _FakeData:
             "block_len": block_len,
         }
 
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ):
+        future: Future[None] = Future()
+        self.add_remote_peer(peer_id, agent_metadata, base_addr, num_blocks, block_len)
+        future.set_result(None)
+        return future
+
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
 
@@ -1363,6 +1372,11 @@ class TestAcceptNewPeers:
 
             def add_remote_peer(self, *args, **kwargs):
                 pass
+
+            def add_remote_peer_async(self, *args, **kwargs):
+                future: Future[None] = Future()
+                future.set_result(None)
+                return future
 
         mgr = _make_manager()
         mgr._data = FakeData()  # type: ignore[assignment]
