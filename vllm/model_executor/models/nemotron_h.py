@@ -804,8 +804,12 @@ class NemotronHForCausalLM(
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
+            chunk_size=vllm_config.model_config.get_mamba_chunk_size(),
         )
         if cache_config.use_replayssm:
+            # Batch-invariant mode rejects ReplaySSM, so this is the plain
+            # (conv, ssm) pair.
+            assert len(base_shape) == 2
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=hf_config.n_groups,
