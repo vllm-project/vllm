@@ -91,6 +91,12 @@ ECConnectorFactory.register_connector(
 )
 
 ECConnectorFactory.register_connector(
+    "ECZmqConnector",
+    "vllm.distributed.ec_transfer.ec_connector.zmq.connector",
+    "ECZmqConnector",
+)
+
+ECConnectorFactory.register_connector(
     "ECMooncakeConnector",
     "vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector",
     "ECMooncakeConnector",
