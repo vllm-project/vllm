@@ -69,10 +69,9 @@ def _make_packed_weights(E, K, N):
     packed = torch.zeros(E, K // 8, N, dtype=torch.int32, device=device)
     for i in range(8):
         packed |= (w[:, i::8, :] & 0xF) << (i * 4)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
     for e in range(E):
         we = packed[e].contiguous()
-        ops.gptq_shuffle(we, g_idx, 4)
+        ops.gptq_shuffle(we, 4)
         packed[e] = we
     return packed
 
@@ -113,7 +112,6 @@ def test_fused_moe_w1_matches_dense(
     w13 = _make_packed_weights(E, K, N_gate_up)
     w13_s = _make_scales(E, groups, N_gate_up, dtype)
     w13_z = _make_qzeros(E, groups, N_gate_up)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
 
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
@@ -147,7 +145,6 @@ def test_fused_moe_w1_matches_dense(
                 w13[e],
                 w13_z[e],
                 w13_s[e],
-                g_idx,
                 False,
             )
             ref_out[flat] = ref.squeeze()
@@ -243,7 +240,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
     w2 = _make_packed_weights(E, N_inter, hidden)
     w2_s = _make_scales(E, N_inter // group_size, hidden, dtype)
     w2_z = _make_qzeros(E, N_inter // group_size, hidden)
-    g_idx = torch.empty(0, dtype=torch.int32, device=device)
 
     topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
     topk_w = torch.softmax(
@@ -300,7 +296,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
                 w13[e],
                 w13_z[e],
                 w13_s[e],
-                g_idx,
                 False,
             )
             a = torch.empty(1, N_inter, dtype=dtype, device=device)
@@ -310,7 +305,6 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
                 w2[e],
                 w2_z[e],
                 w2_s[e],
-                g_idx,
                 False,
             )
             ref[m_idx] += r2.squeeze() * w
