@@ -435,6 +435,55 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
     return True
 
 
+def _literal_end(text: str, start: int) -> int:
+    """Index just past the quoted literal opened at *start*, or -1 if unterminated."""
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i + 1
+        i += 1
+    return -1
+
+
+def _single_to_double_quoted(text: str) -> str:
+    """Rewrite Lark single-quoted literals as EBNF double-quoted literals."""
+
+    def requote(body: str) -> str:
+        out: list[str] = []
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch == "\\" and i + 1 < len(body):
+                # \' is an escape only inside '...', so it loses the backslash
+                out.append(body[i + 1] if body[i + 1] == "'" else ch + body[i + 1])
+                i += 2
+            else:
+                out.append('\\"' if ch == '"' else ch)
+                i += 1
+        return "".join(out)
+
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] not in "'\"":
+            out.append(text[i])
+            i += 1
+            continue
+        end = _literal_end(text, i)
+        if end < 0:
+            out.append(text[i:])
+            break
+        out.append(
+            text[i:end] if text[i] == '"' else f'"{requote(text[i + 1 : end - 1])}"'
+        )
+        i = end
+    return "".join(out)
+
+
 def convert_lark_to_ebnf(grammar_str: str) -> str:
     """Convert a Lark grammar string to EBNF format.
 
@@ -466,17 +515,35 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     def clean_line(line: str) -> str:
         """Remove comments and whitespace from line."""
-        return re.sub(r"(#|//).*$", "", line).strip()
+        i = 0
+        while i < len(line):
+            if line[i] in "'\"":
+                end = _literal_end(line, i)
+                i = len(line) if end < 0 else end
+            elif line[i] == "#" or line[i : i + 2] == "//":
+                return line[:i].strip()
+            else:
+                i += 1
+        return line.strip()
 
     def check_quotes(text: str, rule_name: str, line_num: int) -> None:
-        """Validate quote matching in text."""
-        if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
-            raise ValueError(f"Mismatched quotes in {rule_name} on line {line_num}")
+        """Validate that every quoted literal in text is terminated."""
+        i = 0
+        while i < len(text):
+            if text[i] in "'\"":
+                end = _literal_end(text, i)
+                if end < 0:
+                    raise ValueError(
+                        f"Mismatched quotes in {rule_name} on line {line_num}"
+                    )
+                i = end
+            else:
+                i += 1
 
     def extract_references(text: str) -> set[str]:
         """Extract rule references from text."""
         # Remove quoted strings and special characters
-        text = re.sub(r'"[^"]*"', "", text)
+        text = re.sub(r'"(?:\\.|[^"\\])*"', "", text)
         text = re.sub(r"[+*?()|\[\]{}]", " ", text)
         return set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", text))
 
@@ -529,7 +596,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
                 current_rule = name.strip().strip("?")
 
                 check_quotes(definition, f"rule '{current_rule}'", line_num)
-                definition = re.sub(r"'([^']*)'", r'"\1"', definition)
+                definition = _single_to_double_quoted(definition)
                 referenced_rules.update(extract_references(definition))
                 current_definition = [definition.strip()]
 
@@ -544,7 +611,7 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
                 check_quotes(
                     alt_def, f"alternative for rule '{current_rule}'", line_num
                 )
-                alt_def = re.sub(r"'([^']*)'", r'"\1"', alt_def)
+                alt_def = _single_to_double_quoted(alt_def)
                 referenced_rules.update(extract_references(alt_def))
                 current_definition.append(alt_def)
 
