@@ -616,9 +616,9 @@ def test_hw_agnostic_ops_skip_vendor_forwards(monkeypatch):
     having, expressed where a test can hold it.
     """
     from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-    from vllm.model_executor.custom_op import CustomOp as HwSpecificCustomOp
+    from vllm.model_executor.custom_op import CustomOp as VllmCustomOp
     from vllm.model_executor.hw_agnostic.custom_op import (
-        CustomOp as HwAgnosticCustomOp,
+        CustomOp as HwCustomOp,
     )
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry_oot as hw_agnostic_registry,
@@ -627,11 +627,11 @@ def test_hw_agnostic_ops_skip_vendor_forwards(monkeypatch):
     from vllm.platforms import current_platform
 
     vendors = ("cuda", "hip", "cpu", "tpu", "xpu")
-    assert all(hasattr(HwSpecificCustomOp, f"forward_{v}") for v in vendors)
-    assert not any(hasattr(HwAgnosticCustomOp, f"forward_{v}") for v in vendors)
+    assert all(hasattr(VllmCustomOp, f"forward_{v}") for v in vendors)
+    assert not any(hasattr(HwCustomOp, f"forward_{v}") for v in vendors)
     # Inherited, so a plugin's override keeps the property too.
-    assert issubclass(HwRMSNorm, HwAgnosticCustomOp)
-    assert not issubclass(HwRMSNorm, HwSpecificCustomOp)
+    assert issubclass(HwRMSNorm, HwCustomOp)
+    assert not issubclass(HwRMSNorm, VllmCustomOp)
     assert not any(
         hasattr(type("PluginRMSNorm", (HwRMSNorm,), {}), f"forward_{v}")
         for v in vendors
