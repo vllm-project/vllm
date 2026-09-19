@@ -40,6 +40,11 @@ def get_aligned_state_indices_multi_group_kernel(
     block_table_ptrs_ptr,
     seq_lens_ptr,
     state_indices_ptr,
+    # Optional: batch_idx -> req_state_idx (V2 model runner / PP). The block
+    # tables bound to this context are the source request-state-slot tables, so
+    # the table row must be resolved through this mapping; seq_lens and the
+    # output stay in batch order.
+    idx_mapping_ptr,
     block_table_stride_req: tl.int64,
     seq_lens_stride: tl.constexpr,
     state_indices_stride_0: tl.constexpr,
@@ -52,9 +57,17 @@ def get_aligned_state_indices_multi_group_kernel(
     NUM_STATE_SLOTS: tl.constexpr,
     BLOCK_STATE_SLOTS: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    HAS_IDX_MAPPING: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     valid_row = rows < num_requests
+
+    if HAS_IDX_MAPPING:
+        table_row = tl.load(idx_mapping_ptr + rows, mask=valid_row, other=0).to(tl.int64)
+        active_row = valid_row & (table_row >= 0)
+    else:
+        table_row = rows
+        active_row = valid_row
 
     seq_lens = tl.load(
         seq_lens_ptr + rows * seq_lens_stride,
@@ -76,12 +89,12 @@ def get_aligned_state_indices_multi_group_kernel(
     valid_state_slot = state_slots < NUM_STATE_SLOTS
     state_indices = tl.load(
         block_tables[:, None, None]
-        + rows[None, :, None] * block_table_stride_req
+        + table_row[None, :, None] * block_table_stride_req
         + first_state_slot[None, :, None]
         + state_slots[None, None, :],
         mask=(
             valid_group[:, None, None]
-            & valid_row[None, :, None]
+            & active_row[None, :, None]
             & valid_state_slot[None, None, :]
         ),
     )
@@ -93,7 +106,7 @@ def get_aligned_state_indices_multi_group_kernel(
         state_indices,
         mask=(
             valid_group[:, None, None]
-            & valid_row[None, :, None]
+            & active_row[None, :, None]
             & valid_state_slot[None, None, :]
         ),
     )
@@ -392,8 +405,9 @@ def postprocess_mamba_fused_kernel(
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
     # Optional: batch_idx -> req_idx mapping (V2 model runner / PP). The
-    # per-request decision arrays are in req-state-slot order; the block table
-    # is in batch order, so HAS_IDX_MAPPING splits the two indexings.
+    # per-request decision arrays AND the block tables are both in req-state-slot
+    # order, so rows are always indexed by req_idx; HAS_IDX_MAPPING only selects
+    # how a grid program (batch order) resolves its request slot.
     idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
@@ -476,7 +490,17 @@ def postprocess_mamba_fused_kernel(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
+    # The captured block tables are the SOURCE per-request-slot tables
+    # (persistent [max_num_reqs, max_blocks], mutated only by stream-ordered
+    # staged writes), so rows are always request-state slots -- index them by
+    # req_idx. Indexing by batch row read the CURRENT step's table at a stale
+    # batch mapping: on a non-last PP rank the deferred postprocess runs
+    # pp_size steps after its batch was gathered, so batch rows point at
+    # DIFFERENT requests and the state copy walks another request's
+    # freed/reallocated block ids. In the CSA unified layout every cache
+    # tensor aliases the same page, which is how foreign bytes landed in the
+    # PLE conv state (all-NaN logits -> constant-token loops; vllm#54173).
+    bt_row_idx = req_idx
     _copy_mamba_state_block(
         state_idx,
         bt_row_idx,
@@ -610,7 +634,8 @@ def precopy_mamba_align_fused_kernel(
     token_bias = tl.load(token_bias_ptr + req_idx)
     _copy_mamba_state_block(
         state_idx,
-        batch_idx,
+        # Source tables are req-indexed (see postprocess_mamba_fused_kernel).
+        req_idx,
         src_col,
         dst_col,
         token_bias,
@@ -1093,8 +1118,19 @@ class MambaSpecDecodeGPUContext:
         self,
         seq_lens: torch.Tensor,
         num_reqs: int,
+        idx_mapping: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute every Mamba group's aligned physical state IDs in one launch."""
+        """Compute every Mamba group's aligned physical state IDs in one launch.
+
+        Args:
+            seq_lens: [num_reqs] batch-ordered sequence lengths.
+            num_reqs: number of real requests in the batch.
+            idx_mapping: optional [num_reqs] batch_idx -> req_state_idx. The block
+                tables bound to this context are the source request-state-slot
+                tables (see ``initialize_from_forward_context``), so the table row
+                is resolved through this mapping; None means the batch order
+                already equals the request-state order (V1).
+        """
         assert self.is_initialized
         assert seq_lens.is_cuda
         assert 0 <= num_reqs <= seq_lens.shape[0]
@@ -1110,6 +1146,7 @@ class MambaSpecDecodeGPUContext:
             self.block_table_ptrs,
             seq_lens,
             self.aligned_state_indices,
+            idx_mapping,
             self.block_table_stride_req,
             seq_lens.stride(0),
             self.aligned_state_indices.stride(0),
@@ -1122,6 +1159,7 @@ class MambaSpecDecodeGPUContext:
             NUM_STATE_SLOTS=num_state_slots,
             BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
             BLOCK_ROWS=block_rows,
+            HAS_IDX_MAPPING=idx_mapping is not None,
             num_warps=1,
         )
         return self.aligned_state_indices[:, :num_reqs]

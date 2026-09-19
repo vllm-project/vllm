@@ -302,7 +302,7 @@ class MambaHybridModelState(DefaultModelState):
                     kv_cache_config, mamba_group_ids, block_tables
                 )
                 all_group_indices = ctx.compute_aligned_state_indices(
-                    input_batch.seq_lens, num_reqs
+                    input_batch.seq_lens, num_reqs, input_batch.idx_mapping
                 )
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
