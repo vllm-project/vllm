@@ -3,7 +3,7 @@
 """Reference CPU sparse MLA backend for GLM5Next."""
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -25,6 +25,9 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
+
 
 class Glm5NextCPUSparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [
@@ -32,7 +35,7 @@ class Glm5NextCPUSparseBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[str]] = [
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
         "auto",
         "float16",
         "bfloat16",
@@ -83,7 +86,9 @@ class Glm5NextCPUIndexerBackend(DeepseekV32IndexerBackend):
         return [MultipleOf(32)]
 
     @staticmethod
-    def get_builder_cls() -> type["Glm5NextCPUIndexerMetadataBuilder"]:
+    def get_builder_cls() -> type[  # type: ignore[override]
+        "Glm5NextCPUIndexerMetadataBuilder"
+    ]:
         return Glm5NextCPUIndexerMetadataBuilder
 
 

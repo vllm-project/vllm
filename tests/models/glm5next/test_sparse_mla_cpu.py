@@ -412,7 +412,12 @@ class _SparseRuntime:
         )
 
         # Entries: (request data seed, first token, count, physical pages, tail page).
-        positions, seeds, req_ids, slots, starts, lengths = [], [], [], [], [0], []
+        positions: list[int] = []
+        seeds: list[int] = []
+        req_ids: list[int] = []
+        slots: list[int] = []
+        starts = [0]
+        lengths: list[int] = []
         pages, tails = [], []
         for req, (seed, start, count, blocks, tail_block) in enumerate(requests):
             positions.extend(range(start, start + count))
