@@ -27,6 +27,7 @@
 import math
 import typing
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from itertools import islice
 from typing import Any
 
@@ -45,6 +46,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mixed_precision.xpu import XPUwNa16LinearKernel
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -70,9 +72,14 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.auto_gptq import (
+    AutoGPTQConfig,
+    AutoGPTQLinearMethod,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -709,18 +716,43 @@ class K2HorizonMoVAAttention(nn.Module):
                 self.v_router.bias.float(), requires_grad=False
             )
 
-        self.v_experts = nn.ModuleList(
-            [
-                ColumnParallelLinear(
-                    hidden_size,
-                    self.kv_size * tp_size,
-                    bias=False,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.v_experts.{value}",
-                )
-                for value in range(num_experts)
-            ]
+        expert_quant_config = quant_config
+        if isinstance(quant_config, AutoGPTQConfig):
+            expert_quant_config = deepcopy(quant_config)
+            expert_quant_config.packed_modules_mapping = {
+                **quant_config.packed_modules_mapping,
+                "v_experts_fused": [f"v_experts.{i}" for i in range(num_experts)],
+            }
+        self.v_experts_fused = MergedColumnParallelLinear(
+            hidden_size,
+            [self.kv_size * tp_size] * num_experts,
+            bias=False,
+            quant_config=expert_quant_config,
+            prefix=f"{prefix}.v_experts_fused",
         )
+        method = self.v_experts_fused.quant_method
+        self.mova_group_size = None
+        if isinstance(method, AutoGPTQLinearMethod):
+            config = method.quant_config
+            if (
+                not isinstance(method.kernel, XPUwNa16LinearKernel)
+                or config.weight_bits != 4
+                or not config.is_sym
+                or config.desc_act
+            ):
+                raise NotImplementedError(
+                    "Quantized MoVA requires symmetric GPTQ INT4 without "
+                    "activation ordering and the XPU WNA16 backend."
+                )
+            if self.total_num_kv_heads < tp_size:
+                raise NotImplementedError(
+                    "Quantized MoVA does not support replicated KV heads."
+                )
+            self.mova_group_size = (
+                hidden_size if config.group_size == -1 else config.group_size
+            )
+        elif not isinstance(method, UnquantizedLinearMethod):
+            raise NotImplementedError("Unsupported quantization method for MoVA.")
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -775,28 +807,6 @@ class K2HorizonMoVAAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        w1_shape = torch.Size(
-            [
-                self.num_experts,
-                self.total_num_kv_heads * self.head_dim,
-                hidden_size,
-            ]
-        )
-        config_dtype = _get_config_dtype_str(
-            use_fp8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
-            dtype=vllm_config.model_config.dtype,
-        )
-        self.fused_mova_config = try_get_optimal_moe_config(
-            w1_shape=w1_shape,
-            w2_shape=torch.Size([w1_shape[0], w1_shape[2], w1_shape[1]]),
-            top_k=self.num_experts_per_tok,
-            dtype=config_dtype,
-            M=vllm_config.scheduler_config.max_num_batched_tokens,
-            block_shape=None,
-        )
-
     def compute_mova_v_sparse(self, hidden_states):
         router_logits, _ = self.v_router(hidden_states)
 
@@ -808,18 +818,54 @@ class K2HorizonMoVAAttention(nn.Module):
             scaling_factor=self.router_scaling_factor,
         )
 
-        w1 = torch.stack(
-            [expert.weight for expert in self.v_experts], dim=0
-        ).contiguous()
+        use_int4 = self.mova_group_size is not None
+        w1_scale = None
+        block_shape = None
+        if use_int4:
+            # XPU's linear post-load conversion packs K contiguously per output.
+            w1 = self.v_experts_fused.qweight.view(torch.uint8).view(
+                self.num_experts, self.kv_size, self.hidden_size // 2
+            )
+            w1_scale = self.v_experts_fused.scales.t().view(
+                self.num_experts,
+                self.kv_size,
+                self.hidden_size // self.mova_group_size,
+            )
+            block_shape = [0, self.mova_group_size]
+        else:
+            w1 = self.v_experts_fused.weight.view(
+                self.num_experts, self.kv_size, self.hidden_size
+            )
+        config_dtype = _get_config_dtype_str(
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=use_int4,
+            dtype=hidden_states.dtype,
+        )
+        config = try_get_optimal_moe_config(
+            w1_shape=w1.shape,
+            w2_shape=(
+                self.num_experts,
+                self.hidden_size,
+                self.kv_size // 2 if use_int4 else self.kv_size,
+            ),
+            top_k=self.num_experts_per_tok,
+            dtype=config_dtype,
+            M=hidden_states.shape[0],
+            block_shape=block_shape,
+        )
 
         v = fused_mova_impl(
-            config=self.fused_mova_config,
+            config=config,
             hidden_states=hidden_states.contiguous(),
             w1=w1,
             topk_weights=routing_weights.contiguous(),
             topk_ids=selected_values.contiguous(),
             global_num_experts=self.num_experts,
             expert_map=None,
+            use_int4_w4a16=use_int4,
+            w1_scale=w1_scale,
+            block_shape=block_shape,
         )
 
         return v
@@ -1161,30 +1207,33 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                 loaded_params.add(name)
                 continue
 
-            # MoVA v experts
+            # MoVA v_experts merged into v_experts_fused (shard_id = expert_id).
             if ".self_attn.v_experts." in name:
-                if is_pp_missing_parameter(name, self):
+                prefix_name, suffix = name.split(".self_attn.v_experts.", 1)
+                expert_id_str, param_suffix = suffix.split(".", 1)
+                fused_name = (
+                    f"{prefix_name}.self_attn.v_experts_fused.{param_suffix}"
+                )
+                if is_pp_missing_parameter(fused_name, self):
                     continue
-                if name not in params_dict:
+                if fused_name not in params_dict:
                     continue
 
-                param = params_dict[name]
-                tp_rank = get_tensor_model_parallel_rank()
                 tp_size = get_tensor_model_parallel_world_size()
                 num_kv_heads = self.config.num_key_value_heads
+                if num_kv_heads < tp_size:
+                    num_kv_head_replicas = tp_size // num_kv_heads
+                    loaded_weight = (
+                        loaded_weight.reshape(
+                            num_kv_heads, -1, *loaded_weight.shape[1:]
+                        )
+                        .repeat_interleave(num_kv_head_replicas, dim=0)
+                        .reshape(-1, *loaded_weight.shape[1:])
+                    )
 
-                if loaded_weight.shape != param.shape:
-                    if num_kv_heads >= tp_size:
-                        loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    else:
-                        num_kv_head_replicas = tp_size // num_kv_heads
-                        kv_rank = tp_rank // num_kv_head_replicas
-                        loaded_weight = loaded_weight.chunk(num_kv_heads, dim=0)[
-                            kv_rank
-                        ]
-
-                default_weight_loader(param, loaded_weight)
-                loaded_params.add(name)
+                param = params_dict[fused_name]
+                param.weight_loader(param, loaded_weight, int(expert_id_str))
+                loaded_params.add(fused_name)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
