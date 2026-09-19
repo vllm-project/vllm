@@ -11,6 +11,7 @@ import torch.distributed as dist
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
+from vllm.platforms import current_platform
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -215,3 +216,106 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def _order_sensitive_inputs(
+    numel: int, dtype: torch.dtype, world_size: int, seed: int
+) -> torch.Tensor:
+    """Per-rank inputs, shape [numel, world_size], whose sum depends on the
+    order the ranks are accumulated in.
+
+    Each element holds +B, -B and small terms t in a random rank order, with t
+    below the float32 accumulator's resolution at B: adding t to B loses it,
+    cancelling +B and -B first keeps it, and the difference survives the
+    downcast. Ordinary random fp16/bf16 data cannot detect a changed order,
+    because its float32 partial sums are exact.
+    """
+    log2_big, log2_tiny = {
+        torch.float16: (13, -13),
+        torch.bfloat16: (20, -8),
+        torch.float32: (20, -8),
+    }[dtype]
+    gen = torch.Generator().manual_seed(seed)
+    big = (torch.rand(numel, generator=gen, dtype=torch.float64) + 1) * 2.0**log2_big
+    tiny = torch.rand(numel, world_size - 2, generator=gen, dtype=torch.float64) + 1
+    sign = torch.randint(0, 2, tiny.shape, generator=gen) * 2 - 1
+    tiny *= sign * 2.0**log2_tiny
+    terms = torch.cat([big[:, None], -big[:, None], tiny], dim=1)
+    order = torch.argsort(torch.rand(numel, world_size, generator=gen), dim=1)
+    return torch.gather(terms, 1, order).to(dtype)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def one_and_two_stage_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        fa = get_tp_group().device_communicator.ca_comm
+        assert fa is not None and not fa.disabled, "custom all-reduce is disabled"
+
+        # Sizes are counts of 16-byte packed elements. They straddle the
+        # 512 KiB 1-stage/2-stage threshold, and all but one leave a remainder
+        # when divided by the world size, giving the last rank a larger part.
+        for dtype, bits in [
+            (torch.float16, torch.int16),
+            (torch.bfloat16, torch.int16),
+            (torch.float32, torch.int32),
+        ]:
+            for packed in [1021, 32771, 65536, 262139]:
+                numel = packed * (16 // torch.empty((), dtype=dtype).element_size())
+                case = f"{dtype}, {packed * 16} bytes"
+
+                ints = torch.randint(
+                    -8, 9, (numel, tp_size), generator=torch.Generator().manual_seed(0)
+                ).to(dtype)
+                exact = ints.sum(dim=1).to(device)
+                inputs = _order_sensitive_inputs(numel, dtype, tp_size, seed=packed)
+                outs = {}
+                for algo in ["1stage", "2stage"]:
+                    m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", algo)
+                    summed = fa.all_reduce(
+                        ints[:, rank].contiguous().to(device), registered=False
+                    )
+                    torch.testing.assert_close(summed, exact, rtol=0, atol=0)
+                    outs[algo] = fa.all_reduce(
+                        inputs[:, rank].contiguous().to(device), registered=False
+                    )
+                torch.accelerator.synchronize()
+
+                differ = outs["1stage"].view(bits) != outs["2stage"].view(bits)
+                assert not differ.any(), (
+                    f"{case}: 2-stage differs from 1-stage in "
+                    f"{int(differ.sum())}/{numel} elements"
+                )
+
+
+def test_one_and_two_stage_allreduce_bitwise_identical(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Both kernels accumulate ranks in the same order, so which one the size
+    heuristic selects cannot change the result's bits.
+
+    Needs 4 ranks: at 2, the 2-stage owner rotation only turns a+b into b+a,
+    which is commutative, so no 2-rank run can tell the orders apart.
+    """
+    tp_size = 4
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    if not car.custom_ar:
+        pytest.skip("Custom all-reduce ops are not available.")
+    physical_ids = [
+        current_platform.visible_device_id_to_physical_device_id(i)
+        for i in range(tp_size)
+    ]
+    if not current_platform.is_fully_connected(physical_ids):
+        pytest.skip("Custom all-reduce needs fully connected GPUs above 2 ranks.")
+    multi_process_parallel(monkeypatch, tp_size, 1, one_and_two_stage_allreduce)
