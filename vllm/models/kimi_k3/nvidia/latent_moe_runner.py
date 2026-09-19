@@ -9,17 +9,26 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExpertsOrder,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
+
+
+def _num_shared_output_ar_slots(num_ubatches: int) -> int:
+    return max(1, num_ubatches)
 
 
 class LatentTailTier(IntEnum):
@@ -68,6 +77,9 @@ class LatentMoERunner(MoERunner):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+
+        self._shared_output_ar = None
+        self._shared_output_ar_events = None
 
         # The tail-fusion kernels are tcgen05-based, so they require an
         # SM100 NVIDIA device; the runner falls back to the default latent
@@ -151,6 +163,45 @@ class LatentMoERunner(MoERunner):
             self.moe_config.defer_moe_finalize = False
             self.moe_config.defer_moe_finalize_max_num_tokens = -1
 
+        transform = self.routed_output_transform
+        can_overlap = (
+            envs.VLLM_KIMI_K3_SHARED_OUTPUT_AR_OVERLAP
+            and use_fused_path
+            and self.moe_config.dp_size == 1
+            and self.moe_config.ep_size == 1
+            and self.moe_config.pcp_size == 1
+            and self._quant_method.is_monolithic
+            and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+            and transform is not None
+            and self.moe_config.in_dtype == torch.bfloat16
+        )
+        if can_overlap:
+            assert transform is not None
+            vllm_config = get_current_vllm_config()
+            from vllm.distributed.device_communicators.low_sm_all_reduce import (
+                LowSMAllReduce,
+            )
+
+            shared_output_ar = LowSMAllReduce.initialize(
+                group=get_tp_group().cpu_group,
+                device=transform.up_proj.weight.device,
+                max_num_bytes=(
+                    self.moe_config.max_num_tokens
+                    * transform.up_proj.weight.shape[0]
+                    * self.moe_config.in_dtype.itemsize
+                ),
+                num_slots=_num_shared_output_ar_slots(
+                    vllm_config.parallel_config.num_ubatches
+                ),
+            )
+            if shared_output_ar is not None and aux_stream() is not None:
+                self._shared_output_ar = shared_output_ar
+                with torch.accelerator.device_index(shared_output_ar.device.index):
+                    self._shared_output_ar_events = tuple(
+                        (torch.cuda.Event(), torch.cuda.Event())
+                        for _ in range(shared_output_ar.num_slots)
+                    )
+
     def _get_zero_residual(
         self,
         hidden_states: torch.Tensor,
@@ -186,6 +237,69 @@ class LatentMoERunner(MoERunner):
             and not self._fused_output_is_reduced
             and not self.moe_config.is_sequence_parallel
         )
+
+    def _overlap_shared_ar(self, shared_experts_input: torch.Tensor) -> bool:
+        op = self._shared_output_ar
+        return (
+            envs.VLLM_KIMI_K3_SHARED_OUTPUT_AR_OVERLAP
+            and op is not None
+            and op.supports(shared_experts_input)
+            and not (
+                self.enable_k3_latent_moe_tail_fusion
+                and shared_experts_input.shape[0]
+                <= self._k3_latent_moe_tail_op.contract.max_num_tokens
+            )
+        )
+
+    def _apply_quant_method(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
+        shared_experts_overlapping: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
+        if shared_experts_input is None or not self._overlap_shared_ar(
+            shared_experts_input
+        ):
+            return super()._apply_quant_method(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+                shared_experts_overlapping,
+            )
+
+        assert self._shared_experts is not None
+        if shared_experts_overlapping:
+            self._shared_experts.wait()
+        else:
+            self._maybe_apply_shared_experts(
+                shared_experts_input, SharedExpertsOrder.NO_OVERLAP
+            )
+        shared_partial = self._shared_experts.output
+
+        op = self._shared_output_ar
+        stream = aux_stream()
+        event_slots = self._shared_output_ar_events
+        assert op is not None and stream is not None and event_slots is not None
+        slot = dbo_current_ubatch_id()
+        events = event_slots[slot]
+        if shared_partial.is_cuda:
+            shared_partial.record_stream(stream)
+
+        fused_output, shared_output = maybe_execute_in_parallel(
+            lambda: self.routed_experts.forward_monolithic(
+                x=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            ),
+            lambda: op(shared_partial, slot=slot),
+            events[0],
+            events[1],
+            stream,
+        )
+        return shared_output, fused_output
 
     def _select_tail_tier(
         self,
@@ -269,6 +383,26 @@ class LatentMoERunner(MoERunner):
             result, trunc_size, output_is_reduced=True
         )
 
+    def _pre_reduced_shared_tail(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """Project the routed latent and add an already reduced shared output."""
+        transform = self.routed_output_transform
+        assert transform is not None
+        if transform.norm is not None:
+            fused_latent = self.allreduce_norm_latent_out(fused_output, transform.norm)
+        else:
+            fused_latent = tensor_model_parallel_all_reduce(fused_output)
+
+        result = torch.mm(fused_latent, transform.up_proj.weight.t())
+        result.add_(shared_output)
+        return self._maybe_reduce_final_output(
+            result, trunc_size, output_is_reduced=True
+        )
+
     def _shard_up_proj_tail(
         self,
         fused_output: torch.Tensor,
@@ -330,6 +464,8 @@ class LatentMoERunner(MoERunner):
             hidden_states, shared_experts_input = self.apply_routed_input_transform(
                 hidden_states
             )
+        assert shared_experts_input is not None
+        shared_output_is_pre_reduced = self._overlap_shared_ar(shared_experts_input)
         hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
             self._maybe_pad_hidden_states(
                 shared_experts_input,
@@ -369,13 +505,16 @@ class LatentMoERunner(MoERunner):
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-        tier = self._select_tail_tier(fused_output, shared_output)
-        if tier is LatentTailTier.TAIL_FUSION:
-            latent_tail = self._small_batch_tail
-        elif tier is LatentTailTier.ALLREDUCE_OVERLAP:
-            latent_tail = self._overlap_allreduce_tail
+        if shared_output_is_pre_reduced:
+            latent_tail = self._pre_reduced_shared_tail
         else:
-            latent_tail = self._shard_up_proj_tail
+            tier = self._select_tail_tier(fused_output, shared_output)
+            if tier is LatentTailTier.TAIL_FUSION:
+                latent_tail = self._small_batch_tail
+            elif tier is LatentTailTier.ALLREDUCE_OVERLAP:
+                latent_tail = self._overlap_allreduce_tail
+            else:
+                latent_tail = self._shard_up_proj_tail
 
         result = latent_tail(fused_output, shared_output, og_hidden_dim_post_xform)
 
