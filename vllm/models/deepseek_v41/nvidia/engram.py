@@ -28,6 +28,7 @@ from vllm.models.deepseek_v41.common.engram import (
     EngramLayout,
     _engram_head_shard_weight_loader,
     _engram_select_rows,
+    dequantize_packed_engram_rows,
 )
 from vllm.models.deepseek_v41.common.engram import (
     Engram as BaseEngram,
@@ -369,9 +370,49 @@ class Engram(BaseEngram):
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
+        assert engram_config is not None
+        self._packed_min_tokens = engram_config.packed_fp8_exchange_min_tokens
+        self._packed_current = False
+        self.staged_packed_rows: torch.Tensor | None = None
+        if not engram_config.packed_fp8_exchange:
+            return
+        parallel_config = vllm_config.parallel_config
+        if not (
+            self.embed_tokens.cpu_offload
+            and self.embed_tokens.dp_size == 1
+            and self.embed_tokens.tp_size > 1
+            and not self.use_sequence_parallel
+            and not parallel_config.use_ubatching
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and head_dim % self.embed_tokens.block_size == 0
+        ):
+            return
+        packed_dim = head_dim + head_dim // self.embed_tokens.block_size
+        self.staged_packed_rows = torch.empty(
+            max_tokens,
+            self.embed_tokens.part_n_hash_cols,
+            packed_dim,
+            dtype=torch.uint8,
+            device=self.staged_rows.device,
+        )
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
+        packed_rows = getattr(self, "staged_packed_rows", None)
+        self._packed_current = packed_rows is not None and hash_ids.shape[0] >= getattr(
+            self, "_packed_min_tokens", 256
+        )
+        if self._packed_current:
+            assert packed_rows is not None
+            rows = packed_rows[: hash_ids.shape[0]]
+            if self._prefetch_stream is None:
+                self.embed_tokens.lookup(hash_ids, rows, packed=True)
+            else:
+                self._start_prefetch(hash_ids, rows, self._prefetch_stream, packed=True)
+            return
         if self._prefetch_stream is None:
             return super().prepare_embeddings(hash_ids)
         rows = self.staged_rows[: hash_ids.shape[0]]
@@ -380,14 +421,21 @@ class Engram(BaseEngram):
 
     @eager_break_during_capture
     def _start_prefetch(
-        self, hash_ids: torch.Tensor, rows: torch.Tensor, stream: torch.cuda.Stream
+        self,
+        hash_ids: torch.Tensor,
+        rows: torch.Tensor,
+        stream: torch.cuda.Stream,
+        packed: bool = False,
     ) -> None:
         # Eager boundaries let the lookup span piecewise graph segments.
         stream.wait_stream(torch.cuda.current_stream())
         # Keep temporary hash storage alive until lookup finishes reading it.
         hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
-            self.embed_tokens.lookup(hash_ids, rows, background=True)
+            if packed:
+                self.embed_tokens.lookup(hash_ids, rows, background=True, packed=True)
+            else:
+                self.embed_tokens.lookup(hash_ids, rows, background=True)
 
     @eager_break_during_capture
     def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
@@ -401,3 +449,24 @@ class Engram(BaseEngram):
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return super()._ready_rows(num_tokens)
+
+    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, "_packed_current", False):
+            return super().embed(hash_ids)
+        assert self.staged_packed_rows is not None
+        if self._prefetch_stream is not None:
+            self._finish_prefetch(self._prefetch_stream)
+        packed = self.staged_packed_rows[: hash_ids.shape[0]]
+        gathered = tensor_model_parallel_all_gather(packed, dim=1)
+        num_tokens = hash_ids.shape[0]
+        out = torch.empty(
+            (num_tokens, self.embed_tokens.n_hash_cols, self.embed_tokens.dim),
+            dtype=torch.bfloat16,
+            device=packed.device,
+        )
+        dequantize_packed_engram_rows(
+            gathered[:, : self.embed_tokens.n_hash_cols],
+            out,
+            self.embed_tokens.block_size,
+        )
+        return out
