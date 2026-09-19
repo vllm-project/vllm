@@ -216,17 +216,19 @@ class TestNormalizeAudio:
         assert result.ndim == 1
         torch.testing.assert_close(result, torch.tensor([0.0, 1.0]))
 
-    def test_mono_passthrough_for_1d_numpy(self):
-        """1D numpy array should pass through unchanged with mono spec."""
-        mono = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-        result = normalize_audio(mono, MONO_AUDIO_SPEC)
+    @pytest.mark.parametrize("shape", [(3,), (1, 3), (3, 1), (1, 1)])
+    def test_mono_passthrough_for_numpy(self, shape):
+        """Mono output is 1D, including audio with an explicit channel axis."""
+        mono = np.arange(max(shape), dtype=np.float32)
+        result = normalize_audio(mono.reshape(shape), MONO_AUDIO_SPEC)
         assert result.ndim == 1
         np.testing.assert_array_equal(result, mono)
 
-    def test_mono_passthrough_for_1d_torch(self):
-        """1D torch tensor should pass through unchanged with mono spec."""
-        mono = torch.tensor([1.0, 2.0, 3.0])
-        result = normalize_audio(mono, MONO_AUDIO_SPEC)
+    @pytest.mark.parametrize("shape", [(3,), (1, 3), (3, 1), (1, 1)])
+    def test_mono_passthrough_for_torch(self, shape):
+        """Mono output is 1D, including audio with an explicit channel axis."""
+        mono = torch.arange(max(shape), dtype=torch.float32)
+        result = normalize_audio(mono.reshape(shape), MONO_AUDIO_SPEC)
         assert result.ndim == 1
         torch.testing.assert_close(result, mono)
 
@@ -408,8 +410,9 @@ class TestMultiModalDataParserChannelNormalization:
         # When target_channels=None, stereo audio should be preserved
         assert audio_item.ndim == 2, f"Expected 2D stereo audio, got {audio_item.ndim}D"
 
-    def test_parser_mono_passthrough_when_target_channels_1(self):
-        """Parser should pass through mono audio unchanged when target_channels=1."""
+    @pytest.mark.parametrize("shape", [(16000,), (1, 16000), (16000, 1)])
+    def test_parser_mono_passthrough_when_target_channels_1(self, shape):
+        """Mono layouts must preserve samples and report the waveform length."""
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser with mono normalization enabled
@@ -418,16 +421,19 @@ class TestMultiModalDataParserChannelNormalization:
             target_channels=1,
         )
 
-        # Create mono audio (already 1D)
-        mono_audio = np.random.randn(16000).astype(np.float32)
+        mono_audio = np.linspace(-1.0, 1.0, 16000, dtype=np.float32)
 
         # Parse audio data
-        result = parser._parse_audio_data((mono_audio, 16000))
+        result = parser.parse_mm_data({"audio": (mono_audio.reshape(shape), 16000)})[
+            "audio"
+        ]
 
         # Check that result is still mono (1D)
         audio_item = result.get(0)
         assert audio_item.ndim == 1
         assert audio_item.shape == (16000,)
+        assert result.get_audio_length(0) == 16000
+        np.testing.assert_array_equal(audio_item, mono_audio)
 
     def test_parser_with_target_channels_2(self):
         """Parser should reduce 6-channel to 2-channel when target_channels=2."""
