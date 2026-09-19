@@ -417,7 +417,10 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        rpc_broadcast_mq = self.rpc_broadcast_mq
+        if self.is_failed or rpc_broadcast_mq is None:
+            raise RuntimeError("Executor failed.")
+        rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
