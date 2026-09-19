@@ -13,10 +13,15 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadataBuilder,
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    DeepSeekV32IndexerDecodeMetadata,
+    DeepseekV32IndexerMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
@@ -75,6 +80,67 @@ class Glm5NextCPUIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(32)]
+
+    @staticmethod
+    def get_builder_cls() -> type["Glm5NextCPUIndexerMetadataBuilder"]:
+        return Glm5NextCPUIndexerMetadataBuilder
+
+
+class Glm5NextCPUIndexerMetadataBuilder(AttentionMetadataBuilder):
+    """Eager CPU metadata for the Python KeyPool indexer."""
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata,
+        fast_build: bool = False,
+    ) -> DeepseekV32IndexerMetadata:
+        num_tokens = common_attn_metadata.num_actual_tokens
+        query_lens = torch.diff(common_attn_metadata.query_start_loc_cpu).to(
+            self.device
+        )
+        req_ids = torch.repeat_interleave(
+            torch.arange(common_attn_metadata.num_reqs, device=self.device),
+            query_lens,
+        )
+        seq_lens = common_attn_metadata.seq_lens.to(self.device)
+        start_positions = seq_lens - query_lens
+        positions = torch.repeat_interleave(start_positions, query_lens)
+        request_starts = torch.repeat_interleave(
+            common_attn_metadata.query_start_loc[:-1].to(self.device), query_lens
+        )
+        offsets = torch.arange(num_tokens, device=self.device) - request_starts
+        token_seq_lens = positions + offsets + 1
+        block_table = common_attn_metadata.block_table_tensor.to(self.device)
+        decode_block_table = block_table.index_select(0, req_ids)
+        decode = DeepSeekV32IndexerDecodeMetadata(
+            block_table=decode_block_table,
+            seq_lens=token_seq_lens.to(torch.int32),
+            decode_lens=torch.ones(num_tokens, dtype=torch.int32, device=self.device),
+            requires_padding=False,
+            schedule_metadata=torch.empty(
+                (0, 2), dtype=torch.int32, device=self.device
+            ),
+            per_req_decode_lens=query_lens,
+            decode_is_uniform=False,
+            write_max_decode_len=int(query_lens.max().item())
+            if query_lens.numel()
+            else 0,
+        )
+        return DeepseekV32IndexerMetadata(
+            seq_lens=seq_lens,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            slot_mapping=common_attn_metadata.slot_mapping[:num_tokens],
+            num_decodes=common_attn_metadata.num_reqs,
+            num_decode_tokens=num_tokens,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            decode=decode,
+            prefill=None,
+        )
 
 
 @dataclass(kw_only=True)
