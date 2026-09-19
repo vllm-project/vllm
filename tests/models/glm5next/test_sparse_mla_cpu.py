@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-from vllm.models.glm5next.cpu.mla import Glm5NextCPUSparseImpl
+from vllm.models.glm5next.cpu.mla import (
+    Glm5NextCPUIndexerMetadataBuilder,
+    Glm5NextCPUSparseImpl,
+)
 from vllm.models.glm5next.cpu.sparse_indexer import (
     _expand_pool_ids,
     _pool_compress,
@@ -91,6 +94,36 @@ def test_indexer_score_flattens_per_head_weights():
 
     actual = _weighted_indexer_score(key, query, weights)
     assert actual.item() == 5.0 * 128.0
+
+
+def test_cpu_indexer_metadata_expands_requests_without_triton():
+    builder = object.__new__(Glm5NextCPUIndexerMetadataBuilder)
+    builder.device = torch.device("cpu")
+
+    common = type(
+        "CommonMetadata",
+        (),
+        {
+            "num_actual_tokens": 5,
+            "num_reqs": 2,
+            "query_start_loc_cpu": torch.tensor([0, 3, 5], dtype=torch.int32),
+            "query_start_loc": torch.tensor([0, 3, 5], dtype=torch.int32),
+            "seq_lens": torch.tensor([6, 2], dtype=torch.int32),
+            "max_seq_len": 6,
+            "slot_mapping": torch.arange(5),
+            "block_table_tensor": torch.tensor(
+                [[0, 1], [2, 3]], dtype=torch.int32
+            ),
+        },
+    )()
+
+    metadata = builder.build(0, common)
+    assert metadata.num_decode_tokens == 5
+    torch.testing.assert_close(
+        metadata.decode.seq_lens,
+        torch.tensor([4, 5, 6, 1, 2], dtype=torch.int32),
+    )
+    assert metadata.decode.block_table.shape == (5, 2)
 
 
 @pytest.mark.parametrize(
