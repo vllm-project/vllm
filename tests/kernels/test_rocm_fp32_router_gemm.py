@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import (
     fp32_router_gemm_dispatch_impl,
 )
 from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+    _max_tokens,
     rocm_fp32_router_gemm,
 )
 from vllm.platforms import current_platform
@@ -20,7 +21,11 @@ SHAPES = [
     (6144, 128),
     (6144, 256),
 ]
-MAX_TOKENS = 32
+MAX_TOKENS = 128
+# Every count the kernel sees at decode is covered exactly up to 32; past that
+# the tuned config changes on power-of-two boundaries, so sample those. Shapes
+# with a lower cap skip the counts above it.
+TOKEN_COUNTS = list(range(33)) + [40, 48, 64, 80, 96, 127, 128]
 ATOL = 5e-4
 RTOL = 0.0
 
@@ -47,7 +52,7 @@ def _reference(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
-@pytest.mark.parametrize("num_tokens", range(MAX_TOKENS + 1))
+@pytest.mark.parametrize("num_tokens", TOKEN_COUNTS)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_matches_reference(
     num_tokens: int,
@@ -55,6 +60,8 @@ def test_rocm_fp32_router_gemm_matches_reference(
     num_experts: int,
     dtype: torch.dtype,
 ) -> None:
+    if num_tokens > _max_tokens(hidden_size, num_experts):
+        pytest.skip("above this shape's token cap")
     torch.manual_seed(41 + num_tokens + hidden_size + num_experts)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -69,12 +76,14 @@ def test_rocm_fp32_router_gemm_matches_reference(
     torch.testing.assert_close(output, expected, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.parametrize("num_tokens", [1, 4, 16, 24, 32])
+@pytest.mark.parametrize("num_tokens", [1, 4, 16, 24, 32, 64, 128])
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_preserves_topk(
     num_tokens: int, hidden_size: int, num_experts: int
 ) -> None:
+    if num_tokens > _max_tokens(hidden_size, num_experts):
+        pytest.skip("above this shape's token cap")
     torch.manual_seed(1000 + num_tokens + hidden_size + num_experts)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
@@ -164,7 +173,7 @@ def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
     assert not torch.equal(first_output, second_output)
 
 
-@pytest.mark.parametrize("num_tokens", [4, 32, 33])
+@pytest.mark.parametrize("num_tokens", [4, 32, 33, 128, 129])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_custom_op_dispatch(
@@ -217,7 +226,7 @@ def test_rocm_fp32_router_gemm_dynamic_compile_dispatch() -> None:
         return torch.ops.vllm.fp32_router_gemm_dispatch(x, weight, False)
 
     compiled_dispatch = torch.compile(dispatch, dynamic=True, fullgraph=True)
-    for num_tokens in (4, 16, 33, 5, 32):
+    for num_tokens in (4, 16, 33, 5, 32, 128, 129):
         x = torch.randn(
             num_tokens,
             hidden_size,

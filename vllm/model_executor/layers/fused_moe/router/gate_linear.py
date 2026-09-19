@@ -223,17 +223,19 @@ def fp32_router_gemm_dispatch_impl(
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
-        if current_platform.is_rocm():
-            from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
-                can_use_rocm_fp32_router_gemm,
-                rocm_fp32_router_gemm,
-            )
+    if current_platform.is_rocm():
+        # the gfx950 kernel carries its own per-shape token limit (up to 128)
+        from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+            can_use_rocm_fp32_router_gemm,
+            rocm_fp32_router_gemm,
+        )
 
-            x = x.contiguous()
-            if can_use_rocm_fp32_router_gemm(x, weight):
-                return rocm_fp32_router_gemm(x, weight)
-            return torch.nn.functional.linear(x.float(), weight)
+        x = x.contiguous()
+        if can_use_rocm_fp32_router_gemm(x, weight):
+            return rocm_fp32_router_gemm(x, weight)
+        return torch.nn.functional.linear(x.float(), weight)
+
+    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
