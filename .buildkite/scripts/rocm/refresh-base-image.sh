@@ -5,6 +5,10 @@ set -euo pipefail
 
 # shellcheck source=.buildkite/scripts/rocm/build-config.sh
 source "$(dirname "${BASH_SOURCE[0]}")/build-config.sh"
+ROCM_BASE_STANDARD_CONFIG=0
+if uses_standard_rocm_configuration; then
+    ROCM_BASE_STANDARD_CONFIG=1
+fi
 configure_rocm_build
 
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
@@ -580,6 +584,8 @@ main() {
         fi
         validate_rocm_dockerfile "${DOCKERFILE}" || return $?
     fi
+    publish_rocm_standard_configuration \
+        rocm-base-standard-config "${ROCM_BASE_STANDARD_CONFIG}" || return 1
     build_base_image
 }
 

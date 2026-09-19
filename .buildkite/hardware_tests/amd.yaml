@@ -3,7 +3,7 @@ group: Hardware - AMD Build
 # ROCm image flow:
 # 1. Select or build content-addressed base and ci_base images.
 # 2. Build and smoke-test a build-scoped CI image.
-# 3. Serialize stable-tag promotion for the latest trusted main build.
+# 3. Serialize stable-tag promotion for the latest upstream main nightly.
 steps:
   - label: "AMD: :docker: refresh ROCm base"
     key: refresh-rocm-base-amd
@@ -13,7 +13,7 @@ steps:
     commands:
       - bash .buildkite/scripts/rocm/refresh-base-image.sh
     concurrency: 1
-    concurrency_group: "vllm/rocm/base-build/$BUILDKITE_COMMIT"
+    concurrency_group: "vllm/rocm/base-build/$BUILDKITE_BUILD_ID"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -38,7 +38,7 @@ steps:
     commands:
       - bash .buildkite/scripts/rocm/build-ci-base.sh
     concurrency: 1
-    concurrency_group: "vllm/rocm/ci-base-build/$BUILDKITE_COMMIT"
+    concurrency_group: "vllm/rocm/ci-base-build/$BUILDKITE_BUILD_ID"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -91,7 +91,7 @@ steps:
       - image-build-amd
     device: amd_cpu
     no_plugin: true
-    if_condition: build.branch == pipeline.default_branch && build.pull_request.id == null
+    if_condition: build.branch == "main" && build.pull_request.id == null && build.env("NIGHTLY") == "1"
     concurrency: 1
     concurrency_group: "vllm/rocm/stable-image-promotion"
     timeout_in_minutes: 30

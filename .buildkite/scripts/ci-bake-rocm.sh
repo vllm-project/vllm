@@ -39,6 +39,7 @@ ROCM_ARG_OVERRIDE_PATH=""
 BUILD_CONTEXT_OVERRIDE_PATH=""
 SCRIPT_TMP_DIR=""
 BAKE_CONFIG_FILE=""
+BAKE_METADATA_FILE=""
 ROCM_BUILD_CONTEXT_ROOT=""
 ROCM_BUILD_CONTEXT_INDEX=""
 ROCM_BUILD_CONTEXT_COMMIT=""
@@ -919,10 +920,13 @@ should_export_rocm_smoke() {
 
 verify_rocm_smoke_export() {
     local marker="./build/rocm-smoke-export/vllm-smoke-ok"
+    local image_proof="./build/rocm-smoke-export/vllm-smoke-image"
     local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
     local actual_smoke_id=""
+    local image_digest=""
 
     should_export_rocm_smoke || return 0
+    rm -f "${image_proof}" "${image_proof}.tmp" || return 1
     if [[ ! -f "${marker}" ]]; then
         echo "ROCm BuildKit smoke marker is missing: ${marker}" >&2
         return 1
@@ -933,6 +937,19 @@ verify_rocm_smoke_export() {
             >&2
         return 1
     fi
+    # A marker alone does not identify the pushed image. Bind it to the image
+    # digest emitted by this same Bake graph before allowing host smoke to skip.
+    [[ -n "${IMAGE_TAG:-}" ]] || return 0
+    if [[ -s "${BAKE_METADATA_FILE:-}" ]] && command -v jq >/dev/null 2>&1; then
+        image_digest=$(jq -er '."test-rocm-ci"."containerimage.digest" // empty' \
+            "${BAKE_METADATA_FILE}" 2>/dev/null) || image_digest=""
+    fi
+    if [[ ! "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "No complete Bake image digest proof; host smoke will verify the pinned image"
+        return 0
+    fi
+    printf '%s\n' "${expected_smoke_id}" "${IMAGE_TAG}" "${image_digest}" \
+        > "${image_proof}.tmp" && mv -f "${image_proof}.tmp" "${image_proof}"
 }
 
 get_remote_image_label() {
@@ -1104,6 +1121,10 @@ create_and_bootstrap_builder() {
 init_config() {
     # shellcheck source=.buildkite/scripts/rocm/build-config.sh
     source "$(dirname "${BASH_SOURCE[0]}")/rocm/build-config.sh"
+    CI_BASE_STANDARD_CONFIG=0
+    if uses_standard_rocm_configuration; then
+        CI_BASE_STANDARD_CONFIG=1
+    fi
     configure_rocm_build
 
     TARGET="${1:-test-ci}"
@@ -1216,49 +1237,6 @@ compute_ci_base_hash_if_needed() {
     CI_BASE_CONTENT_HASH=$(compute_ci_base_content_hash)
     export CI_BASE_CONTENT_HASH
     echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}..."
-}
-
-wants_stable_ci_base_tag() {
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        return 1
-    fi
-
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "1" ]]; then
-        return 0
-    fi
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "0" ]]; then
-        return 1
-    fi
-
-    [[ "${NIGHTLY:-0}" == "1" && "${BUILDKITE_BRANCH:-}" == "${CI_BASE_STABLE_BRANCH:-main}" ]]
-}
-
-trusted_ci_base_tip_matches_build() {
-    local branch="${CI_BASE_STABLE_BRANCH:-main}"
-    local build_commit="${BUILDKITE_COMMIT:-}"
-    local remote_tip=""
-
-    is_trusted_ci_cache_writer || return 1
-    if [[ ! "${build_commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ci_base stable tag: Buildkite commit is missing or invalid" >&2
-        return 1
-    fi
-    remote_tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
-        "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    if [[ ! "${remote_tip}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ci_base stable tag: could not resolve remote ${branch} tip" >&2
-        return 1
-    fi
-    if [[ "${remote_tip,,}" != "${build_commit,,}" ]]; then
-        echo "Skipping ci_base stable tag: ${branch} advanced from ${build_commit} to ${remote_tip}" >&2
-        return 1
-    fi
-}
-
-should_push_stable_ci_base_tag() {
-    wants_stable_ci_base_tag \
-        && is_trusted_ci_cache_writer \
-        && trusted_ci_base_tip_matches_build
 }
 
 ci_base_tag_with_suffix() {
@@ -1503,12 +1481,14 @@ refresh_ci_base_tags_from_ref() {
             echo "Failed to update ci_base tag ${tag} from ${source_ref}" >&2
             return 2
         fi
-        if ! confirm_remote_image_push "${tag}"; then
+        if ! tag_digest=$(resolve_image_digest "${tag}") \
+            || ! confirm_remote_image_push "${tag%@*}@${tag_digest}"; then
             echo "Updated ci_base tag did not become visible: ${tag}" >&2
             return 2
         fi
-        if ! tag_digest=$(resolve_image_digest "${tag}") \
-            || [[ "${tag_digest}" != "${source_digest}" ]]; then
+        if [[ "${tag_digest}" != "${source_digest}" \
+            && ( "${tag}" != "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}" \
+                || "${tag}" == "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ) ]]; then
             echo "Updated ci_base tag does not match its source digest: ${tag}" >&2
             return 2
         fi
@@ -1529,49 +1509,20 @@ validate_ci_base_output_refs() {
     fi
     while IFS= read -r image_ref; do
         [[ -n "${image_ref}" ]] || continue
-        if ! confirm_remote_image_push "${image_ref}"; then
+        if ! image_digest=$(resolve_image_digest "${image_ref}") \
+            || ! confirm_remote_image_push "${image_ref%@*}@${image_digest}"; then
             echo "Required ci_base output ref is missing or stale: ${image_ref}" >&2
             return 2
         fi
-        if ! image_digest=$(resolve_image_digest "${image_ref}") \
-            || [[ "${image_digest}" != "${expected_digest}" ]]; then
+        # Concurrent builds may publish equivalent content with different
+        # digests. Only this build's runtime alias must keep its exact digest.
+        if [[ "${image_digest}" != "${expected_digest}" \
+            && ( "${image_ref}" != "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}" \
+                || "${image_ref}" == "${source_ref}" ) ]]; then
             echo "Required ci_base output ref has the wrong digest: ${image_ref}" >&2
             return 2
         fi
     done < <(ci_base_output_refs)
-}
-
-promote_stable_ci_base_tag() {
-    local source_ref="${1:-${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}}"
-    local stable_ref="${CI_BASE_STABLE_PROMOTION_REF:-}"
-    local digest=""
-    local immutable_source=""
-
-    is_ci_base_target || return 0
-    wants_stable_ci_base_tag || return 0
-    if ! should_push_stable_ci_base_tag; then
-        echo "Skipping ci_base stable promotion: build is not the trusted current main tip"
-        return 0
-    fi
-    if [[ -z "${source_ref}" || -z "${stable_ref}" ]]; then
-        echo "Cannot promote ci_base stable tag without source and destination refs" >&2
-        return 1
-    fi
-    if ! digest=$(resolve_image_digest "${source_ref}"); then
-        echo "Could not pin ci_base source before stable promotion: ${source_ref}" >&2
-        return 1
-    fi
-    immutable_source="${source_ref%@*}@${digest}"
-    echo "Promoting ci_base stable tag from ${immutable_source}"
-    if ! docker buildx imagetools create --prefer-index=false \
-        -t "${stable_ref}" "${immutable_source}"; then
-        echo "Failed to promote ci_base stable tag" >&2
-        return 1
-    fi
-    if ! confirm_remote_image_push "${stable_ref}"; then
-        echo "Promoted ci_base stable tag did not become visible: ${stable_ref}" >&2
-        return 1
-    fi
 }
 
 maybe_reuse_matching_ci_base_ref() {
@@ -2896,6 +2847,13 @@ run_bake() {
     local build_rc=0
     local confirmation_ref="${IMAGE_TAG:-}"
 
+    BAKE_METADATA_FILE="${SCRIPT_TMP_DIR:?}/bake-metadata.json"
+    rm -f "${BAKE_METADATA_FILE}" || return 1
+    if should_export_rocm_smoke; then
+        rm -f ./build/rocm-smoke-export/vllm-smoke-ok \
+            ./build/rocm-smoke-export/vllm-smoke-image \
+            ./build/rocm-smoke-export/vllm-smoke-image.tmp || return 1
+    fi
     if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
         confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
     fi
@@ -2904,6 +2862,7 @@ run_bake() {
     docker buildx bake \
         "${BAKE_ALLOW_ARGS[@]}" \
         "${BAKE_FILES[@]}" \
+        --metadata-file "${BAKE_METADATA_FILE}" \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         "${BAKE_TARGETS[@]}" || build_rc=$?
 
@@ -3045,6 +3004,8 @@ main() {
     load_ci_hcl
     init_bake_files
     if is_ci_base_target; then
+        publish_rocm_standard_configuration \
+            rocm-ci-base-standard-config "${CI_BASE_STANDARD_CONFIG}" || return 1
         prepare_ci_build_context
         configure_custom_rocm_stages
     fi
@@ -3083,8 +3044,7 @@ main() {
         rm -rf ./wheel-export
     fi
     if should_export_rocm_smoke; then
-        # The marker is a build output, not a cache. Never accept stale output
-        # from an earlier build or retry.
+        # Never accept a marker left by an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
     if is_ci_base_target; then

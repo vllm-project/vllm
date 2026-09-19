@@ -103,8 +103,43 @@ pin_image_ref() {
     printf '%s@%s\n' "${repository}" "${digest}"
 }
 
+verify_buildkit_smoke_proof() {
+    local image_ref="$1"
+    local image_digest="$2"
+    local marker="./build/rocm-smoke-export/vllm-smoke-ok"
+    local image_proof="./build/rocm-smoke-export/vllm-smoke-image"
+    local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
+    local actual_smoke_id=""
+    local -a proof=()
+
+    if [[ ! -f "${marker}" ]]; then
+        if [[ -e "${image_proof}" ]]; then
+            echo "ROCm BuildKit smoke image proof has no success marker" >&2
+            return 1
+        fi
+        return 2
+    fi
+    actual_smoke_id="$(< "${marker}")"
+    if [[ "${actual_smoke_id}" != "${expected_smoke_id}" ]]; then
+        echo "ROCm BuildKit smoke marker belongs to ${actual_smoke_id}, not ${expected_smoke_id}" \
+            >&2
+        return 1
+    fi
+    # Older or incomplete exports must still run the exact image smoke checks.
+    [[ -f "${image_proof}" ]] || return 2
+    mapfile -t proof < "${image_proof}"
+    if [[ ${#proof[@]} -ne 3 \
+        || "${proof[0]:-}" != "${expected_smoke_id}" \
+        || "${proof[1]:-}" != "${image_ref}" \
+        || "${proof[2]:-}" != "${image_digest}" ]]; then
+        echo "ROCm BuildKit smoke image proof does not match this build, image, and digest" >&2
+        return 1
+    fi
+    echo "ROCm image verified inside BuildKit: ${image_ref}@${image_digest}"
+}
+
 main() {
-    if [[ "${1:-}" == "--inside" ]]; then
+    if [[ "${1:-}" == "--inside" && $# == 1 ]]; then
         run_smoke_checks
         return
     fi
@@ -118,6 +153,7 @@ main() {
     local post_smoke_digest=""
     local required_ref=""
     local smoke_required=""
+    local proof_status=0
 
     if [[ "${BUILDKITE:-false}" == "true" ]]; then
         smoke_required="$(metadata_get rocm-ci-image-smoke-required)"
@@ -147,10 +183,15 @@ main() {
     image_digest=$(resolve_image_digest "${image_ref}") || return 1
     pinned_image=$(pin_image_ref "${image_ref}" "${image_digest}") || return 1
 
-    # The BuildKit marker records a build ID, not the published image digest.
-    # Promotion requires these checks against the exact pinned image.
-    docker run --rm -i --network=none --entrypoint /bin/bash "${pinned_image}" \
-        -s -- --inside < "${BASH_SOURCE[0]}"
+    verify_buildkit_smoke_proof "${image_ref}" "${image_digest}" || proof_status=$?
+    case "${proof_status}" in
+        0) ;;
+        2)
+            docker run --rm -i --network=none --entrypoint /bin/bash "${pinned_image}" \
+                -s -- --inside < "${BASH_SOURCE[0]}" || return 1
+            ;;
+        *) return 1 ;;
+    esac
 
     post_smoke_digest=$(resolve_image_digest "${image_ref}") || return 1
     if [[ "${post_smoke_digest}" != "${image_digest}" ]]; then

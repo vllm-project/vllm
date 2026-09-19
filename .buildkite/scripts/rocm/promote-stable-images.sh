@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Promote immutable ROCm candidates only from the latest trusted main build.
+# Promote immutable ROCm candidates only from the latest upstream main nightly.
 
 set -euo pipefail
 
@@ -23,13 +23,14 @@ normalize_repo() {
 }
 
 is_trusted_main() {
-    local stable_branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}}"
-    local stable_repo="${ROCM_BASE_STABLE_REPO_SLUG:-${CI_BASE_STABLE_REPO_SLUG:-${TRUSTED_REPO}}}"
     [[ "${BUILDKITE:-false}" == true \
-        && "${BUILDKITE_PULL_REQUEST:-false}" == false \
-        && "${BUILDKITE_BRANCH:-}" == "${stable_branch}" \
-        && "$(normalize_repo "${BUILDKITE_REPO:-}")" == \
-            "$(normalize_repo "${stable_repo}")" ]]
+        && "${BUILDKITE_PULL_REQUEST:-}" == false \
+        && "${BUILDKITE_BRANCH:-}" == "${STABLE_BRANCH}" \
+        && "$(normalize_repo "${BUILDKITE_REPO:-}")" == "${TRUSTED_REPO}" \
+        && "${NIGHTLY:-0}" == 1 \
+        && "${TORCH_NIGHTLY:-0}" != 1 \
+        && "${ROCM_BASE_PUSH_STABLE_TAG-1}" == 1 \
+        && "${CI_BASE_PUSH_STABLE_TAG-1}" == 1 ]]
 }
 
 metadata_required() {
@@ -235,13 +236,17 @@ validate_smoke() {
 }
 
 recheck_main() {
-    local branch="${ROCM_BASE_STABLE_BRANCH:-${CI_BASE_STABLE_BRANCH:-${STABLE_BRANCH}}}" tip=""
-    tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
-        "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
+    local tip=""
+    if ! tip=$(git ls-remote --exit-code "https://github.com/${TRUSTED_REPO}.git" \
+        "refs/heads/${STABLE_BRANCH}" 2>/dev/null \
+        | awk '$2 == "refs/heads/main" { print $1 }'); then
+        echo "Could not resolve latest upstream ${STABLE_BRANCH}" >&2
+        return 1
+    fi
     [[ "${tip}" =~ ^[0-9a-fA-F]{40}$ ]] \
-        || { echo "Could not resolve latest ${branch}" >&2; return 1; }
+        || { echo "Could not resolve latest upstream ${STABLE_BRANCH}" >&2; return 1; }
     if [[ "${tip,,}" != "${BUILDKITE_COMMIT,,}" ]]; then
-        echo "Skipping stable promotion: this build is no longer latest ${branch}"
+        echo "Skipping stable promotion: this build is no longer latest upstream ${STABLE_BRANCH}"
         return 2
     fi
 }
@@ -252,7 +257,8 @@ main() {
     local base="" base_hash="" base_content="" base_stable=""
     local ci="" ci_content="" ci_build="" parent=""
     local required="" smoke_ref="" smoked="" smoked_ref=""
-    local status=0 failed=0 transaction_active=0
+    local standard_config="" metadata_key=""
+    local status=0 failed=0 transaction_active=0 rollback_error=0
     local actual="" source="" stable_parent="" i=0
     local -a aliases=() candidates=() previous=("" "" "" "")
     local -a needs_write=(0 0 0 0)
@@ -268,12 +274,19 @@ main() {
         done
         ((rollback_failed == 0)) \
             || echo "One or more aliases could not be restored" >&2
+        rollback_error=${rollback_failed}
         return 0
     }
     is_trusted_main \
-        || { echo "Skipping stable ROCm promotion outside trusted main"; return 0; }
-    if using_custom_rocm_dockerfiles; then
-        echo "Skipping stable ROCm promotion for custom Dockerfiles"
+        || { echo "Skipping stable ROCm promotion outside the upstream main nightly"; return 0; }
+    if ! uses_standard_rocm_configuration; then
+        echo "Skipping stable ROCm promotion for a nonstandard configuration"
+        return 0
+    fi
+    if [[ "${repo}" != "${IMAGE_REPO}" \
+        || "${CI_BASE_IMAGE_TAG:-${IMAGE_REPO}:ci_base}" != "${IMAGE_REPO}:ci_base" \
+        || "${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}" != "rocm/vllm-ci" ]]; then
+        echo "Skipping stable ROCm promotion for custom image repositories or tags"
         return 0
     fi
     [[ "${BUILDKITE_COMMIT:-}" =~ ^[0-9a-fA-F]{40}$ \
@@ -281,6 +294,20 @@ main() {
         || { echo "Promotion requires a full commit and build ID" >&2; return 1; }
     command -v docker >/dev/null
     command -v git >/dev/null
+    recheck_main || status=$?
+    case "${status}" in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
+    for metadata_key in rocm-base-standard-config rocm-ci-base-standard-config; do
+        standard_config=$(metadata_required "${metadata_key}")
+        case "${standard_config}" in
+            1) ;;
+            0) echo "Skipping stable ROCm promotion: ${metadata_key}=0"; return 0 ;;
+            *) echo "Invalid standard-configuration metadata: ${metadata_key}" >&2; return 1 ;;
+        esac
+    done
     base=$(metadata_required rocm-base-image)
     base_hash=$(metadata_required rocm-base-content-hash)
     base_content=$(metadata_required rocm-base-image-content)
@@ -298,7 +325,8 @@ main() {
         "${ci_stable}-${BUILDKITE_COMMIT}"
         "${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}:${BUILDKITE_COMMIT}")
     candidates=("${base}" "${ci}" "${ci}" "${smoked_ref}")
-    if ! is_tagged "${aliases[1]}" || ! is_tagged "${aliases[2]}" \
+    if [[ "${ci_stable}" != "${IMAGE_REPO}:ci_base" ]] \
+        || ! is_tagged "${aliases[1]}" || ! is_tagged "${aliases[2]}" \
         || ! is_tagged "${aliases[3]}" \
         || [[ "$(repository_of "${aliases[1]}")" != "${repo}" ]]; then
         echo "ROCm promotion aliases are invalid" >&2
@@ -336,17 +364,25 @@ main() {
         return 1
     fi
     if [[ "${previous[0]}" != "${stable_parent}" ]]; then
-        echo "Repairing interrupted ROCm stable alias update"
-        if ! retag_and_verify "${aliases[0]}" "${repo}@${stable_parent}"; then
-            echo "Could not restore coherence between stable ROCm aliases" >&2
-            return 1
-        fi
-        actual=$(lookup_digest "${aliases[1]}") || return 1
-        if [[ "${actual}" != "${previous[1]}" ]]; then
-            echo "Stable ci_base changed during alias repair" >&2
-            return 1
-        fi
-        previous[0]="${stable_parent}"
+        status=0
+        recheck_main || status=$?
+        case "${status}" in
+            0)
+                echo "Repairing interrupted ROCm stable alias update"
+                if ! retag_and_verify "${aliases[0]}" "${repo}@${stable_parent}"; then
+                    echo "Could not restore coherence between stable ROCm aliases" >&2
+                    return 1
+                fi
+                actual=$(lookup_digest "${aliases[1]}") || return 1
+                if [[ "${actual}" != "${previous[1]}" ]]; then
+                    echo "Stable ci_base changed during alias repair" >&2
+                    return 1
+                fi
+                previous[0]="${stable_parent}"
+                ;;
+            2) return 0 ;;
+            *) return 1 ;;
+        esac
     fi
     [[ "${previous[0]}" == "${candidates[0]##*@}" ]] \
         && needs_write[0]=0 || needs_write[0]=1
@@ -357,17 +393,25 @@ main() {
         recheck_main || status=$?
         case "${status}" in
             0) ;;
-            2) needs_write[0]=0; needs_write[1]=0 ;;
+            2) return 0 ;;
             *) return 1 ;;
         esac
     fi
     if ((needs_write[0] || needs_write[1])); then
-        transaction_active=1
         trap 'status=$?; trap - EXIT INT TERM; rollback_transaction; exit "${status}"' EXIT
         trap 'trap - EXIT INT TERM; rollback_transaction; exit 130' INT
         trap 'trap - EXIT INT TERM; rollback_transaction; exit 143' TERM
         for i in 0 1; do
             if ((needs_write[i])); then
+                status=0
+                recheck_main || status=$?
+                if ((status != 0)); then
+                    rollback_transaction
+                    trap - EXIT INT TERM
+                    ((status == 2 && rollback_error == 0)) && return 0
+                    return 1
+                fi
+                transaction_active=1
                 docker buildx imagetools create --prefer-index=false \
                     -t "${aliases[i]}" "${candidates[i]}" \
                     || { failed=1; break; }
@@ -386,6 +430,14 @@ main() {
             trap - EXIT INT TERM
             return 1
         fi
+        status=0
+        recheck_main || status=$?
+        if ((status != 0)); then
+            rollback_transaction
+            trap - EXIT INT TERM
+            ((status == 2 && rollback_error == 0)) && return 0
+            return 1
+        fi
         transaction_active=0
         trap - EXIT INT TERM
     fi
@@ -393,6 +445,13 @@ main() {
     # A partial failure is retryable without disturbing the stable aliases.
     for i in 2 3; do
         ((needs_write[i])) || continue
+        status=0
+        recheck_main || status=$?
+        case "${status}" in
+            0) ;;
+            2) return 0 ;;
+            *) return 1 ;;
+        esac
         if ! retag_and_verify "${aliases[i]}" "${candidates[i]}"; then
             echo "Could not publish compatibility alias ${aliases[i]}" >&2
             return 1
