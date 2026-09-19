@@ -59,7 +59,12 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config):
-        return cls()
+        instance = cls()
+        # Keep the raw dict: the base class drops it, but the fp8 linear
+        # delegation below needs config_groups.
+        instance._k3_raw_quant_config = config
+        instance._k3_ct_config = None
+        return instance
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -92,6 +97,9 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
+            delegated = self._k3_fp8_linear_method(layer, prefix)
+            if delegated is not None:
+                return delegated
             logger.debug_once(
                 "MXFP4 linear layer is not implemented - falling back to "
                 "UnquantizedLinearMethod.",
@@ -105,6 +113,45 @@ class Mxfp4Config(QuantizationConfig):
                 "Skipping quantization for this layer.",
             )
         return None
+
+    # --- K3_FP8_LINEAR -------------------------------------------------------
+    # Delegate Linears covered by a non-mxfp4 config group to compressed-tensors
+    # so a mixed-precision checkpoint (mxfp4 routed experts + fp8 dense) works
+    # on ROCm. The MoE branch above is deliberately untouched: routing it to
+    # compressed-tensors would hit the CUDA-only Marlin repack path.
+    def _k3_fp8_linear_method(self, layer, prefix):
+        raw = getattr(self, "_k3_raw_quant_config", None)
+        groups = (raw or {}).get("config_groups") or {}
+        if len(groups) < 2:
+            return None
+        try:
+            from vllm.model_executor.layers.quantization.compressed_tensors.utils import (  # noqa: E501
+                find_matched_target,
+            )
+            extra = [
+                t
+                for name, g in groups.items()
+                if "mxfp4" not in str(g.get("format", "")).lower()
+                for t in (g.get("targets") or [])
+                if t != "Linear"
+            ]
+            if not extra or find_matched_target(prefix, layer, extra, {}) is None:
+                return None
+            if getattr(self, "_k3_ct_config", None) is None:
+                from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+                    CompressedTensorsConfig,
+                )
+                self._k3_ct_config = CompressedTensorsConfig.from_config(dict(raw))
+            method = self._k3_ct_config.get_quant_method(layer, prefix)
+        except Exception as exc:  # noqa: BLE001 - never break the stock path
+            logger.warning_once("K3 fp8 linear delegation failed (%s); "
+                                "falling back to unquantized.", exc)
+            return None
+        if method is not None:
+            logger.info_once("K3: %s delegated to %s", prefix, type(method).__name__)
+        return method
+    # --- end K3_FP8_LINEAR ---------------------------------------------------
+
 
 
 class GptOssMxfp4Config(Mxfp4Config):
