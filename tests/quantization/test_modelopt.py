@@ -775,8 +775,8 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
     ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
     ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
     (their ``_supports_quant_scheme`` requires
-    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin survives because
-    it only checks ``weight_key``. A regression here would mean a W4A16
+    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin accepts the
+    unquantized activation key. A regression here would mean a W4A16
     ckpt silently went to the cutlass W4A4 path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (

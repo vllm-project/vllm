@@ -437,7 +437,11 @@ def select_fp8_moe_backend(
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
+                k_cls,
+                config,
+                weight_key,
+                None if backend == Fp8MoeBackend.MARLIN else activation_key,
+                activation_format,
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -515,7 +519,7 @@ def select_fp8_moe_backend(
                 k_cls,
                 config,
                 weight_key,
-                activation_key,
+                None if backend == Fp8MoeBackend.MARLIN else activation_key,
                 activation_format,
             )
             if supported:
