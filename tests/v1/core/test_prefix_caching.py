@@ -6,7 +6,7 @@ import copy
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -325,7 +325,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
+    """Restore the final host page when completing an indexer-only import."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -360,11 +360,15 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    # The local prefix is adopted from shadow pages (GPU-resident), while the
-    # externally imported page stays host-backed until its tail allocation.
     assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
+    assert not resident[2].is_null
     assert not resident[3].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+    coordinator.finish_host_import(resumed.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1 and transfers[0].restore
+    assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
 
 def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
@@ -465,7 +469,8 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     )
     allocated = manager.get_blocks(resumed.request_id).blocks
     assert len(allocated[0]) == host_blocks
-    assert allocated[2][1].is_null == (external > 0)
+    assert allocated[2][1].is_null == (host_blocks > 2)
+    assert not allocated[2][-1].is_null
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
@@ -488,6 +493,87 @@ def allocate_external_prefix(
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
     )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])
+def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
+    """Import every real token and restore the page used by last-token replay."""
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
+    connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    request.kv_transfer_params = {"do_remote_prefill": True}
+    count, is_async = connector.get_num_new_matched_tokens(request, 0)
+    assert count == num_tokens and is_async
+    assert allocate_external_prefix(manager, request, count) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    assert len(source) == len(resident) == (num_tokens + 15) // 16
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
+    coordinator = get_hisparse_coordinator(manager)
+    assert not coordinator.build_offload_command().page_transfers
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 1
+    restore = transfers[0]
+    assert restore.restore and not restore.after_forward
+    assert restore.host_block_id == source[-1].block_id
+    assert restore.resident_block_ids == (resident[-1].block_id,)
+    request.num_computed_tokens = count
+    scheduler = SimpleNamespace(
+        connector=connector,
+        kv_cache_manager=manager,
+        failed_recving_kv_req_ids=set(),
+        finished_recving_kv_req_ids={request.request_id},
+        prefix_replay_tokens=0,
+    )
+    scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
+    Scheduler._update_waiting_for_remote_kv(scheduler, request)
+    assert request.num_tokens - request.num_computed_tokens == 1
+    assert manager.allocate_slots(request, num_new_tokens=1) is not None
+    assert coordinator.build_row_mirrors([(request.request_id, num_tokens - 1, 1)])
+    # A pending restore must not expose uninitialized GPU copies to prefix hits.
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 2
+    assert all(resident[-1] not in copies for copies in coordinator.copies.values())
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert resident[-1].ref_cnt == 1
+    assert coordinator.request_states[request.request_id].valid_pages == set(
+        range(num_tokens // HISPARSE_BLOCK_SIZE)
+    )
+    if num_tokens % HISPARSE_BLOCK_SIZE:
+        assert source[-1].block_hash is None
+    else:
+        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+
+
+def test_hisparse_aborted_tail_restore_retains_both_endpoints():
+    """An abort cannot recycle storage still used by a queued tail restore."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
+    request = make_request("import", list(range(17)), HISPARSE_BLOCK_SIZE, sha256)
+    assert allocate_external_prefix(manager, request, 17) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    host_tail, gpu_tail = source[-1], resident[-1]
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    restore = coordinator.build_offload_command().page_transfers[0]
+    manager.free(request)
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
+    coordinator.update_spills({}, {restore.transfer_id: 1})
+    assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
@@ -669,7 +755,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
-        11,
+        12,
         16,
         transfer_device_cache=True,
     )
@@ -1127,9 +1213,10 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
     assert len(resident) == num_prompt_blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
-    assert manager.block_pool.get_num_free_blocks() == 1
+    assert manager.block_pool.get_num_free_blocks() == 0
 
 
 def test_hisparse_external_import_survives_capacity_retry():
@@ -1149,7 +1236,8 @@ def test_hisparse_external_import_survives_capacity_retry():
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
-    assert all(block.is_null for block in resident)
+    assert all(block.is_null for block in resident[:-1])
+    assert not resident[-1].is_null
     assert len(hot) == 2
 
 
@@ -1826,8 +1914,7 @@ def _test_partial_request_hit(
 def _make_hybrid_kv_cache_config(
     block_size: int, num_blocks: int, spec_types: list[str]
 ) -> KVCacheConfig:
-    """
-    Create a KVCacheConfig with the specified spec types.
+    """Create a KVCacheConfig with the specified spec types.
 
     Args:
         block_size: The block size for KV cache.
@@ -1837,6 +1924,7 @@ def _make_hybrid_kv_cache_config(
             - "sliding_window": SlidingWindowSpec with window=2*block_size
             - "sliding_window_large": SlidingWindowSpec with window=4*block_size
             - "mamba": MambaSpec
+
     """
     spec_map = {
         "full": lambda: FullAttentionSpec(
@@ -1938,8 +2026,7 @@ _HYBRID_MODEL_TEST_CASES = [
 
 @pytest.mark.parametrize("spec_types", _HYBRID_MODEL_TEST_CASES)
 def test_prefill_hybrid_model_combinations(spec_types: list[str]):
-    """
-    Test prefix caching with hybrid models containing various combinations of
+    """Test prefix caching with hybrid models containing various combinations of
     KV cache spec types.
 
     This unified test covers:
@@ -2021,8 +2108,7 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
 def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
-    """
-    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
+    """Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
     More complex hybrid models with EAGLE are not yet supported (see issue #32802).
     """
     block_size = 16
@@ -2489,8 +2575,7 @@ def test_evict():
 
 
 def test_hash_block_correct_reuse():
-    """
-    This tests when a previously cached block is reused as a new block,
+    """This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
     """
     block_size = 16
@@ -2530,8 +2615,7 @@ def test_hash_block_correct_reuse():
 
 
 def test_computed_blocks_not_evicted():
-    """
-    Test that the computed blocks are not evicted when getting new blocks
+    """Test that the computed blocks are not evicted when getting new blocks
     for a request if there are any other free blocks.
     """
     block_size = 16
@@ -2590,9 +2674,7 @@ def test_computed_blocks_not_evicted():
 
 
 def test_basic_prefix_caching_disabled():
-    """
-    This tests that the prefix caching is disabled.
-    """
+    """This tests that the prefix caching is disabled."""
     block_size = 4
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 5),
@@ -2639,11 +2721,9 @@ def test_basic_prefix_caching_disabled():
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_cache_blocks(hash_fn):
-    """
-    This is a unit test that tests the correctness of the _cache_full_blocks
+    """This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
-
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=5,
@@ -2688,9 +2768,7 @@ def test_cache_blocks(hash_fn):
 
 
 def test_cache_blocks_multi_group():
-    """
-    This tests that blocks are cached correctly for different kv cache groups.
-    """
+    """This tests that blocks are cached correctly for different kv cache groups."""
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
@@ -2773,10 +2851,7 @@ def test_cache_blocks_multi_group():
 
 
 def test_mm_prefix_caching():
-    """
-    This tests that the multi-modal prefix caching is correct.
-    """
-
+    """This tests that the multi-modal prefix caching is correct."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
@@ -2881,8 +2956,7 @@ def test_mm_prefix_caching():
 
 
 def test_cache_key_salting():
-    """
-    This tests that cache salts are applied during hashing and the cache
+    """This tests that cache salts are applied during hashing and the cache
     is separated cache as expected.
     """
     block_size = 16
@@ -2961,8 +3035,7 @@ def test_cache_key_salting():
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
-    """
-    This is a unit test that tests the correctness of the allocate_slots
+    """This is a unit test that tests the correctness of the allocate_slots
     when there is not enough free blocks. Specifically, when a request
     has computed blocks but cannot be allocated due to not enough free blocks,
     the computed blocks should not be touched.
@@ -3462,8 +3535,7 @@ def test_session_id_does_not_affect_prefix_cache_identity():
 
 
 def test_block_stored_event_group_idx_multiple_groups():
-    """
-    Test BlockStored events for separate HMA groups that each carry the
+    """Test BlockStored events for separate HMA groups that each carry the
     correct group_idx.
 
     Simulates the HMA scenario where full-attention blocks (group 0) and
@@ -3585,8 +3657,7 @@ def test_block_stored_event_group_idx_out_of_bounds(monkeypatch):
 
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_removed_event_group_idx(group_id: int):
-    """
-    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    """Test BlockRemoved events emitted on eviction carry the group_idx extracted
     from the evicted block's BlockHashWithGroupId via get_group_id().
     """
     block_size = 4
