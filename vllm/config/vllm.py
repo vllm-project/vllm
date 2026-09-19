@@ -772,6 +772,39 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
+        """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
+        Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
+        at capture; lm_head runs outside compiled forward and does not benefit."""
+        from vllm.model_executor.determinism.batch_invariant_configs import (
+            has_tuned_matmul_configs,
+        )
+        from vllm.platforms import current_platform
+
+        model = self.model_config
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            or model is None
+            or model.enforce_eager
+            or model.dtype != torch.bfloat16
+            or model.quantization is not None
+            or not current_platform.is_cuda()
+            or not has_tuned_matmul_configs()
+        ):
+            return False
+        parallel = self.parallel_config
+        tp = parallel.tensor_parallel_size
+        hidden = model.get_hidden_size()
+        head = model.get_head_size()
+        heads = model.get_num_attention_heads(parallel)
+        kv_heads = model.get_num_kv_heads(parallel)
+        shapes = [((heads + 2 * kv_heads) * head, hidden), (hidden, heads * head)]
+        intermediate = getattr(model.hf_text_config, "intermediate_size", None)
+        # Per-layer sizes (e.g. Gemma3n) are not modeled.
+        if isinstance(intermediate, int):
+            shapes += [(2 * intermediate // tp, hidden), (hidden, intermediate // tp)]
+        return has_tuned_matmul_configs(shapes)
+
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
             "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -781,6 +814,18 @@ class VllmConfig:
             logger.info_once(
                 "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+            )
+        elif (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and envs.VLLM_BATCH_INVARIANT
+            and self._uses_breakable_cudagraph_for_batch_invariance()
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 "
+                "so tuned matmul configs follow the runtime batch size "
+                "(vllm-project/vllm#54243). Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 "
+                "to opt out."
             )
 
         from vllm.compilation.breakable_cudagraph import (
@@ -1697,7 +1742,14 @@ class VllmConfig:
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
-            if self.parallel_config.tensor_parallel_size == 1:
+            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                logger.warning_once(
+                    "Sequence parallelism and async TP require compilation mode "
+                    "VLLM_COMPILE; disabling them."
+                )
+                pass_config.enable_sp = False
+                pass_config.fuse_gemm_comms = False
+            elif self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
                 pass_config.fuse_gemm_comms = False
