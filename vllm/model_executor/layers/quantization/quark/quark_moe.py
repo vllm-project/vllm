@@ -1667,7 +1667,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
-                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+                    self.mxfp4_backend,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    act_dtype=act_dtype,
                 )
             )
         return hidden_size, intermediate_size_per_partition

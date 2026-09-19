@@ -23,6 +23,41 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 from .utils import make_dummy_moe_config
 
 
+@pytest.mark.parametrize("tp_size,padded", [(4, 576), (8, 320)])
+@pytest.mark.parametrize("packing", [2, 32])
+def test_mxfp4_intermediate_padding_preserves_all_tp_shards(tp_size, padded, packing):
+    """Packed weights and block scales cover the checkpoint exactly once."""
+    experts = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(experts)
+    experts.moe_config = make_dummy_moe_config()
+    experts.moe_config.moe_parallel_config.tp_size = tp_size
+    hidden, intermediate = 64, 2304
+    local = intermediate // tp_size
+    w1 = torch.arange(intermediate * hidden // packing).reshape(
+        intermediate, hidden // packing
+    )
+    w3 = w1 + w1.numel()
+    w2 = torch.arange(hidden * intermediate // packing).reshape(
+        hidden, intermediate // packing
+    )
+    loaded_w1, loaded_w3, loaded_w2 = [], [], []
+    for rank in range(tp_size):
+        gate_up = torch.zeros(2 * padded, hidden // packing, dtype=w1.dtype)
+        down = torch.zeros(hidden, padded // packing, dtype=w2.dtype)
+        experts._load_w13(gate_up, 0, "w1", w1, rank)
+        experts._load_w13(gate_up, 0, "w3", w3, rank)
+        experts._load_w2(down, 1, w2, rank)
+        loaded_w1.append(gate_up[:local])
+        loaded_w3.append(gate_up[padded : padded + local])
+        loaded_w2.append(down[:, : local // packing])
+        assert torch.count_nonzero(gate_up[local:padded]) == 0
+        assert torch.count_nonzero(gate_up[padded + local :]) == 0
+        assert torch.count_nonzero(down[:, local // packing :]) == 0
+    torch.testing.assert_close(torch.cat(loaded_w1), w1)
+    torch.testing.assert_close(torch.cat(loaded_w3), w3)
+    torch.testing.assert_close(torch.cat(loaded_w2, dim=1), w2)
+
+
 class TestGetHiddenDim:
     """Unit tests for _get_hidden_dim."""
 
