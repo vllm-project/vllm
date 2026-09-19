@@ -8,6 +8,7 @@ from vllm.models.glm5next.cpu.sparse_indexer import (
     _expand_pool_ids,
     _pool_compress,
     _quantize_cache_vector,
+    _weighted_indexer_score,
     fwht128_quant_fp8,
 )
 
@@ -81,6 +82,15 @@ def test_cpu_sparse_mqa_matches_selected_row_reference():
     expected = torch.einsum("hs,sd->hd", logits.softmax(-1), cache[0, :2])
     torch.testing.assert_close(actual[0], expected)
     assert lse is None
+
+
+def test_indexer_score_flattens_per_head_weights():
+    key = torch.ones(2, 128)
+    query = torch.ones(2, 128)
+    weights = torch.tensor([[2.0], [3.0]])
+
+    actual = _weighted_indexer_score(key, query, weights)
+    assert actual.item() == 5.0 * 128.0
 
 
 @pytest.mark.parametrize(

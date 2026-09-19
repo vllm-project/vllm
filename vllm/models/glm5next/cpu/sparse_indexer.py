@@ -72,6 +72,14 @@ def _dequantize_cache_vector(row: torch.Tensor) -> torch.Tensor:
     return (values.reshape(128) * scale).reshape(128)
 
 
+def _weighted_indexer_score(
+    key: torch.Tensor, query: torch.Tensor, weights: torch.Tensor
+) -> torch.Tensor:
+    """Compute one weighted multi-head indexer logit."""
+    per_head = (query.float() * key.float()).sum(dim=-1)
+    return (per_head * weights.float().reshape(-1)).sum()
+
+
 def _expand_pool_ids(
     pool_ids: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -370,9 +378,9 @@ class SparseAttnIndexerKpool(nn.Module):
                     if physical < 0:
                         continue
                     key = _dequantize_cache_vector(cache[physical, offset])
-                    scores[row, token] = (
-                        (key * q[row]).sum(dim=-1) * w[row]
-                    ).sum()
+                    scores[row, token] = _weighted_indexer_score(
+                        key, q[row], w[row]
+                    )
             select = min(self.topk_tokens // pool_size, scores.shape[1])
             pool_ids = torch.full(
                 (end - start, select),
@@ -427,10 +435,9 @@ class SparseAttnIndexerKpool(nn.Module):
                 if physical < 0:
                     continue
                 key = _dequantize_cache_vector(cache[physical, offset])
-                scores[token] = (
-                    (key * q_quant[row].float()).sum(dim=-1)
-                    * weights[row].float()
-                ).sum()
+                scores[token] = _weighted_indexer_score(
+                    key, q_quant[row], weights[row]
+                )
             select = min(self.topk_tokens // pool_size, length)
             pool_ids = torch.full(
                 (1, self.topk_tokens // pool_size),
