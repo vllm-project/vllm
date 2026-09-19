@@ -16,6 +16,7 @@ _EXPORTS: dict[str, str] = {
     "DataType": "humming.dtypes:DataType",
     "GemmType": "humming.config:GemmType",
     "LayerConfig": "humming.config:LayerConfig",
+    "WeightScale2Type": "humming.config:WeightScale2Type",
     "WeightScaleType": "humming.config:WeightScaleType",
     "humming_forward": "humming.forward:humming_forward",
     "may_quant_input": "humming.forward:may_quant_input",
