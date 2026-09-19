@@ -3099,6 +3099,11 @@ class VllmConfig:
                 "it sizes the KV cache from measured memory, which "
                 "kv_cache_memory_bytes overrides"
             )
+        elif cache_config.num_gpu_blocks_override is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "num_gpu_blocks_override overrides"
+            )
         elif not self.use_v2_model_runner:
             unsupported = "it requires the V2 model runner"
         elif self.attention_config.hisparse_config is not None:

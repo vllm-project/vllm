@@ -36,8 +36,15 @@ def _autotune_runner(
     max_num_tokens: int = 100,
     use_replayssm: bool = True,
     backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER,
+    committable_blocks: int | None = None,
 ) -> SimpleNamespace:
+    extensible_kv_cache = None
+    if committable_blocks is not None:
+        extensible_kv_cache = SimpleNamespace(
+            committable_blocks=lambda: committable_blocks, commit=Mock()
+        )
     return SimpleNamespace(
+        extensible_kv_cache=extensible_kv_cache,
         vllm_config=SimpleNamespace(
             cache_config=SimpleNamespace(use_replayssm=use_replayssm),
             mamba_config=SimpleNamespace(backend=backend),
@@ -59,8 +66,10 @@ def _autotune_runner(
         (dict(query_len=6, use_v2_model_runner=True), 16),
         # num_blocks - 1 is the binding constraint.
         (dict(query_len=1, max_num_tokens=128, max_num_seqs=64, num_blocks=5), 4),
+        # An extensible cache bounds by what warmup may commit, not capacity.
+        (dict(query_len=1, max_num_tokens=128, num_blocks=64, committable_blocks=4), 3),
     ],
-    ids=["v1", "v2", "clamped_to_state_capacity"],
+    ids=["v1", "v2", "clamped_to_state_capacity", "clamped_to_committable"],
 )
 def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
     query_len = runner_kwargs["query_len"]
@@ -102,6 +111,25 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     ):
         result = warmup._replayssm_autotune_kwargs(_autotune_runner(**runner_kwargs))
     assert result is None
+
+
+def test_replayssm_autotune_warmup_commits_dummy_slots_first():
+    """The dummy slots 1..max_num_reqs must be committed memory before the
+    autotune run and its cleanup touch them."""
+    runner = _autotune_runner(
+        query_len=1, max_num_tokens=128, num_blocks=64, committable_blocks=4
+    )
+    events: list[str] = []
+    runner.extensible_kv_cache.commit = lambda n: events.append(f"commit {n}")
+    runner._dummy_run = lambda **kwargs: events.append("dummy_run")
+    with (
+        patch.object(
+            warmup, "flashinfer_replayssm_autotune_supported", return_value=True
+        ),
+        patch.object(warmup, "_temporary_replayssm_autotune_state"),
+    ):
+        warmup.replayssm_autotune_warmup(runner)
+    assert events == ["commit 4", "dummy_run"]
 
 
 def test_replayssm_autotune_slots_restore_state_and_trackers():

@@ -251,21 +251,40 @@ def test_extensible_kv_cache_defaults():
     ).create_engine_config(UsageContext.OPENAI_API_SERVER)
     assert not config.cache_config.enable_extensible_kv_cache
     assert config.cache_config.resolved_gpu_memory_utilization == 0.92
+    config = EngineArgs(
+        model="facebook/opt-125m", num_gpu_blocks_override=64
+    ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert not config.cache_config.enable_extensible_kv_cache
 
 
-def test_extensible_kv_cache_rejects_manual_kv_cache_size():
+@pytest.mark.parametrize(
+    "manual_size",
+    [dict(kv_cache_memory_bytes=1 << 30), dict(num_gpu_blocks_override=64)],
+)
+def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
+    """Measured sizing and a manual size conflict: silently clamping the manual
+    one would misreport the cache, so an explicit request is an error."""
+    (arg_name,) = manual_size
     engine_args = EngineArgs(
-        model="facebook/opt-125m",
-        enable_extensible_kv_cache=True,
-        kv_cache_memory_bytes=1 << 30,
+        model="facebook/opt-125m", enable_extensible_kv_cache=True, **manual_size
     )
-    with pytest.raises(ValueError, match="kv_cache_memory_bytes"):
+    with pytest.raises(ValueError, match=arg_name):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
 
-def test_extensible_kv_cache_falls_back_when_driver_unsupported():
-    from types import SimpleNamespace
+def _fake_executor(vllm_config, collective_rpc):
+    from types import MethodType, SimpleNamespace
 
+    from vllm.v1.executor.abstract import Executor
+
+    fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
+    fake._extensible_kv_cache_unsupported_reason = MethodType(
+        Executor._extensible_kv_cache_unsupported_reason, fake
+    )
+    return fake
+
+
+def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     from vllm.v1.executor.abstract import Executor
 
     calls: list[str] = []
@@ -281,7 +300,7 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert vllm_config.cache_config.enable_extensible_kv_cache
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
     specs = [{"layer": object()}]
-    fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
+    fake = _fake_executor(vllm_config, collective_rpc)
     Executor.resolve_extensible_kv_cache(fake, specs)
     assert not vllm_config.cache_config.enable_extensible_kv_cache
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
@@ -291,15 +310,54 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     ]
 
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    fake = SimpleNamespace(
-        vllm_config=vllm_config, collective_rpc=lambda method: [None, None]
-    )
+    fake = _fake_executor(vllm_config, lambda method: [None, None])
     Executor.resolve_extensible_kv_cache(fake, specs)
     assert vllm_config.cache_config.enable_extensible_kv_cache
 
     # No KV cache at all: nothing to size, so the feature is turned off.
     Executor.resolve_extensible_kv_cache(fake, [{}])
     assert not vllm_config.cache_config.enable_extensible_kv_cache
+
+
+def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
+    """Under torchrun each rank probes only its own driver; a rank whose probe
+    passes must still follow one whose probe fails, or it hangs waiting for
+    the others in the block-count all-reduce."""
+    import torch.distributed as dist
+
+    from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
+
+    class FakeExecutor(ExecutorWithExternalLauncher):
+        def __init__(self, vllm_config, collective_rpc):
+            self.vllm_config = vllm_config
+            self.collective_rpc = collective_rpc
+
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        return [None]
+
+    reduced: list[tuple[int, object]] = []
+
+    def all_reduce(value: int, op):
+        reduced.append((value, op))
+        return 1  # Some other rank reported "unsupported".
+
+    monkeypatch.setattr(
+        ExecutorWithExternalLauncher, "_all_reduce", staticmethod(all_reduce)
+    )
+    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    FakeExecutor(vllm_config, collective_rpc).resolve_extensible_kv_cache(
+        [{"layer": object()}]
+    )
+    assert reduced == [(0, dist.ReduceOp.MAX)]
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
 
 
 def test_extensible_kv_cache_connector_needs_block_compact_layout():
