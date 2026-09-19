@@ -158,17 +158,20 @@ def getattr_iter(
     return default_factory() if default_factory is not None else default
 
 
-def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
     """Get any docstrings placed after attribute assignments in a class body.
 
     https://davidism.com/mit-license/
     """
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        # ``object`` and classes without retrievable source (e.g. builtins).
+        return
 
+    cls_node = ast.parse(textwrap.dedent(source)).body[0]
     if not isinstance(cls_node, ast.ClassDef):
-        raise TypeError("Given object was not a class.")
-
-    out = {}
+        return
 
     # Consider each pair of nodes.
     for a, b in pairwise(cls_node.body):
@@ -193,6 +196,20 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
                 continue
 
             out[target.id] = doc
+
+
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
+    """Get any docstrings placed after attribute assignments in a class body or
+    its bases."""
+    if not isinstance(cls, type):
+        raise TypeError("Given object was not a class.")
+
+    out: dict[str, str] = {}
+
+    # Walk the MRO from the most-base class to ``cls`` so that a docstring
+    # redefined on a subclass overrides the one inherited from a base class.
+    for klass in reversed(cls.__mro__):
+        _get_own_attr_docs(klass, out)
 
     return out
 
