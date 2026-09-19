@@ -2,13 +2,65 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tool_parsers import ToolParserManager
+
+
+def _stream_in_deltas(
+    tokenizer: TokenizerLike, output: str, boundaries: list[tuple[int, int]]
+) -> tuple[str, list[tuple[str, str]]]:
+    """Stream `output` through a fresh parser, batching tokens as given.
+
+    Returns the reconstructed content and (name, arguments) of each tool call.
+    """
+    parser = ToolParserManager.get_tool_parser("step3")(tokenizer)
+    request = ChatCompletionRequest(messages=[], model="test")
+
+    token_ids = tokenizer.encode(output, add_special_tokens=False)
+    token_texts, decoded = [], ""
+    for i in range(1, len(token_ids) + 1):
+        current = tokenizer.decode(token_ids[:i])
+        token_texts.append(current[len(decoded) :])
+        decoded = current
+
+    previous_text = ""
+    previous_ids: list[int] = []
+    content = ""
+    calls: dict[int, dict[str, str]] = {}
+    for start, end in boundaries:
+        delta_text = "".join(token_texts[start:end])
+        delta_ids = token_ids[start:end]
+        current_text = previous_text + delta_text
+        current_ids = previous_ids + delta_ids
+
+        message = parser.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_ids,
+            current_ids,
+            delta_ids,
+            request,
+        )
+        if message is not None:
+            content += message.content or ""
+            for tool_call in message.tool_calls or []:
+                call = calls.setdefault(tool_call.index, {"name": "", "arguments": ""})
+                call["name"] += tool_call.function.name or ""
+                call["arguments"] += tool_call.function.arguments or ""
+
+        previous_text, previous_ids = current_text, current_ids
+
+    return content, [(c["name"], c["arguments"]) for c in calls.values()]
 
 
 class TestStep3ToolParser(ToolParserTests):
@@ -110,3 +162,41 @@ class TestStep3ToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+    @pytest.mark.parametrize(
+        "output_attr", ["single_tool_call_output", "surrounding_text_output"]
+    )
+    def test_streaming_is_independent_of_delta_boundaries(
+        self,
+        test_config: ToolParserTestConfig,
+        tokenizer: TokenizerLike,
+        output_attr: str,
+    ):
+        """Streaming must not depend on how tokens are batched into deltas.
+
+        The name and the arguments used to be emitted from separate calls, so
+        a delta carrying a whole tool call yielded empty arguments, and a delta
+        carrying both leading text and a tool call yielded no tool call at all.
+        Multi-token deltas are normal in production (``--stream-interval``,
+        speculative decoding, scheduler batching).
+        """
+        output = getattr(test_config, output_attr)
+        num_tokens = len(tokenizer.encode(output, add_special_tokens=False))
+
+        baseline = _stream_in_deltas(
+            tokenizer, output, [(i, i + 1) for i in range(num_tokens)]
+        )
+        assert baseline[1] == [
+            (
+                test_config.single_tool_call_expected_name,
+                json.dumps(test_config.single_tool_call_expected_args),
+            )
+        ]
+
+        for split in range(1, num_tokens):
+            batched = _stream_in_deltas(
+                tokenizer, output, [(0, split), (split, num_tokens)]
+            )
+            assert batched == baseline, f"differs when split after token {split}"
+
+        assert _stream_in_deltas(tokenizer, output, [(0, num_tokens)]) == baseline
