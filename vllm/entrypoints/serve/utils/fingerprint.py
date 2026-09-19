@@ -20,7 +20,10 @@ of times per server); each subclass caches the returned string on
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 FingerprintMode = Literal["full", "hash", "custom", "none"]
 
@@ -43,6 +46,24 @@ def get_system_fingerprint(vllm_config: Any) -> str | None:
     """Return the fingerprint for ``vllm_config`` using the mode configured by
     ``set_default_fingerprint_mode``."""
     return build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
+
+
+def dump_response_with_fingerprint(response: BaseModel) -> dict[str, Any]:
+    """``model_dump()`` a response that carries a ``system_fingerprint`` field,
+    dropping that key entirely when ``--fingerprint-mode=none`` rather than
+    serializing it as JSON ``null``.
+
+    ``model_dump()`` on the response as a whole can't use ``exclude_none``
+    for this: other fields (e.g. ``service_tier``) are also nullable but
+    should stay present as explicit ``null`` per the OpenAI schema, and
+    dropping all of them would be a bigger, unrelated behavior change. Only
+    ``system_fingerprint`` is scoped here, and only in the mode where the
+    user explicitly asked for it to be disabled.
+    """
+    content = response.model_dump()
+    if _DEFAULT_MODE == "none":
+        content.pop("system_fingerprint", None)
+    return content
 
 
 def build_system_fingerprint(
