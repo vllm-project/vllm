@@ -154,6 +154,23 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         assert expected in dockerfile
 
 
+def test_kv_connector_install_preserves_pytorch_family() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    connector_stage = dockerfile.split(
+        "FROM vllm-base AS vllm-openai-base", maxsplit=1
+    )[1].split("# Mooncake registers GPU memory", maxsplit=1)[0]
+
+    constraint = "--constraint /vllm-workspace/torch_lib_versions.txt"
+    assert connector_stage.count(constraint) == 3
+    for expected in (
+        'uv pip freeze --system | grep -i "^torch=\\|^torchvision=\\|^torchaudio="',
+        "| diff -u /vllm-workspace/torch_lib_versions.txt -",
+        "uv pip check --system",
+        "import torch, torchvision, torchvision.ops, torchaudio, vllm",
+    ):
+        assert expected in connector_stage
+
+
 def test_rust_build_cache_excludes_git_metadata() -> None:
     import torch
 
