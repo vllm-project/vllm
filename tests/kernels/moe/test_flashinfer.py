@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -537,10 +538,11 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
     method.moe_kernel = None
+    mock_kernel = MagicMock()
     monkeypatch.setattr(
         method,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", object()),
+        lambda _: setattr(method, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
