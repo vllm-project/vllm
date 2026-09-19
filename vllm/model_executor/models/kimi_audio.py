@@ -13,7 +13,7 @@ from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -180,7 +180,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
