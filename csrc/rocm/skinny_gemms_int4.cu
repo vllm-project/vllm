@@ -197,7 +197,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         for (int n = 0; n < N; n++) {
-          bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+          // K % 16 == 0 (host-checked) and k_ is a multiple of A_CHUNK (16),
+          // so s[k_ + K * n] is always 32-byte aligned. Telling the compiler
+          // lets it widen the LDS read to ds_load_b128 for every activation.
+          bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+              &(s[k_ + K * n]), sizeof(bigTypeA)));
         }
       }
 
@@ -446,8 +450,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         for (int n = 0; n < N; n++) {
+          // See the note in wvSplitK_int4_hf_sml_: s[k_ + K * n] is 32-byte
+          // aligned, so the LDS read can widen to ds_load_b128 for all rows.
           if (k_ + K * n < max_lds_len)
-            bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+            bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+                &(s[k_ + K * n]), sizeof(bigTypeA)));
           else
             bigA[n][k2] = *((const bigTypeA*)(&(A[k_ + K * n])));
         }
