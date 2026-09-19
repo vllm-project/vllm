@@ -411,3 +411,22 @@ def test_load_bytes_lazy_hash_matches_eager_mode_conversion():
         assert _hash(lazy) == _hash(eager)
         assert not lazy.is_decoded
         assert np.array_equal(np.array(lazy.media), np.array(eager.media))
+
+
+def test_load_bytes_lazy_png_hash_does_not_decode(monkeypatch):
+    """Hashing a lazy PNG must not trigger pixel decoding.
+
+    PngImageFile.getexif() calls .load() when info lacks an "exif" key, so
+    the hasher must only consult EXIF parsed at open time.
+    """
+    data = _png_bytes(Image.new("RGB", (8, 8), (1, 2, 3)))
+    image_io = ImageMediaIO()
+    eager = image_io.load_bytes(data)
+    lazy = image_io.load_bytes_lazy(data)
+
+    def fail_load(self):
+        raise AssertionError("hashing triggered a pixel decode")
+
+    monkeypatch.setattr(lazy.header_image, "load", fail_load)
+    assert _hash(lazy) == _hash(eager)
+    assert not lazy.is_decoded

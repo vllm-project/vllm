@@ -116,9 +116,15 @@ class MultiModalHasher:
 
         if isinstance(obj, LazyMedia):
             if (header_image := obj.header_image) is not None:
-                # The header was opened eagerly at fetch time, so the EXIF /
-                # io_config branches below do not trigger pixel decoding.
-                image_id = _get_image_id_bytes(header_image)
+                # Never let hashing decode pixels: PngImageFile.getexif()
+                # calls .load() to scan for a trailing eXIf chunk when info
+                # has none. Per the PNG spec eXIf must precede IDAT, so
+                # compliant PNGs parse EXIF into info at open time and hash
+                # identically to the eager path; a non-compliant
+                # trailing-eXIf PNG with an ImageID would hash differently.
+                image_id = None
+                if header_image.format != "PNG" or "exif" in header_image.info:
+                    image_id = _get_image_id_bytes(header_image)
                 if image_id is not None:
                     return _framed(image_id)
 
