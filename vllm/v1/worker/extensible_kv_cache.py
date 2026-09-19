@@ -126,14 +126,21 @@ class ExtensibleKVCache:
         self.commit(1)
         return self.buffer.full_view()
 
-    def commit(self, num_blocks: int, defragment: bool = False) -> None:
-        """Back the first ``num_blocks`` blocks; new blocks are zeroed, never shrinks.
+    def commit(
+        self, num_blocks: int, defragment: bool = False, shrink: bool = False
+    ) -> None:
+        """Back the first ``num_blocks`` blocks; new blocks are zeroed.
 
-        ``defragment`` remaps each segment as one driver allocation (discarding
-        contents): UCX cannot RDMA a range spanning several allocations.
+        Grow-only unless ``shrink`` is set, which remaps a smaller prefix and
+        discards contents. ``defragment`` remaps each segment as one driver
+        allocation (discarding contents): UCX cannot RDMA a range spanning
+        several allocations.
         """
         num_blocks = min(num_blocks, self.capacity_blocks)
-        if defragment and self.buffer.num_physical_chunks > self.buffer.num_segments:
+        remap = (
+            defragment and self.buffer.num_physical_chunks > self.buffer.num_segments
+        ) or (shrink and num_blocks < self.num_committed_blocks)
+        if remap:
             self.buffer.release_physical()
             self.num_committed_blocks = 0
         if num_blocks <= self.num_committed_blocks:
@@ -283,15 +290,17 @@ class ExtensibleKVCache:
 def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
     """Blocks warmup may address: all of them, or, for an extensible cache,
     those whose commit still leaves the reserved headroom free."""
-    if runner.extensible_kv_cache is not None:
-        return runner.extensible_kv_cache.committable_blocks()
+    kv_cache = getattr(runner, "extensible_kv_cache", None)
+    if kv_cache is not None:
+        return kv_cache.committable_blocks()
     return runner.kv_cache_config.num_blocks
 
 
 def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
     """Commit enough of an extensible KV cache to address ``num_blocks``."""
-    if runner.extensible_kv_cache is not None:
-        runner.extensible_kv_cache.commit(num_blocks)
+    kv_cache = getattr(runner, "extensible_kv_cache", None)
+    if kv_cache is not None:
+        kv_cache.commit(num_blocks)
 
 
 def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
@@ -303,8 +312,18 @@ def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
     """
     kv_cache = runner.extensible_kv_cache
     assert kv_cache is not None
+    if num_blocks < kv_cache.num_committed_blocks:
+        # Warmup committed more than the measured budget fits (its transient
+        # peak exceeded the reserve); the contents are warmup garbage.
+        logger.info(
+            "Remapping the KV cache from %d to %d blocks to fit the measured budget.",
+            kv_cache.num_committed_blocks,
+            num_blocks,
+        )
     kv_cache.commit(
-        num_blocks, defragment=runner.vllm_config.kv_transfer_config is not None
+        num_blocks,
+        defragment=runner.vllm_config.kv_transfer_config is not None,
+        shrink=True,
     )
     runner.kv_cache_config.num_blocks = kv_cache.num_committed_blocks
     logger.info(
