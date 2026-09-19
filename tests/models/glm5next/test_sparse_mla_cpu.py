@@ -55,13 +55,6 @@ def test_cpu_cache_quantization_returns_glm_record():
 
 
 def test_cpu_sparse_mqa_matches_selected_row_reference():
-    class Projection:
-        def __init__(self, weight):
-            self.weight = weight
-
-        def __call__(self, x):
-            return x @ self.weight.t(), None
-
     impl = object.__new__(Glm5NextCPUSparseImpl)
     impl.num_heads = 2
     impl.v_head_dim = 3
@@ -69,7 +62,6 @@ def test_cpu_sparse_mqa_matches_selected_row_reference():
     impl.qk_nope_head_dim = 2
     impl.qk_rope_head_dim = 0
     impl.scale = 0.5
-    impl.kv_b_proj = Projection(torch.randn(2 * (2 + 3), 4))
     impl.topk_indices_buffer = torch.tensor([[0, 1, -1]], dtype=torch.int32)
 
     q = torch.randn(1, 2, 4)
@@ -85,12 +77,8 @@ def test_cpu_sparse_mqa_matches_selected_row_reference():
     )()
 
     actual, lse = impl.forward_mqa(q, cache, metadata, None)
-    projected = (cache[0, :2] @ impl.kv_b_proj.weight.t()).view(
-        2, impl.num_heads, impl.qk_nope_head_dim + impl.v_head_dim
-    )
-    _, values = projected.split([2, 3], dim=-1)
     logits = torch.einsum("nd,sd->ns", q[0], cache[0, :2]) * impl.scale
-    expected = torch.einsum("hs,shv->hv", logits.softmax(-1), values)
+    expected = torch.einsum("hs,sd->hd", logits.softmax(-1), cache[0, :2])
     torch.testing.assert_close(actual[0], expected)
     assert lse is None
 

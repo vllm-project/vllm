@@ -212,13 +212,17 @@ class Glm5NextCPUSparseImpl(SparseMLACommonImpl[Glm5NextCPUSparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
+        if q.shape[-1] != self.kv_lora_rank:
+            raise NotImplementedError(
+                "GLM5Next CPU sparse MLA currently requires qk_rope_head_dim=0"
+            )
         assert self.topk_indices_buffer is not None
         topk = self.topk_indices_buffer[: q.shape[0]]
         req_ids = attn_metadata.req_id_per_token[: q.shape[0]]
         cache = kv_cache.view(-1, kv_cache.shape[-1])
         latent_cache = cache[:, : self.kv_lora_rank]
         block_size = attn_metadata.block_size
-        output = q.new_zeros((q.shape[0], self.num_heads, self.v_head_dim))
+        output = q.new_zeros((q.shape[0], self.num_heads, self.kv_lora_rank))
         for row in range(q.shape[0]):
             req = int(req_ids[row])
             local = topk[row]
@@ -231,18 +235,10 @@ class Glm5NextCPUSparseImpl(SparseMLACommonImpl[Glm5NextCPUSparseMetadata]):
             physical = attn_metadata.block_table[req, blocks]
             slots = physical * block_size + offsets
             latent = latent_cache[slots]
-            projected = self.kv_b_proj(latent)[0].view(
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-            )
-            _, values = projected.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
             query = q[row]
-            if self.qk_rope_head_dim:
-                query = query[..., : self.kv_lora_rank]
             logits = torch.einsum("nd,sd->ns", query, latent)
             probs = torch.softmax(logits * self.scale, dim=-1)
-            output[row] = torch.einsum("hs,shv->hv", probs, values)
+            output[row] = torch.einsum("hs,sd->hd", probs, latent)
         return output, None
 
     def forward_mha(self, *args, **kwargs) -> None:
