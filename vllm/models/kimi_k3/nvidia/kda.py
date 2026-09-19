@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.common.kda import store_cache_checkpoints_kernel
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -49,7 +50,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
     flashinfer_recurrent_kda,
@@ -387,69 +388,6 @@ def _flashinfer_kda_prefill(
         prefill_workspace=prefill_workspace,
     )
     return output, initial_state
-
-
-@triton.jit
-def _store_cache_checkpoints_kernel(
-    x_ptr,
-    conv_state_ptr,
-    recurrent_checkpoint_ptr,
-    recurrent_state_ptr,
-    query_start_loc_ptr,
-    checkpoint_offsets_ptr,
-    checkpoint_state_indices_ptr,
-    x_stride_0: tl.constexpr,
-    x_stride_1: tl.constexpr,
-    state_stride_0: tl.constexpr,
-    state_stride_1: tl.constexpr,
-    state_stride_2: tl.constexpr,
-    checkpoint_stride_0: tl.constexpr,
-    recurrent_state_stride_0: tl.constexpr,
-    checkpoint_offset_stride: tl.constexpr,
-    STATE_LEN: tl.constexpr,
-    WIDTH: tl.constexpr,
-    RECURRENT_ROW_SIZE: tl.constexpr,
-    NULL_STATE_IDX: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    # store checkpoints to cache
-    seq_idx = tl.program_id(0)
-    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx).to(tl.int64)
-    checkpoint_offset = tl.load(
-        checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
-    )
-    valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
-    valid_conv = (
-        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
-    )
-    width_idx = cols // STATE_LEN
-    history_idx = cols % STATE_LEN
-    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
-    token_idx = checkpoint_end - STATE_LEN + history_idx
-    values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
-        mask=valid_conv,
-    )
-    tl.store(
-        conv_state_ptr
-        + state_idx * state_stride_0
-        + width_idx * state_stride_1
-        + history_idx * state_stride_2,
-        values,
-        mask=valid_conv,
-    )
-
-    valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
-    recurrent = tl.load(
-        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
-        mask=valid_recurrent,
-    )
-    tl.store(
-        recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
-        recurrent,
-        mask=valid_recurrent,
-    )
 
 
 def resolve_kda_prefill_backend(
@@ -1177,7 +1115,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         width = mixed_qkv_ns.shape[-1]
                         recurrent_row_size = checkpoint_state[0].numel()
                         block_size = 256
-                        _store_cache_checkpoints_kernel[
+                        store_cache_checkpoints_kernel[
                             (
                                 checkpoint_offsets.numel(),
                                 triton.cdiv(

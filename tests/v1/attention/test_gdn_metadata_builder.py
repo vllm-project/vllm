@@ -221,3 +221,52 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from dataclasses import replace
+
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    builder = _create_gdn_builder(num_speculative_tokens=num_spec)
+    builder.vllm_config.cache_config.mamba_cache_mode = "align"
+    builder.vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    builder.kv_cache_spec = replace(
+        builder.kv_cache_spec,
+        block_size=64,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+        num_speculative_blocks=num_spec,
+    )
+    batch = BatchSpec(
+        seq_lens=[65, 100, 100], query_lens=[3 if num_spec else 1, 100, 99]
+    )
+    common = create_common_attn_metadata(batch, 64, DEVICE, arange_block_indices=True)
+    table = common.block_table_tensor + 1
+    if num_spec:
+        table = torch.cat([table, torch.zeros(3, num_spec, dtype=table.dtype)], dim=1)
+    common = common.replace(block_table_tensor=table)
+    kwargs = {}
+    if num_spec:
+        kwargs = dict(
+            num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        )
+    actual = builder.build(0, common, **kwargs)
+    assert actual.checkpoint is not None
+    offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
+    slots = [common.block_table_tensor[1, 0].item(), NULL_BLOCK_ID]
+    if not num_spec:
+        slots.insert(0, NULL_BLOCK_ID)
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, torch.tensor(offsets, dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
+    )
