@@ -106,8 +106,13 @@ class WorkerBase:
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
-        backends = get_current_attn_backends(self.vllm_config)
-        return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
+        # Backend capability hooks read the ambient config (e.g. FlashInfer's
+        # get_supported_kernel_block_sizes and supported_kv_cache_layouts), so
+        # install it for the duration of the query; this RPC is otherwise the
+        # one capability path that runs without it.
+        with set_current_vllm_config(self.vllm_config):
+            backends = get_current_attn_backends(self.vllm_config)
+            return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""
