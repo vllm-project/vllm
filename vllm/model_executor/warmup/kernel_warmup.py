@@ -219,8 +219,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
-    flashinfer_sparse_mla_decode_autotune_warmup(worker)
-    deepseek_v4_sparse_mla_attention_warmup(worker)
+    if not current_platform.is_xpu():
+        flashinfer_sparse_mla_decode_autotune_warmup(worker)
+        deepseek_v4_sparse_mla_attention_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
