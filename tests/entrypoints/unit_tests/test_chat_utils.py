@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -18,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
+    MultiModalItemTracker,
     _load_embeds_dict,
     _parse_metadata_array,
     _postprocess_messages,
@@ -25,8 +27,9 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
     validate_chat_template,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.media import LazyMedia
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
@@ -3068,6 +3071,86 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop():
+    """Lazy vision_chunk items decode on the media thread pool, not the
+    event-loop thread, when use_unified_vision_chunk_modality is active."""
+    loop_thread_name = threading.current_thread().name
+    decode_thread_names: list[str] = []
+
+    def _decode():
+        decode_thread_names.append(threading.current_thread().name)
+        return "decoded-image"
+
+    lazy_item = LazyMedia(_decode, b"fake-image-bytes")
+
+    async def _fetch():
+        return lazy_item, "uuid-0"
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker._model_config.hf_config.use_unified_vision_chunk = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [lambda: _fetch()]
+    tracker._modality_order["vision_chunk"] = ["image"]
+
+    mm_data, mm_uuids = await tracker.resolve_items()
+
+    assert decode_thread_names
+    assert all(name != loop_thread_name for name in decode_thread_names)
+    assert lazy_item.is_decoded
+    assert mm_data is not None
+    chunk = mm_data["vision_chunk"][0]
+    assert chunk["type"] == "image"
+    assert chunk["image"] == "decoded-image"
+    assert mm_uuids == {"vision_chunk": ["uuid-0"]}
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_lazy_vision_chunk_decode_error_propagates_async():
+    """A LazyMedia decode failure in a vision_chunk item must raise
+    VLLMUnprocessableEntityError, not be logged and swallowed."""
+
+    def _decode():
+        raise ValueError("corrupt media")
+
+    lazy_item = LazyMedia(_decode, b"corrupt-video-bytes")
+
+    async def _fetch():
+        return lazy_item, None
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker._model_config.hf_config.use_unified_vision_chunk = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [lambda: _fetch()]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError, match="corrupt media"):
+        await tracker.resolve_items()
+
+
+def test_resolve_items_lazy_vision_chunk_decode_error_propagates_sync(caplog):
+    """Sync path: a LazyMedia decode failure in a vision_chunk item must
+    propagate as VLLMUnprocessableEntityError instead of hitting the
+    "Failed to split video chunks" log-and-append fallback."""
+
+    def _decode():
+        raise ValueError("corrupt media")
+
+    lazy_item = LazyMedia(_decode, b"corrupt-video-bytes")
+
+    tracker = MultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [(lazy_item, None)]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError, match="corrupt media"):
+        tracker.resolve_items()
+    assert "Failed to split video chunks" not in caplog.text
 
 
 def _assistant_tool_call(arguments, name="write"):

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pybase64
@@ -17,7 +19,7 @@ from vllm.utils.sparse_utils import (
 )
 
 from ..image import convert_image_mode, normalize_image, rgba_to_rgb
-from .base import MediaIO, MediaWithBytes
+from .base import LazyMedia, MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
@@ -76,7 +78,14 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 image, self.image_mode, self.rgba_background_color
             )
 
-    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
+    def open_header(self, data: bytes) -> tuple[Image.Image, dict[str, Any] | None]:
+        """Open only the image header, leaving the pixels undecoded.
+
+        Returns the header-opened image (mode/size/EXIF are readable without
+        decoding pixels) and the io_config of the decode that will follow:
+        conversion happens iff `image_mode` differs from the header mode,
+        matching the decode-time `converted is not image` check.
+        """
         try:
             image = Image.open(BytesIO(data))
             w, h = image.size
@@ -87,19 +96,56 @@ class ImageMediaIO(MediaIO[Image.Image]):
                     f"the maximum of {max_pixels} pixels. Set "
                     f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
                 )
-            image = normalize_image(image)
-            image.load()
-            converted = self._convert_image_mode(image)
         except (OSError, Image.UnidentifiedImageError) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
         io_config = None
-        if converted is not image:
+        if self.image_mode is not None and image.mode != self.image_mode:
             io_config = {
                 "image_mode": self.image_mode,
                 "rgba_background_color": self.rgba_background_color,
             }
-        return MediaWithBytes(converted, data, io_config)
+        return image, io_config
+
+    def _decode_pixels(self, image: Image.Image) -> Image.Image:
+        """Rasterize a header-opened image, then normalize and convert it."""
+        try:
+            image = normalize_image(image)
+            image.load()
+            return self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+
+    def _decode_from_bytes(self, data: bytes) -> Image.Image:
+        header_image, _ = self.open_header(data)
+        return self._decode_pixels(header_image)
+
+    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
+        header_image, io_config = self.open_header(data)
+        return MediaWithBytes(self._decode_pixels(header_image), data, io_config)
+
+    def load_bytes_lazy(self, data: bytes) -> LazyMedia[Image.Image]:
+        """Eager header-open + lazy pixel-decode.
+
+        The header (mode/size/EXIF) is parsed eagerly so io_config and the
+        hasher's EXIF branch match the eager path, and oversized images still
+        fail at fetch time. Unparsable headers and pixel decoding are
+        deferred to first access, where decode errors surface.
+        """
+        try:
+            header_image, io_config = self.open_header(data)
+        except ValueError as e:
+            # The max-pixels ValueError has no __cause__ and stays eager;
+            # header parse failures (wrapping OSError) are deferred.
+            if e.__cause__ is None:
+                raise
+            return LazyMedia(partial(self._decode_from_bytes, data), data)
+        return LazyMedia(
+            partial(self._decode_pixels, header_image),
+            data,
+            io_config,
+            header_image,
+        )
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))

@@ -4,6 +4,7 @@ import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import numpy as np
 import numpy.typing as npt
@@ -17,7 +18,8 @@ from vllm.assets.video import (
     video_to_ndarrays,
     video_to_pil_images_list,
 )
-from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
+from vllm.multimodal.media import ImageMediaIO, LazyMedia, VideoMediaIO
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
@@ -589,3 +591,180 @@ def test_pynvvc_frames_normalized_to_nhwc(layout: str):
     assert out.shape == (n, h, w, c)
     assert out.is_contiguous()
     assert torch.equal(out, nhwc)  # content preserved / correctly transposed
+
+
+# ---------------------------------------------------------------------------
+# Lazy video decode tests
+# ---------------------------------------------------------------------------
+
+
+@VIDEO_LOADER_REGISTRY.register("recording_lazy_backend")
+class RecordingLazyVideoLoader(VideoLoader):
+    """Test loader that records every load_bytes invocation."""
+
+    calls: ClassVar[list[bytes]] = []
+
+    @classmethod
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict]:
+        cls.calls.append(data)
+        return FAKE_OUTPUT_1, {"video_backend": "recording_lazy_backend"}
+
+
+def test_load_bytes_lazy_defers_decode(monkeypatch: pytest.MonkeyPatch):
+    """load_bytes_lazy must not invoke the video loader until first access.
+
+    This is what keeps GPU/NVDEC codec selection and decoding (which happen
+    inside the loader's load_bytes) off the fetch path and inside the
+    processor's parallel decode phase.
+    """
+    RecordingLazyVideoLoader.calls.clear()
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "recording_lazy_backend")
+        videoio = VideoMediaIO(ImageMediaIO(), num_frames=10)
+
+        lazy = videoio.load_bytes_lazy(b"test")
+        assert isinstance(lazy, LazyMedia)
+        assert not lazy.is_decoded
+        assert RecordingLazyVideoLoader.calls == []
+
+        frames, metadata = lazy.media
+        assert lazy.is_decoded
+        assert RecordingLazyVideoLoader.calls == [b"test"]
+        np.testing.assert_array_equal(frames, FAKE_OUTPUT_1)
+        assert metadata["video_backend"] == "recording_lazy_backend"
+
+        # Repeated access is a cache read, not a re-decode.
+        _ = lazy.media
+        assert RecordingLazyVideoLoader.calls == [b"test"]
+
+
+@pytest.mark.parametrize("codec_backend", ["opencv", "torchcodec"])
+def test_load_bytes_lazy_matches_load_bytes(tmp_path, codec_backend: str):
+    """Lazy decoding must produce the same frames and metadata as the eager
+    load_bytes for every codec backend available in this environment."""
+    if codec_backend == "torchcodec":
+        pytest.importorskip("torchcodec")
+
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
+    video_path = f"{tmp_path}/test_lazy_video.mp4"
+    create_video_from_image(str(image_path), video_path, num_frames=4)
+    data = Path(video_path).read_bytes()
+
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=2, backend=codec_backend)
+
+    lazy = videoio.load_bytes_lazy(data)
+    assert not lazy.is_decoded
+    eager = videoio.load_bytes(data)
+
+    lazy_frames, lazy_metadata = lazy.media
+    eager_frames, eager_metadata = eager.media
+
+    np.testing.assert_array_equal(np.asarray(lazy_frames), np.asarray(eager_frames))
+    assert lazy_metadata == eager_metadata
+    assert lazy.original_bytes == eager.original_bytes == data
+
+
+def test_load_base64_lazy_jpeg_defers_decode(monkeypatch: pytest.MonkeyPatch):
+    """The jpeg_sequence lazy path defers per-frame decoding (not just the
+    stack) until first access, and decodes to the same result as load_base64."""
+    num_test_frames = 3
+    data = ",".join(_make_jpeg_b64_frames(num_test_frames))
+
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=num_test_frames)
+
+    calls: list[str] = []
+    original_load_base64 = ImageMediaIO.load_base64
+
+    def counting_load_base64(self, media_type, frame_data):
+        calls.append(frame_data)
+        return original_load_base64(self, media_type, frame_data)
+
+    monkeypatch.setattr(ImageMediaIO, "load_base64", counting_load_base64)
+
+    lazy = videoio.load_base64_lazy("video/jpeg", data)
+    assert isinstance(lazy, LazyMedia)
+    assert not lazy.is_decoded
+    assert calls == []
+    assert lazy.original_bytes == data.encode()
+
+    frames, metadata = lazy.media
+    assert lazy.is_decoded
+    assert len(calls) == num_test_frames
+
+    eager = videoio.load_base64("video/jpeg", data)
+    eager_frames, eager_metadata = eager.media
+    np.testing.assert_array_equal(frames, eager_frames)
+    assert metadata == eager_metadata
+    assert lazy.original_bytes == eager.original_bytes
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"num_frames": 0}, "num_frames must be greater than 0 or -1"),
+        ({"num_frames": 3, "frames_indices": [0, 1]}, "frames_indices length"),
+        ({"num_frames": 3, "frames_indices": "0,1"}, "list of integers"),
+        ({"num_frames": 3, "total_num_frames": 2}, "must be >="),
+        ({"num_frames": 3, "duration": -1}, "duration must be a non-negative"),
+    ],
+)
+def test_load_base64_lazy_jpeg_validates_eagerly(kwargs: dict, match: str):
+    """Argument validation must fire at load_base64_lazy call time, before
+    any access to the lazy item."""
+    data = ",".join(_make_jpeg_b64_frames(3))
+    videoio = VideoMediaIO(ImageMediaIO(), **kwargs)
+
+    with pytest.raises(ValueError, match=match):
+        videoio.load_base64_lazy("video/jpeg", data)
+
+
+def test_load_base64_lazy_jpeg_enforces_num_frames_limit():
+    """The num_frames truncation happens during eager splitting, so the lazy
+    path cannot be used to bypass the per-request frame limit."""
+    data = ",".join(_make_jpeg_b64_frames(20))
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=4)
+
+    lazy = videoio.load_base64_lazy("video/jpeg", data)
+    frames, metadata = lazy.media
+
+    assert frames.shape[0] == 4
+    assert metadata["total_num_frames"] == 4
+    assert metadata["frames_indices"] == list(range(4))
+
+
+def test_lazy_video_metadata_check_fires_at_decode():
+    """Parsing stores metadata=None for lazy video items; the
+    video_needs_metadata check fires when the item is decoded, where the
+    jpeg_sequence decoder supplies metadata."""
+    parser = MultiModalDataParser(video_needs_metadata=True)
+
+    data = ",".join(_make_jpeg_b64_frames(3))
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=3)
+    lazy = videoio.load_base64_lazy("video/jpeg", data)
+
+    item, metadata = parser._get_video_with_metadata(lazy)
+    assert metadata is None
+    assert isinstance(item, LazyMedia)
+    assert not item.is_decoded
+
+    frames, parsed_metadata = item.media
+    assert frames.shape[0] == 3
+    assert parsed_metadata["video_backend"] == "jpeg_sequence"
+
+
+def test_lazy_video_without_metadata_raises_at_decode():
+    """A lazy item decoding to frames without metadata must raise the
+    video_needs_metadata error at decode time, not at parse time."""
+    parser = MultiModalDataParser(video_needs_metadata=True)
+    lazy = LazyMedia(lambda: np.zeros((2, 4, 4, 3), dtype=np.uint8), b"raw")
+
+    item, metadata = parser._get_video_with_metadata(lazy)
+    assert metadata is None
+    assert not item.is_decoded
+
+    with pytest.raises(ValueError, match="Video metadata is required"):
+        _ = item.media

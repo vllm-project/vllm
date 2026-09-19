@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import uuid
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from vllm.multimodal.media import ImageMediaIO
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.media import ImageMediaIO, LazyMedia
 
 pytestmark = pytest.mark.cpu_test
 
@@ -281,3 +284,130 @@ def test_image_pixel_limit_disabled(monkeypatch):
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
     assert result.media.size == (1000, 1000)
+
+
+def _png_bytes(image: Image.Image) -> bytes:
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _hash(item) -> str:
+    return MultiModalHasher.hash_kwargs("blake3", image=item)
+
+
+def test_load_bytes_lazy_defers_decode():
+    """load_bytes_lazy opens only the header; pixels decode on first access."""
+    data = _png_bytes(Image.new("RGB", (8, 8), (100, 150, 200)))
+    image_io = ImageMediaIO()
+
+    lazy = image_io.load_bytes_lazy(data)
+    assert isinstance(lazy, LazyMedia)
+    assert not lazy.is_decoded
+    assert lazy.original_bytes == data
+    # The header is readable without triggering pixel decoding
+    assert lazy.header_image.size == (8, 8)
+    assert lazy.header_image.mode == "RGB"
+    assert not lazy.is_decoded
+
+    decoded = lazy.media
+    assert lazy.is_decoded
+    assert decoded is lazy.media  # decode result is cached
+
+    eager = image_io.load_bytes(data)
+    assert lazy.io_config == eager.io_config
+    assert decoded.mode == eager.media.mode
+    assert np.array_equal(np.array(decoded), np.array(eager.media))
+
+
+def test_load_bytes_lazy_preserves_mode_when_disabled():
+    """image_mode=None keeps the original mode and leaves io_config None."""
+    data = _png_bytes(Image.new("RGBA", (8, 8), (0, 0, 0, 0)))
+    lazy = ImageMediaIO(image_mode=None).load_bytes_lazy(data)
+
+    assert lazy.io_config is None
+    assert lazy.media.mode == "RGBA"
+
+
+def test_load_bytes_lazy_error_timing():
+    """Decode errors surface at first access, not at construction."""
+    image_io = ImageMediaIO()
+
+    # Unparsable header: deferred so decode errors surface at the use site
+    lazy = image_io.load_bytes_lazy(b"not an image")
+    assert lazy.header_image is None
+    assert not lazy.is_decoded
+    with pytest.raises(ValueError, match="Failed to load image"):
+        _ = lazy.media
+
+    # Truncated JPEG: the header still parses, pixel decoding fails
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), (100, 150, 200)).save(buf, format="JPEG")
+    data = buf.getvalue()[:-50]
+
+    lazy = image_io.load_bytes_lazy(data)
+    assert not lazy.is_decoded
+    with pytest.raises(ValueError, match="Failed to load image"):
+        _ = lazy.media
+
+
+def test_load_bytes_lazy_rejects_oversized_image_eagerly(monkeypatch):
+    """The VLLM_MAX_IMAGE_PIXELS check stays in the eager header phase."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 100)
+
+    data = _png_bytes(Image.new("RGB", (20, 20), (0, 255, 0)))
+    with pytest.raises(ValueError, match="exceed"):
+        ImageMediaIO().load_bytes_lazy(data)
+
+
+def test_load_bytes_lazy_hash_matches_eager_no_exif():
+    """Same bytes, no EXIF: lazy and eager items hash identically, without
+    triggering a decode."""
+    data = _png_bytes(Image.new("RGB", (8, 8), (100, 150, 200)))
+    image_io = ImageMediaIO()
+    lazy = image_io.load_bytes_lazy(data)
+    eager = image_io.load_bytes(data)
+
+    assert lazy.io_config is None and eager.io_config is None
+    assert _hash(lazy) == _hash(eager)
+    assert not lazy.is_decoded
+
+
+def test_load_bytes_lazy_hash_matches_eager_with_exif():
+    """Same bytes, with EXIF: lazy and eager items hash identically."""
+    image = Image.new("RGB", (8, 4), (10, 20, 30))
+    exif = Image.Exif()
+    exif[Image.ExifTags.Base.ImageID] = uuid.uuid4().bytes
+    exif[Image.ExifTags.Base.Orientation] = 6
+    buf = BytesIO()
+    image.save(buf, format="JPEG", exif=exif)
+    data = buf.getvalue()
+
+    image_io = ImageMediaIO()
+    lazy = image_io.load_bytes_lazy(data)
+    eager = image_io.load_bytes(data)
+
+    assert lazy.io_config == eager.io_config
+    assert _hash(lazy) == _hash(eager)
+    assert not lazy.is_decoded
+    # Decode equivalence, including the EXIF orientation transpose
+    assert lazy.media.size == eager.media.size == (4, 8)
+    assert np.array_equal(np.array(lazy.media), np.array(eager.media))
+
+
+def test_load_bytes_lazy_hash_matches_eager_mode_conversion():
+    """Non-RGB source: io_config is computed eagerly and hashes match the
+    eager path exactly."""
+    data = _png_bytes(Image.new("RGBA", (8, 8), (255, 0, 0, 128)))
+
+    for background in ((255, 255, 255), (0, 0, 0)):
+        image_io = ImageMediaIO(rgba_background_color=background)
+        lazy = image_io.load_bytes_lazy(data)
+        eager = image_io.load_bytes(data)
+
+        assert lazy.io_config == eager.io_config is not None
+        assert _hash(lazy) == _hash(eager)
+        assert not lazy.is_decoded
+        assert np.array_equal(np.array(lazy.media), np.array(eager.media))

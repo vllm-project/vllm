@@ -9,7 +9,8 @@ import pybase64 as base64
 import pytest
 import soundfile as sf
 
-from vllm.multimodal.media import AudioMediaIO
+from vllm.exceptions import VLLMValidationError
+from vllm.multimodal.media import AudioMediaIO, LazyMedia
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
     load_audio,
@@ -175,6 +176,96 @@ def test_load_audio_threads_max_decode_bytes():
             max_duration_s=600,
             max_decode_bytes=512 * 1024,
         )
+
+
+def test_audio_media_io_load_bytes_lazy_decode_matches_eager(dummy_audio_bytes):
+    """The lazy handle must not decode at construction and must decode to
+    exactly what load_bytes returns."""
+    audio_io = AudioMediaIO()
+    lazy = audio_io.load_bytes_lazy(dummy_audio_bytes)
+    assert isinstance(lazy, LazyMedia)
+    assert lazy.original_bytes == dummy_audio_bytes
+    assert not lazy.is_decoded
+
+    ref_audio, ref_sr = audio_io.load_bytes(dummy_audio_bytes)
+    audio, sr = lazy.media
+    assert lazy.is_decoded
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_audio_media_io_load_bytes_lazy_rejects_oversize_eagerly(
+    dummy_audio_bytes, monkeypatch
+):
+    """The encoded-size guard must run at fetch time, not at decode time."""
+    audio_io = AudioMediaIO()
+    monkeypatch.setattr(audio_io, "get_max_bytes", lambda: 4)
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        audio_io.load_bytes_lazy(dummy_audio_bytes)
+
+
+def test_audio_media_io_load_bytes_lazy_corrupt_raises_on_access():
+    """Corrupt bytes must construct a lazy handle; the decode error only
+    surfaces on first access (the processor wraps it as a 422)."""
+    audio_io = AudioMediaIO()
+    lazy = audio_io.load_bytes_lazy(b"garbage-not-audio")
+    assert not lazy.is_decoded
+    with pytest.raises(ValueError, match="Invalid or corrupted audio data"):
+        _ = lazy.media
+
+
+def test_audio_media_io_load_base64_lazy(dummy_audio_bytes, monkeypatch):
+    """The lazy base64 variant keeps the encoded-size guard eager and decodes
+    to the same samples as load_base64."""
+    encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
+    audio_io = AudioMediaIO()
+
+    lazy = audio_io.load_base64_lazy("audio/wav", encoded)
+    assert not lazy.is_decoded
+    ref_audio, ref_sr = audio_io.load_base64("audio/wav", encoded)
+    audio, sr = lazy.media
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+    monkeypatch.setattr(audio_io, "get_max_bytes", lambda: 4)
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        audio_io.load_base64_lazy("audio/wav", encoded)
+
+
+def test_audio_media_io_load_file_lazy(audio_assets: AudioTestAssets, monkeypatch):
+    """The lazy file variant keeps the size guard eager (rejecting before the
+    read) and decodes to the same samples as load_file."""
+    audio_io = AudioMediaIO()
+    path = audio_assets[0].get_local_path()
+
+    lazy = audio_io.load_file_lazy(path)
+    assert not lazy.is_decoded
+    ref_audio, ref_sr = audio_io.load_file(path)
+    audio, sr = lazy.media
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+    monkeypatch.setattr(audio_io, "get_max_bytes", lambda: 4)
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        audio_io.load_file_lazy(path)
+
+
+def test_audio_lazy_item_flows_through_parse_resample(dummy_audio_bytes):
+    """A lazy item from AudioMediaIO must pass through the parser undecoded,
+    with resampling stacked onto the decode."""
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    audio_io = AudioMediaIO()
+    parser = MultiModalDataParser(target_sr=8000, target_channels=1)
+
+    lazy = audio_io.load_bytes_lazy(dummy_audio_bytes)
+    items = parser.parse_mm_data({"audio": [lazy]})["audio"]
+    assert not lazy.is_decoded
+
+    ref_items = parser.parse_mm_data(
+        {"audio": [audio_io.load_bytes(dummy_audio_bytes)]}
+    )["audio"]
+    np.testing.assert_array_equal(items.get(0), ref_items.get(0))
 
 
 @pytest.mark.parametrize("backend", ["soundfile", "pyav", "torchcodec"])

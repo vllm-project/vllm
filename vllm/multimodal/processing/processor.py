@@ -1326,8 +1326,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _decode_lazy_items(
         self,
         mm_data_items: MultiModalDataItems,
-        *,
-        release_bytes: bool = False,
     ) -> None:
         """Decode all lazy media items in parallel on the media thread pool.
 
@@ -1367,20 +1365,25 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 parameter=f"{modality}_url",
             ) from cause
 
-        if release_bytes:
-            for _, item in lazy_items:
-                item.release_bytes()
-
     def _release_lazy_item_bytes(
         self,
         mm_data_items: MultiModalDataItems,
+        is_cached: MultiModalIsCached | None = None,
     ) -> None:
-        """Release the original bytes of lazy items (e.g. cache hits) once
-        hashing is done and their decode is no longer needed."""
-        for items in mm_data_items.values():
+        """Release the original bytes of lazy items once hashing is done and
+        their bytes are no longer needed.
+
+        With `is_cached` (from `_get_cache_missing_items`), only cache-hit
+        items are released: they never reach the HF processor. Cache-miss
+        items must keep their bytes until after `_apply_hf_processor_main`,
+        since byte-consuming models read `original_bytes` there.
+        """
+        for modality, items in mm_data_items.items():
             if not isinstance(items, ProcessorBatchItems):
                 continue
             for idx in range(items.get_count()):
+                if is_cached is not None and not is_cached[modality][idx]:
+                    continue
                 item = items.get_raw(idx)
                 if isinstance(item, LazyMedia):
                     item.release_bytes()
@@ -1521,19 +1524,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         with timing_ctx.record("decode_mm_items"):
             # Cache-miss items are decoded in parallel here; cache-hit items
-            # are never decoded. Hashing is done by now, so the original
-            # bytes of every lazy item can be released.
-            self._decode_lazy_items(mm_missing_data_items, release_bytes=True)
-            self._release_lazy_item_bytes(inputs.mm_data_items)
+            # are never decoded and their bytes can be released right after
+            # hashing. Miss items keep their bytes until HF processing is
+            # done (byte-consuming models read `original_bytes` there).
+            self._decode_lazy_items(mm_missing_data_items)
+            self._release_lazy_item_bytes(inputs.mm_data_items, mm_is_cached)
 
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
-        with timing_ctx.record("apply_hf_processor"):
-            mm_missing_processed_data = self._apply_hf_processor_main(
-                mm_items=mm_missing_data_items,
-                hf_kwargs=inputs.hf_processor_mm_kwargs,
-            )
+        try:
+            with timing_ctx.record("apply_hf_processor"):
+                mm_missing_processed_data = self._apply_hf_processor_main(
+                    mm_items=mm_missing_data_items,
+                    hf_kwargs=inputs.hf_processor_mm_kwargs,
+                )
+        finally:
+            # Hashing and HF processing are done; the miss items' bytes are
+            # released even if the HF processor raises. (Hit items were
+            # released above; this is idempotent.)
+            self._release_lazy_item_bytes(mm_missing_data_items)
+            self._release_lazy_item_bytes(inputs.mm_data_items)
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,

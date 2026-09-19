@@ -17,7 +17,7 @@ from vllm.config.multimodal import (
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.media import MediaWithBytes
+from vllm.multimodal.media import LazyMedia, MediaWithBytes
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
@@ -645,7 +645,14 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
 
             raw_videos: list[object] = []
             for index, item in enumerate(videos.data):
-                if isinstance(item, MediaWithBytes):
+                # This model decodes video from raw bytes itself. Lazy items
+                # stay wrapped after the processor's in-place decode, and
+                # their bytes may already be released on the cached path;
+                # fall back to decoded frames in that case.
+                if (
+                    isinstance(item, (MediaWithBytes, LazyMedia))
+                    and item.original_bytes
+                ):
                     raw_videos.append(item.original_bytes)
                 else:
                     raw_videos.append(videos.get(index))

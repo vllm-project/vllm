@@ -19,7 +19,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.media import LazyMedia
-from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.parse import MultiModalDataParser, ProcessorBatchItems
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
     TimingContext,
@@ -1416,9 +1416,26 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
             dummy_inputs=None,  # type: ignore[arg-type]
             cache=cache,
         )
+        # Raw bytes visible to byte-consuming models (see dots3_note) at
+        # HF-processing time, one entry per lazy item.
+        self.seen_original_bytes = list[bytes]()
+        self.fail_hf_processor = False
+
+    def _get_hf_mm_inputs(self, mm_items, hf_kwargs):
+        for items in mm_items.values():
+            if not isinstance(items, ProcessorBatchItems):
+                continue
+            for idx in range(items.get_count()):
+                raw = items.get_raw(idx)
+                if isinstance(raw, LazyMedia):
+                    self.seen_original_bytes.append(raw.original_bytes)
+        return super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
     def _call_hf_processor(self, hf_data, hf_kwargs):
         from transformers.feature_extraction_utils import BatchFeature
+
+        if self.fail_hf_processor:
+            raise RuntimeError("boom")
 
         images = hf_data.get("images") or []
         if not images:
@@ -1532,3 +1549,31 @@ def test_lazy_decode_error_becomes_unprocessable():
 
     assert exc_info.value.parameter == "image_url"
     assert slow_completed.is_set()
+
+
+def test_lazy_miss_bytes_available_during_hf_processing():
+    """Byte-consuming models (e.g. dots3_note) must still see non-empty
+    original_bytes on the cached path; bytes are released afterwards."""
+    processor = _LazyTestProcessor(with_cache=True)
+    lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+
+    _cached_apply(processor, [lazy])
+
+    # The HF-facing layer saw the raw bytes for the miss item...
+    assert processor.seen_original_bytes == [b"image-bytes"]
+    # ...and the bytes are released by the time processing returns.
+    assert lazy.original_bytes == b""
+
+
+def test_lazy_miss_bytes_released_on_hf_processor_error():
+    """Bytes of cache-miss lazy items are released even if HF processing
+    raises (try/finally in `_cached_apply_hf_processor`)."""
+    processor = _LazyTestProcessor(with_cache=True)
+    processor.fail_hf_processor = True
+    lazy = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _cached_apply(processor, [lazy])
+
+    assert processor.seen_original_bytes == [b"image-bytes"]
+    assert lazy.original_bytes == b""

@@ -128,6 +128,10 @@ class MultiModalHasher:
                         {"io_config": obj.io_config, "data": obj.original_bytes},
                     )
 
+                # Match the eager MediaWithBytes image branch, which prefixes
+                # the raw bytes with the b"image" key.
+                return cls.iter_item_to_bytes("image", obj.original_bytes)
+
             original_bytes = obj.original_bytes
             if not original_bytes and not obj.is_decoded:
                 raise RuntimeError(

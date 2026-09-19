@@ -52,7 +52,7 @@ from typing_extensions import Required, TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
@@ -65,7 +65,8 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, LazyMedia, MediaConnector
+from vllm.multimodal.media.connector import global_thread_pool
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
@@ -727,6 +728,23 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         raise NotImplementedError
 
 
+def _decode_lazy_item(data: object, modality: str) -> None:
+    """Trigger decoding of a lazy media item.
+
+    Decode failures are wrapped as VLLMUnprocessableEntityError so corrupt
+    media surfaces as a client error (422) instead of a server error.
+    """
+    if not isinstance(data, LazyMedia) or data.is_decoded:
+        return
+    try:
+        data.decode()
+    except Exception as error:
+        raise VLLMUnprocessableEntityError(
+            f"Failed to decode {modality} media: {error}",
+            parameter=f"{modality}_url",
+        ) from error
+
+
 def _resolve_vision_chunk_items(
     vision_chunk_items: list[tuple[object, str | None]],
     mm_processor: BaseMultiModalProcessor,
@@ -746,6 +764,9 @@ def _resolve_vision_chunk_items(
     for inner_modality, (data, uuid) in zip(
         vision_chunks_modality_order, vision_chunk_items
     ):
+        # Decode lazy items up front: decode failures must propagate instead
+        # of being swallowed by the split_video_chunks fallback below.
+        _decode_lazy_item(data, inner_modality)
         if inner_modality == "image":
             # Cast data to proper type for image
             # Use .media (PIL.Image) directly to avoid redundant
@@ -787,6 +808,40 @@ def _resolve_vision_chunk_items(
             else:
                 processed_chunks.append(data)  # type: ignore[arg-type]
     return processed_chunks, vision_chunks_uuids
+
+
+async def _predecode_vision_chunk_items(
+    vision_chunk_items: list[tuple[object, str | None]],
+    vision_chunks_modality_order: list[str],
+) -> None:
+    """Decode lazy vision_chunk items concurrently on the media thread pool.
+
+    Waits for every submitted decode to finish, then raises the first failure
+    (already wrapped as VLLMUnprocessableEntityError by `_decode_lazy_item`).
+    """
+    lazy_items = [
+        (inner_modality, data)
+        for inner_modality, (data, _uuid) in zip(
+            vision_chunks_modality_order, vision_chunk_items
+        )
+        if isinstance(data, LazyMedia) and not data.is_decoded
+    ]
+    if not lazy_items:
+        return
+
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(
+        *(
+            loop.run_in_executor(
+                global_thread_pool, _decode_lazy_item, data, inner_modality
+            )
+            for inner_modality, data in lazy_items
+        ),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
 
 
 def _resolve_items(
@@ -934,6 +989,17 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
             next_result_idx = result_idx + len(group)
             resolved_items_by_modality[modality] = results[result_idx:next_result_idx]
             result_idx = next_result_idx
+
+        # Decode lazy vision_chunk items concurrently on the media thread
+        # pool so no synchronous decode runs on the event-loop thread.
+        if (
+            self.use_unified_vision_chunk_modality
+            and "vision_chunk" in resolved_items_by_modality
+        ):
+            await _predecode_vision_chunk_items(
+                resolved_items_by_modality["vision_chunk"],
+                self._modality_order["vision_chunk"],
+            )
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None

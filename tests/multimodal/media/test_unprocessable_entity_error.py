@@ -8,6 +8,7 @@ HTTP 422 instead of 500.
 """
 
 from http import HTTPStatus
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -16,7 +17,9 @@ import pytest
 from vllm.connections import MediaDownloadSizeExceededError
 from vllm.entrypoints.serve import create_error_response
 from vllm.exceptions import VLLMClientError, VLLMUnprocessableEntityError
-from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media import AudioMediaIO, MediaConnector
+from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
+from vllm.multimodal.processing.processor import BaseMultiModalProcessor
 
 
 class TestVLLMUnprocessableEntityError:
@@ -171,3 +174,34 @@ class TestErrorResponse:
 
         assert response.error.message == "Test error message"
         assert response.error.code == 422
+
+    def test_processor_decode_error_returns_422(self):
+        """Corrupt media bytes decoded inside the mm processor surface as 422.
+
+        Intentional behavior change (400 -> 422): with eager decoding a
+        corrupt payload raised a plain decode error at fetch time, which
+        fell through to the 400 BadRequest fallback; the processor's
+        lazy-decode phase now wraps it as VLLMUnprocessableEntityError.
+        """
+        corrupt = b"corrupt-not-an-audio"
+        lazy = AudioMediaIO().load_bytes_lazy(corrupt)
+        mm_items = cast(
+            MultiModalDataItems,
+            {"audio": AudioProcessorItems([lazy])},  # type: ignore[list-item]
+        )
+
+        with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+            # `_decode_lazy_items` uses no instance state; call it unbound to
+            # exercise the real decode-and-wrap path without a full processor.
+            BaseMultiModalProcessor._decode_lazy_items(
+                cast("BaseMultiModalProcessor", None), mm_items
+            )
+
+        assert exc_info.value.parameter == "audio_url"
+
+        response = create_error_response(exc_info.value)
+
+        assert response.error.code == HTTPStatus.UNPROCESSABLE_ENTITY.value
+        assert response.error.type == "UnprocessableEntityError"
+        assert response.error.param == "audio_url"
+        assert "Failed to decode audio media" in response.error.message
