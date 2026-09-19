@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
+from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
@@ -1013,6 +1015,22 @@ def _process_weights_cpu(
     )
 
 
+def _xpu_uva_transform(
+    tensor: torch.Tensor,
+    transform: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Apply an XPU WNA16 layout transform without materializing a UVA tensor."""
+    if not getattr(tensor, "_vllm_is_uva_offloaded", False):
+        return transform(tensor)
+
+    cpu_tensor = tensor.to(device="cpu")
+    cpu_tensor = transform(cpu_tensor)
+
+    uva_tensor = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    uva_tensor._vllm_is_uva_offloaded = True
+    return uva_tensor
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -1061,10 +1079,22 @@ def _process_weights_xpu(
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
 
-    w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
-    w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
-    w13_scales_xpu = w13_scales.transpose(1, 2).contiguous()
-    w2_scales_xpu = w2_scales.transpose(1, 2).contiguous()
+    w13_xpu = _xpu_uva_transform(
+        w13_qweight,
+        lambda x: x.transpose(1, 2).contiguous().view(torch.uint8),
+    )
+    w2_xpu = _xpu_uva_transform(
+        w2_qweight,
+        lambda x: x.transpose(1, 2).contiguous().view(torch.uint8),
+    )
+    w13_scales_xpu = _xpu_uva_transform(
+        w13_scales,
+        lambda x: x.transpose(1, 2).contiguous(),
+    )
+    w2_scales_xpu = _xpu_uva_transform(
+        w2_scales,
+        lambda x: x.transpose(1, 2).contiguous(),
+    )
 
     return (
         w13_xpu,
