@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
 
@@ -487,9 +488,7 @@ class _SparseRuntime:
             "auto",
             torch.ones(1),
         )
-        q = torch.cos(
-            (pos[:, None, None] + torch.arange(8).reshape(1, 2, 4)) * 0.2
-        )
+        q = torch.cos((pos[:, None, None] + torch.arange(8).reshape(1, 2, 4)) * 0.2)
         attn_meta = SimpleNamespace(
             req_id_per_token=torch.tensor(req_ids),
             block_size=128,
@@ -530,8 +529,8 @@ class _SparseRuntime:
                         )
                     )
                 )
-                quantized = (transformed / scales).clamp(-448, 448).to(
-                    torch.float8_e4m3fn
+                quantized = (
+                    (transformed / scales).clamp(-448, 448).to(torch.float8_e4m3fn)
                 )
                 logical = torch.arange(pool_count)
                 physical = table[req_ids[row], logical // 32]
@@ -543,9 +542,7 @@ class _SparseRuntime:
                     records[:, 128:].contiguous().view(torch.float32), scales
                 )
                 scores = (
-                    (query[row].float() @ (quantized.float() * scales).T)
-                    .relu()
-                    .sum(0)
+                    (query[row].float() @ (quantized.float() * scales).T).relu().sum(0)
                 )
                 selected_pool = int(chosen[0]) // 4
                 torch.testing.assert_close(scores[selected_pool], scores.max())

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reference CPU sparse MLA backend for GLM5Next."""
 
 from dataclasses import dataclass
@@ -330,6 +331,4 @@ class Glm5NextCPUSparseImpl(SparseMLACommonImpl[Glm5NextCPUSparseMetadata]):
         return output, None
 
     def forward_mha(self, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            "GLM5Next CPU sparse MLA routes prefill through MQA"
-        )
+        raise NotImplementedError("GLM5Next CPU sparse MLA routes prefill through MQA")

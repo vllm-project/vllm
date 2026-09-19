@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness-first CPU implementation of the GLM5Next KeyPool indexer.
 
 This module intentionally uses eager PyTorch operations.  It is the CPU
@@ -88,9 +89,7 @@ def _expand_pool_ids(
 ) -> torch.Tensor:
     """Expand pool indices to causal token indices and append the tail."""
     rows: list[torch.Tensor] = []
-    width = max_tokens or (
-        pool_ids.shape[-1] * pool_size + max(pool_size - 1, 0)
-    )
+    width = max_tokens or (pool_ids.shape[-1] * pool_size + max(pool_size - 1, 0))
     for ids, seq_len in zip(pool_ids.tolist(), seq_lens.tolist()):
         values: list[int] = []
         for pool in ids:
@@ -246,9 +245,7 @@ class SparseAttnIndexerKpool(nn.Module):
             raise IndexError(f"index cache slot {slot} is out of bounds")
         values, scales = _quantize_cache_vector(pooled)
         flat_cache[block, offset, :128].copy_(values)
-        flat_cache[block, offset, 128:132].copy_(
-            scales.reshape(1).view(torch.uint8)
-        )
+        flat_cache[block, offset, 128:132].copy_(scales.reshape(1).view(torch.uint8))
 
     def _tail_rows(self) -> tuple[torch.Tensor, int] | None:
         if self.tail_cache is None:
@@ -279,9 +276,7 @@ class SparseAttnIndexerKpool(nn.Module):
             return cache[block, 0, offset], cache[block, 1, offset]
         return cache[block, offset, 0], cache[block, offset, 1]
 
-    def _tail_write(
-        self, slot: int, key: torch.Tensor, gate: torch.Tensor
-    ) -> None:
+    def _tail_write(self, slot: int, key: torch.Tensor, gate: torch.Tensor) -> None:
         result = self._tail_rows()
         if result is None:
             return
@@ -378,9 +373,7 @@ class SparseAttnIndexerKpool(nn.Module):
                     if physical < 0:
                         continue
                     key = _dequantize_cache_vector(cache[physical, offset])
-                    scores[row, token] = _weighted_indexer_score(
-                        key, q[row], w[row]
-                    )
+                    scores[row, token] = _weighted_indexer_score(key, q[row], w[row])
             select = min(self.topk_tokens // pool_size, scores.shape[1])
             pool_ids = torch.full(
                 (end - start, select),
@@ -416,8 +409,7 @@ class SparseAttnIndexerKpool(nn.Module):
             return
         if decode.requires_padding:
             raise NotImplementedError(
-                "CPU GLM sparse indexer does not support padded speculative "
-                "decode yet"
+                "CPU GLM sparse indexer does not support padded speculative decode yet"
             )
         seq_lens = decode.seq_lens.reshape(-1)
         page_table = decode.block_table
@@ -435,9 +427,7 @@ class SparseAttnIndexerKpool(nn.Module):
                 if physical < 0:
                     continue
                 key = _dequantize_cache_vector(cache[physical, offset])
-                scores[token] = _weighted_indexer_score(
-                    key, q_quant[row], weights[row]
-                )
+                scores[token] = _weighted_indexer_score(key, q_quant[row], weights[row])
             select = min(self.topk_tokens // pool_size, length)
             pool_ids = torch.full(
                 (1, self.topk_tokens // pool_size),
