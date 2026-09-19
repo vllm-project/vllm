@@ -71,10 +71,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.amd.rocm import (
-    DeepseekV4ROCMAiterMLAAttention,
-    weight_already_preshuffled,
-)
+from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
@@ -152,13 +149,11 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip if the linear's kernel already shuffled it.
-        if not weight_already_preshuffled(self.gate_up_proj):
-            replace_parameter(
-                self.gate_up_proj,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
+        replace_parameter(
+            self.gate_up_proj,
+            "weight",
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
         self._gateup_scale = ws
 
     def forward(self, x):
@@ -957,16 +952,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention._run_parallel_input_projections
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
