@@ -193,6 +193,15 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             )
         q_nope, q_rope = q
         num_actual_toks = q_rope.shape[0]
+        if num_actual_toks == 0:
+            return (
+                torch.empty(
+                    (0, self.num_heads, self.head_size),
+                    dtype=q_nope.dtype,
+                    device=q_nope.device,
+                ),
+                None,
+            )
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
@@ -302,6 +311,13 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         *,
         cache_is_flat: bool = False,
     ) -> torch.Tensor:
+        if q_rope.shape[0] == 0:
+            return torch.empty(
+                (0, self.num_heads, self.head_size),
+                dtype=q_nope.dtype,
+                device=q_nope.device,
+            )
+
         kv_rows = (
             kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
         )
