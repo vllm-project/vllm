@@ -122,6 +122,15 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
         ...
 
 
+@runtime_checkable
+class SupportsLocalLogits(Protocol):
+    """Optional capability to return post-processed, TP-local logits."""
+
+    def compute_local_logits(self, hidden_states: torch.Tensor) -> Any | None:
+        """Return local logits plus their vocabulary-shard layout."""
+        ...
+
+
 @overload
 def is_text_generation_model(
     model: type[object],
