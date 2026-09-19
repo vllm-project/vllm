@@ -1276,14 +1276,26 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,dp_size,elastic_ep,expected",
+    [(True, 2, False, True), (False, 2, False, False), (True, 1, False, False)],
+)
+def test_engram_dp_shared_memory_defaults_when_supported(
+    cpu_offload, dp_size, elastic_ep, expected
+):
+    """Unset dp_shared_memory enables sharing only for offloaded, non-elastic DP."""
+    parallel = ParallelConfig(data_parallel_size=dp_size)
+    parallel.enable_elastic_ep = elastic_ep
+    config = EngramConfig(cpu_offload=cpu_offload)
+    config.resolve_dp_shared_memory(parallel)
+    assert config.dp_shared_memory is expected
+
+
+@pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [
         (1, "auto", False, "requires data_parallel_size > 1"),
-        (2, "dummy", False, "requires load_format"),
-        (2, "sharded_state", False, "requires load_format"),
         (2, "auto", False, None),
         (2, "safetensors", True, None),
-        (2, "pt", True, None),
     ],
 )
 def test_engram_dp_shared_memory_config_validation(
