@@ -44,7 +44,7 @@ import uvloop
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -187,6 +187,7 @@ def main():
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     args = parser.parse_args()
+    configure_logging_from_args(args)
 
     # Run server
     try:

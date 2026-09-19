@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -49,6 +50,7 @@ from vllm.config import (
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
+    LoggingConfig,
     LoRAConfig,
     MambaConfig,
     ModelConfig,
@@ -83,6 +85,7 @@ from vllm.config.kernel import (
     SparseIndexerTopkBackend,
 )
 from vllm.config.load import SafetensorsLoadStrategy
+from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
@@ -442,6 +445,20 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
+_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
+    "--log-config-file is deprecated and will be removed in v0.33.0. "
+    "Use --logging-config.pylogging_config_file instead."
+)
+
+
+class DeprecatedLogConfigFileAction(argparse.Action):
+    """Warn when the legacy ``--log-config-file`` option is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
+        setattr(namespace, self.dest, values)
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -725,6 +742,10 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+
+    logging_config: LoggingConfig | None = None
+    log_level: LogLevel | None = None
+    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -1529,6 +1550,34 @@ class EngineArgs:
             **lora_kwargs["enable_moe_shared_loras"],
         )
 
+        # Logging arguments
+        logging_group = parser.add_argument_group(
+            title="LoggingConfig",
+            description=LoggingConfig.__doc__,
+        )
+        logging_config_kwargs = get_kwargs(VllmConfig)["logging_config"]
+        logging_config_kwargs["default"] = argparse.SUPPRESS
+        logging_group.add_argument("--logging-config", **logging_config_kwargs)
+        logging_group.add_argument(
+            "--log-level",
+            choices=get_args(LogLevel),
+            default=argparse.SUPPRESS,
+            help=(
+                "Shortcut for --logging-config.log_level. "
+                "Overrides that field if both are specified."
+            ),
+        )
+        logging_group.add_argument(
+            "--log-config-file",
+            dest="log_config_file",
+            default=argparse.SUPPRESS,
+            metavar="PYLOGGING_CONFIG_FILE",
+            action=DeprecatedLogConfigFileAction,
+            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
+        )
+        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
+        # compatibility mapping in create_logging_config() in v0.33.0.
+
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
@@ -2051,6 +2100,16 @@ class EngineArgs:
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
         )
+
+    def create_logging_config(self) -> LoggingConfig:
+        config = self.logging_config or LoggingConfig()
+        if self.log_level is not None:
+            config = dataclasses.replace(config, log_level=self.log_level)
+        if self.log_config_file is not None:
+            config = dataclasses.replace(
+                config, pylogging_config_file=self.log_config_file
+            )
+        return config
 
     def create_engine_config(
         self,
@@ -2608,6 +2667,7 @@ class EngineArgs:
             )
 
         observability_config = self.create_observability_config()
+        logging_config = self.create_logging_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
@@ -2678,6 +2738,7 @@ class EngineArgs:
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
+            logging_config=logging_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
