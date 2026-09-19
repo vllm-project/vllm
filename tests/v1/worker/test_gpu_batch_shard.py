@@ -461,6 +461,119 @@ def test_gather_sampler_output_kernels(tp_size: int):
         assert torch.equal(out.num_rejected.cpu(), expected_rejected.to(torch.int32))
 
 
+@requires_cuda
+def test_gather_sampler_output_sampling_masks():
+    """Sampling masks survive mixed-owner sharding with an empty rank."""
+    from dataclasses import replace as dc_replace
+
+    from vllm.v1.worker.gpu.sample.output import (
+        SamplerOutput,
+        SamplingMaskTensors,
+    )
+
+    tp_size = 3
+    rng = np.random.default_rng(0)
+    slot_pool = np.array([1, 2, 4, 5, 7, 8], dtype=np.int32)
+    batch = _make_batch(
+        rng,
+        num_reqs=len(slot_pool),
+        max_num_reqs=16,
+        max_spec=0,
+        slot_pool=slot_pool,
+    )
+    results = _shard_all_ranks(batch, max_num_reqs=16, tp_size=tp_size)
+    assert [result[2].num_local_reqs for result in results] == [0, 3, 3]
+    owners = batch.idx_mapping_np % tp_size
+    assert not np.array_equal(owners, np.sort(owners))
+
+    device = torch.device(DEVICE)
+    vocab_size = 32
+    compact_width = 4
+    packed_width = (vocab_size + 7) // 8
+    expected_token_ids = torch.empty(batch.num_reqs, compact_width, dtype=torch.int32)
+    expected_packed_masks = torch.empty(batch.num_reqs, packed_width, dtype=torch.uint8)
+    expected_counts = torch.empty(batch.num_reqs, dtype=torch.int32)
+    local_outputs: list[SamplerOutput | None] = []
+
+    for local, _, metadata in results:
+        if metadata.num_local_reqs == 0:
+            local_outputs.append(None)
+            continue
+        owned = torch.from_numpy(_owned_batch_indices(local))
+        token_ids = owned[:, None] * compact_width + torch.arange(compact_width)
+        packed_masks = owned[:, None] + torch.arange(packed_width)
+        counts = owned % compact_width + 1
+        expected_token_ids[owned] = token_ids.to(torch.int32)
+        expected_packed_masks[owned] = packed_masks.to(torch.uint8)
+        expected_counts[owned] = counts.to(torch.int32)
+        local_outputs.append(
+            SamplerOutput(
+                sampled_token_ids=torch.zeros(
+                    metadata.num_local_reqs, 1, dtype=torch.int64, device=device
+                ),
+                logprobs_tensors=None,
+                num_nans=None,
+                num_sampled=torch.ones(
+                    metadata.num_local_reqs, dtype=torch.int32, device=device
+                ),
+                num_rejected=torch.zeros(
+                    metadata.num_local_reqs, dtype=torch.int32, device=device
+                ),
+                sampling_mask_tensors=SamplingMaskTensors(
+                    token_ids=token_ids.to(device=device, dtype=torch.int32),
+                    packed_mask=packed_masks.to(device=device, dtype=torch.uint8),
+                    counts=counts.to(device=device, dtype=torch.int32),
+                    vocab_size=vocab_size,
+                ),
+            )
+        )
+
+    recorded: dict[int, list[torch.Tensor]] = {}
+    gathered: list[torch.Tensor] = []
+
+    def run(rank: int) -> SamplerOutput:
+        metadata = dc_replace(
+            results[rank][2],
+            gathered_src_indices=results[rank][2].gathered_src_indices.to(device),
+        )
+        call = 0
+
+        def fake_all_gather(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
+            nonlocal call
+            result = gathered[call] if gathered else torch.cat([x] * tp_size)
+            call += 1
+            if not gathered:
+                recorded.setdefault(rank, []).append(x.clone())
+            return result
+
+        with mock.patch.object(
+            batch_shard, "tensor_model_parallel_all_gather", fake_all_gather
+        ):
+            return batch_shard.gather_sampler_output(
+                local_outputs[rank],
+                metadata,
+                device,
+                global_batch=batch,
+                local_batch=results[rank][0],
+                sampling_mask_dims=(vocab_size, compact_width),
+            )
+
+    for rank in range(tp_size):
+        run(rank)
+    gathered.extend(
+        torch.cat([recorded[rank][i] for rank in range(tp_size)]) for i in range(4)
+    )
+
+    for rank in range(tp_size):
+        output = run(rank)
+        assert output.sampling_mask_tensors is not None
+        mask = output.sampling_mask_tensors
+        assert mask.vocab_size == vocab_size
+        assert torch.equal(mask.token_ids.cpu(), expected_token_ids)
+        assert torch.equal(mask.packed_mask.cpu(), expected_packed_masks)
+        assert torch.equal(mask.counts.cpu(), expected_counts)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_gather_sampler_output_logprobs_and_nans():
     """num_nans is reduced per request and gathered; LogprobsTensors are
