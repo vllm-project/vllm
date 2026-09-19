@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,6 +26,7 @@ from vllm.lora.model_manager import (
     LRUCacheLoRAModelManager,
 )
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
@@ -1103,3 +1105,211 @@ def test_target_modules_match_packed_runtime_modules(
         ],
         vllm_config=default_vllm_config,
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_image_mapping_restores_batch_after_failure(monkeypatch):
+    """A failed image encode must not leak its adapter into subsequent work."""
+    from vllm.lora.layers import LoRAMappingType
+
+    manager = object.__new__(LoRAModelManager)
+    manager._mm_lora_mappings = {}
+    manager._last_mapping = None
+    manager._last_slot_layout = None
+    manager.lora_index_to_id = [11, 22]
+    active = {}
+    monkeypatch.setattr(
+        manager,
+        "_set_adapter_mapping",
+        lambda mapping: active.update({mapping.type: mapping}),
+    )
+    # Profiling can precede the first mapping.
+    with manager.use_mm_lora_mapping(0, 5, 2):
+        assert not active
+    for kind in LoRAMappingType:
+        manager.set_adapter_mapping(
+            LoRAMapping((11, 11, 22, 0), (11, 22, 0), is_prefill=True, type=kind)
+        )
+    original = active.copy()
+    with (
+        pytest.raises(RuntimeError, match="encoder failed"),
+        manager.use_mm_lora_mapping(1, 5, 2),
+    ):
+        assert active[LoRAMappingType.TOWER].index_mapping == (22,) * 5
+        assert active[LoRAMappingType.CONNECTOR].index_mapping == (22,) * 2
+        assert active[LoRAMappingType.LANGUAGE] == original[LoRAMappingType.LANGUAGE]
+        raise RuntimeError("encoder failed")
+    assert active == original
+    with manager.use_mm_lora_mapping(2, 3, 1):
+        assert active[LoRAMappingType.TOWER].index_mapping == (0,) * 3
+        assert active[LoRAMappingType.CONNECTOR].index_mapping == (0,)
+    assert active == original
+
+
+@pytest.mark.parametrize("grid, expected", [([3, 3], (9, 1)), ([4, 7], (28, 6))])
+def test_image_lora_counts_exclude_span_delimiters(grid, expected):
+    from vllm.models.deepseek_v4_1.nvidia.vl_model import DeepseekV41ForCausalLM
+
+    model = object.__new__(DeepseekV41ForCausalLM)
+    model.config = SimpleNamespace(vision_downsample_ratio=3)
+    counts = model.get_mm_lora_token_counts(
+        modality="image",
+        mm_kwargs={"vit_grid": SimpleNamespace(data=torch.tensor(grid))},
+        num_mm_embeds=999,
+    )
+    assert counts == expected
+
+
+def test_image_lora_initialization_accepts_encoder_budget_without_grid():
+    from vllm.models.deepseek_v4_1.nvidia.vl_model import DeepseekV41ForCausalLM
+
+    model = object.__new__(DeepseekV41ForCausalLM)
+    model.config = SimpleNamespace(vision_downsample_ratio=3)
+    assert model.get_mm_lora_token_counts(
+        modality="image", mm_kwargs=None, num_mm_embeds=4096
+    ) == (36864, 4096)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA vision LoRA")
+def test_image_batch_matches_individual_adapters(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """Mixed adapters and base images keep their identity when TP reorders images."""
+    from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+        IMAGE,
+        IMAGE_END,
+        IMAGE_NEW_LINE,
+        IMAGE_START,
+    )
+    from vllm.models.deepseek_v4_1.nvidia.vl_model import (
+        DeepseekV4VLImagePixelInputs,
+        DeepseekV41ForCausalLM,
+    )
+
+    from vllm.lora.layers import LoRAMappingType
+    from vllm.models.deepseek_v4.common.vision import DeepseekV4Aligner, DeepseekV4ViT
+
+    def init_small_wrappers(manager, max_tokens, vllm_config):
+        # Keep the real manager/wrappers; only bypass full-checkpoint token budgeting.
+        manager.supports_mm = manager.supports_tower_connector_lora = True
+        manager.mm_mapping = manager.model.get_mm_mapping()
+        manager.punica_wrapper_mapping = {
+            prefix: get_punica_wrapper(
+                128, 8, manager.device, lora_config=manager.lora_config
+            )
+            for prefix in ("language_model", "vision.", "aligner")
+        }
+
+    monkeypatch.setattr(LoRAModelManager, "_init_punica_wrapper", init_small_wrappers)
+    torch.manual_seed(7)
+    config = SimpleNamespace(
+        vision_patch_size=2,
+        vision_dim=64,
+        vision_n_heads=1,
+        vision_inter_dim=64,
+        vision_n_layers=1,
+        vision_rope_theta=10000.0,
+        vision_downsample_ratio=2,
+        hidden_size=64,
+    )
+    lora_config = LoRAConfig(
+        max_loras=2,
+        max_lora_rank=8,
+        lora_dtype=torch.bfloat16,
+        enable_tower_connector_lora=True,
+    )
+    with torch.device("cuda"), torch.inference_mode():
+        model = object.__new__(DeepseekV41ForCausalLM)
+        torch.nn.Module.__init__(model)
+        model.config = config
+        model.use_data_parallel = True
+        model.vision = DeepseekV4ViT(config).to(torch.bfloat16)
+        model.aligner = DeepseekV4Aligner(config).to(torch.bfloat16)
+        for name in ("image_start", "image_end", "image_newline"):
+            setattr(
+                model, name, torch.nn.Parameter(torch.randn(64, dtype=torch.bfloat16))
+            )
+        for name, value in model.named_parameters():
+            if value.ndim > 1:
+                value.normal_(std=0.1)
+            elif name.endswith("bias"):
+                value.zero_()
+        grids = [(2, 3), (4, 4), (3, 5), (1, 2)]
+        ids = [11, 22, 0, 11]
+        patches = [torch.randn(h * w, 3, 2, 2, dtype=torch.bfloat16) for h, w in grids]
+
+        def image_input(indices):
+            llm_grid = [(-(-grids[i][0] // 2), -(-grids[i][1] // 2)) for i in indices]
+            types = []
+            for h, w in llm_grid:
+                types.extend(
+                    [IMAGE_START] + ([IMAGE] * w + [IMAGE_NEW_LINE]) * h + [IMAGE_END]
+                )
+            return DeepseekV4VLImagePixelInputs(
+                patches=torch.cat([patches[i] for i in indices]),
+                vit_grid=torch.tensor([grids[i] for i in indices], device="cpu"),
+                llm_grid=torch.tensor(llm_grid, device="cpu"),
+                types=torch.tensor(types),
+                resolve_bindings={"p": 2},
+            )
+
+        base = model._process_image_input(image_input(range(4)))
+        manager = LoRAModelManager(
+            model, 8, 128, 128, lora_config, patches[0].device, default_vllm_config
+        )
+        # Profiling without active metadata must still produce the base output.
+        for actual, expected in zip(
+            model._process_image_input(image_input(range(4))), base
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for adapter_id in (11, 22):
+            adapter = manager.create_dummy_lora(adapter_id, 8, {})
+            for weights in adapter.loras.values():
+                for tensors in (weights.lora_a, weights.lora_b):
+                    for tensor in tensors if isinstance(tensors, list) else [tensors]:
+                        if tensor is not None:
+                            tensor.normal_(std=0.2 * adapter_id / 11)
+            manager.add_adapter(adapter)
+            manager.activate_adapter(adapter_id)
+
+        def set_batch(indices):
+            for kind in (LoRAMappingType.TOWER, LoRAMappingType.CONNECTOR):
+                counts = [
+                    grids[i][0] * grids[i][1]
+                    if kind == LoRAMappingType.TOWER
+                    else -(-grids[i][0] // 2) * -(-grids[i][1] // 2)
+                    for i in indices
+                ]
+                manager.set_adapter_mapping(
+                    LoRAMapping(
+                        [
+                            ids[i]
+                            for i, count in zip(indices, counts)
+                            for _ in range(count)
+                        ],
+                        [ids[i] for i in indices],
+                        is_prefill=True,
+                        type=kind,
+                    )
+                )
+
+        individual = []
+        for i in range(4):
+            set_batch([i])
+            individual.extend(model._process_image_input(image_input([i])))
+        torch.testing.assert_close(individual[2], base[2], rtol=0, atol=0)
+        for i in (0, 1, 3):
+            assert not torch.equal(individual[i], base[i])
+        for order in ([0, 1, 2, 3], [3, 2, 1, 0]):
+            set_batch(order)
+            before = {
+                key: wrapper.token_lora_indices.clone()
+                for key, wrapper in manager.punica_wrapper_mapping.items()
+            }
+            actual = model._process_image_input(image_input(order))
+            for result, i in zip(actual, order):
+                torch.testing.assert_close(result, individual[i], rtol=0, atol=0)
+            for key, wrapper in manager.punica_wrapper_mapping.items():
+                torch.testing.assert_close(
+                    wrapper.token_lora_indices, before[key], rtol=0, atol=0
+                )
