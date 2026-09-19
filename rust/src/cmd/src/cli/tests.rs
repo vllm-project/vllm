@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use expect_test::expect;
+use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
@@ -9,6 +10,78 @@ use vllm_server::{
 };
 
 use super::{BenchCommand, Cli, Command};
+
+#[test]
+fn serve_output_logging_flags_set_output_and_delta_logging() {
+    for (flags, outputs, deltas) in [
+        (vec![], false, true),
+        (vec!["--no-enable-log-outputs"], false, true),
+        (vec!["--enable-log-outputs"], true, true),
+        (
+            vec!["--enable-log-outputs", "--no-enable-log-deltas"],
+            true,
+            false,
+        ),
+        (
+            vec!["--enable-log-outputs", "--enable-log-deltas=false"],
+            true,
+            false,
+        ),
+        (vec!["--no-enable-log-deltas"], false, false),
+    ] {
+        let mut argv = vec!["vllm-rs", "serve", "test-model", "--enable-log-requests"];
+        argv.extend(flags);
+        let Command::Serve(args) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected serve args");
+        };
+        let options = args.runtime.api_server_options();
+        assert_eq!(
+            (options.enable_log_outputs, options.enable_log_deltas),
+            (outputs, deltas)
+        );
+    }
+}
+
+#[test]
+fn frontend_args_json_requires_request_logging_for_output_logging() {
+    for requests in [false, true] {
+        let json = serde_json::json!({
+            "model_tag": "test-model",
+            "enable_log_requests": requests,
+            "enable_log_outputs": true,
+            "enable_log_deltas": false,
+        })
+        .to_string();
+        let Command::Frontend(args) = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-address",
+            "ipc:///tmp/input.sock",
+            "--output-address",
+            "ipc:///tmp/output.sock",
+            "--args-json",
+            &json,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected frontend args");
+        };
+        let config = args.into_config();
+        assert!(config.api_server_options.enable_log_outputs);
+        assert!(!config.api_server_options.enable_log_deltas);
+        if requests {
+            config.validate().unwrap();
+        } else {
+            assert_eq!(
+                config.validate().unwrap_err().as_report().to_string(),
+                "--enable-log-outputs requires --enable-log-requests",
+            );
+        }
+    }
+}
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
@@ -197,6 +270,10 @@ fn serve_args_forward_python_flags_with_separator() {
                         lora_modules: [],
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        no_enable_log_outputs: false,
+                        enable_log_deltas: true,
+                        no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
@@ -966,12 +1043,12 @@ fn serve_args_reject_unsupported_no_flag_alias() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--no-enable-log-deltas",
+        "--no-log-error-stack",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--enable-log-deltas [<ENABLE_LOG_DELTAS>]': argument is not implemented in Rust frontend yet
+        error: invalid value 'true' for '--log-error-stack [<LOG_ERROR_STACK>]': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -1037,6 +1114,10 @@ fn frontend_args_accept_json() {
                         lora_modules: [],
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        no_enable_log_outputs: false,
+                        enable_log_deltas: true,
+                        no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
@@ -1708,6 +1789,10 @@ fn serve_args_accept_handshake_aliases() {
                         lora_modules: [],
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        no_enable_log_outputs: false,
+                        enable_log_deltas: true,
+                        no_enable_log_deltas: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
@@ -1864,6 +1949,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                enable_log_outputs: false,
+                enable_log_deltas: true,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -1957,6 +2044,8 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                enable_log_outputs: false,
+                enable_log_deltas: true,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -2071,6 +2160,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                enable_log_outputs: false,
+                enable_log_deltas: true,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,

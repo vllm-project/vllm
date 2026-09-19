@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 pub(crate) mod convert;
+mod output_logging;
 mod types;
 mod validate;
 
@@ -127,6 +128,7 @@ async fn collect_chat_completion(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        enable_log_outputs,
         enable_prompt_tokens_details,
         ..
     }: ApiServerOptions,
@@ -204,6 +206,10 @@ async fn collect_chat_completion(
     };
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
+    if enable_log_requests && enable_log_outputs {
+        output_logging::log_message(&message, include_reasoning, &finish_reason, false);
+    }
+
     if enable_log_requests {
         info!(
             model = %response_model,
@@ -253,6 +259,8 @@ async fn chat_completion_chunk_stream(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        enable_log_outputs,
+        enable_log_deltas,
         enable_prompt_tokens_details,
         ..
     }: ApiServerOptions,
@@ -291,6 +299,11 @@ async fn chat_completion_chunk_stream(
             let mut chunk = $chunk;
             if include_continuous_usage {
                 chunk.usage = Some(continuous_usage.to_usage());
+            }
+            if enable_log_requests && enable_log_outputs && enable_log_deltas {
+                for choice in &chunk.choices {
+                    output_logging::log_delta(&choice.delta);
+                }
             }
             y.yield_ok(chunk).await;
         }};
@@ -427,6 +440,7 @@ async fn chat_completion_chunk_stream(
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
+                message,
                 usage: final_usage,
                 finish_reason,
                 ..
@@ -461,7 +475,17 @@ async fn chat_completion_chunk_stream(
                     finish_reason,
                     saw_tool_calls && !is_named_tool_choice,
                 ) {
-                    Ok(chunk) => yield_chunk!(chunk),
+                    Ok(chunk) => {
+                        if enable_log_requests && enable_log_outputs {
+                            output_logging::log_message(
+                                &message,
+                                include_reasoning,
+                                "streaming_complete",
+                                true,
+                            );
+                        }
+                        yield_chunk!(chunk);
+                    }
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
