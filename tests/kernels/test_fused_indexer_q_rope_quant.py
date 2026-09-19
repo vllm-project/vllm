@@ -15,6 +15,7 @@ Expects bit-exact equality on both q_fp8 and weights_out.
 
 import contextlib
 import importlib
+import math
 from unittest import mock
 
 import pytest
@@ -26,7 +27,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.torch_utils import set_random_seed
 
 HEAD_DIM = 128
 ROPE_DIM = 64
@@ -613,3 +616,69 @@ def test_fused_indexer_q_rope_quant_writes_bf16_weights(use_cutedsl):
         )
     assert weights_fused.dtype == torch.bfloat16
     assert torch.equal(weights_fused, weights_ref.to(torch.bfloat16))
+
+
+E2M1_LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _e2m1_code(value: float) -> int:
+    """``cvt.rn.satfinite.e2m1x2.f32`` on one value: nearest level, ties to the
+    even code, saturating at the ends. IEEE keeps the sign of zero."""
+    sign = 8 if math.copysign(1.0, value) < 0 else 0
+    magnitude = abs(value)
+    best, best_gap = 0, math.inf
+    for code, level in enumerate(E2M1_LEVELS):
+        gap = abs(magnitude - level)
+        if gap < best_gap - 1e-12 or (abs(gap - best_gap) < 1e-12 and code % 2 == 0):
+            best, best_gap = code, gap
+    return sign | best
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm branch of the e2m1 pack"
+)
+def test_fp32x2_to_fp4x2_matches_cvt_rn_satfinite() -> None:
+    """The ROCm pack must produce the same byte as the PTX one it replaces.
+
+    gfx950's instruction takes the low nibble first, scales by the E8M0 of a
+    third operand and writes only the destination's low byte, so a mismatch
+    here is an operand-order, scaling or masking bug rather than a rounding one.
+    """
+    from vllm.models.deepseek_v4.common.ops.fused_indexer_q import _fp32x2_to_fp4x2
+
+    @triton.jit
+    def pack_kernel(lo_ptr, hi_ptr, out_ptr, N: tl.constexpr):
+        offsets = tl.arange(0, N)
+        tl.store(
+            out_ptr + offsets,
+            _fp32x2_to_fp4x2(tl.load(lo_ptr + offsets), tl.load(hi_ptr + offsets)),
+        )
+
+    device = torch.device("cuda")
+    set_random_seed(0)
+    # Every level and its negation, both signed zeros, exact ties, and values
+    # past the ends of the format, padded out with a random spread.
+    edges = torch.tensor(
+        list(E2M1_LEVELS)
+        + [-level for level in E2M1_LEVELS]
+        + [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, -0.25, -1.25, 1e3, -1e3, 1e-9],
+        dtype=torch.float32,
+        device=device,
+    )
+    size = 1024
+    lo = torch.cat(
+        [torch.randn(size - 2 * edges.numel(), device=device) * 3.0, edges, -edges]
+    )
+    hi = lo.flip(0).contiguous()
+    packed = torch.zeros(size, dtype=torch.uint8, device=device)
+    pack_kernel[(1,)](lo, hi, packed, N=size)
+
+    expected = torch.tensor(
+        [
+            _e2m1_code(low) | (_e2m1_code(high) << 4)
+            for low, high in zip(lo.tolist(), hi.tolist())
+        ],
+        dtype=torch.uint8,
+        device=device,
+    )
+    torch.testing.assert_close(packed, expected, rtol=0, atol=0)
