@@ -125,6 +125,7 @@ async def build_and_serve(
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
+    uvicorn_kwargs.setdefault("http", args.http)
 
     supported_tasks = await engine_client.get_supported_tasks()
     model_config = engine_client.model_config

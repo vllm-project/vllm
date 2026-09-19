@@ -285,6 +285,9 @@ class FrontendArgs(BaseFrontendArgs):
         "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
+    http: Literal["auto", "h11", "httptools"] = "auto"
+    """Uvicorn HTTP/1.1 implementation. Use h11 for clients that send h2c
+    upgrade requests. This does not enable HTTP/2."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
     disable_access_log_for_endpoints: str | None = None
