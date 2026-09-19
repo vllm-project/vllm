@@ -291,6 +291,7 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b"\x01"
     START_DP_WAVE = b"\x02"
     UTILITY = b"\x03"
+    ADD_STREAMING_PROMPT = b"\x06"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
