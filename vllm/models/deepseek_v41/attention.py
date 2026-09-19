@@ -531,6 +531,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "instead."
             )
             swa_bounded_replay = False
+        speculative_config = vllm_config.speculative_config
+        dspark_layered_replay_tokens = (
+            self.window_size * config.num_hidden_layers
+            if swa_bounded_replay
+            and speculative_config is not None
+            and speculative_config.use_dspark()
+            else None
+        )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -542,6 +550,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
             bounded_replay=swa_bounded_replay,
+            bounded_replay_tokens=dspark_layered_replay_tokens,
         )
 
         # The attention layer itself was already registered with the

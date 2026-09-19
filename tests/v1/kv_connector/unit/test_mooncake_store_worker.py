@@ -2287,6 +2287,7 @@ def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
         dtype=torch.bfloat16,
         sliding_window=128,
         bounded_replay=True,
+        bounded_replay_tokens=40 * 128,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=10,
@@ -2302,7 +2303,6 @@ def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
 
     assert store_worker._excluded_group_ids == {1}
     assert store_worker._group_participates == (True, False)
-    assert store_worker._external_hit_replay_tokens == 4992
     assert store_worker.coord.excluded_group_ids == {1}
     assert [group.group_ids for group in store_worker.coord.attention_groups] == [[0]]
 
@@ -2335,7 +2335,7 @@ def test_worker_init_rejects_dsv41_dspark_without_bounded_replay(monkeypatch):
         ],
     )
 
-    with pytest.raises(ValueError, match="requires SWA bounded replay"):
+    with pytest.raises(ValueError, match="requires layered SWA replay"):
         worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
 
 
@@ -3579,7 +3579,6 @@ def _make_bare_worker(
     worker._supports_group_ids = False
     worker._excluded_group_ids = set()
     worker._group_participates = (True,)
-    worker._external_hit_replay_tokens = 0
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
@@ -3881,19 +3880,17 @@ def test_lookup_partial_prefix_returns_first_hit_length():
     assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
 
 
-def test_dsv41_dspark_lookup_leaves_layered_swa_replay_suffix():
+def test_dsv41_dspark_lookup_leaves_layered_replay_to_scheduler():
     worker = _make_bare_worker(block_size=16)
-    # 40 * 128 exact replay tokens minus the scheduler's 128-token replay.
-    worker._external_hit_replay_tokens = 4992
     num_tokens = 120000
     block_hashes = [f"h{i}".encode() for i in range(num_tokens // 16)]
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
 
     result = worker.lookup(num_tokens, block_hashes)
 
-    assert result.hit_length == 115008
-    assert num_tokens - result.hit_length + 128 >= 40 * 128
-    # Probe the complete prefix so hybrid tail keys can validate an earlier hit.
+    # The worker returns the complete target hit. The scheduler owns the
+    # 40-layer replay so all replayed target KV slots can remain padded.
+    assert result.hit_length == num_tokens - 16
     queried_keys = worker.store.batch_is_exist.call_args.args[0]
     assert len(queried_keys) == num_tokens // 16
 

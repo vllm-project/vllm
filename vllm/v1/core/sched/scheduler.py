@@ -271,9 +271,9 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-        # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
-        # after a prefix hit by recomputing its trailing tokens. One window
-        # for all such groups, so the rewind matches every group's allocation.
+        # DSV41 SWA bounded replay: groups that declare a replay span are rebuilt
+        # after a prefix hit by recomputing its trailing tokens. All such groups
+        # use one span so the rewind matches every group's allocation.
         replay_windows = {
             group.kv_cache_spec.prefix_replay_tokens
             for group in kv_cache_config.kv_cache_groups
@@ -3015,7 +3015,7 @@ class Scheduler(SchedulerInterface):
         """Record where a prefix hit's replay starts and return the number of
         hit tokens to recompute; the caller rewinds the computed count by it.
 
-        The replayed tokens are the hit's last window (see
+        The replayed tokens are the hit's trailing replay span (see
         ``Request.replay_start``): the worker rebuilds their sliding-window KV
         and leaves their cached KV alone.
         """

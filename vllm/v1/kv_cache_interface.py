@@ -914,6 +914,10 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
     bounded_replay: bool = False
+    # Optional replay length larger than the physical SWA window. DeepSeek-V4.1
+    # with DSpark uses one window per target layer so replay can rebuild exact
+    # layered SWA state without overwriting the reusable target KV.
+    bounded_replay_tokens: int | None = None
 
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -922,6 +926,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         assert self.model_version in (None, "deepseek_v4"), (
             f"Unsupported model version: {self.model_version}"
         )
+        assert self.bounded_replay or self.bounded_replay_tokens is None, (
+            "bounded_replay_tokens requires bounded_replay"
+        )
+        assert self.bounded_replay_tokens is None or (
+            self.bounded_replay_tokens >= self.sliding_window
+        ), "bounded replay must cover at least one sliding window"
         super().__post_init__()
         _apply_alignment_padding(self)
 
@@ -931,7 +941,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def prefix_replay_tokens(self) -> int:
-        return self.sliding_window if self.bounded_replay else 0
+        if not self.bounded_replay:
+            return 0
+        return self.bounded_replay_tokens or self.sliding_window
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -945,6 +957,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
+        bounded_replay_tokens_set = set(spec.bounded_replay_tokens for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -952,10 +965,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(sliding_window_set) == 1
             and len(extra_retained_set) == 1
             and len(bounded_replay_set) == 1
+            and len(bounded_replay_tokens_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
+            "window size, retained token count, and replay policy/length."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -971,6 +985,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
+            bounded_replay_tokens=bounded_replay_tokens_set.pop(),
         )
 
     def is_uniform_with_collection(
@@ -980,6 +995,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             isinstance(spec, SlidingWindowMLASpec)
             and spec.sliding_window == self.sliding_window
             and spec.bounded_replay == self.bounded_replay
+            and spec.bounded_replay_tokens == self.bounded_replay_tokens
             for spec in kv_cache_specs.values()
         )
 

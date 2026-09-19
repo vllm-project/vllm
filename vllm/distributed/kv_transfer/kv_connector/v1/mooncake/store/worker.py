@@ -1624,29 +1624,21 @@ class MooncakeStoreWorker:
             ),
             default=0,
         )
+        required_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
         if (
             is_deepseek_v41
             and use_dspark
-            and prefix_replay_tokens < dspark_replay_tokens
+            and (prefix_replay_tokens < required_replay_tokens)
         ):
             raise ValueError(
-                "DeepSeek-V4.1 DSpark with Mooncake requires SWA bounded replay "
-                f"of at least {dspark_replay_tokens} tokens"
+                "DeepSeek-V4.1 DSpark with Mooncake requires layered SWA replay "
+                f"of at least {required_replay_tokens} tokens"
             )
         self._excluded_group_ids = {
             group_id
             for group_id, group in enumerate(self._kv_cache_groups)
             if is_deepseek_v41 and use_dspark and group.is_eagle_group
         }
-        # Missing SWA boundary state can influence one additional window at
-        # each target layer. Replay one window per target layer so the hidden
-        # states used to rebuild DSpark's draft KV no longer depend on it.
-        required_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
-        self._external_hit_replay_tokens = (
-            max(0, required_replay_tokens - prefix_replay_tokens)
-            if self._excluded_group_ids
-            else 0
-        )
         self._group_participates = tuple(
             group.kv_cache_spec.prefix_cacheable
             and group_id not in self._excluded_group_ids
@@ -1656,10 +1648,9 @@ class MooncakeStoreWorker:
             logger.warning(
                 "Excluding DeepSeek-V4.1 DSpark draft KV groups %s from "
                 "Mooncake store/lookup/load; target-model KV groups remain reusable "
-                "and connector/scheduler replay %d/%d suffix tokens to rebuild "
-                "layered SWA and draft KV",
+                "and the model replays %d suffix tokens to rebuild layered SWA "
+                "and draft KV",
                 sorted(self._excluded_group_ids),
-                self._external_hit_replay_tokens,
                 prefix_replay_tokens,
             )
         self.coord = MooncakeStoreCoordinator(
@@ -2255,13 +2246,7 @@ class MooncakeStoreWorker:
             return MooncakeLookupResult(0)
 
         token_len = self.coord.align_lookup_length(num_tokens)
-        max_hit_len = token_len
-        if self._external_hit_replay_tokens:
-            replay_limited_len = self.coord.align_lookup_length(
-                max(0, num_tokens - self._external_hit_replay_tokens)
-            )
-            max_hit_len = min(max_hit_len, replay_limited_len)
-        if not block_hashes or token_len <= 0 or max_hit_len <= 0:
+        if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
@@ -2343,7 +2328,7 @@ class MooncakeStoreWorker:
         )
         _, hit_length = self.coord.find_longest_cache_hit(
             block_hashes,
-            max_hit_len,
+            token_len,
             cached_block_pool,
         )
         if hit_length >= num_tokens:
