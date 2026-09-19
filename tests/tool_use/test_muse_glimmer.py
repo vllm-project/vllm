@@ -24,9 +24,12 @@ a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
 
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
+from vllm.reasoning import muse_glimmer_reasoning_parser as muse_reasoning_mod
 from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 
@@ -384,3 +387,20 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+def test_collapse_regex_timeout_treated_as_no_reasoning_boundary():
+    raw = "<|eom|>" + "b" * 100
+    mock_regex = MagicMock()
+    mock_regex.sub.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(muse_reasoning_mod, "_COLLAPSE_RE", mock_regex):
+        reasoning, content = MuseGlimmerReasoningParser.extract_reasoning(R, raw, None)
+
+    assert reasoning is None
+    assert content == raw
+    mock_regex.sub.assert_called_once()
+    assert (
+        mock_regex.sub.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
