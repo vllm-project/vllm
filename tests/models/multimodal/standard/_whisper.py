@@ -12,7 +12,6 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
-from ....utils import create_new_process_for_each_test, multi_gpu_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -126,9 +125,7 @@ def check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [64])
-def test_beam_search_encoder_decoder(
+def run_beam_search_encoder_decoder(
     hf_runner,
     vllm_runner,
     dtype: str,
@@ -223,7 +220,7 @@ def test_beam_search_encoder_decoder(
                 )
 
 
-def test_parse_language_detection_output():
+def run_parse_language_detection_output():
     """Unit test for WhisperForConditionalGeneration.parse_language_detection_output.
 
     No GPU or model loading required.
@@ -264,13 +261,7 @@ def test_parse_language_detection_output():
         cls.parse_language_detection_output([], make_tokenizer("anything"))
 
 
-@pytest.mark.core_model
-@pytest.mark.cpu_model
-@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-@pytest.mark.parametrize("dtype", ["half", "float"])
-@pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("enforce_eager", [True, False])
-def test_models(
+def run_models(
     hf_runner,
     vllm_runner,
     model: str,
@@ -296,15 +287,7 @@ def test_models(
     )
 
 
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.core_model
-@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [200])
-@pytest.mark.parametrize("num_logprobs", [5])
-@create_new_process_for_each_test("spawn")
-def test_models_distributed(
+def run_models_distributed(
     hf_runner,
     vllm_runner,
     model: str,
@@ -331,9 +314,7 @@ def test_models_distributed(
     )
 
 
-@pytest.mark.core_model
-@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-def test_encoder_cache_cleanup(
+def run_encoder_cache_cleanup(
     vllm_runner,
     model: str,
     input_audios,

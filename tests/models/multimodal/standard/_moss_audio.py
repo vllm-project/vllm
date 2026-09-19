@@ -22,8 +22,6 @@ EXTENDED_MODELS = [
     "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
 ]
 
-ACCURACY_MODELS = [CORE_MODEL, *EXTENDED_MODELS]
-
 PARALLEL_SMOKE_CASES = [
     pytest.param({"tensor_parallel_size": 2}, id="tp2"),
     pytest.param({"pipeline_parallel_size": 2}, id="pp2"),
@@ -39,8 +37,7 @@ HF_ACCURACY_SKIP_REASON = (
 )
 
 
-@pytest.mark.core_model
-def test_moss_audio_generation_smoke(vllm_runner) -> None:
+def run_moss_audio_generation_smoke(vllm_runner) -> None:
     model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
@@ -67,12 +64,7 @@ def test_moss_audio_generation_smoke(vllm_runner) -> None:
     assert len(outputs[0][1]) > 0
 
 
-@pytest.mark.skip(reason=HF_ACCURACY_SKIP_REASON)
-@pytest.mark.parametrize("model", ACCURACY_MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [8])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_moss_audio_hf_vllm_accuracy(
+def run_moss_audio_hf_vllm_accuracy(
     hf_runner,
     vllm_runner,
     model: str,
@@ -118,9 +110,7 @@ def test_moss_audio_hf_vllm_accuracy(
     )
 
 
-@pytest.mark.core_model
-@pytest.mark.parametrize("parallel_kwargs", PARALLEL_SMOKE_CASES)
-def test_moss_audio_parallel_smoke(vllm_runner, parallel_kwargs) -> None:
+def run_moss_audio_parallel_smoke(vllm_runner, parallel_kwargs) -> None:
     model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
     required_gpus = parallel_kwargs.get(
         "tensor_parallel_size", 1

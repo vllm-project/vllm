@@ -587,7 +587,7 @@ steps:
   - tests/utils.py
   - tests/models/test_vision.py
   commands:
-  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py && pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
+  - case "$$BUILDKITE_PARALLEL_JOB" in 0) TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' && HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)' ;; 1) pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' && pytest models/language -v -s -m 'distributed(num_gpus=2)' && VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' ;; 2) pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/standard/test_whisper.py --ignore models/multimodal/generation/vision/test_phi4siglip.py && pytest models/multimodal/generation/vision/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)' && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/standard/test_whisper.py -v -s -m 'distributed(num_gpus=2)' && pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)' ;; *) exit 2 ;; esac
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
@@ -2157,7 +2157,7 @@ steps:
   - tests/models/multimodal
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
-  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+  - pytest -v -s models/multimodal/generation/omni/test_ultravox.py -m core_model
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 55
@@ -2174,6 +2174,46 @@ steps:
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
+
+- label: ":amd: (MI300) Multimodal Models (Standard) 4: ViT CUDAGraph Shard %N" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  parallelism: 3
+  commands:
+  - pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - '{ test $$BUILDKITE_PARALLEL_JOB -ne 0 || pytest -v -s models/multimodal/standard/test_vit_cudagraph_eonly.py; }'
+
+- label: ":amd: (MI300) Multimodal Models (Standard) 4: Audio" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pytest -v -s models/multimodal/standard/audio
+  - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/test_whisper.py
+
+- label: ":amd: (MI300) Multimodal Models (Standard) 4: Pooling + Other" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pytest -v -s models/multimodal/standard/pooling models/multimodal/standard/test_interleaved.py models/multimodal/standard/test_mapping.py
+  - pytest -v -s models/multimodal/standard/test_memory_leak.py
 
 - label: ":amd: (MI300) Multimodal Processor Shard %N" # TBD
   timeout_in_minutes: 115
@@ -4218,10 +4258,25 @@ steps:
   - tests/models/multimodal
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
-  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+  - pytest -v -s models/multimodal/generation/omni/test_ultravox.py -m core_model
 
-- label: ":amd: (MI355) Multimodal Models (Standard) 4: other + whisper" # TBD
-  timeout_in_minutes: 70
+- label: ":amd: (MI355) Multimodal Models (Standard) 4: ViT CUDAGraph Shard %N" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  parallelism: 3
+  commands:
+  - pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - '{ test $$BUILDKITE_PARALLEL_JOB -ne 0 || pytest -v -s models/multimodal/standard/test_vit_cudagraph_eonly.py; }'
+
+- label: ":amd: (MI355) Multimodal Models (Standard) 4: Audio" # TBD
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -4231,10 +4286,22 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
-  - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
-  - pytest models/multimodal/generation/test_memory_leak.py -m core_model
-  - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
+  - pytest -v -s models/multimodal/standard/audio
+  - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/test_whisper.py
+
+- label: ":amd: (MI355) Multimodal Models (Standard) 4: Pooling + Other" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+  - pytest -v -s models/multimodal/standard/pooling models/multimodal/standard/test_interleaved.py models/multimodal/standard/test_mapping.py
+  - pytest -v -s models/multimodal/standard/test_memory_leak.py
 
 #-----------------------------------------------------  mi355 · models / quantized  -----------------------------------------------------#
 
