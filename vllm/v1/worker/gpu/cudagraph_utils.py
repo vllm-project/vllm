@@ -25,6 +25,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
+    get_tp_group,
     graph_capture,
     is_global_first_rank,
 )
@@ -438,8 +439,16 @@ class CudaGraphManager:
                     # Prepare inputs and get forward function
                     forward_fn = create_forward_fn(desc, warmup=True)
 
-                    # Warmup
-                    forward_fn(CUDAGraphMode.NONE)
+                    # XPU TP graph capture needs every rank to enter capture with
+                    # completed queues and matching collective order. Mirror the
+                    # two synchronized warmups used by SGLang's XPU backend.
+                    if self.device.type == "xpu":
+                        for _ in range(2):
+                            torch.accelerator.synchronize()
+                            get_tp_group().barrier()
+                            forward_fn(CUDAGraphMode.NONE)
+                    else:
+                        forward_fn(CUDAGraphMode.NONE)
 
                     # Capture
                     logger.debug(
