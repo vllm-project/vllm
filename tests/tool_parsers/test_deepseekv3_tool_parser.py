@@ -90,3 +90,30 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_post_tool_call_text_kept_in_both_modes(
+        self, tokenizer: TokenizerLike, test_config: ToolParserTestConfig
+    ):
+        """Regression for #56263: the non-streaming parse must return the
+        same content the streaming parse emits for an output that carries
+        text after the tool-calls block."""
+        from tests.tool_parsers.utils import run_tool_extraction
+        from vllm.tool_parsers import ToolParserManager
+
+        output = (
+            "Let me check the weather."
+            """<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+```json
+{"city": "Paris"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"""
+            "It is 30 degrees."
+        )
+        parser = ToolParserManager.get_tool_parser(test_config.parser_name)(tokenizer)
+
+        full_content, tool_calls = run_tool_extraction(parser, output, streaming=False)
+        stream_content, _ = run_tool_extraction(parser, output, streaming=True)
+
+        expected = "Let me check the weather.It is 30 degrees."
+        assert full_content == expected
+        assert stream_content == expected
+        assert [tc.function.name for tc in tool_calls] == ["get_weather"]
