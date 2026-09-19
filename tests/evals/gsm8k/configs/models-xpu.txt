@@ -1,0 +1,2 @@
+Llama-3.1-8B-Instruct-XPU.yaml
+Qwen3-30B-A3B-EP4-XPU.yaml

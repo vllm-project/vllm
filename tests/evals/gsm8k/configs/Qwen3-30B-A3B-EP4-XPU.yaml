@@ -1,0 +1,9 @@
+model_name: Qwen/Qwen3-30B-A3B
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --max-model-len 4096
+  --tensor-parallel-size 4
+  --enable-expert-parallel
+  --enforce-eager
