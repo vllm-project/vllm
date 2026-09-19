@@ -451,6 +451,7 @@ def dummy_hf_overrides(
     model_arch: str = "",
     exist_overrides: dict[str, Any] | None = None,
     use_original_num_layers: bool = False,
+    num_dummy_layers: int | None = None,
 ) -> PretrainedConfig:
     """Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
@@ -499,11 +500,23 @@ def dummy_hf_overrides(
             else 1
         )
 
-    update_dict = {
-        "num_layers": num_layers,
-        # For Gemma-3n
-        "num_kv_shared_layers": 1,
-    }
+    if num_dummy_layers is not None:
+        num_layers = num_hidden_layers = num_dummy_layers
+
+    update_dict = {"num_layers": num_layers}
+    # Keep one shared layer only when the reduced model has a valid source.
+    if getattr(text_config, "num_kv_shared_layers", 0) > 0:
+        num_shared_layers = min(1, max(0, num_hidden_layers - 1))
+        layer_types = getattr(text_config, "layer_types", None)
+        if (
+            num_shared_layers
+            and layer_types
+            and len(layer_types) >= num_hidden_layers
+            and layer_types[num_hidden_layers - 1]
+            not in layer_types[: num_hidden_layers - 1]
+        ):
+            num_shared_layers = 0
+        update_dict["num_kv_shared_layers"] = num_shared_layers
 
     _hf_config = hf_config
 

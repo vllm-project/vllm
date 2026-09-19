@@ -48,7 +48,14 @@ def is_active() -> bool:
     return _active
 
 
-def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
+def activate(
+    *,
+    mode: JitMonitorMode = "warn",
+    verbose: bool = False,
+    monitor_triton: bool = True,
+    monitor_cutedsl: bool = True,
+    monitor_tilelang: bool = True,
+) -> None:
     """Enable JIT compilation monitoring after warmup.
 
     Call once per worker process at the end of
@@ -71,14 +78,16 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     _mode = mode
     _verbose = verbose
 
-    _setup_triton_autotuning_print()
-    _setup_triton_jit_hook()
-    _setup_cutedsl_jit_hook()
+    if monitor_triton:
+        _setup_triton_autotuning_print()
+        _setup_triton_jit_hook()
+    if monitor_cutedsl:
+        _setup_cutedsl_jit_hook()
 
     # Refer to #51159. tilelang ships broken symbols
     # on rocm.
     # TODO: Remove the guard once tilelang upstream is fixed.
-    if not current_platform.is_rocm():
+    if monitor_tilelang and not current_platform.is_rocm():
         _setup_tilelang_jit_hook()
 
     logger.info(
