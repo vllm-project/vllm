@@ -1638,9 +1638,12 @@ class MooncakeStoreWorker:
             for group_id, group in enumerate(self._kv_cache_groups)
             if is_deepseek_v41 and use_dspark and group.is_eagle_group
         }
-        exact_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
+        # Missing SWA boundary state can influence one additional window at
+        # each target layer. Replay one window per target layer so the hidden
+        # states used to rebuild DSpark's draft KV no longer depend on it.
+        required_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
         self._external_hit_replay_tokens = (
-            max(0, exact_replay_tokens - prefix_replay_tokens)
+            max(0, required_replay_tokens - prefix_replay_tokens)
             if self._excluded_group_ids
             else 0
         )
