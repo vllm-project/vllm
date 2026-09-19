@@ -47,6 +47,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
                 [np.arange(count, dtype=np.int32) for count in num_logits_per_req]
             )
         ).to(device),
+        synthetic_verify_compaction_mask=None,
     )
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(logprobs_mode=logprobs_mode)
