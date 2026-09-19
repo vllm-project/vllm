@@ -4661,7 +4661,7 @@ async fn stream_raw_generate_emits_final_usage_without_continuous_usage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn stream_raw_generate_emits_empty_finish_chunk() {
+async fn stream_raw_generate_skips_empty_finish_chunk_by_default() {
     let (mut app, engine_task) = test_app_with_stream_output_specs(vec![
         (vec![33], None),
         (vec![], Some(EngineCoreFinishReason::Stop)),
@@ -4697,16 +4697,12 @@ async fn stream_raw_generate_emits_empty_finish_chunk() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
-    assert_eq!(payloads.len(), 3, "{text}");
+    assert_eq!(payloads.len(), 2, "{text}");
 
     let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert!(first["choices"][0].get("finish_reason").is_none());
-
-    let second: serde_json::Value = serde_json::from_str(payloads[1]).expect("second chunk json");
-    assert_eq!(second["choices"][0]["token_ids"], json!([]));
-    assert_eq!(second["choices"][0]["finish_reason"], "stop");
-    assert_eq!(payloads[2], "[DONE]");
+    assert_eq!(payloads[1], "[DONE]");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
