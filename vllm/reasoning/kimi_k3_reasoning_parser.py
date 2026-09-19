@@ -58,23 +58,37 @@ def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     return -1
 
 
-def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) -> int:
-    """Report which of *a* / *b* occurs last in *haystack*.
+def _newest_marker_ends_reasoning(
+    haystack: Sequence[int],
+    markers: Sequence[tuple[Sequence[int], bool]],
+) -> bool:
+    """Whether the newest marker in *haystack* is one that ends reasoning.
 
-    Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
-    Equivalent to comparing two ``_subseq_index`` results, but a single backward
-    pass that stops at the first hit instead of walking to index 0 twice.
+    Args:
+        haystack: Token ids to search.
+        markers: ``(marker_ids, ends_reasoning)`` pairs.
+
+    Returns:
+        True if the last marker to occur ends reasoning, False if it does not or
+        if no marker occurs at all.
+
+    Equivalent to comparing one ``_subseq_index`` per marker, but a single
+    backward pass that stops at the first hit instead of walking to index 0 once
+    per marker.
     """
-    if not a or not b:
-        return -1
-    a0, b0 = a[0], b[0]
-    for i in range(len(haystack) - min(len(a), len(b)), -1, -1):
+    if not markers:
+        return False
+    shortest = min(len(marker) for marker, _ in markers)
+    for i in range(len(haystack) - shortest, -1, -1):
         head = haystack[i]
-        if head == a0 and i + len(a) <= len(haystack) and _match_at(haystack, i, a):
-            return 0
-        if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
-            return 1
-    return -1
+        for marker, ends_reasoning in markers:
+            if (
+                head == marker[0]
+                and i + len(marker) <= len(haystack)
+                and _match_at(haystack, i, marker)
+            ):
+                return ends_reasoning
+    return False
 
 
 class KimiK3ReasoningParser(ReasoningParser):
@@ -134,6 +148,24 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        # The response opener ends reasoning too: a completion that skips the
+        # think channel never emits a close marker, and everything from the
+        # opener on is the answer the grammar has to constrain.
+        self._response_open_ids = tokenizer.encode(
+            self._response_open, add_special_tokens=False
+        )
+        self._reasoning_markers: tuple[tuple[Sequence[int], bool], ...] = tuple(
+            (marker, ends_reasoning)
+            for marker, ends_reasoning in (
+                (self._think_close_ids, True),
+                (self._response_open_ids, True),
+                (self._think_open_ids, False),
+            )
+            if marker
+        )
+        self._marker_carry = (
+            max((len(marker) for marker, _ in self._reasoning_markers), default=1) - 1
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -157,18 +189,16 @@ class KimiK3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if not self._thinking_enabled:
             return True
-        # Reasoning has ended only if the *most recent* think block is closed:
-        # the last close marker must come after the last open marker. A plain
-        # "a close marker exists anywhere" check false-positives in multi-turn /
-        # agent continuations, where the chat template keeps a prior turn's
-        # think channel (with its <|close|>think<|sep|>) in the prompt while the
-        # current turn is still reasoning (its <|open|>think<|sep|> is the newest
-        # marker). A missing open marker (e.g. it was consumed as the generation
-        # prefix) means a close marker alone ends reasoning, which is what
-        # "close is the newest marker" already encodes.
-        return (
-            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
-        )
+        # Reasoning has ended only if the *most recent* marker is one that ends
+        # it. A plain "an end marker exists anywhere" check false-positives in
+        # multi-turn / agent continuations, where the chat template keeps a
+        # prior turn's channels (its <|close|>think<|sep|> and
+        # <|open|>response<|sep|>) in the prompt while the current turn is still
+        # reasoning (its <|open|>think<|sep|> is the newest marker). A missing
+        # open marker (e.g. it was consumed as the generation prefix) means an
+        # end marker alone ends reasoning, which is what "an end marker is
+        # newest" already encodes.
+        return _newest_marker_ends_reasoning(input_ids, self._reasoning_markers)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -189,10 +219,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
         head = len(input_ids) - len(delta)
-        window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        window = list(input_ids[max(0, head - self._marker_carry) : head]) + delta
+        return _newest_marker_ends_reasoning(window, self._reasoning_markers)
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:

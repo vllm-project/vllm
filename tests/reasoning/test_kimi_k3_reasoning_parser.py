@@ -30,6 +30,8 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == RESPONSE_OPEN:
+            return [5, 2, 3]
         return [ord(ch) for ch in text]
 
 
@@ -117,6 +119,45 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
     assert parser.is_reasoning_end([*stale_close, *new_open, *stale_close])
     # open with no close yet -> not ended
     assert not parser.is_reasoning_end([*new_open])
+
+
+def test_is_reasoning_end_when_think_channel_is_skipped():
+    # The model answered without thinking, so no think marker is ever
+    # generated and the response channel opens first. The gate has to read the
+    # same way extract_reasoning does for those bytes, or a guided request is
+    # never constrained.
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    response_open = [5, 2, 3]
+
+    assert parser.is_reasoning_end(response_open)
+    assert parser.extract_reasoning(f"{RESPONSE_OPEN}answer", request) == (
+        None,
+        "answer",
+    )
+
+
+def test_is_reasoning_end_streaming_engages_on_response_opener():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    # nothing opened yet -> still reasoning
+    assert not parser.is_reasoning_end_streaming([10], [10])
+    # the 3-token opener straddles two decode steps: only the step that
+    # completes it ends reasoning.
+    assert not parser.is_reasoning_end_streaming([5, 2], [5, 2])
+    assert parser.is_reasoning_end_streaming([5, 2, 3], [3])
+
+
+def test_is_reasoning_end_ignores_response_open_from_prior_turn():
+    # A completed prior turn leaves its think close and response opener in the
+    # prompt. The current turn is thinking again, so its open marker is newest
+    # and reasoning must still read as unfinished.
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    prior_turn = [4, 2, 3, 5, 2, 3]
+    new_open = [1, 2, 3]
+
+    assert not parser.is_reasoning_end([*prior_turn, *new_open])
+    assert parser.is_reasoning_end([*prior_turn, *new_open, 4, 2, 3])
 
 
 def test_streaming_split_open_marker_is_held_back():
