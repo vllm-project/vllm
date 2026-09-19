@@ -2396,27 +2396,9 @@ def test_kv_connector_honors_skip_reading_prefix_cache():
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
-
-def test_external_prefix_cache_stats_skip_reading_prefix_cache():
-    """A request that skips the cache lookup is not an external cache query."""
-    BLOCK_SIZE = 16
-    scheduler = create_scheduler(
-        enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
-        block_size=BLOCK_SIZE,
-    )
-    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
-    scoring.sampling_params.prompt_logprobs = 1
-    scoring.skip_reading_prefix_cache = True
-    scheduler.add_request(plain)
-    scheduler.add_request(scoring)
-    scheduler.schedule()
-
-    stats = scheduler.make_stats()
-    assert stats is not None
-    external_stats = stats.connector_prefix_cache_stats
+    # Only the plain request counts as an external cache query.
+    external_stats = scheduler.make_stats().connector_prefix_cache_stats
     assert external_stats is not None
-    # Only the plain request counts: 64 tokens queried, 32 served.
     assert external_stats.requests == 1
     assert external_stats.queries == BLOCK_SIZE * 4
     assert external_stats.hits == BLOCK_SIZE * 2

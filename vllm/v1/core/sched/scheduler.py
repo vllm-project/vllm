@@ -978,8 +978,6 @@ class Scheduler(SchedulerInterface):
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
 
-                        # Like the local prefix cache, do not count a request
-                        # that skipped the lookup: its hit was discarded above.
                         if not request.skip_reading_prefix_cache:
                             connector_prefix_cache_queries = (
                                 request.num_tokens - num_new_local_computed_tokens
