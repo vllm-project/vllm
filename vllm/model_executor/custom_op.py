@@ -6,6 +6,7 @@ import inspect
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.model_executor.utils import maybe_disable_graph_partition
@@ -27,6 +28,18 @@ def maybe_get_oot_by_class(class_type: type) -> type:
     if class_name in op_registry_oot:
         return op_registry_oot[class_name]
     return class_type
+
+
+def get_known_op_names() -> set[str]:
+    # The hw-agnostic keys count only when VLLM_USE_HW_AGNOSTIC is set. Both
+    # sets are kept, since the classic stack still provides all other ops.
+    names = op_registry.keys() | op_registry_oot.keys()
+    if envs.VLLM_USE_HW_AGNOSTIC:
+        from vllm.model_executor.hw_agnostic import custom_op as hw_agnostic_custom_op
+
+        names |= hw_agnostic_custom_op.op_registry.keys()
+        names |= hw_agnostic_custom_op.op_registry_oot.keys()
+    return names
 
 
 class PluggableLayer(nn.Module):
