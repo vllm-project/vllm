@@ -164,6 +164,7 @@ class _AutotuneTuner:
         self.run = run
         self.cache = {}
         self.loaded = None
+        self._dirty = False
 
     def load_configs(self, path):
         self.loaded = json.loads(Path(path).read_text())
@@ -184,6 +185,7 @@ class _AutotuneTuner:
             if group is not None:
                 group.record(("all_reduce", operation, tactic))
         self.cache[operation] = self.run.rank // self.run.tp
+        self._dirty = True
 
 
 class _AutotuneRun:
@@ -304,7 +306,7 @@ def test_pp_stage_cache_roundtrip_isolated_and_asymmetric_hits_safe(
     assert all(cache == stage_caches[r // 4] for r, _, cache in cold.saves)
     warm = autotune_run().execute()
     warm.assert_collectives_match()
-    assert not warm.profile_groups
+    assert not warm.profile_groups and not warm.saves
     for rank, tuner in warm.tuners.items():
         assert tuner.loaded == stage_caches[rank // 4]
     cold.cache_path(5).unlink()
