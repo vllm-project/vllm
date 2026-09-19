@@ -36,16 +36,19 @@ def _replayssm_autotune_kwargs(
             "is unavailable."
         )
         return None
+    from vllm.v1.worker.extensible_kv_cache import num_committable_kv_blocks
+
     v2_runner: Any = runner
     query_len = (
         v2_runner.decode_query_len
         if config.use_v2_model_runner
         else runner.uniform_decode_query_len
     )
+    # Block 0 is the null block; the dummy slots must be committed memory.
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
         runner.max_num_tokens // query_len,
-        runner.kv_cache_config.num_blocks - 1,
+        num_committable_kv_blocks(v2_runner) - 1,
     )
     if max_num_reqs <= 0:
         logger.warning_once(
@@ -168,6 +171,8 @@ def _temporary_replayssm_autotune_state(
 
 
 def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
+    from vllm.v1.worker.extensible_kv_cache import ensure_kv_cache_blocks
+
     max_token_prefill_kwargs = {
         "num_tokens": runner.scheduler_config.max_num_batched_tokens,
         "skip_eplb": True,
@@ -178,5 +183,7 @@ def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:
     if autotune is None:
         return
     max_num_reqs, decode_kwargs = autotune
+    v2_runner: Any = runner
+    ensure_kv_cache_blocks(v2_runner, 1 + max_num_reqs)
     with _temporary_replayssm_autotune_state(runner, max_num_reqs):
         runner._dummy_run(**decode_kwargs)

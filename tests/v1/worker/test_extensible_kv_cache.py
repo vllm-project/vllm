@@ -272,6 +272,49 @@ def test_release_and_recommit_for_sleep(vmm):
 
 @requires_cuda
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
+def test_shrinking_commit_remaps_to_the_smaller_prefix(vmm, layout):
+    """When fewer blocks fit than warmup committed, the final commit remaps
+    only that prefix (contents are warmup garbage), so the physical footprint,
+    the views and the connector-facing placements all describe the same,
+    smaller cache."""
+    config, _ = _make_config(layout)
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        capacity_views = allocate_kv_cache(
+            config, device, layout, allocate=kv_cache.allocate
+        )
+        kv_cache.commit(6)
+        for view in capacity_views.values():
+            view[:6].fill_(1.0)
+        torch.accelerator.synchronize()
+        # Without `shrink` a smaller request is a no-op.
+        kv_cache.commit(4)
+        assert kv_cache.num_committed_blocks == 6
+
+        kv_cache.commit(4, shrink=True)
+        assert kv_cache.num_committed_blocks == 4
+        granule = kv_cache.buffer.granularity
+        expected_physical = sum(
+            -(-4 * stride // granule) * granule for stride in kv_cache.segment_strides
+        )
+        assert kv_cache.physical_bytes <= expected_physical
+        final = copy.copy(config)
+        final.num_blocks = 4
+        views = kv_cache.committed_views(final, layout)
+        assert views is not None
+        for name, view in views.items():
+            assert view.shape[0] == 4
+            assert view.data_ptr() == capacity_views[name].data_ptr()
+            assert torch.count_nonzero(view) == 0
+        tensors = kv_cache.committed_kv_cache_tensors(final, layout, 4)
+        assert all(t.size == 4 * kv_cache.bytes_per_block for t in tensors)
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
 def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
     """After the final commit, per-layer views are rebuilt over storages that
     span only the committed blocks, at the same addresses as the capacity

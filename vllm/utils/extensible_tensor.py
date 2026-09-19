@@ -8,6 +8,7 @@ import ctypes
 import itertools
 from collections.abc import Sequence
 from contextlib import suppress
+from typing import Any
 
 import torch
 
@@ -70,7 +71,6 @@ class _VirtualBuffer:
             return
         first = start // self.granularity
         last = (end + self.granularity - 1) // self.granularity  # exclusive
-        mapped: list[tuple[int, int]] = []
         run_start: int | None = None
         for g in range(first, last + 1):
             unmapped = g < last and g not in self._mapped_granules
@@ -80,12 +80,12 @@ class _VirtualBuffer:
                 self._map_chunk_at(
                     run_start * self.granularity, (g - run_start) * self.granularity
                 )
+                # Grant before recording the run as mapped: a failure in a
+                # later run must not leave these granules mapped but
+                # inaccessible, since later commits would skip them.
+                self._grant_access(*self._run_bounds(run_start, g))
                 self._mapped_granules.update(range(run_start, g))
-                mapped.append((run_start, g))
                 run_start = None
-
-        for chunk_first, chunk_last in mapped:
-            self._grant_access(*self._run_bounds(chunk_first, chunk_last))
 
     def _run_bounds(self, first: int, last: int) -> tuple[int, int]:
         """Bounds of the maximal contiguous mapped run covering `[first, last)`."""
@@ -149,8 +149,11 @@ class _VirtualBuffer:
             self._driver.free_reserved(self.base_ptr, self.reserved_size)
         self.base_ptr = 0
 
-    def __del__(self) -> None:
-        with suppress(Exception):
+    def __del__(self, _suppress: Any = suppress) -> None:
+        # Bound as a default: module globals may be gone at interpreter exit.
+        if _suppress is None:
+            return
+        with _suppress(Exception):
             self.free()
 
 
@@ -193,37 +196,38 @@ _DLManagedTensor._fields_ = [
     ("deleter", _DLDeleter),
 ]
 
-_KEEPALIVE: dict[int, tuple[object, object, object]] = {}
 _PyCapsule_New = ctypes.pythonapi.PyCapsule_New
 _PyCapsule_New.restype = ctypes.py_object
 _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+_malloc = ctypes.CDLL(None).malloc
+_malloc.restype = ctypes.c_void_p
+_malloc.argtypes = [ctypes.c_size_t]
 
 
 def uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.Tensor:
-    """Wrap device memory at `ptr` as a uint8 tensor; the caller keeps it mapped."""
-    shape_arr = (ctypes.c_int64 * 1)(num_bytes)
+    """Wrap device memory at `ptr` as a uint8 tensor; the caller keeps it mapped.
 
-    managed = _DLManagedTensor()
+    The DLManagedTensor is malloc'd and never freed: torch reads it when the
+    view is destroyed, which can be after this module's globals are cleared at
+    interpreter exit. Its deleter is NULL, so nothing calls back into Python.
+    """
+    managed_size = ctypes.sizeof(_DLManagedTensor)
+    addr = _malloc(managed_size + ctypes.sizeof(ctypes.c_int64))
+    if not addr:
+        raise MemoryError("Failed to allocate a DLManagedTensor.")
+    ctypes.memset(addr, 0, managed_size + ctypes.sizeof(ctypes.c_int64))
+    shape_addr = addr + managed_size
+    ctypes.c_int64.from_address(shape_addr).value = num_bytes
+
+    managed = _DLManagedTensor.from_address(addr)
     managed.dl_tensor.data = ctypes.c_void_p(ptr)
     device_type = get_vmm_driver().dlpack_device_type
     managed.dl_tensor.device = _DLDevice(device_type, device_index)
     managed.dl_tensor.ndim = 1
     managed.dl_tensor.dtype = _DLDataType(_K_DL_UINT, _UINT8_BITS, 1)
-    managed.dl_tensor.shape = ctypes.cast(shape_arr, ctypes.POINTER(ctypes.c_int64))
-    managed.dl_tensor.strides = None
-    managed.dl_tensor.byte_offset = 0
-    managed.manager_ctx = None
+    managed.dl_tensor.shape = ctypes.cast(shape_addr, ctypes.POINTER(ctypes.c_int64))
 
-    key = ctypes.addressof(managed)
-
-    def _deleter(_managed_ptr: object) -> None:
-        _KEEPALIVE.pop(key, None)
-
-    deleter = _DLDeleter(_deleter)
-    managed.deleter = deleter
-    _KEEPALIVE[key] = (managed, shape_arr, deleter)
-
-    capsule = _PyCapsule_New(ctypes.addressof(managed), b"dltensor", None)
+    capsule = _PyCapsule_New(addr, b"dltensor", None)
     return torch.from_dlpack(capsule)
 
 

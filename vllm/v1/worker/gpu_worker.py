@@ -848,7 +848,9 @@ class Worker(WorkerBase):
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
             # The connector is created in `extend_kv_cache`, once the
-            # memory it registers is final.
+            # memory it registers is final; the runner reads the DCP
+            # interleave size now, so settle it first.
+            self.vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
             self._kv_cache_config = kv_cache_config
         else:
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)

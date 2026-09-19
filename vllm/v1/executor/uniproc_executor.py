@@ -22,6 +22,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerWrapperBase
@@ -201,6 +202,16 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         memory = super().determine_available_memory()
         return [self._all_reduce_min(memory[0])]
 
+    def _extensible_kv_cache_unsupported_reason(
+        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
+    ) -> str | None:
+        # Every rank must reach the same decision: one that keeps the feature
+        # would wait in the block-count all-reduce for one that dropped it.
+        reason = super()._extensible_kv_cache_unsupported_reason(kv_cache_specs)
+        if self._all_reduce(int(reason is not None), dist.ReduceOp.MAX):
+            return reason or "another rank cannot use it"
+        return None
+
     def compile_or_warm_up_model(self) -> list[CompilationTimes]:
         # Every rank's engine must size the KV cache identically.
         return [
@@ -210,11 +221,15 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             for times in super().compile_or_warm_up_model()
         ]
 
+    @classmethod
+    def _all_reduce_min(cls, value: int) -> int:
+        return cls._all_reduce(value, dist.ReduceOp.MIN)
+
     @staticmethod
-    def _all_reduce_min(value: int) -> int:
+    def _all_reduce(value: int, op: "dist.ReduceOp") -> int:
         from vllm.distributed.parallel_state import get_world_group
 
         cpu_group = get_world_group().cpu_group
         tensor = torch.tensor([value], device="cpu", dtype=torch.int64)
-        dist.all_reduce(tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        dist.all_reduce(tensor, group=cpu_group, op=op)
         return int(tensor.item())
