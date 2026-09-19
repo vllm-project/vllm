@@ -22,6 +22,13 @@ _QWEN_MODEL_TYPES = frozenset(
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        # Qwen4Exp runs its GDN prefill and QSA on other backends, but the
+        # kernels this file warms are the Triton ones around them -- the gated
+        # RMS norm, the causal conv, the post-conv preparation, the decode
+        # state update -- and those stay whichever prefill kernel is chosen.
+        # Left out of this set they compile on the first prompt instead.
+        "qwen4_exp",
+        "qwen4_exp_text",
     }
 )
 
