@@ -108,6 +108,7 @@ def test_indexer_score_flattens_per_head_weights():
 def test_cpu_indexer_metadata_expands_requests_without_triton():
     builder = object.__new__(Glm5NextCPUIndexerMetadataBuilder)
     builder.device = torch.device("cpu")
+    builder.kv_cache_spec = SimpleNamespace(tokens_per_state=1)
 
     common = type(
         "CommonMetadata",
@@ -357,3 +358,322 @@ def test_pool_to_token_expansion_appends_only_valid_tail(pool_ids, seq_len, expe
     ids = torch.tensor(pool_ids, dtype=torch.int32)
     actual = _expand_pool_ids(ids, torch.tensor([seq_len]), 3, max_tokens=8)
     torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.int32))
+
+
+class _SparseRuntime:
+    """Execute real CPU metadata/indexer/cache/MLA with deterministic inputs."""
+
+    def __init__(self):
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+        self.index = SimpleNamespace(
+            prefix="index", kv_cache=torch.zeros(8, 32, 132, dtype=torch.uint8)
+        )
+        self.tail = SimpleNamespace(
+            prefix="tail", kv_cache=torch.zeros(8, 2, 4, 128, dtype=torch.bfloat16)
+        )
+        self.latent = torch.zeros(8, 128, 4)
+        self.topk = torch.full((256, 7), -1, dtype=torch.int32)
+        self.indexer = SparseAttnIndexerKpool(
+            self.index,
+            128,
+            "ue8m0",
+            4,
+            128,
+            1024,
+            1024,
+            self.topk,
+            tail_cache=self.tail,
+        )
+        self.builder = Glm5NextCPUIndexerMetadataBuilder(
+            MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                tokens_per_state=4,
+            ),
+            ["index"],
+            None,
+            torch.device("cpu"),
+        )
+        self.impl = object.__new__(Glm5NextCPUSparseImpl)
+        self.impl.num_heads = 2
+        self.impl.kv_lora_rank = 4
+        self.impl.scale = 0.5
+        self.impl.topk_indices_buffer = self.topk
+
+    def run(self, requests):
+        from vllm.forward_context import override_forward_context
+        from vllm.v1.attention.backend import CommonAttentionMetadata
+        from vllm.v1.attention.backends.mla.indexer import (
+            compute_kpool_tail_slot_mapping,
+        )
+
+        # Entries: (request data seed, first token, count, physical pages, tail page).
+        positions, seeds, req_ids, slots, starts, lengths = [], [], [], [], [0], []
+        pages, tails = [], []
+        for req, (seed, start, count, blocks, tail_block) in enumerate(requests):
+            positions.extend(range(start, start + count))
+            seeds.extend([seed] * count)
+            req_ids.extend([req] * count)
+            slots.extend(
+                blocks[pos // 128] * 128 + pos % 128
+                for pos in range(start, start + count)
+            )
+            starts.append(starts[-1] + count)
+            lengths.append(start + count)
+            pages.append(blocks)
+            tails.append([tail_block])
+        pos = torch.tensor(positions)
+        seed = torch.tensor(seeds)
+        starts = torch.tensor(starts, dtype=torch.int32)
+        table = torch.tensor(pages, dtype=torch.int32)
+        slots = torch.tensor(slots)
+        common = CommonAttentionMetadata(
+            query_start_loc=starts,
+            query_start_loc_cpu=starts,
+            seq_lens=torch.tensor(lengths, dtype=torch.int32),
+            num_reqs=len(requests),
+            num_actual_tokens=len(positions),
+            max_query_len=max(r[2] for r in requests),
+            max_seq_len=max(lengths),
+            block_table_tensor=table,
+            slot_mapping=slots,
+            positions=pos,
+        )
+        metadata = self.builder.build(0, common)
+        tail_slots = compute_kpool_tail_slot_mapping(
+            slots,
+            torch.tensor(tails, dtype=torch.int32),
+            starts,
+            pos,
+            len(positions),
+            len(requests),
+            4,
+        )
+        channels = torch.arange(128).float()
+        keys = torch.sin(
+            (pos[:, None] + seed[:, None] * 3 + channels) * 0.13
+        ).bfloat16()
+        gates = torch.cos((pos[:, None] + channels) * 0.17).bfloat16()
+        ape = torch.arange(512).reshape(4, 128).float() * 0.001
+        query = torch.cos(channels * 0.07)[None, None].expand(len(pos), 2, -1)
+        context = ForwardContext(
+            no_compile_layers={},
+            slot_mapping={},
+            attn_metadata={
+                "index": metadata,
+                "tail": SimpleNamespace(slot_mapping=tail_slots),
+            },
+        )
+        with override_forward_context(context):
+            self.indexer(
+                torch.zeros(len(pos), 4),
+                query,
+                keys,
+                torch.ones(len(pos), 2),
+                gate_score=gates,
+                compress_ape=ape,
+                index_kpool=4,
+                positions=pos,
+            )
+        values = torch.sin((pos[:, None] + seed[:, None] + torch.arange(4)) * 0.3)
+        self.impl.do_kv_cache_update(
+            values,
+            torch.empty(len(pos), 1, 0),
+            self.latent,
+            slots,
+            "auto",
+            torch.ones(1),
+        )
+        q = torch.cos(
+            (pos[:, None, None] + torch.arange(8).reshape(1, 2, 4)) * 0.2
+        )
+        attn_meta = SimpleNamespace(
+            req_id_per_token=torch.tensor(req_ids),
+            block_size=128,
+            block_table=table,
+        )
+        output, _ = self.impl.forward_mqa(q, self.latent, attn_meta, None)
+        # Independent request-local dense attention over exactly the selected ids.
+        for row, ids in enumerate(self.topk[: len(pos)]):
+            chosen = ids[ids >= 0].long()
+            assert (chosen <= pos[row]).all()
+            assert chosen.unique().numel() == chosen.numel()
+            tail_start = (int(pos[row]) + 1) // 4 * 4
+            assert set(range(tail_start, int(pos[row]) + 1)) <= set(chosen.tolist())
+            pool_count = (int(pos[row]) + 1) // 4
+            if pool_count:
+                history_pos = torch.arange(pool_count * 4)[:, None]
+                history_keys = (
+                    torch.sin((history_pos + seed[row] * 3 + channels) * 0.13)
+                    .bfloat16()
+                    .float()
+                    .reshape(pool_count, 4, 128)
+                )
+                history_gates = (
+                    torch.cos((history_pos + channels) * 0.17)
+                    .bfloat16()
+                    .float()
+                    .reshape(pool_count, 4, 128)
+                )
+                pooled = (
+                    (history_keys * (history_gates + ape).softmax(1)).sum(1).bfloat16()
+                )
+                transformed = _reference_fwht(pooled).bfloat16().float()
+                scales = torch.exp2(
+                    torch.ceil(
+                        torch.log2(
+                            transformed.abs().amax(-1, keepdim=True).clamp_min(1e-4)
+                            / 448
+                        )
+                    )
+                )
+                quantized = (transformed / scales).clamp(-448, 448).to(
+                    torch.float8_e4m3fn
+                )
+                logical = torch.arange(pool_count)
+                physical = table[req_ids[row], logical // 32]
+                records = self.index.kv_cache[physical, logical % 32]
+                torch.testing.assert_close(
+                    records[:, :128], quantized.view(torch.uint8)
+                )
+                torch.testing.assert_close(
+                    records[:, 128:].contiguous().view(torch.float32), scales
+                )
+                scores = (
+                    (query[row].float() @ (quantized.float() * scales).T)
+                    .relu()
+                    .sum(0)
+                )
+                selected_pool = int(chosen[0]) // 4
+                torch.testing.assert_close(scores[selected_pool], scores.max())
+            v = torch.sin((chosen[:, None] + seed[row] + torch.arange(4)) * 0.3)
+            expected = (q[row] @ v.T * 0.5).softmax(-1) @ v
+            torch.testing.assert_close(output[row], expected)
+        return self.topk[: len(pos)].clone(), output.clone()
+
+
+def test_mixed_prefill_decode_matches_isolated_requests():
+    mixed, a, b = _SparseRuntime(), _SparseRuntime(), _SparseRuntime()
+    mixed.run([(1, 0, 7, [5, 2], 6)])
+    a.run([(1, 0, 7, [3, 4], 1)])
+    ids, output = mixed.run([(1, 7, 1, [5, 2], 6), (9, 0, 11, [1, 7], 3)])
+    ai, ao = a.run([(1, 7, 1, [3, 4], 1)])
+    bi, bo = b.run([(9, 0, 11, [2, 5], 4)])
+    torch.testing.assert_close(ids, torch.cat([ai, bi]))
+    torch.testing.assert_close(output, torch.cat([ao, bo]))
+    # Request ordering changes on the next step.
+    ids, output = mixed.run([(9, 11, 2, [1, 7], 3), (1, 8, 1, [5, 2], 6)])
+    bi, bo = b.run([(9, 11, 2, [2, 5], 4)])
+    ai, ao = a.run([(1, 8, 1, [3, 4], 1)])
+    torch.testing.assert_close(ids, torch.cat([bi, ai]))
+    torch.testing.assert_close(output, torch.cat([bo, ao]))
+
+
+def test_slot_reuse_does_not_read_previous_request():
+    reused, fresh = _SparseRuntime(), _SparseRuntime()
+    reused.run([(11, 0, 135, [5, 2], 6)])
+    for start, count in [(0, 3), (3, 1), (4, 5), (9, 122)]:
+        actual = reused.run([(2, start, count, [5, 2], 6)])
+        expected = fresh.run([(2, start, count, [5, 2], 6)])
+        for left, right in zip(actual, expected):
+            torch.testing.assert_close(left, right)
+
+
+@pytest.mark.parametrize("prefix", [7, 128, 131])
+def test_prefix_restore_relocated_pages_matches_uninterrupted(prefix):
+    live, restored = _SparseRuntime(), _SparseRuntime()
+    live.run([(3, 0, prefix, [5, 2], 6)])
+    # Restore all three state components to different physical owners.
+    restored.index.kv_cache[[1, 7]] = live.index.kv_cache[[5, 2]].clone()
+    restored.latent[[1, 7]] = live.latent[[5, 2]].clone()
+    if prefix % 4:
+        restored.tail.kv_cache[3] = live.tail.kv_cache[6].clone()
+    else:
+        # Prefix-cache hits are block-aligned; circular tail is not cached.
+        restored.tail.kv_cache[3].fill_(99)
+    for start, count in [(prefix, 1), (prefix + 1, 4)]:
+        actual = restored.run([(3, start, count, [1, 7], 3)])
+        expected = live.run([(3, start, count, [5, 2], 6)])
+        for left, right in zip(actual, expected):
+            torch.testing.assert_close(left, right)
+    torch.testing.assert_close(
+        restored.index.kv_cache[[1, 7]], live.index.kv_cache[[5, 2]]
+    )
+
+
+def test_indexer_score_applies_relu_before_head_weights():
+    key = torch.ones(128)
+    query = torch.stack([-torch.ones(128), torch.ones(128)])
+    weights = torch.tensor([2.0, -3.0])
+    assert _weighted_indexer_score(key, query, weights).item() == -384.0
+
+
+@pytest.mark.parametrize("kernel_size", [None, 64])
+def test_indexer_builder_compresses_slots_and_preserves_replay_mask(kernel_size):
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    builder = Glm5NextCPUIndexerMetadataBuilder(
+        MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            tokens_per_state=4,
+        ),
+        ["index"],
+        None,
+        torch.device("cpu"),
+    )
+    if kernel_size:
+        builder.set_kernel_block_size(kernel_size)
+    starts = torch.tensor([0, 2, 6], dtype=torch.int32)
+    blocks = [[5, 2], [3, 7]]
+    if kernel_size:
+        blocks = [[10, 11, 4, 5], [6, 7, 14, 15]]
+    common = CommonAttentionMetadata(
+        query_start_loc=starts,
+        query_start_loc_cpu=starts,
+        seq_lens=torch.tensor([129, 4], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=6,
+        max_query_len=4,
+        max_seq_len=129,
+        block_table_tensor=torch.tensor(blocks, dtype=torch.int32),
+        slot_mapping=torch.tensor([767, 256, 384, 385, 386, -1]),
+    )
+    actual = builder.build(0, common)
+    assert actual.slot_mapping.tolist() == [191, -1, -1, -1, -1, -1]
+    assert actual.decode.seq_lens.tolist() == [32, 32, 0, 0, 0, 1]
+    assert actual.decode.block_table.tolist() == [[5, 2]] * 2 + [[3, 7]] * 4
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_cpu_config_preserves_glm_sparse_chunking_and_prefix_cache(monkeypatch, sparse):
+    import os
+    from unittest.mock import patch
+
+    from vllm.config import VllmConfig
+    from vllm.platforms.cpu import CpuPlatform
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
+    with patch.dict(os.environ):
+        config = VllmConfig()
+        config.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="glm5_next_text",
+                index_topk=4 if sparse else None,
+                index_kpool=4,
+            ),
+            use_mla=True,
+            max_model_len=256,
+        )
+        config.scheduler_config.enable_chunked_prefill = True
+        config.cache_config.enable_prefix_caching = True
+        CpuPlatform.check_and_update_config(config)
+        assert config.scheduler_config.enable_chunked_prefill == sparse
+        assert config.cache_config.enable_prefix_caching == sparse

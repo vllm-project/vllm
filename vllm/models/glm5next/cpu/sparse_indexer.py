@@ -77,7 +77,7 @@ def _weighted_indexer_score(
 ) -> torch.Tensor:
     """Compute one weighted multi-head indexer logit."""
     per_head = (query.float() * key.float()).sum(dim=-1)
-    return (per_head * weights.float().reshape(-1)).sum()
+    return (per_head.relu() * weights.float().reshape(-1)).sum()
 
 
 def _expand_pool_ids(

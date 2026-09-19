@@ -115,6 +115,28 @@ class Glm5NextCPUIndexerMetadataBuilder(AttentionMetadataBuilder):
         offsets = torch.arange(num_tokens, device=self.device) - request_starts
         token_seq_lens = positions + offsets + 1
         block_table = common_attn_metadata.block_table_tensor.to(self.device)
+        ratio = self.kv_cache_spec.tokens_per_state
+        slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
+        if ratio > 1:
+            kernel_block_size = self.kernel_block_size
+            if (
+                kernel_block_size is not None
+                and self.kv_cache_spec.block_size != kernel_block_size
+                and self.kv_cache_spec.block_size % kernel_block_size == 0
+            ):
+                factor = self.kv_cache_spec.block_size // kernel_block_size
+                block_table = (block_table[:, ::factor] // factor).contiguous()
+            pool_positions = (token_seq_lens - 1) // ratio
+            valid = (token_seq_lens % ratio == 0) & (slot_mapping >= 0)
+            compressed_slots = torch.full_like(slot_mapping, -1)
+            block_size = self.kv_cache_spec.num_states
+            physical = block_table[req_ids[valid], pool_positions[valid] // block_size]
+            compressed_slots[valid] = (
+                physical * block_size + pool_positions[valid] % block_size
+            )
+            slot_mapping = compressed_slots
+            seq_lens = seq_lens // ratio
+            token_seq_lens = token_seq_lens // ratio
         decode_block_table = block_table.index_select(0, req_ids)
         decode = DeepSeekV32IndexerDecodeMetadata(
             block_table=decode_block_table,
@@ -132,8 +154,8 @@ class Glm5NextCPUIndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         return DeepseekV32IndexerMetadata(
             seq_lens=seq_lens,
-            max_seq_len=common_attn_metadata.max_seq_len,
-            slot_mapping=common_attn_metadata.slot_mapping[:num_tokens],
+            max_seq_len=common_attn_metadata.max_seq_len // ratio,
+            slot_mapping=slot_mapping,
             num_decodes=common_attn_metadata.num_reqs,
             num_decode_tokens=num_tokens,
             num_prefills=0,
