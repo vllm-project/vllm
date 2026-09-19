@@ -15,6 +15,8 @@ and decode segments write disjoint token ranges of one output buffer pair, so
 a single ``wo_a`` einsum covers the whole step.
 """
 
+import functools
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -23,6 +25,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.models.deepseek_v41.common.ops import (
@@ -36,6 +39,7 @@ from vllm.models.deepseek_v41.common.ops.fused_layout import (
     permute_wq_b_,
 )
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v41.nvidia.mega_splitkv_combine import mega_combine
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     FlashMLAMegaAttnBackend,
@@ -48,6 +52,36 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+logger = init_logger(__name__)
+
+# Split-KV decode partials, keyed by (device, padded head count). The mega
+# kernel runs one cluster per query token, so a small decode batch leaves most
+# of the GPU idle; a FlashMLA build with partial-output support can instead
+# split the KV range across CTAs and let `mega_combine` merge the pieces.
+_SPLIT_BUFS: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+@functools.cache
+def _splitkv_config() -> tuple[int, int]:
+    """``(max splits, max decode tokens to split)``; ``(0, 0)`` disables.
+
+    Splitting costs ``splits * tokens * h_q * d_v * 4`` bytes of partials per
+    layer per step, so it only pays while the batch is too small to fill the
+    GPU -- hence the token cap rather than a pure SM-count heuristic.
+    """
+    cap = int(os.environ.get("VLLM_DSV41_MEGA_SPLITKV", "0") or 0)
+    if cap <= 1:
+        return 0, 0
+    op = torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode
+    if "mega_num_splits" not in str(op.default._schema):
+        logger.warning_once(
+            "VLLM_DSV41_MEGA_SPLITKV is set but the linked FlashMLA has no "
+            "split-KV support; keeping the fused decode path."
+        )
+        return 0, 0
+    return cap, int(os.environ.get("VLLM_DSV41_MEGA_SPLITKV_MAX_TOKENS", "8") or 8)
+
 
 _HEAD_DIM_V = 512
 _ROPE_DIM = 64
@@ -264,6 +298,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, produce zeros.
             self._reserve_prefill_workspace(q)
+            self._splitkv_partials(1)  # allocate outside graph capture
             output.data.zero_()
             output.scale.zero_()
             return
@@ -339,6 +374,45 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         return self._compressed_kv_cache().unsqueeze(-2), indices, lens
 
+    def _splitkv_partials(
+        self, s_q: int
+    ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
+        """Per-split partial buffers for this step, or ``(1, None, None)``."""
+        cap, max_tokens = _splitkv_config()
+        if cap <= 1 or not 0 < s_q <= max_tokens or self.topk_indices_buffer is None:
+            return 1, None, None
+        topk = self.topk_indices_buffer.shape[-1] + self.window_size
+        device = self.attn_sink.device
+        splits = min(
+            cap,
+            -(-topk // 64),  # KV blocks: the most splits that can do any work
+            torch.cuda.get_device_properties(device).multi_processor_count // s_q,
+        )
+        splits = 1 << max(splits, 1).bit_length() - 1  # combine needs a power of two
+        if splits <= 1:
+            return 1, None, None
+        key = (str(device), self.padded_heads)
+        if key not in _SPLIT_BUFS:
+            _SPLIT_BUFS[key] = (
+                torch.zeros(
+                    cap,
+                    max_tokens,
+                    self.padded_heads,
+                    _HEAD_DIM_V,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                torch.empty(
+                    cap,
+                    max_tokens,
+                    self.padded_heads,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+            )
+        o_accum, lse_accum = _SPLIT_BUFS[key]
+        return splits, o_accum[:splits, :s_q], lse_accum[:splits, :s_q]
+
     def _forward_decode_mega(
         self,
         q: torch.Tensor,
@@ -358,7 +432,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             flashmla_metadata, swa_metadata
         )
         assert swa_metadata.decode_swa_indices is not None
-        torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
+        args = [
             q,
             self.swa_cache_layer.kv_cache.unsqueeze(-2),
             swa_metadata.decode_swa_indices.view(q.shape[0], -1),
@@ -378,7 +452,14 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             *_SF_ARGS,
             out.data,
             out.scale,
-        )
+        ]
+        num_splits, o_accum, lse_accum = self._splitkv_partials(q.shape[0])
+        if num_splits > 1:
+            args += [num_splits, o_accum, lse_accum]
+        torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(*args)
+        if num_splits > 1:
+            # The kernel wrote fp32 partials instead of the fused FP8 epilogue.
+            mega_combine(o_accum, lse_accum, out.data, out.scale, self.attn_sink)
 
     def _forward_prefill_mega(
         self,
