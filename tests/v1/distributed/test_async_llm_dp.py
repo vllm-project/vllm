@@ -126,6 +126,7 @@ async def test_load(
             data_parallel_size=DP_SIZE,
             data_parallel_backend=data_parallel_backend,
             async_scheduling=async_scheduling,
+            gpu_memory_utilization=0.7,
         )
         engine = AsyncLLM.from_engine_args(
             engine_args, stat_loggers=[SimpleStatsLogger]

@@ -110,6 +110,15 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    # dpctl/Level-Zero initializes the GPU runtime early in the Ray worker
+    # process, so a ZE_AFFINITY_MASK narrowed after that point (e.g. by Ray's
+    # own accelerator scheduling) is not honored by the driver. Keep the full
+    # device list visible in every worker (like CUDA/ROCm do for their own
+    # visible-devices env vars) and rely on assigned_physical_gpu_ids for the
+    # logical-to-physical mapping instead.
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_ZE_AFFINITY_MASK",
+    ]
     supported_quantization: list[str] = [
         "awq",
         "gptq",

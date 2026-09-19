@@ -51,7 +51,11 @@ def test_engine_log_metrics_ray(
     class EngineTestActor:
         async def run(self):
             engine_args = AsyncEngineArgs(
-                model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
+                model=model,
+                dtype=dtype,
+                disable_log_stats=False,
+                enforce_eager=True,
+                gpu_memory_utilization=0.7,
             )
 
             engine = AsyncLLM.from_engine_args(
