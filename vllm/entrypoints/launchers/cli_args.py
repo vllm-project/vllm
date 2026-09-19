@@ -195,6 +195,14 @@ class BaseFrontendArgs:
     `vllm launch render` or `vllm serve --tokens-only`, which always register
     their required endpoints regardless of this flag.
     """
+    enable_responses_store: bool = False
+    """
+    If set to True, retain input and output messages for OpenAI ``/responses``
+    requests that opt in via the ``store`` field. Off by default because
+    stored responses are kept in memory only (not persisted to disk) and are
+    never evicted until the server terminates - enabling this can cause
+    unbounded memory growth.
+    """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
 
