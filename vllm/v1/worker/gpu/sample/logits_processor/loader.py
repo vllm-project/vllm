@@ -196,10 +196,7 @@ def build_custom_logits_processors_params_validator(
         RuntimeError: if an FQCN fails to import.
 
     """
-    if not custom_logitsprocs:
-        return lambda _: None
-
-    classes = _cached_load_v2_logitsprocs(tuple(custom_logitsprocs))
+    classes = _cached_load_v2_logitsprocs(tuple(custom_logitsprocs or ()))
 
     def validate_params(sampling_params: "SamplingParams") -> None:
         for cls in classes:
