@@ -3,6 +3,7 @@
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.v1.worker.workspace import reset_workspace_manager
 
 NEEDS_CLEAN_ENTRY = frozenset(
     {
@@ -59,3 +60,4 @@ def pytest_runtest_setup(item):
     # still runs afterwards.
     if item.path.name in NEEDS_CLEAN_ENTRY:
         cleanup_dist_env_and_memory()
+        reset_workspace_manager()
