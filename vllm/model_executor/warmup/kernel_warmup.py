@@ -488,4 +488,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if world.world_size > 1:
         world.barrier()
-    tuner.save_configs(str(cache_path))
+    # Skip the rewrite when nothing was tuned this start (every entry came from
+    # the file). FlashInfer gates its own autotune(cache=...) save the same way.
+    if tuner._dirty:
+        tuner.save_configs(str(cache_path))
