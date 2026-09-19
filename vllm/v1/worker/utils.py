@@ -661,6 +661,25 @@ def bind_kv_cache_to_layers(
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
+def zero_null_kv_block(kv_caches: Iterable[torch.Tensor]) -> None:
+    """Restore the null block (block 0) to zeros after CUDA graph capture.
+
+    Dummy capture batches carry an all-zero block table, so capture can leave
+    uninitialized values in block 0. Attention kernels that intentionally gather
+    block 0 for masked or padded entries rely on the softmax mask to discard the
+    result, which only holds while the gathered data is finite: a non-finite value
+    survives masking as ``0 * NaN == NaN`` in the value accumulation and poisons
+    every real token in the batch.
+
+    Block 0 is the reserved null block (see ``BlockPool.null_block``); it is never
+    handed to a request, so zeroing it once after capture holds for the lifetime of
+    the process.
+    """
+    for kv_cache in kv_caches:
+        if kv_cache.numel() and kv_cache.shape[0]:
+            kv_cache[0].zero_()
+
+
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
     """Detach the KV/state cache tensors installed by bind_kv_cache().
 
