@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import re
 from collections.abc import Sequence
-
-import partial_json_parser
-from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
@@ -26,12 +24,18 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
+from vllm.tool_parsers.utils import (
+    is_complete_json,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
 
 class Internlm2ToolParser(ToolParser):
+    TOOL_CALL_START_TOKEN = "<|action_start|><|plugin|>"
+    TOOL_CALL_END_TOKEN = "<|action_end|>"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
         self.position = 0
@@ -54,6 +58,70 @@ class Internlm2ToolParser(ToolParser):
             return obj.get("arguments")
         return None
 
+    def _extract_content(self, current_text: str) -> str | None:
+        """Return unsent non-tool-call text, or None.
+
+        Holds back any suffix that could be a partial opening marker.
+        """
+        if self.TOOL_CALL_START_TOKEN not in current_text:
+            overlap = partial_tag_overlap(current_text, self.TOOL_CALL_START_TOKEN)
+            sendable_idx = len(current_text) - overlap
+        else:
+            sendable_idx = current_text.index(self.TOOL_CALL_START_TOKEN)
+
+        if sendable_idx > self.position:
+            content = current_text[self.position : sendable_idx]
+            self.position = sendable_idx
+            return content
+        return None
+
+    def _extract_tool_call(self, current_text: str) -> tuple[str, bool] | None:
+        """Extract the action payload and completion status, or None."""
+        if self.TOOL_CALL_START_TOKEN not in current_text:
+            return None
+        start_idx = current_text.index(self.TOOL_CALL_START_TOKEN)
+        after_start = current_text[start_idx + len(self.TOOL_CALL_START_TOKEN) :]
+        if self.TOOL_CALL_END_TOKEN in after_start:
+            body = after_start.split(self.TOOL_CALL_END_TOKEN)[0]
+            return body.strip(), True
+        else:
+            overlap = partial_tag_overlap(after_start, self.TOOL_CALL_END_TOKEN)
+            raw = after_start[:-overlap] if overlap else after_start
+            raw = raw.strip()
+            is_comp = is_complete_json(raw) if raw else False
+            return raw, is_comp
+
+    @staticmethod
+    def _extract_tool_name(tc_json: str) -> str | None:
+        """Extract tool name, or None if the name is not yet complete."""
+        match = re.search(r'"name"\s*:\s*"([^"]+)"', tc_json)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_tool_args(tc_json: str, is_complete: bool) -> str | None:
+        """Extract tool arguments from the tool call JSON string."""
+        match = re.search(r'"(?:parameters|arguments)"\s*:\s*', tc_json)
+        if not match:
+            return None
+        raw = tc_json[match.end() :]
+        if is_complete:
+            raw = raw.rstrip()
+            if raw.endswith("}"):
+                raw = raw[:-1].rstrip()
+        return raw
+
+    def _compute_args_diff(self, tc_json: str, is_complete: bool) -> str | None:
+        """Compute unsent arguments diff for the active tool call."""
+        args = self._extract_tool_args(tc_json, is_complete)
+        if args is None:
+            return None
+        streamed = self.streamed_args_for_tool[self.current_tool_id]
+        if len(args) <= len(streamed):
+            return None
+        diff = args[len(streamed) :]
+        self.streamed_args_for_tool[self.current_tool_id] = args
+        return diff
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -64,137 +132,71 @@ class Internlm2ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if "<|action_start|>" not in current_text:
-            self.position = len(current_text)
-            return DeltaMessage(content=delta_text)
-        # if the tool call is sent, return an empty delta message
-        # to make sure the finish_reason will be sent correctly.
-        if self.current_tool_id > 0:
-            return DeltaMessage(content="")
-
-        last_pos = self.position
-        if "<|action_start|><|plugin|>" not in current_text[last_pos:]:
-            return None
-
-        new_delta = current_text[last_pos:]
-        text, action = new_delta.split("<|action_start|><|plugin|>")
-
-        if len(text) > 0:
-            self.position = self.position + len(text)
-            return DeltaMessage(content=text)
-
-        action = action.strip()
-        action = action.split("<|action_end|>".strip())[0]
-
-        # bit mask flags for partial JSON parsing. If the name hasn't been
-        # sent yet, don't allow sending
-        # an incomplete string since OpenAI only ever (as far as I have
-        # seen) allows sending the entire tool/ function name at once.
-        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+        if not previous_text:
+            self._sent_content_idx = 0
+            self.current_tool_id = -1
+            self.current_tool_name_sent = False
+            self.streamed_args_for_tool = []
 
         try:
-            parsable_arr = action
+            # 1. Check for unsent plain content before tool call
+            content = self._extract_content(current_text)
+            if content:
+                return DeltaMessage(content=content)
 
-            # tool calls are generated in an object in internlm2
-            # it's not support parallel tool calls
-            try:
-                tool_call_arr: dict = partial_json_parser.loads(parsable_arr, flags)
-            except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug("not enough tokens to parse into JSON yet")
+            # 2. Extract tool call body
+            tc_info = self._extract_tool_call(current_text)
+            if not tc_info:
                 return None
 
-            # if the current tool name hasn't been sent, send if available
-            # - otherwise send nothing
+            tc_json, is_complete = tc_info
+            if not tc_json:
+                return None
+
+            tool_call_deltas: list[DeltaToolCall] = []
+
+            # 3. If tool name hasn't been sent yet, send it
             if not self.current_tool_name_sent:
-                function_name = tool_call_arr.get("name")
-                if function_name:
-                    self.current_tool_id = self.current_tool_id + 1
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                type="function",
-                                id=make_tool_call_id(),
-                                function=DeltaFunctionCall(
-                                    name=function_name
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
+                name = self._extract_tool_name(tc_json)
+                if not name:
+                    return None
+                self.current_tool_id += 1
+                self.current_tool_name_sent = True
+                self.streamed_args_for_tool.append("")
+
+                args = self._extract_tool_args(tc_json, is_complete)
+                if args:
+                    self.streamed_args_for_tool[self.current_tool_id] = args
+                    fn_call = DeltaFunctionCall(name=name, arguments=args).model_dump(
+                        exclude_none=True
                     )
-                    self.current_tool_name_sent = True
-                    self.streamed_args_for_tool.append("")
                 else:
-                    delta = None
-            # now we know we're on the same tool call and we're streaming
-            # arguments
-            else:
-                prev_arguments = self.get_arguments(
-                    self.prev_tool_call_arr[self.current_tool_id]
+                    fn_call = DeltaFunctionCall(name=name).model_dump(exclude_none=True)
+
+                tool_call_deltas.append(
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        type="function",
+                        id=make_tool_call_id(),
+                        function=fn_call,
+                    )
                 )
-                cur_arguments = self.get_arguments(tool_call_arr)
+                return DeltaMessage(tool_calls=tool_call_deltas)
 
-                # not arguments generated
-                if not cur_arguments and not prev_arguments:
-                    delta = None
-                # will never happen
-                elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "INVARIANT - impossible to have arguments reset mid-arguments"
+            # 4. Stream incremental arguments
+            diff = self._compute_args_diff(tc_json, is_complete)
+            if diff:
+                tool_call_deltas.append(
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        function=DeltaFunctionCall(arguments=diff).model_dump(
+                            exclude_none=True
+                        ),
                     )
-                    delta = None
-                # first time to get parameters
-                elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
+                )
+                return DeltaMessage(tool_calls=tool_call_deltas)
 
-                    match_start = cur_arguments_json.find(delta_text)
-                    if match_start != -1:
-                        arguments_delta = cur_arguments_json[
-                            : match_start + len(delta_text)
-                        ]
-                    elif is_complete_json(parsable_arr):
-                        # Complete in this delta: send whole, don't drop.
-                        arguments_delta = cur_arguments_json
-                    else:
-                        # Still partial: wait for more text.
-                        return None
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=arguments_delta
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-                # both prev and cur parameters, send the increase parameters
-                elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments, ensure_ascii=False)
-
-                    argument_diff = extract_intermediate_diff(
-                        cur_args_json, prev_args_json
-                    )
-
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    arguments=argument_diff
-                                ).model_dump(exclude_none=True),
-                            )
-                        ]
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-
-            # check to see if the name is defined and has been sent. if so,
-            # stream the name - otherwise keep waiting
-            # finish by setting old and returning None as base case
-            tool_call_arr["arguments"] = self.get_arguments(tool_call_arr)
-            self.prev_tool_call_arr = [tool_call_arr]
-            return delta
+            return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
@@ -209,33 +211,43 @@ class Internlm2ToolParser(ToolParser):
     ) -> ExtractedToolCallInformation:
         text = model_output
         tools = self.tools
-        if "<|action_start|><|plugin|>" in text:
-            text, action = text.split("<|action_start|><|plugin|>")
-            action = action.split("<|action_end|>".strip())[0]
-            action = action[action.find("{") :]
-            action_dict = json.loads(action)
-            name, parameters = (
-                action_dict["name"],
-                json.dumps(
+        if self.TOOL_CALL_START_TOKEN in text:
+            text, action = text.split(self.TOOL_CALL_START_TOKEN, 1)
+            action = action.split(self.TOOL_CALL_END_TOKEN.strip())[0]
+            json_start = action.find("{")
+            if json_start != -1:
+                action = action[json_start:]
+            try:
+                action_dict = json.loads(action)
+                name = action_dict["name"]
+                parameters = json.dumps(
                     action_dict.get("parameters", action_dict.get("arguments", {})),
                     ensure_ascii=False,
-                ),
-            )
-
-            if not tools or name not in [t.function.name for t in tools]:
-                ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=text
                 )
 
-            tool_calls = [
-                ToolCall(function=FunctionCall(name=name, arguments=parameters))
-            ]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=text if len(text) > 0 else None,
-            )
+                if tools and name not in [t.function.name for t in tools]:
+                    return ExtractedToolCallInformation(
+                        tools_called=False,
+                        tool_calls=[],
+                        content=text if len(text) > 0 else None,
+                    )
+
+                tool_calls = [
+                    ToolCall(function=FunctionCall(name=name, arguments=parameters))
+                ]
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=tool_calls,
+                    content=text if len(text) > 0 else None,
+                )
+            except Exception:
+                logger.exception("Error in extracting tool call from response.")
+                return ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=text if len(text) > 0 else None,
+                )
 
         return ExtractedToolCallInformation(
-            tools_called=False, tool_calls=[], content=text
+            tools_called=False, tool_calls=[], content=text if len(text) > 0 else None
         )
