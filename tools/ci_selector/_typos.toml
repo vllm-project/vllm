@@ -1,0 +1,10 @@
+# Vocabulary local to this tool, so vLLM's root typos config stays untouched.
+[default.extend-identifiers]
+# "literals", not a misspelling of "list". Renaming it collides with the real
+# `literals` already in scope in dispatch.py and keys.py.
+lits = "lits"
+
+[default.extend-words]
+# From "café" in the non-UTF8 fixtures: a latin-1 source file, an undecodable
+# shell script, and git's C-quoted filename all have to degrade, not crash.
+caf = "caf"
