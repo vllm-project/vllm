@@ -149,6 +149,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.conf_compute_utils import confidential_compute_enabled
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -312,39 +313,75 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._routed_experts = routed_experts
         self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
+        self._check_ep_fault = check_ep_fault
+        self._copy_stream = async_output_copy_stream
+
+        # Under Confidential Computing the D2H copies are host-synchronous:
+        # issued here they would stall this thread on the in-flight
+        # forward+sample and delay the next step's launch. Defer them to
+        # get_output(), which runs on the executor's async-output thread and
+        # blocks until the copy completes anyway (see
+        # vllm.v1.conf_compute_utils).
+        self._defer_copy = confidential_compute_enabled()
+        if self._defer_copy:
+            # No CPU output tensor exists until get_output() issues the
+            # deferred copies, so set_async_sampled_token_ids receives None
+            # and the async output-token-ids repair is skipped under
+            # Confidential Computing.
+            self.sampled_token_ids_cpu: torch.Tensor | None = None
+            self._src_ready_event = torch.cuda.Event(blocking=True)
+            self._src_ready_event.record()
+            return
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self.sampled_token_ids_cpu = self._sampled_token_ids.to(
-                "cpu", non_blocking=True
-            )
-            self._logprobs_tensors_cpu = (
-                self._logprobs_tensors.to_cpu_nonblocking()
-                if self._logprobs_tensors
-                else None
-            )
-            self._routed_experts_cpu = (
-                self._routed_experts.to_cpu_nonblocking()
-                if self._routed_experts is not None
-                else None
-            )
-            self._num_nans_cpu = (
-                self._num_nans.to("cpu", non_blocking=True)
-                if self._num_nans is not None
-                else None
-            )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
-            self.async_copy_ready_event.record()
+            self._issue_copies()
+
+    def _issue_copies(self) -> None:
+        """Issue the D2H copies on the current stream and record the ready
+        event. The producing forward+sample work must already be ordered
+        before the copies (stream-wait in __init__, or event-sync in
+        get_output for the deferred Confidential Computing path).
+        """
+        self.sampled_token_ids_cpu = self._sampled_token_ids.to(
+            "cpu", non_blocking=True
+        )
+        self._logprobs_tensors_cpu = (
+            self._logprobs_tensors.to_cpu_nonblocking()
+            if self._logprobs_tensors
+            else None
+        )
+        self._routed_experts_cpu = (
+            self._routed_experts.to_cpu_nonblocking()
+            if self._routed_experts is not None
+            else None
+        )
+        self._num_nans_cpu = (
+            self._num_nans.to("cpu", non_blocking=True)
+            if self._num_nans is not None
+            else None
+        )
+        if self._check_ep_fault:
+            has_fault = get_ep_all2all_manager().query_fault()
+            self._has_fault = has_fault.to("cpu", non_blocking=True)
+        self.async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
 
         This function blocks until the copy is finished.
         """
+        if self._defer_copy:
+            # Confidential Computing: sleep until the forward+sample has
+            # materialized the source tensors (event-sync, not stream-wait,
+            # so the host-synchronous copies below only pay their own
+            # transfer time), then issue the copies here on the copy stream.
+            self._src_ready_event.synchronize()
+            with torch.cuda.stream(self._copy_stream):
+                self._issue_copies()
+        assert self.sampled_token_ids_cpu is not None
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         self.async_copy_ready_event.synchronize()
 
@@ -828,8 +865,8 @@ class GPUModelRunner(
         self.optimistic_seq_lens_cpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
         )
-        self.num_computed_tokens = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=self.device
+        self.num_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
         )
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
@@ -2173,7 +2210,7 @@ class GPUModelRunner(
                 device=self.device, non_blocking=True
             )
             update_num_computed_tokens_for_batch_change(
-                self.num_computed_tokens,
+                self.num_computed_tokens.gpu,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
                 self.valid_sampled_token_count_gpu,
@@ -2181,10 +2218,10 @@ class GPUModelRunner(
                 cpu_values,
             )
         else:
-            self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
-                non_blocking=True,
+            self.num_computed_tokens.np[:num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
             )
+            self.num_computed_tokens.copy_to_gpu(num_reqs)
 
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
@@ -2195,11 +2232,11 @@ class GPUModelRunner(
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         self.positions[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
         )
         self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
 
@@ -2219,22 +2256,14 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            # Copy one row at a time. mrope_positions is allocated as
-            # [num_dims, max_num_tokens + 1] with a dummy trailing column to keep it
-            # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
-            # copy_() cannot express a strided source as a single
-            # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
-            # temporary, and a pageable H2D ignores non_blocking=True and
-            # synchronizes the stream before the transfer starts. Each row is
-            # contiguous within the pinned allocation, so per-row copies stay on
-            # the pinned path and are genuinely asynchronous.
-            for row in range(self.mrope_positions.gpu.shape[0]):
-                self.mrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
-                    self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
+            # mrope_positions is allocated as [num_dims, max_num_tokens + 1]
+            # with a dummy trailing column to keep it non-contiguous for
+            # torch.compile, so cpu[:, :N] is a strided view; copy it row by
+            # row to stay on the pinned (and, under Confidential Computing,
+            # staged) path.
+            self.mrope_positions.copy_rows_to_gpu(total_num_scheduled_tokens)
         if self.use_async_spec_decode and self.uses_mrope:
-            drift = self.num_computed_tokens[req_indices_gpu].to(
+            drift = self.num_computed_tokens.gpu[req_indices_gpu].to(
                 torch.int64
             ) - async_tensor_h2d(
                 self.input_batch.num_computed_tokens_cpu_tensor[req_indices],
@@ -3852,6 +3881,16 @@ class GPUModelRunner(
     @contextmanager
     def synchronize_input_prep(self):
         if self.prepare_inputs_event is None:
+            yield
+            return
+
+        if current_platform.is_confidential_compute():
+            # H2D copies are host-synchronous under Confidential Computing
+            # (see vllm.v1.conf_compute_utils): the prior step has already
+            # finished reading the reused CPU tensors by the time its copy
+            # call returned, so this event-sync would only serialize the
+            # worker on the in-flight forward (making the rank a straggler
+            # under tensor parallelism).
             yield
             return
 
