@@ -5,6 +5,7 @@ import atexit
 import functools
 import inspect
 import os
+import secrets
 import traceback
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.id_generator import IdGenerator
     from opentelemetry.trace import (
         SpanKind,  # noqa: F401
         Tracer,
@@ -42,6 +44,25 @@ try:
 
     _IS_OTEL_AVAILABLE = True
     otel_import_error_traceback = None
+
+    class SecretsIdGenerator(IdGenerator):
+        """An ID generator that draws from Python's `secrets` module (CSPRNG)
+        instead of the standard library `random` module. This prevents span ID
+        and trace ID collisions across multi-process tensor-parallel workers
+        where Python's `random.seed()` is deterministically synchronized.
+        """
+
+        def generate_span_id(self) -> int:
+            span_id = secrets.randbits(64)
+            while span_id == trace.INVALID_SPAN_ID:
+                span_id = secrets.randbits(64)
+            return span_id
+
+        def generate_trace_id(self) -> int:
+            trace_id = secrets.randbits(128)
+            while trace_id == trace.INVALID_TRACE_ID:
+                trace_id = secrets.randbits(128)
+            return trace_id
 except ImportError:
     _IS_OTEL_AVAILABLE = False
     otel_import_error_traceback = traceback.format_exc()
@@ -80,7 +101,10 @@ def init_otel_tracer(
         resource_attrs.update(extra_attributes)
     resource = Resource.create(resource_attrs)
 
-    trace_provider = TracerProvider(resource=resource)
+    trace_provider = TracerProvider(
+        resource=resource,
+        id_generator=SecretsIdGenerator(),
+    )
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
     set_tracer_provider(trace_provider)
