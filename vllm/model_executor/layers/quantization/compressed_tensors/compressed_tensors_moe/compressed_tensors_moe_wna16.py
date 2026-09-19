@@ -143,8 +143,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         num_groups_w2: int | None = None,
         num_groups_w13: int | None = None,
     ) -> tuple[int, int, int]:
-        """
-        Get the shape of the weight based on the weight name, number of experts
+        """Get the shape of the weight based on the weight name, number of experts
         hidden size, intermediate size per partition, number of groups for w2,
         and number of groups for w13. Pass in num_groups_w2 and num_groups_w13
         for weight scales/zero_points.
@@ -443,10 +442,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-        # CPU fused_experts_cpu requires zero points even for symmetric quant.
+        # CPU fused_experts_cpu and the RDNA3 HIP kernel require zero points
+        # even for symmetric quant (the oracle synthesizes them).
         # EMULATION bakes ZP into the dequantized bf16 weights — ZP is None.
         if (
-            not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU
+            not self.symmetric
+            or self.wna16_backend in (WNA16MoEBackend.CPU, WNA16MoEBackend.RDNA3)
         ) and self.wna16_backend != WNA16MoEBackend.EMULATION:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)

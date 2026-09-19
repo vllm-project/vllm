@@ -38,7 +38,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -47,6 +49,7 @@ All2AllBackend = Literal[
     "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
+    "moonep",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -94,9 +97,11 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
+    - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
+      on CUDA, falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
@@ -202,6 +207,7 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
@@ -216,6 +222,8 @@ class ParallelConfig:
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+    elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
+    """Maximum data parallel size supported by elastic expert parallelism."""
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
@@ -435,7 +443,9 @@ class ParallelConfig:
     )
     """The configurations for fault tolerance."""
 
-    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
+    @field_validator(
+        "disable_nccl_for_dp_synchronization", "elastic_ep_max_dp_size", mode="wrap"
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -521,10 +531,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "CUDA devices or ROCm devices or XPU devices now."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -598,15 +608,13 @@ class ParallelConfig:
 
     @property
     def local_engines_only(self) -> bool:
-        """
-        Client manages local+remote EngineCores in pure internal LB case.
+        """Client manages local+remote EngineCores in pure internal LB case.
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
     def get_next_dp_init_port(self) -> int:
-        """
-        We might need to initialize process groups in multiple
+        """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
         e.g. both in the worker and in the engine, which
         can live in different processes. To avoid port conflicts, we
@@ -715,6 +723,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "deepep_v2",
                 "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
@@ -790,6 +799,7 @@ class ParallelConfig:
 
         Returns:
             (has_unfinished_global, pause_consensus)
+
         """
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
@@ -811,8 +821,7 @@ class ParallelConfig:
         return tensor.item()
 
     def compute_hash(self):
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -941,6 +950,18 @@ class ParallelConfig:
                     " for dense models."
                 )
 
+        max_dp_size = self.elastic_ep_max_dp_size
+        self.elastic_ep_max_dp_size = (
+            max_dp_size
+            if self.enable_elastic_ep and max_dp_size is not None
+            else self.data_parallel_size
+        )
+        if self.elastic_ep_max_dp_size < self.data_parallel_size:
+            raise ValueError(
+                "--elastic-ep-max-dp-size must be greater than or equal to "
+                f"the initial data_parallel_size ({self.data_parallel_size})."
+            )
+
         self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
@@ -1019,7 +1040,10 @@ class ParallelConfig:
             # See https://github.com/pytorch/pytorch/issues/174288
             from vllm.distributed.nixl_utils import is_nixl_available
 
-            if is_nixl_available():
+            if current_platform.is_xpu():
+                # On XPU, use the device-native XCCL P2P backend.
+                self.eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
                 self.eplb_config.communicator = "nixl"
             elif self.enable_elastic_ep:
                 self.eplb_config.communicator = "pynccl"

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for HF3FS KV Connector high-level components:
-  - TestHf3fsMockClient      : file-backed mock client I/O correctness
-  - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+"""Tests for HF3FS KV Connector high-level components:
+- TestHf3fsMockClient      : file-backed mock client I/O correctness
+- TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
 """
 
 import os
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -219,6 +219,9 @@ class TestHF3FSKVConnectorStats:
         assert result["Num save task success"] == pytest.approx(2.0, rel=0.01)
         assert result["Num save task failed"] == pytest.approx(0.0, rel=0.01)
         assert result["Avg save duration (ms)"] == pytest.approx(2000.0, rel=0.01)
+        # Reduced values must be plain Python scalars so CLI logging renders
+        # them without numpy reprs (eg np.float64(...)).
+        assert all(not isinstance(v, np.generic) for v in result.values())
 
     def test_clone_and_reset(self, hf3fs_stats):
         """clone_and_reset() returns a copy with data and resets the original."""

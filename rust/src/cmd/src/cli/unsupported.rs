@@ -235,11 +235,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub hf_token: Option<Unsupported>,
 
-    /// If a dictionary, contains arguments to be forwarded to the Hugging Face
-    /// config. If a callable, it is called to update the HuggingFace config.
-    #[arg(long)]
-    pub hf_overrides: Option<Unsupported>,
-
     /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     /// used with `--generation-config auto`, the override parameters will be
     /// merged with the default config from the model. If used with
