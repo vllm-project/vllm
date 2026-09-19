@@ -8,12 +8,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -128,3 +130,61 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.num_heads_q == 16
     assert builder.num_heads_kv == 2
     assert builder.headdim == 64
+
+
+def _triton_builder(spec_num_kv_heads, spec_head_size, spec_head_size_v):
+    """Triton builder whose group geometry disagrees with the model-wide values."""
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
+
+    layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
+    vllm_config.model_config.get_num_kv_heads.return_value = NUM_KV_HEADS
+    vllm_config.model_config.get_head_size.return_value = 128
+    vllm_config.model_config.rswa_window = None
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=spec_num_kv_heads,
+        head_size=spec_head_size,
+        head_size_v=spec_head_size_v,
+        dtype=torch.bfloat16,
+    )
+
+    with patch(
+        "vllm.v1.attention.backends.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        return TritonAttentionMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=list(layers),
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+
+
+def test_triton_geometry_comes_from_the_group():
+    """The 2D/3D threshold must follow the group's KV head count, not the model's."""
+    from vllm.v1.attention.backends.triton_attn import MIN_LAUNCH_GRID_SIZE_2D
+
+    builder = _triton_builder(
+        spec_num_kv_heads=2, spec_head_size=512, spec_head_size_v=512
+    )
+
+    assert builder.num_heads_kv == 2
+    assert builder.headdim == 512
+    assert builder.seq_threshold_3D == MIN_LAUNCH_GRID_SIZE_2D // 2
+
+
+def test_triton_softmax_scratch_matches_the_kernel_stride():
+    """The scratch must match the kernel's stride, next_power_of_2(head_size)."""
+    from vllm.utils.math_utils import next_power_of_2
+
+    for head_size, head_size_v in ((192, 128), (128, 192), (256, 256)):
+        builder = _triton_builder(
+            spec_num_kv_heads=2,
+            spec_head_size=head_size,
+            spec_head_size_v=head_size_v,
+        )
+        assert builder.headdim == head_size
+        assert builder.softmax_segm_output.shape[-1] == next_power_of_2(head_size)
