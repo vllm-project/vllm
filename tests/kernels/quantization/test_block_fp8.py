@@ -13,15 +13,28 @@ from tests.kernels.quant_utils import (
     native_w8a8_block_matmul,
 )
 from tests.kernels.utils import fp8_ulp_distance
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+    Fp8BlockScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+    cutlass_scaled_mm,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -209,6 +222,44 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="SM100 only."
+)
+@pytest.mark.parametrize(
+    "num_tokens", [7, 127, 128, 129, 130, 131, 257, 1025, 8193, 8194, 8195]
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_cutlass_block_fp8_padding_preserves_output(num_tokens, dtype):
+    """Padding must preserve leading dimensions, bias, and unpadded results."""
+    torch.manual_seed(0)
+    n, k = 576, 256
+    x = torch.randn(1, num_tokens, k, dtype=dtype) * 0.1
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(
+        torch.randn(n, k).to(torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.rand((n + 127) // 128, k // 128) * 0.1, requires_grad=False
+    )
+    bias = torch.randn(n, dtype=dtype) * 0.1
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        weight_shape=(n, k),
+        input_dtype=dtype,
+        out_dtype=dtype,
+    )
+    with set_current_vllm_config(VllmConfig(compilation_config={"mode": 0})):
+        kernel = CutlassFp8BlockScaledMMKernel(config)
+        expected = Fp8BlockScaledMMLinearKernel.apply_weights(kernel, layer, x, bias)
+        actual = kernel.apply_weights(layer, x, bias)
+
+    assert actual.shape == (1, num_tokens, n)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
 
 
 @pytest.mark.skipif(

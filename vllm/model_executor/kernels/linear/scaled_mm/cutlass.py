@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -276,6 +277,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
+        self.should_pad_large_m = current_platform.is_device_capability_family(100)
         act_scale_descriptor = config.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
@@ -284,6 +286,23 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             use_ue8m0=False,
             column_major_scales=True,
         )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        num_tokens = x.numel() // x.shape[-1]
+        if self.should_pad_large_m and num_tokens >= 128 and num_tokens % 4:
+            # SM100 dispatches every M not divisible by 4 to the small-M swapAB
+            # kernel. For M >= 128, pad before quantization so the FP8 input and
+            # column-major FP32 scales use the faster aligned-M kernel.
+            padded_x = F.pad(x.view(-1, x.shape[-1]), (0, 0, 0, -num_tokens % 4))
+            output = super().apply_weights(layer, padded_x, bias, **kwargs)
+            return output[:num_tokens].view(*x.shape[:-1], output.shape[-1])
+        return super().apply_weights(layer, x, bias, **kwargs)
 
     @classmethod
     def is_supported(cls, compute_capability=None):
