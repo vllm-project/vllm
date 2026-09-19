@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -24,6 +25,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -500,6 +502,53 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+
+        if self.indexer is None and self.compressor is None:
+            # Dense layers have no compression work to overlap.
+            self.aux_stream_list = None
+
+    def _enable_multi_stream_overlap(self) -> bool:
+        """ROCm multi-stream gate: streams and capture region.
+
+        Dict metadata marks piecewise cudagraph, whose eager breaks rebuild
+        the attention inputs on the owning stream. Forking side streams
+        there would rely on runtime HIP event sync, which is unreliable in
+        this overlap on ROCm (event waits can hang), so multi-stream only
+        runs where the fork/join becomes static graph edges: inside capture,
+        or with non-dict metadata (full cudagraph or the profile run), which
+        has no eager breaks.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        return self.aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
+        )
+
+    def _maybe_execute_in_parallel(
+        self,
+        fn0: Callable[[], Any],
+        fn1: Callable[[], Any],
+    ) -> tuple[Any, Any]:
+        """Fork the CSA stages where the fork/join lands in the captured graph.
+
+        maybe_execute_in_parallel serializes whenever a breakable capture is
+        active, captured segments included, so the enabled path forks through
+        execute_in_parallel instead. The gate is re-read per call, which
+        disables the fork in MRV1's wide eager region.
+        """
+        if not self._enable_multi_stream_overlap():
+            return fn0(), fn1()
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None
+        default_result, aux_results = execute_in_parallel(
+            fn0,
+            [fn1],
+            self.ln_events[0],
+            [self.ln_events[1]],
+            aux_streams[:1],
+            enable=True,
+        )
+        return default_result, aux_results[0]
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

@@ -473,7 +473,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # graph and MRV1 produces garbage (#51430).
             self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
-        # Will be None on ROCm for now.
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -765,7 +764,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
-        aux_streams = self.aux_stream_list
 
         def project_query_and_cache_kv() -> torch.Tensor:
             q = self._wq_b_proj(qr, qr_scale).view(
@@ -777,17 +775,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         index_q_scale: torch.Tensor | None = None
         index_weights_out: torch.Tensor | None = None
         latent: torch.Tensor | None = None
-        aux_stream = aux_streams[0] if aux_streams is not None else None
 
         if compressor is not None:
             # Q projection / KV insertion on the default stream overlaps the
-            # compressor on aux stream 0 (sequential on ROCm).
-            q, latent = maybe_execute_in_parallel(
+            # compressor on the aux stream.
+            q, latent = self._maybe_execute_in_parallel(
                 project_query_and_cache_kv,
                 lambda: compressor(kv_score, positions),
-                self.ln_events[0],
-                self.ln_events[1],
-                aux_stream,
             )
         else:
             q = project_query_and_cache_kv()
@@ -805,12 +799,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         if compressor is not None:
-            indexer_result, _ = maybe_execute_in_parallel(
+            indexer_result, _ = self._maybe_execute_in_parallel(
                 prepare_indexer,
                 lambda: compressor.insert_cache(latent, positions, self.rotary_emb),
-                self.ln_events[0],
-                self.ln_events[1],
-                aux_stream,
             )
         else:
             indexer_result = prepare_indexer()
@@ -825,6 +816,23 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv,
             positions,
             attn_out,
+        )
+
+    def _maybe_execute_in_parallel(
+        self,
+        fn0: Callable[[], Any],
+        fn1: Callable[[], Any],
+    ) -> tuple[Any, Any]:
+        """Run ``fn0`` on the current stream and ``fn1`` alongside it.
+
+        Override point: the ROCm layer drops the helper's capture guard and
+        gates the fork on the execution region instead.
+        """
+        aux_stream = (
+            self.aux_stream_list[0] if self.aux_stream_list is not None else None
+        )
+        return maybe_execute_in_parallel(
+            fn0, fn1, self.ln_events[0], self.ln_events[1], aux_stream
         )
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:

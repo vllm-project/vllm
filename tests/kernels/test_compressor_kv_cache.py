@@ -842,6 +842,10 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         _fused_qnorm_rope_kv_insert=lambda q, kv, pos, meta: q,
         _sparse_indexer_and_attn=observe,
     )
+    # The base pipeline now forks through this hook; bind it to the fake layer.
+    attention._maybe_execute_in_parallel = (
+        DeepseekV4Attention._maybe_execute_in_parallel.__get__(attention)
+    )
 
     def run():
         with override_forward_context(context):
