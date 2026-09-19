@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from packaging.version import Version
-import torch
 from PIL import Image
 
 from vllm.multimodal import MULTIMODAL_REGISTRY

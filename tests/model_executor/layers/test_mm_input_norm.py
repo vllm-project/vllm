@@ -482,9 +482,7 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_mm_input_norm_triton(
-            x, out, w, b, compute_dtype=torch.float32, block=block
-        )
+        fused_mm_input_norm_triton(x, out, w, b, block=block)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
@@ -509,7 +507,7 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
+        fused_mm_input_norm_triton(x, out, w, b)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
@@ -530,7 +528,7 @@ class TestFusedMMInputNormKernel:
             dtype=torch.float32,
             device=_DEVICE,
         )
-        fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
+        fused_mm_input_norm_triton(x, out, w, b)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out[:N], expected)
@@ -549,7 +547,6 @@ class TestFusedMMInputNormKernel:
                 torch.empty(N, C + 1, L, dtype=torch.float32, device=_DEVICE),
                 w,
                 b,
-                compute_dtype=torch.float32,
             )
         with pytest.raises(AssertionError):
             fused_mm_input_norm_triton(
@@ -557,18 +554,7 @@ class TestFusedMMInputNormKernel:
                 torch.empty(N, C, L + 1, dtype=torch.float32, device=_DEVICE),
                 w,
                 b,
-                compute_dtype=torch.float32,
             )
-
-    def test_rejects_unsupported_compute_dtype(self):
-        N, C, L = 2, 3, 64
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
-        out = torch.empty_like(x)
-        w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
-        b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
-
-        with pytest.raises(AssertionError):
-            fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float16)
 
 
 # ===========================================================================

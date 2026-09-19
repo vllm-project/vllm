@@ -69,13 +69,6 @@ bias[c]   = -image_mean[c] / image_std[c]
 
 The kernel takes raw pixel values (`uint8`), performs one fused multiply-add per channel, and folds the rescale factor into `weight`—no separate divide-by-255 step.
 
-#### Key Properties and Gains
-
-- **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
-- **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch; input is read in its native dtype (`uint8`).
-- **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
-- **Preallocated output with batch-dim padding** — callers can pass a larger buffer; only the leading `N` rows are written, so buffers are reusable across calls.
-
 #### Optimized Data Path for Fused Normalisation
 
 The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_mm_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
@@ -94,3 +87,10 @@ This GPU‑side fusion is controlled by a config flag called **`mm_device_do_nor
 |--------------|--------------------------------------|-------------------------------------|
 | `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
 | `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+
+#### Key Properties and Gains
+
+- **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
+- **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch via `fused_mm_input_norm_triton`; input is read in its native dtype (`uint8`).
+- **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
+- **Preallocated output with batch-dim padding** — callers can pass a larger buffer; only the leading `N` rows are written, so buffers are reusable across calls.
