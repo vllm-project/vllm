@@ -169,6 +169,108 @@ def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
     assert num_computed == 6
 
 
+@pytest.mark.parametrize(
+    (
+        "attention_block_size",
+        "dcp_world_size",
+        "sliding_window",
+        "prompt_len",
+        "resend_hit",
+        "extension_hit",
+    ),
+    [
+        (16, 1, None, 95, 64, 64),
+        (64, 1, None, 95, 64, 64),
+        (16, 4, None, 95, 64, 64),
+        (16, 1, 32, 95, 64, 64),
+        (16, 1, None, 96, 64, 80),
+        (16, 1, 32, 96, 64, 80),
+        # Attention has no key at 144; the resend loses the coarse fallback.
+        (64, 1, None, 160, 0, 144),
+    ],
+)
+def test_eagle_fine_hit_retention_preserves_materialized_replay_states(
+    attention_block_size,
+    dcp_world_size,
+    sliding_window,
+    prompt_len,
+    resend_hit,
+    extension_hit,
+):
+    """Latest-only retention uses the fine replay alignment without coarse fallbacks."""
+    attention_args = dict(
+        block_size=attention_block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    attention = (
+        FullAttentionSpec(**attention_args)
+        if sliding_window is None
+        else SlidingWindowSpec(**attention_args, sliding_window=sliding_window)
+    )
+    config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        prefix_cache_retention_interval=0,
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], attention),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=64,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=512,
+        enable_caching=True,
+        use_eagle=True,
+        scheduler_block_size=64,
+        hash_block_size=16,
+        dcp_world_size=dcp_world_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    scheduler = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64),
+        use_eagle_block_drop=True,
+        hash_block_size=16,
+        mamba_partial_cache_hit=True,
+        mamba_fine_grained_prefix_cache=False,
+        mamba_has_prefill_checkpoint_blocks=False,
+        mamba_prefill_checkpoint_alignment=None,
+        max_num_scheduled_tokens=64,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+    )
+    token_ids = list(range(prompt_len))
+    producer = make_request("producer", token_ids, 16, sha256)
+    assert manager.get_computed_blocks(producer)[1] == 0
+    offloads = []
+    while producer.num_computed_tokens < prompt_len:
+        manager.new_step_starts()
+        num_new = Scheduler._mamba_block_aligned_split(
+            scheduler, producer, min(64, prompt_len - producer.num_computed_tokens)
+        )
+        assert num_new > 0
+        assert manager.allocate_slots(producer, num_new) is not None
+        offloads.extend(drain_boundary_state_offloads(manager).get("producer", []))
+        producer.num_computed_tokens += num_new
+    manager.free(producer)
+    manager.new_step_starts()
+
+    resend = make_request("resend", token_ids, 16, sha256)
+    assert manager.get_computed_blocks(resend)[1] == resend_hit
+    for hit in {resend_hit, extension_hit} - {0}:
+        assert any(group == 1 and boundary == hit for group, _, boundary in offloads)
+    extension = make_request("extension", token_ids + [999] * 16, 16, sha256)
+    assert manager.get_computed_blocks(extension)[1] == extension_hit
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
