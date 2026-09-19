@@ -112,7 +112,10 @@ def _mamba_get_block_table_tensor(
     if mamba_cache_mode in ("all", "none"):
         return block_table
 
-    assert block_table.is_cuda and seq_lens.is_cuda
+    # This launcher and the Triton kernel it drives are platform-generic (the
+    # kernel's PDL branch is already gated by is_arch_support_pdl(), False on
+    # non-CUDA); only the device check was CUDA-only.
+    assert not block_table.is_cpu and not seq_lens.is_cpu
     num_requests = block_table.shape[0]
     num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
     state_indices = torch.empty(
@@ -220,7 +223,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert not state_indices.is_cpu
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
