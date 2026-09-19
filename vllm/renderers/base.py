@@ -260,17 +260,20 @@ class BaseRenderer(ABC, Generic[_T]):
             # prevent MM processor hangs
             with set_default_torch_num_threads(1):
                 if self.mm_processor:
+                    mm_processor_only_cache = self._mm_processor_only_cache
+
                     try:
                         logger.debug("Warming up multi-modal processing...")
                         self._warmup_mm_processor(
                             self.mm_processor,
-                            self._mm_processor_only_cache,
+                            mm_processor_only_cache,
                             log_prefix="Multi-modal",
                         )
                     except Exception:
                         logger.warning("Multi-modal warmup failed")
                     finally:
-                        self.clear_mm_cache()
+                        if mm_processor_only_cache:
+                            mm_processor_only_cache.clear_cache()
         finally:
             self._mm_warmup_done = True
 
