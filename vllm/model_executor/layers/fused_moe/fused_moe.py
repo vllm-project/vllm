@@ -885,9 +885,13 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        # Per-tensor expert scales may be [E] or [E, 1, 1]; a singleton N dim
+        # must broadcast rather than index past the scale.
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],

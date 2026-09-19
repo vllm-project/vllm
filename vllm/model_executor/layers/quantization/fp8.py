@@ -522,11 +522,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key = kFp8Dynamic128Sym
         else:
             weight_key = kFp8StaticTensorSym
-            activation_key = (
-                kFp8StaticTensorSym
-                if self.quant_config.activation_scheme == "static"
-                else kFp8DynamicTensorSym
-            )
+            if self.quant_config.activation_scheme == "static":
+                activation_key = kFp8StaticTensorSym
+            elif envs.VLLM_BATCH_INVARIANT:
+                # A per-tensor dynamic scale is the max over every token in
+                # the batch, so a request's quantized activations would depend
+                # on the requests it is batched with.
+                activation_key = kFp8DynamicTokenSym
+            else:
+                activation_key = kFp8DynamicTensorSym
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
@@ -789,6 +794,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.moe_block_shape,
+            per_act_token_quant=self.per_act_token_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),

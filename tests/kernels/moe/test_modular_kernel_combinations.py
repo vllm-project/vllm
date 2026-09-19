@@ -231,12 +231,9 @@ def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
     if info.needs_matching_quant:
-        # The triton kernels expect both per-act-token-quant and
-        # per-out-ch-quant or neither.
-        unsupported_quant_config = (
-            config.is_per_act_token_quant + config.is_per_out_ch_quant
-        ) == 1
-        return unsupported_quant_config
+        # The triton kernels expect per-out-ch-quant weights to be paired with
+        # per-act-token-quant activations.
+        return config.is_per_out_ch_quant and not config.is_per_act_token_quant
 
     return False
 
