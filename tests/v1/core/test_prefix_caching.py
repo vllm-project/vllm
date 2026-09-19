@@ -4398,7 +4398,10 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     # The SWA manager uses the configured 64-token interval (a multiple of the
     # 32-token lcm_block_size) as its retention segment. For this 128-token
     # prompt, the retained SWA tails are the 64-token interval boundary, the
-    # 96-token replay boundary, and the 128-token interval boundary.
+    # 96-token replay boundary, and the 128-token interval boundary. The replay
+    # tail reaches one alignment unit (32 tokens = 4 blocks) further back than
+    # a hit at the boundary needs, so a prompt that diverges inside the last
+    # aligned unit still hits: blocks 7..11 rather than 11 alone.
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
     computed_blocks, _, _ = manager.get_computed_blocks(req)
@@ -4411,7 +4414,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {7, 11, 15}
+    expected_swa_cached = {7, 8, 9, 10, 11, 15}
     for i in range(16):
         cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -4624,7 +4627,9 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11}
+    # The replay boundary (127 -> aligned 96) keeps the one-block tail a hit
+    # needs plus one alignment unit (4 blocks) below it: blocks 7..11.
+    expected_swa_cached = {7, 8, 9, 10, 11}
     for i in range(16):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -4644,8 +4649,16 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert num_computed_tokens == 12 * block_size
     assert len(computed_blocks.blocks[1]) == 12
 
+    # One alignment unit shorter (or diverging inside the last unit): the
+    # longest usable hit is 64 tokens, and the retained tail reaches it.
     shorter_req = make_request("2", token_ids[: 12 * block_size], block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(shorter_req)
+    assert num_computed_tokens == 8 * block_size
+    assert len(computed_blocks.blocks[1]) == 8
+
+    # Two units shorter is beyond the retained tail: no hit.
+    shortest_req = make_request("3", token_ids[: 8 * block_size], block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(shortest_req)
     assert num_computed_tokens == 0
     assert len(computed_blocks.blocks[1]) == 0
 
@@ -4696,7 +4709,9 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     # 127 tokens: eagle proves a boundary only if an aligned unit exists past
     # it, so the replay boundary rewinds one unit to
     # floor(127 / 32) * 32 - 32 = 64. The SWA tail plus its proof block then
-    # ends at 72, two 8-token blocks wide: hashes 7 and 8.
+    # ends at 72, two 8-token blocks wide (hashes 7 and 8), and reaches one
+    # alignment unit (4 blocks) further back for a prompt that diverges inside
+    # the last aligned unit: hashes 3..8.
     token_ids = [i for i in range(15) for _ in range(block_size)] + [15] * 7
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
@@ -4710,7 +4725,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {7, 8}
+    expected_swa_cached = {3, 4, 5, 6, 7, 8}
     for i in range(15):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -5387,9 +5402,10 @@ def test_pure_swa_retention_interval_caches_sparse_tails():
     }
     # per_segment = 64 / 16 = 4, need = cdiv(16-1, 16) = 1 -> segment tails at
     # i%4==3 -> {3,7,11,15}; latest replay boundary (255//16*16 = 240) -> tail
-    # block 14. Crucially this is a strict subset of all 16 blocks: retention
-    # is actually sparse for pure SWA (not silently dense).
-    assert cached == {3, 7, 11, 14, 15}
+    # block 14 plus one alignment block below it -> {13, 14}. Crucially this is
+    # a strict subset of all 16 blocks: retention is actually sparse for pure
+    # SWA (not silently dense).
+    assert cached == {3, 7, 11, 13, 14, 15}
 
     # A replay of the same prompt hits the latest replayable boundary (240).
     replay = make_request("1", token_ids, block_size, sha256)
@@ -5422,8 +5438,10 @@ def test_pure_swa_retention_latest_only():
         if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[0])
         is not None
     }
-    # No segment tails (interval 0); only the latest replay tail (block 14).
-    assert cached == {14}
+    # No segment tails (interval 0); only the latest replay tail (block 14)
+    # and the one alignment block below it that a prompt diverging inside the
+    # last block still needs (block 13).
+    assert cached == {13, 14}
 
     replay = make_request("1", token_ids, block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(replay)
@@ -5699,19 +5717,24 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
+    # Every reachable-boundary tail is one alignment block (here one block)
+    # longer than a hit at the boundary needs, so a prompt that diverges inside
+    # the last aligned block still finds a full run.
     # window == block_size -> need = cdiv(15, 16) = 1: single-block tail (like
-    # Mamba). Junction at token 96 -> block 5; replay boundary -> block 14.
-    assert retained(0, 96, block_size) == {5, 14}
+    # Mamba) plus the alignment block. Junction at token 96 -> blocks {4, 5};
+    # replay boundary -> blocks {13, 14}.
+    assert retained(0, 96, block_size) == {4, 5, 13, 14}
     # window == 3 * block_size -> need = cdiv(47, 16) = 3: the junction keeps a
-    # 3-block WINDOW {3,4,5} (the SWA distinction), plus replay window {12,13,14}.
-    assert retained(0, 96, 3 * block_size) == {3, 4, 5, 12, 13, 14}
-    # Coexists with segment tails (interval 64, need=1): {3,7,11,15} + replay 14
-    # + junction 5.
-    assert retained(64, 96, block_size) == {3, 5, 7, 11, 14, 15}
+    # 3-block WINDOW {3,4,5} (the SWA distinction) plus block 2, and the replay
+    # window {12,13,14} plus block 11.
+    assert retained(0, 96, 3 * block_size) == {2, 3, 4, 5, 11, 12, 13, 14}
+    # Coexists with segment tails (interval 64, need=1): {3,7,11,15} + replay
+    # {13,14} + junction {4,5}.
+    assert retained(64, 96, block_size) == {3, 4, 5, 7, 11, 13, 14, 15}
     # Dense (all blocks reachable) ignores the hint.
     assert retained(None, 96, block_size) is None
     # No boundary -> unchanged replay-only behavior.
-    assert retained(0, 0, block_size) == {14}
+    assert retained(0, 0, block_size) == {13, 14}
 
 
 def test_swa_reachable_block_mask_with_dcp_scaling():
@@ -5887,7 +5910,10 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
 
         def distinct(v):
-            return [v for _ in range(2 * block_size)]
+            # Long enough that the replay tail (the 2-block window plus one
+            # alignment block) ends inside the distinct part: only the pin can
+            # keep the junction window cached.
+            return [v for _ in range(4 * block_size)]
 
         # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
         # only its own replay window, not the shared-prefix boundary.
@@ -5963,3 +5989,100 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def _make_hybrid_swa_manager_gemma_like(retention_interval: int | None):
+    """Full-attention blocks of 32 next to sliding-window (1024) blocks of 16,
+    so the hit alignment is 32 tokens and a sliding hit needs 64 blocks."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float16
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                    sliding_window=1024,
+                ),
+            ),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=retention_interval,
+    )
+
+
+def test_swa_reachable_block_mask_keeps_one_alignment_block_below_boundary():
+    """Under sparse retention the tail kept below a reachable boundary must be
+    one alignment block longer than a hit needs: a request that diverges inside
+    the last aligned block gets a full-attention hit one aligned block shorter,
+    and its sliding lookup then needs the run to end one aligned block earlier."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        sliding_window=1024,
+    )
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=256,
+        alignment_tokens=32,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=0,
+        reachable_boundaries=[4099],
+    )
+    assert mask is not None
+    # Boundary 4099 aligns down to 4096 -> end block 256; a hit needs 64
+    # blocks, plus 32 / 16 = 2 for the shorter aligned hit: [190, 256).
+    assert [i for i, kept in enumerate(mask) if kept] == list(range(190, 256))
+
+
+@pytest.mark.parametrize(
+    ("length", "divergence", "expected_hit"),
+    [
+        # Divergence inside the last aligned block [4064, 4096): the full
+        # group hits 4064 and the sliding run must reach back to block 190.
+        (4100, 4094, 4064),
+        (6980, 6974, 6944),
+        # Divergence after the aligned boundary: unchanged.
+        (4110, 4104, 4096),
+    ],
+)
+def test_swa_latest_only_retention_hits_when_prompt_diverges_in_last_aligned_block(
+    length, divergence, expected_hit
+):
+    """The same user turn with a few tokens appended must still hit the cache
+    under ``prefix_cache_retention_interval=0`` on a hybrid SWA model."""
+    manager = _make_hybrid_swa_manager_gemma_like(retention_interval=0)
+    token_ids = [(i * 7919) % 50000 + 1 for i in range(length)]
+    cold = make_request("cold", token_ids, 16, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(cold)
+    assert num_computed == 0
+    assert (
+        manager.allocate_slots(cold, length, num_computed, computed_blocks) is not None
+    )
+    manager.free(cold)
+
+    extended = token_ids[:divergence] + [
+        60000 + i for i in range(length - divergence + 3)
+    ]
+    tail = make_request("tail", extended, 16, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(tail)
+    assert num_computed == expected_hit

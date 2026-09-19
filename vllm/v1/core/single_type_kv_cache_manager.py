@@ -1138,11 +1138,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # capped by ``get_computed_blocks``) and any shared-prefix junction. Both
         # land before segments would cover them under sparse retention, so keep
         # the ``need``-block tail ending on each boundary explicitly.
+        #
+        # The tail is one alignment block longer than a hit at the boundary
+        # needs. A request that diverges from the cached prompt inside the last
+        # aligned block (the same turn with a few tokens appended) gets a
+        # full-attention hit one aligned block shorter, and its sliding lookup
+        # then needs ``need`` contiguous blocks ending that much earlier; with
+        # a tail of exactly ``need`` blocks it finds ``need - extra`` and the
+        # whole prompt misses.
         if retention_interval is not None:
+            extra = alignment_tokens // block_size
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
                 end = aligned // block_size + shift
-                for j in range(max(start_block, end - need), min(end_block, end)):
+                for j in range(
+                    max(start_block, end - need - extra), min(end_block, end)
+                ):
                     mask[j - start_block] = True
 
         return mask
