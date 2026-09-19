@@ -226,6 +226,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   warn_if_ptx_arch_requested("${CUDA_ARCH_FLAGS}")
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
+  # Preserve requested feature targets before the general filter maps e.g. 10.3a
+  # to the baseline 10.0 target.
+  cuda_archs_ldmatrix_s4(MARLIN_LDMATRIX_S4_ARCHS "${CUDA_ARCHS}")
   # Filter the target architectures by the supported supported archs
   # since for some files we will build for all CUDA_ARCHS.
   cuda_archs_loose_intersection(CUDA_ARCHS
@@ -734,6 +737,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
           PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
       endif()
       list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_SRCS}")
+
+      if(MARLIN_LDMATRIX_S4_ARCHS)
+        set(MARLIN_LDMATRIX_S4_SRCS
+          "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/marlin/sm80_kernel_s8_u4b8_float16.cu"
+          "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/marlin/sm80_kernel_s8_u4b8_bfloat16.cu"
+          "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu")
+        # Match the CUDA images used by the layout query and both GEMM variants.
+        # Generic legacy images all use the legacy layout; repack also keeps SM75.
+        set(MARLIN_W4A8_ARCHS ${MARLIN_ARCHS} ${MARLIN_BF16_ARCHS}
+          ${MARLIN_OTHER_ARCHS} ${MARLIN_LDMATRIX_S4_ARCHS})
+        list(REMOVE_ITEM MARLIN_W4A8_ARCHS "7.5")
+        list(REMOVE_DUPLICATES MARLIN_W4A8_ARCHS)
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_LDMATRIX_S4_SRCS}"
+          CUDA_ARCHS "${MARLIN_W4A8_ARCHS}")
+        set_property(SOURCE ${MARLIN_LDMATRIX_S4_SRCS} APPEND
+          PROPERTY COMPILE_DEFINITIONS VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+      endif()
 
       message(STATUS "Building Marlin kernels for archs: ${MARLIN_OTHER_ARCHS}")
     else()

@@ -256,6 +256,7 @@ def prepare_fp4_layer_for_marlin(
         size_n=padded_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
+        is_w4a8_int8=False,
     )
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
 
@@ -323,6 +324,7 @@ def _repack_marlin_experts(
             size_n=size_n,
             num_bits=4,
             is_a_8bit=is_a_8bit,
+            is_w4a8_int8=False,
         )
         if out is None:
             out = torch.empty(
@@ -714,6 +716,7 @@ def rand_marlin_weight_nvfp4_like(weight, group_size, input_dtype=None):
         size_n=size_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
+        is_w4a8_int8=False,
     )
 
     marlin_scales = marlin_permute_scales(
@@ -773,6 +776,7 @@ def rand_marlin_weight_mxfp4_like(weight, group_size, input_dtype=None):
         size_n=size_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
+        is_w4a8_int8=False,
     )
 
     marlin_scales = marlin_permute_scales(
