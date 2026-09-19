@@ -205,6 +205,12 @@ class CpuPlatform(Platform):
             model_config is not None
             and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4"
         )
+        is_glm5next_sparse = (
+            model_config is not None
+            and getattr(model_config.hf_config, "model_type", None)
+            in ("glm5_next", "glm5_next_text")
+            and getattr(model_config.hf_config, "index_topk", None) is not None
+        )
 
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
@@ -219,6 +225,7 @@ class CpuPlatform(Platform):
         # as CPU MLA, just with a different value.
         cpu_mla_enabled = (
             not is_deepseek_v4
+            and not is_glm5next_sparse
             and model_config is not None
             and getattr(model_config, "use_mla", False)
         )
@@ -265,6 +272,17 @@ class CpuPlatform(Platform):
             cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
+
+        if is_glm5next_sparse:
+            index_kpool = getattr(model_config.hf_config, "index_kpool", None)
+            if not index_kpool or index_kpool <= 0:
+                raise ValueError("GLM5Next sparse MLA requires a positive index_kpool")
+            if cache_config.block_size % (index_kpool * 32) != 0:
+                raise ValueError(
+                    "GLM5Next CPU sparse MLA requires block_size to be a multiple "
+                    f"of index_kpool * 32 ({index_kpool * 32}), got "
+                    f"{cache_config.block_size}."
+                )
 
         if not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
@@ -479,6 +497,7 @@ class CpuPlatform(Platform):
             model_config is not None
             and model_config.use_mla
             and not amx_mla_or_dsv4_enabled
+            and not is_glm5next_sparse
         ):
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
