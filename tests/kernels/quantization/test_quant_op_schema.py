@@ -74,6 +74,36 @@ def test_group_fp8_quant_schema():
     )
 
 
+def test_gemm_with_dynamic_quant_x_scales_schema():
+    """MXFP4 GEMM with a caller-supplied activation scale."""
+    # this import statement is needed to ensure the op is registered
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
+
+    torch.manual_seed(0)
+    M, K, N = 128, 4096, 4096
+    x = torch.randn((M, K), dtype=torch.bfloat16, device="cuda")
+    weight = (torch.randn((N, K), dtype=torch.float32, device="cuda") * 0.02).to(
+        torch.bfloat16
+    )
+
+    x_fp4, x_scales = dynamic_mxfp4_quant(x)
+    weight_fp4, weight_scale = dynamic_mxfp4_quant(weight)
+
+    opcheck(
+        torch.ops.vllm.gemm_with_dynamic_quant,
+        (
+            x_fp4,
+            weight_fp4,
+            weight_scale.T.contiguous(),
+            False,
+            torch.bfloat16,
+            x_scales,
+        ),
+    )
+
+
 @pytest.mark.parametrize("dynamic", [True, False])
 def test_per_tensor_quant_matches_native(dynamic):
     """Wrapper output matches the native scaled_fp8_quant reference."""
