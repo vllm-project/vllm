@@ -395,27 +395,16 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        w13_scale = deep_gemm.transform_sf_into_required_layout(
-            self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
-            2 * self.intermediate_size,
-            self.hidden_size,
-            (1, 32),
-            self.num_local_experts,
-        )
-        w2_scale = deep_gemm.transform_sf_into_required_layout(
-            self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
-            self.hidden_size,
-            self.intermediate_size,
-            (1, 32),
-            self.num_local_experts,
-        )
+        backend = self._ensure_backend()
         self._transformed_l1_weights, self._transformed_l2_weights = (
-            deep_gemm.transform_weights_for_mega_moe(
-                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+            backend.transform_weights(
+                w13_weight=self.w13_weight.data,
+                w13_weight_scale=self.w13_weight_scale.data,
+                w2_weight=self.w2_weight.data,
+                w2_weight_scale=self.w2_weight_scale.data,
+                num_local_experts=self.num_local_experts,
+                hidden_size=self.hidden_size,
+                intermediate_size=self.intermediate_size,
                 activation=self.activation,
             )
         )
@@ -437,6 +426,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
+        backend = self._ensure_backend()
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -448,6 +438,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             self.hidden_size,
             self.intermediate_size,
             self.activation,
+            backend.mma_type,
         )
         symm_buffer = self._kimi_symm_buffer_cache.get(key)
         if symm_buffer is None:
@@ -459,6 +450,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 self.hidden_size,
                 self.intermediate_size,
                 activation=self.activation,
+                mma_type=backend.mma_type,
             )
             self._kimi_symm_buffer_cache[key] = symm_buffer
         return symm_buffer
@@ -479,9 +471,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 f"but its symmetric buffer supports {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
@@ -526,18 +515,19 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.finalize_weights()
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
-        deep_gemm.fp8_fp4_mega_moe(
-            y,
-            self._transformed_l1_weights,
-            self._transformed_l2_weights,
-            symm_buffer,
+        backend = self._ensure_backend()
+        backend.run_mega_moe(
+            y=y,
+            l1_weights=self._transformed_l1_weights,
+            l2_weights=self._transformed_l2_weights,
+            symm_buffer=symm_buffer,
             activation_clamp=activation_clamp,
-            activation=self.activation,
+            fast_math=fast_math,
             # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
             # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
+            activation=self.activation,
             activation_alpha=self.activation_beta or 1.0,
             activation_beta=self.activation_linear_beta or 0.0,
-            fast_math=fast_math,
         )
         return y
 
