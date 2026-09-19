@@ -81,9 +81,9 @@ def _fused_mm_input_norm_kernel(
         mask=mask,
         other=0,
         eviction_policy="evict_first",
-    ).to(COMPUTE_DTYPE)
-    w = tl.load(w_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
-    b = tl.load(b_ptr + c, mask=mask, other=0).to(COMPUTE_DTYPE)
+    ).to(tl.float32)
+    w = tl.load(w_ptr + c, mask=mask, other=0).to(tl.float32)
+    b = tl.load(b_ptr + c, mask=mask, other=0).to(tl.float32)
     tl.store(
         y_ptr + offs,
         x * w + b,
