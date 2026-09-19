@@ -44,6 +44,8 @@ class AnthropicContentBlock(BaseModel):
         "tool_reference",
         "thinking",
         "redacted_thinking",
+        "tool_addition",
+        "tool_removal",
     ]
     text: str | None = None
     # For image content
@@ -57,6 +59,8 @@ class AnthropicContentBlock(BaseModel):
     is_error: bool | None = None
     # For tool_reference content
     tool_name: str | None = None
+    # For tool_addition / tool_removal content
+    tool: dict[str, Any] | None = None
     # For thinking content
     thinking: str | None = None
     signature: str | None = None

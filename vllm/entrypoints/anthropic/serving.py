@@ -373,6 +373,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             # Tool references are expanded during tool_result processing
             # when they appear inside tool_result content.
             pass
+        elif block.type in ("tool_addition", "tool_removal"):
+            # Mid-conversation tool changes (e.g. from Claude Code tool search).
+            # We accept and pass over these blocks at top level, similar to
+            # tool_reference and redacted_thinking, avoiding 400 validation errors.
+            pass
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
