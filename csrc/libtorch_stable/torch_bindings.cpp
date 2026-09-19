@@ -425,6 +425,17 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
+  // fused_qk_norm_rope with the paged KV-cache write folded in: qkv is
+  // read-only, Q/K land in q_out/k_out and K/V are also scattered into the
+  // flash-layout key/value cache via slot_mapping.
+  ops.def(
+      "fused_qk_norm_rope_kvcache(Tensor qkv, Tensor! q_out, Tensor! k_out, "
+      "int num_heads_q, int num_heads_k, int num_heads_v, int head_dim, "
+      "float eps, Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids, Tensor! key_cache, "
+      "Tensor! value_cache, Tensor slot_mapping, "
+      "int forced_token_heads_per_warp=-1) -> ()");
+
   // q_head_padded is the padded Q head count of the returned tensor, or 0 to
   // do the KV insert alone and return an empty tensor.  The Q knobs are
   // independent: apply_q_norm and apply_q_rope each drop that step for Q
@@ -820,6 +831,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+  ops.impl("fused_qk_norm_rope_kvcache",
+           TORCH_BOX(&fused_qk_norm_rope_kvcache));
   ops.impl("fused_deepseek_v4_kv_rope_insert",
            TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
