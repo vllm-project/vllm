@@ -15,7 +15,12 @@ from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config import (
+    DiffusionConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -818,6 +823,7 @@ class SamplingParams(
         speculative_config: SpeculativeConfig | None,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
+        diffusion_config: DiffusionConfig | None = None,
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
@@ -826,7 +832,7 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
-        self._validate_diffusion(model_config)
+        self._validate_diffusion(model_config, diffusion_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1045,7 +1051,11 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+    def _validate_diffusion(
+        self,
+        model_config: ModelConfig,
+        diffusion_config: DiffusionConfig | None = None,
+    ) -> None:
         if not model_config.is_diffusion:
             return
 
@@ -1066,6 +1076,90 @@ class SamplingParams(
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
             )
+        self._validate_diffusion_extra_args(model_config, diffusion_config)
+
+    def _validate_diffusion_extra_args(
+        self,
+        model_config: ModelConfig,
+        diffusion_config: DiffusionConfig | None,
+    ) -> None:
+        """Reject bad diffusion fields in ``extra_args`` before the worker.
+
+        On the GPU a seed id outside the vocabulary is a device-side assert.
+        ``diffusion_seed_canvas``: token ids, one per canvas position, that
+        replace the random canvas after prefill. ``diffusion_max_steps``:
+        denoise steps per canvas. ``diffusion_read_only``: end the request
+        on the first canvas that converges.
+        """
+        extra = self.extra_args
+        if not extra:
+            return
+
+        canvas_length = (
+            None if diffusion_config is None else diffusion_config.canvas_length
+        )
+        width = extra.get("diffusion_canvas_length")
+        if width is not None and (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or width < 1
+            or (canvas_length is not None and width > canvas_length)
+        ):
+            raise VLLMValidationError(
+                "diffusion_canvas_length must be a positive integer no larger "
+                "than the served canvas.",
+                parameter="extra_args",
+            )
+        # The request's canvas: its own width, else the served one.
+        expected_len = width or canvas_length
+
+        seed = extra.get("diffusion_seed_canvas")
+        if seed is not None:
+            if not isinstance(seed, (list, tuple)) or not all(
+                isinstance(t, int) and not isinstance(t, bool) for t in seed
+            ):
+                raise VLLMValidationError(
+                    "diffusion_seed_canvas must be a list of token ids.",
+                    parameter="extra_args",
+                )
+            vocab_size = model_config.get_vocab_size()
+            if any(t < 0 or t >= vocab_size for t in seed):
+                raise VLLMValidationError(
+                    f"diffusion_seed_canvas ids must be in [0, {vocab_size}).",
+                    parameter="extra_args",
+                )
+            if expected_len is not None and len(seed) != expected_len:
+                raise VLLMValidationError(
+                    "diffusion_seed_canvas must hold exactly "
+                    f"{expected_len} ids, got {len(seed)}.",
+                    parameter="extra_args",
+                )
+
+        cap = extra.get("diffusion_max_steps")
+        if cap is not None and (
+            not isinstance(cap, int) or isinstance(cap, bool) or cap < 1
+        ):
+            raise VLLMValidationError(
+                "diffusion_max_steps must be a positive integer.",
+                parameter="extra_args",
+            )
+
+        # The OpenAI server's vllm_xargs narrows JSON booleans to 0/1.
+        read_only = extra.get("diffusion_read_only")
+        if read_only is not None and (
+            not isinstance(read_only, (bool, int)) or read_only not in (0, 1)
+        ):
+            raise VLLMValidationError(
+                "diffusion_read_only must be a boolean (or 0/1).",
+                parameter="extra_args",
+            )
+        if read_only:
+            # One canvas is the whole output. Cap max_tokens so the scheduler
+            # ends the request there, and ignore EOS so an end-of-turn token
+            # drawn into a noise slot does not end it early.
+            if expected_len is not None:
+                self.max_tokens = min(self.max_tokens or expected_len, expected_len)
+            self.ignore_eos = True
 
     def _validate_structured_outputs(
         self,
