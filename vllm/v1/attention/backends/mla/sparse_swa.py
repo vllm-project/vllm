@@ -585,8 +585,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             self.token_to_req_indices
         )
 
-        # Validity is derived from slot_mapping inside the SWA index kernels,
-        # which cover every decode and prefill row of the padded batch.
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
 
         non_causal = not common_attn_metadata.causal

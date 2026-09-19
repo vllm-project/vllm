@@ -662,14 +662,7 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("noncausal", [False, True])
 def test_swa_validity_is_derived_from_slot_mapping(noncausal):
-    """Both index kernels must derive is_valid_token from their own slot_mapping.
-
-    Guards dropping the eager ``slot_mapping >= 0`` / copy and the ``swa_lens``
-    tail fill. A non-zero ``token_offset`` keeps the shifted input row honest,
-    and the second, shorter launch must refresh the rows it owns rather than
-    leave the first launch's behind. Index values for valid rows are unchanged
-    by that removal and stay covered by the kernel tests above.
-    """
+    """Both index kernels must derive is_valid_token from slot_mapping."""
     device = torch.device("cuda")
     total, offset = 32, 3
     width = WINDOW + (2 if noncausal else 0)
@@ -684,6 +677,7 @@ def test_swa_validity_is_derived_from_slot_mapping(noncausal):
     qsl, seq, t2r, slots, table = make_batch(
         [40] * (total + offset), [1] * (total + offset), device
     )
+    # A shorter second launch must refresh the rows it owns.
     for step, live in enumerate((total, total // 4)):
         slots.fill_(7)
         slots[offset + step : offset + live : 3] = -1
@@ -704,7 +698,6 @@ def test_swa_validity_is_derived_from_slot_mapping(noncausal):
             token_offset=offset,
         )
         expected = slots[offset : offset + live] >= 0
-        rows = indices[:live, 0]
         assert torch.equal(valid[offset : offset + live], expected)
         assert torch.equal(lens[:live] == 0, ~expected)
-        assert torch.equal((rows == -1).all(-1), ~expected)
+        assert torch.equal((indices[:live, 0] == -1).all(-1), ~expected)
