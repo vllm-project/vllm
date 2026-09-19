@@ -612,9 +612,12 @@ class TestMultiConnectorStats:
         assert stats.data["MockConnector"].data == {"mock_field": [1, 2, 3]}
         assert stats.to_dict() == serialized_data
 
-    def test_build_kv_connector_stats_raises_error_for_unknown_connector(self):
-        """Test that unknown connectors raise an error."""
+    def test_build_kv_connector_stats_skips_unregistered_connector(self):
+        """An unregistered connector name is skipped instead of raising, so a
+        connector whose class name differs from its registration name cannot
+        crash the stats path. Other connectors are still reconstructed."""
         serialized_data = {
+            # Keyed by class name, but not registered under that name.
             "UnknownConnector": {"some_field": [1, 2, 3]},
             "NixlConnector": {
                 "transfer_duration": [1.5],
@@ -628,10 +631,13 @@ class TestMultiConnectorStats:
             },
         }
 
-        with pytest.raises(
-            ValueError, match="Connector 'UnknownConnector' is not registered."
-        ):
-            MultiConnector.build_kv_connector_stats(data=serialized_data)
+        stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
+
+        assert stats is not None
+        assert isinstance(stats, MultiKVConnectorStats)
+        assert "UnknownConnector" not in stats.data
+        assert "NixlConnector" in stats.data
+        assert isinstance(stats.data["NixlConnector"], NixlKVConnectorStats)
 
     def test_build_kv_connector_stats_with_already_instantiated_objects(self):
         """Test that already-instantiated stats objects are preserved (same process)."""
