@@ -16,9 +16,12 @@ from torch._dynamo.utils import counters
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import fork_new_process_for_each_test
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 MODEL = "microsoft/Phi-tiny-MoE-instruct"
 
