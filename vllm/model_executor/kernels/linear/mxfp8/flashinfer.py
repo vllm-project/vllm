@@ -87,12 +87,15 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         )
 
         qa = as_quantized_activation(x, self.input_quant_key())
+        input_shape = qa.orig_shape if qa is not None else x.shape
+        out_dtype = qa.orig_dtype if qa is not None else x.dtype
+        if input_shape[0] == 0:
+            return torch.empty((0, N), device=weight.device, dtype=out_dtype)
+
         if qa is not None:
             input_mxfp8, input_scale = qa.data, qa.scale
-            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
         else:
             assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = x.dtype, x.shape
             input_mxfp8, input_scale = mxfp8_e4m3_quantize(
                 x.view(-1, K), is_sf_swizzled_layout=True
             )
@@ -181,12 +184,15 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         )
 
         qa = as_quantized_activation(x, self.input_quant_key())
+        input_shape = qa.orig_shape if qa is not None else x.shape
+        out_dtype = qa.orig_dtype if qa is not None else x.dtype
+        if input_shape[0] == 0:
+            return torch.empty((0, N), device=weight.device, dtype=out_dtype)
+
         if qa is not None:
             input_mxfp8, input_scale = qa.data, qa.scale
-            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
         else:
             assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = x.dtype, x.shape
             input_mxfp8, input_scale = mxfp8_e4m3_quantize(
                 x.view(-1, K), is_sf_swizzled_layout=True
             )
