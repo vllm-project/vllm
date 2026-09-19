@@ -1586,13 +1586,85 @@ class MooncakeStoreWorker:
             and callable(getattr(spec_cfg, "use_eagle_block_drop", None))
             else False
         )
+        use_dspark = bool(
+            spec_cfg.use_dspark()
+            if spec_cfg is not None and callable(getattr(spec_cfg, "use_dspark", None))
+            else False
+        )
+        is_deepseek_v41 = (
+            getattr(getattr(model_config, "hf_config", None), "model_type", None)
+            == "deepseek_v41"
+        )
+        dspark_sliding_window = getattr(
+            getattr(model_config, "hf_config", None), "sliding_window", None
+        )
+        num_hidden_layers = getattr(
+            getattr(model_config, "hf_config", None), "num_hidden_layers", None
+        )
+        dspark_replay_tokens = (
+            dspark_sliding_window if isinstance(dspark_sliding_window, int) else 0
+        )
+        dsv41_num_hidden_layers = (
+            num_hidden_layers if isinstance(num_hidden_layers, int) else 0
+        )
+        if is_deepseek_v41 and use_dspark and dspark_replay_tokens <= 0:
+            raise ValueError(
+                "DeepSeek-V4.1 DSpark requires a positive sliding_window to "
+                "rebuild draft KV after loading target KV from Mooncake"
+            )
+        if is_deepseek_v41 and use_dspark and dsv41_num_hidden_layers <= 0:
+            raise ValueError(
+                "DeepSeek-V4.1 DSpark requires a positive num_hidden_layers to "
+                "rebuild layered SWA state after loading KV from Mooncake"
+            )
+        prefix_replay_tokens = max(
+            (
+                group.kv_cache_spec.prefix_replay_tokens
+                for group in kv_cache_config.kv_cache_groups
+            ),
+            default=0,
+        )
+        required_replay_tokens = dspark_replay_tokens * dsv41_num_hidden_layers
+        if (
+            is_deepseek_v41
+            and use_dspark
+            and (prefix_replay_tokens < required_replay_tokens)
+        ):
+            raise ValueError(
+                "DeepSeek-V4.1 DSpark with Mooncake requires layered SWA replay "
+                f"of at least {required_replay_tokens} tokens"
+            )
+        self._excluded_group_ids = {
+            group_id
+            for group_id, group in enumerate(self._kv_cache_groups)
+            if is_deepseek_v41 and use_dspark and group.is_eagle_group
+        }
+        self._group_participates = tuple(
+            group.kv_cache_spec.prefix_cacheable
+            and group_id not in self._excluded_group_ids
+            for group_id, group in enumerate(self._kv_cache_groups)
+        )
+        if self._excluded_group_ids:
+            logger.warning(
+                "Excluding DeepSeek-V4.1 DSpark draft KV groups %s from "
+                "Mooncake store/lookup/load; target-model KV groups remain reusable "
+                "and the model replays %d suffix tokens to rebuild layered SWA "
+                "and draft KV",
+                sorted(self._excluded_group_ids),
+                prefix_replay_tokens,
+            )
         self.coord = MooncakeStoreCoordinator(
             self._kv_cache_groups,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
-            use_eagle=use_eagle_block_drop,
+            use_eagle=use_eagle_block_drop
+            and any(
+                group.is_eagle_group and self._group_participates[group_id]
+                for group_id, group in enumerate(self._kv_cache_groups)
+            ),
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             dcp_world_size=self.dcp_size,
+            excluded_group_ids=self._excluded_group_ids,
         )
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
@@ -1972,10 +2044,7 @@ class MooncakeStoreWorker:
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
-                group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
-                ],
+                group_participates=self._group_participates,
             )
             self.kv_send_thread.start()
 
@@ -1993,10 +2062,7 @@ class MooncakeStoreWorker:
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
-                group_participates=[
-                    group.kv_cache_spec.prefix_cacheable
-                    for group in self._kv_cache_groups
-                ],
+                group_participates=self._group_participates,
                 is_hma_required=self._is_hma_required,
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
@@ -2190,7 +2256,7 @@ class MooncakeStoreWorker:
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+            if not self._group_participates[g_idx]:
                 continue
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
@@ -2302,7 +2368,7 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
+            if not self._group_participates[group_id]:
                 # Scratch groups are never stored, so they have no tail key.
                 continue
             chunk_id = cdiv(hit_length, db.block_size) - 1

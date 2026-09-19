@@ -106,8 +106,10 @@ class DeepseekV41ModelState(DefaultModelState):
 
     SWA bounded replay (``CacheConfig.swa_bounded_replay``) keeps the
     sliding-window KV out of prefix caching and rebuilds it after a prefix hit
-    by recomputing the hit's last window; the scheduler tells each request the
-    position from which it holds window KV (``NewRequestData.replay_start``).
+    by recomputing the hit's trailing replay span; the scheduler tells each
+    request the position from which it holds window KV
+    (``NewRequestData.replay_start``). DSpark uses a layered span so every
+    target layer's window state is exact.
     ``prepare_attn`` gathers those per batch, pads the replayed tokens' slots
     in the prefix-cacheable groups so the cached KV stays as is, and hands the
     starts to the sliding-window metadata builders, whose kernels read no

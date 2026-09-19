@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     RSWASpec,
+    SlidingWindowMLASpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -308,7 +309,12 @@ def _make_vllm_config(
     kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
     disable_hybrid_kv_cache_manager: bool = True,
 ) -> SimpleNamespace:
-    cache_config = SimpleNamespace(block_size=16, num_gpu_blocks=10)
+    cache_config = SimpleNamespace(
+        block_size=16,
+        num_gpu_blocks=10,
+        enable_prefix_caching=True,
+        prefix_match_unit=None,
+    )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -2255,6 +2261,117 @@ def test_worker_is_hma_required_from_kv_cache_groups(
     assert store_worker._is_hma_required is expected_is_hma_required
 
 
+def test_worker_init_excludes_dsv41_dspark_draft_group(monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.hf_config = SimpleNamespace(
+        model_type="deepseek_v41", sliding_window=128, num_hidden_layers=40
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        use_eagle_block_drop=lambda: False,
+    )
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    replay_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        bounded_replay=True,
+        bounded_replay_tokens=40 * 128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target"], spec),
+            KVCacheGroupSpec(["target_swa"], replay_spec),
+            KVCacheGroupSpec(["draft"], spec, is_eagle_group=True),
+        ],
+    )
+
+    store_worker = worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+    assert store_worker._excluded_group_ids == {1}
+    assert store_worker._group_participates == (True, False)
+    assert store_worker.coord.excluded_group_ids == {1}
+    assert [group.group_ids for group in store_worker.coord.attention_groups] == [[0]]
+
+
+def test_worker_init_rejects_dsv41_dspark_without_bounded_replay(monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.hf_config = SimpleNamespace(
+        model_type="deepseek_v41", sliding_window=128, num_hidden_layers=40
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        use_eagle_block_drop=lambda: False,
+    )
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target"], spec),
+            KVCacheGroupSpec(["draft"], spec, is_eagle_group=True),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="requires layered SWA replay"):
+        worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+
+def test_worker_init_keeps_non_dsv41_dspark_eagle_group(monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        use_eagle_block_drop=lambda: True,
+    )
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target"], spec),
+            KVCacheGroupSpec(["draft"], spec, is_eagle_group=True),
+        ],
+    )
+
+    store_worker = worker.MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+    assert store_worker._excluded_group_ids == set()
+    assert store_worker._group_participates == (True, True)
+    assert store_worker.coord.use_eagle
+    assert store_worker.coord.eagle_group_ids == {0, 1}
+
+
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
     store = MagicMock()
     store.setup.return_value = 0
@@ -3401,6 +3518,10 @@ def _register_with_mocked_threads(
 def _refresh_group_tp_replication_factors(
     worker: mooncake_store_worker.MooncakeStoreWorker,
 ) -> None:
+    worker._group_participates = tuple(
+        group_id not in worker._excluded_group_ids
+        for group_id in range(len(worker._kv_cache_groups))
+    )
     worker._group_tp_replication_factors = (
         worker._compute_group_tp_replication_factors()
     )
@@ -3456,6 +3577,8 @@ def _make_bare_worker(
     worker.store_replicate_config = SimpleNamespace()
     worker.enable_group_semantics = False
     worker._supports_group_ids = False
+    worker._excluded_group_ids = set()
+    worker._group_participates = (True,)
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
@@ -3755,6 +3878,21 @@ def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
     assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
+
+
+def test_dsv41_dspark_lookup_leaves_layered_replay_to_scheduler():
+    worker = _make_bare_worker(block_size=16)
+    num_tokens = 120000
+    block_hashes = [f"h{i}".encode() for i in range(num_tokens // 16)]
+    worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+
+    result = worker.lookup(num_tokens, block_hashes)
+
+    # The worker returns the complete target hit. The scheduler owns the
+    # 40-layer replay so all replayed target KV slots can remain padded.
+    assert result.hit_length == num_tokens - 16
+    queried_keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(queried_keys) == num_tokens // 16
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
