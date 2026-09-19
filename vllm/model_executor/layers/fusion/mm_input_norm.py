@@ -44,7 +44,6 @@ _SUPPORTED_INPUTS = (
     torch.float32,
 )
 _SUPPORTED_OUTPUTS = (torch.float16, torch.bfloat16, torch.float32)
-_SUPPORTED_COMPUTE = (torch.float32,)
 
 # Default tile size along the flattened element axis. 4096 keeps each
 # program's payload large enough to amortise launch overhead while
@@ -66,7 +65,6 @@ def _fused_mm_input_norm_kernel(
     L,
     C: tl.constexpr,
     BLOCK: tl.constexpr,
-    COMPUTE_DTYPE: tl.constexpr,
 ):
     # 1D grid over the flattened (N, C, L) tensor. Each program processes
     # BLOCK contiguous elements; the channel index is recovered from the
@@ -97,7 +95,6 @@ def fused_mm_input_norm_triton(
     outputs: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-    compute_dtype: torch.dtype,
     block: int | None = None,
     num_warps: int | None = None,
 ):
@@ -118,8 +115,6 @@ def fused_mm_input_norm_triton(
             rows are written.
         weight: Per-channel scale, shape ``(C,)``, contiguous.
         bias: Per-channel shift, shape ``(C,)``, contiguous.
-        compute_dtype: Compute dtype used inside the kernel. Only
-            ``torch.float32`` is currently supported.
         block: Block size along the flattened element axis. Defaults to
             ``_DEFAULT_BLOCK``.
         num_warps: Number of warps per program. If ``None``, derived from
@@ -133,9 +128,6 @@ def fused_mm_input_norm_triton(
     assert inputs.dtype in _SUPPORTED_INPUTS, f"unsupported input dtype: {inputs.dtype}"
     assert outputs.dtype in _SUPPORTED_OUTPUTS, (
         f"unsupported output dtype: {outputs.dtype}"
-    )
-    assert compute_dtype in _SUPPORTED_COMPUTE, (
-        f"unsupported compute dtype: {compute_dtype}"
     )
 
     # --- shape validation ---------------------------------------------
@@ -198,7 +190,6 @@ def fused_mm_input_norm_triton(
         L,
         C=C,
         BLOCK=block,
-        COMPUTE_DTYPE=_TL_DTYPE[compute_dtype],
         num_warps=num_warps,
     )
     return outputs
@@ -269,16 +260,9 @@ class FusedMMInputNorm(CustomOp):
         )
 
         if not self.is_identity:
-            image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
-                1.0 / rescale_factor
-            )
-            image_std_tensor = torch.tensor(image_std, dtype=dtype) * (
-                1.0 / rescale_factor
-            )
-            weight = 1.0 / image_std_tensor
-            bias = -image_mean_tensor / image_std_tensor
-            self.register_buffer("weight", weight)
-            self.register_buffer("bias", bias)
+            device = torch.get_default_device()
+            self.register_buffer("weight", weight_cpu.to(device))
+            self.register_buffer("bias", bias_cpu.to(device))
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
@@ -511,7 +495,7 @@ class FusedMMInputNorm(CustomOp):
             not HAS_TRITON
             or grid_thw.dtype not in _SUPPORTED_INPUTS
             or visual_dtype not in _SUPPORTED_OUTPUTS
-            or self.weight.dtype not in _SUPPORTED_COMPUTE
+            or self.weight.dtype is torch.float32
             or not self.weight.is_contiguous()
             or not self.bias.is_contiguous()
         ):
@@ -541,7 +525,6 @@ class FusedMMInputNorm(CustomOp):
             y3,
             self.weight,
             self.bias,
-            compute_dtype=self._compute_dtype,
         )
         return out_view
 
