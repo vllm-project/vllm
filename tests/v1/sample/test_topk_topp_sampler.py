@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
+
 import pytest
 import torch
 from torch import Generator
@@ -1158,3 +1160,32 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only gate")
+def test_absent_flashinfer_falls_back_instead_of_aborting(monkeypatch):
+    """The sampler is on by default, so an unguarded backend import aborts
+    engine init on any install without flashinfer. It should be reported the
+    same way every other unavailability reason is: warn and use native.
+    """
+    import builtins
+
+    from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
+
+    real_import = builtins.__import__
+
+    def without_flashinfer(name, *args, **kwargs):
+        if name.startswith("flashinfer") or name.endswith("backends.flashinfer"):
+            raise ImportError("No module named 'flashinfer'")
+        return real_import(name, *args, **kwargs)
+
+    for module in [m for m in sys.modules if m.startswith("flashinfer")]:
+        monkeypatch.delitem(sys.modules, module, raising=False)
+    monkeypatch.delitem(
+        sys.modules, "vllm.v1.attention.backends.flashinfer", raising=False
+    )
+    monkeypatch.setattr(builtins, "__import__", without_flashinfer)
+
+    # Not explicitly opted in: fall back rather than raise.
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert flashinfer_sampler_supported() is False
