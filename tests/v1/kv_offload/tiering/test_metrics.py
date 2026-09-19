@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections.abc import Iterable
 
 import numpy as np
@@ -209,6 +210,87 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
         p2p_label
     ] == pytest.approx(3 / 6)
     assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][p2p_label] == 1
+
+
+def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch):
+    """Tracker observes registration-to-completion, not the reported transfer_time."""
+    clock = 100.0
+    monkeypatch.setattr(time, "monotonic", lambda: clock)
+
+    tracker = TieringMetricsTracker(
+        tier_types=["fs", "p2p"],
+        num_primary_chunks=5,
+        primary_chunk_size=16,
+    )
+
+    promotion_job = JobMetadata(
+        TransferJob(0, to_keys([0, 1]), np.array([0, 1]), True, _CTX),
+        1,
+    )
+    tracker.on_job_registered(promotion_job)
+    clock += 1.5
+    tracker.on_job_finished(
+        promotion_job, JobResult(job_id=0, success=True, transfer_time=0.42)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert observations == {("2:p2p",): [1.5]}
+
+    cascade_job = JobMetadata(
+        TransferJob(1, to_keys([2]), np.array([2]), False, _CTX),
+        1,
+    )
+    tracker.on_job_registered(cascade_job)
+    clock += 0.1
+    tracker.on_job_finished(
+        cascade_job, JobResult(job_id=1, success=True, transfer_time=0.10)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+
+    failed_promotion_job = JobMetadata(
+        TransferJob(2, to_keys([3]), np.array([3]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(failed_promotion_job)
+    clock += 0.2
+    tracker.on_job_finished(
+        failed_promotion_job,
+        JobResult(job_id=2, success=False, transfer_time=0.42),
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+    tracker.assert_idle()
+
+
+def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time():
+    """A completion carrying no transfer_time still records a latency sample."""
+    tracker = TieringMetricsTracker(
+        tier_types=["p2p"],
+        num_primary_chunks=5,
+        primary_chunk_size=16,
+    )
+
+    promotion_job = JobMetadata(
+        TransferJob(0, to_keys([0]), np.array([0]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(promotion_job)
+    tracker.on_job_finished(promotion_job, JobResult(job_id=0, success=True))
+    tracker.assert_idle()
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+    assert len(observations[("1:p2p",)]) == 1
 
 
 def test_tiering_metrics_tracker_records_promotion_allocation_failures():

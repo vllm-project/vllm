@@ -508,6 +508,14 @@ class TestTieringOffloadingManager:
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
 
+        original_submit_load = self.secondary_tier1.submit_load
+
+        def submit_load(job_metadata):
+            assert job_metadata.job_id in self.manager._jobs
+            original_submit_load(job_metadata)
+
+        self.secondary_tier1.submit_load = submit_load
+
         # Lookup each chunk to initiate promotion for all of them
         for chunk in chunks:
             result = self.manager.lookup(chunk, _CTX)
@@ -518,6 +526,18 @@ class TestTieringOffloadingManager:
 
         # End of step 2: processes the completed promotion jobs
         self._simulate_on_schedule_end()
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.PROMOTION_LATENCY, ("1:example",)
+                )
+            ]
+            == 1
+        )
 
         # Now chunks should be in primary tier
         assert count_hits(self.primary_tier, chunks) == 3

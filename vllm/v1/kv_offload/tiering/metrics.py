@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
+    JobId,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -56,6 +57,7 @@ class TieringMetricsTracker:
         self._primary_chunk_size = primary_chunk_size
         self._request_states: dict[str, _RequestMetricsState] = {}
         self._tier_states = [_TierState() for _ in tier_types]
+        self._job_start_times: dict[JobId, float] = {}
         self._stats = OffloadingConnectorStats()
 
     @functools.cache  # noqa: B019
@@ -116,6 +118,7 @@ class TieringMetricsTracker:
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
             state.primary_write_chunk_count += chunk_count
+            self._job_start_times[transfer_job.job_id] = time.monotonic()
         else:
             state.active_cascade_count += 1
             state.primary_read_chunk_count += chunk_count
@@ -124,6 +127,7 @@ class TieringMetricsTracker:
         self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
         self._observe_finished_job_stats(job_metadata, result)
+        self._observe_promotion_latency(job_metadata, result)
         self._decrement_tier_state(job_metadata)
 
     def on_promotion_allocation_failure(self) -> None:
@@ -177,6 +181,7 @@ class TieringMetricsTracker:
         return stats
 
     def assert_idle(self) -> None:
+        assert not self._job_start_times
         assert all(
             state.active_promotion_count == 0
             and state.active_cascade_count == 0
@@ -236,6 +241,25 @@ class TieringMetricsTracker:
             self._stats.increase_counter(
                 time_metric, completed_job.transfer_time, labelvalues
             )
+
+    def _observe_promotion_latency(
+        self, job_metadata: _JobMetadataLike, result: JobResult
+    ) -> None:
+        """Record promotion time from job registration to reported completion.
+
+        This is broader than the tier-reported `JobResult.transfer_time`, which
+        covers only the active data movement, and so includes tier queueing.
+        Only fully successful promotions are observed; failures are reported
+        through PROMOTION_JOB_FAILURES instead.
+        """
+        start_time = self._job_start_times.pop(job_metadata.transfer_job.job_id, None)
+        if start_time is None or not result.success:
+            return
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.PROMOTION_LATENCY,
+            time.monotonic() - start_time,
+            self.tier_label(job_metadata.tier_idx),
+        )
 
     def _observe_active_transfer_stats(self, stats: OffloadingConnectorStats) -> None:
         for tier_idx, state in enumerate(self._tier_states):
