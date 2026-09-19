@@ -136,6 +136,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
+        # Latched once a stream opens straight into the response channel with
+        # no think markers at all (the model skipped thinking). The opener
+        # arrives across several deltas, so the decision has to be sticky.
+        self._response_only_stream = False
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -311,7 +315,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         if m_open is not None:
             text = text[m_open.end() :]
         overlap = 0
-        for marker in (self._think_open, self._think_close):
+        # ``response_open`` is held back too: a completion that skipped the
+        # think channel opens with it, and streaming it out as reasoning
+        # while the marker is still arriving would misroute the whole reply.
+        for marker in (self._think_open, self._think_close, self._response_open):
             max_check = min(len(marker) - 1, len(text))
             for n in range(max_check, 0, -1):
                 if text.endswith(marker[:n]):
@@ -386,6 +393,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
 
+        if self._response_only_stream:
+            return self.strip_content_streaming(previous_text, current_text)
+
         # reasoning already ended -> downstream content
         if self._think_close_re.search(previous_text):
             return DeltaMessage(content=delta_text)
@@ -411,6 +421,16 @@ class KimiK3ReasoningParser(ReasoningParser):
                 reasoning=reasoning_delta or None,
                 content=content or None,
             )
+
+        # No think markers anywhere but a response channel opened: the model
+        # went straight to the answer, so the whole stream is content. Same
+        # shape the non-streaming extract_reasoning routes to content.
+        if (
+            self._think_open_re.search(current_text) is None
+            and self._response_open_re.search(current_text) is not None
+        ):
+            self._response_only_stream = True
+            return self.strip_content_streaming(previous_text, current_text)
 
         current_reasoning = self._reasoning_text_ready_to_emit(current_text)
         previous_reasoning = self._reasoning_text_ready_to_emit(previous_text)
