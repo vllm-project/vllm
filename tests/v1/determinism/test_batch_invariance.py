@@ -16,6 +16,7 @@ from utils import (
 )
 
 import vllm.envs as envs
+from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 
 
@@ -387,6 +388,69 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
             f"{len(prompts)} prompts. See output above for details."
         )
         pytest.fail(msg)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.timeout(1500)
+@pytest.mark.parametrize("backend", ["TRITON_ATTN"])
+def test_logprobs_bitwise_batch_invariance_with_sequence_parallelism(backend):
+    """Guard against batch-dependent SP reductions (vllm-project/vllm#56370).
+
+    Removing the config gate should fail this test: SP makes the reduction
+    order depend on the batch composition.
+    """
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=4,
+        max_num_seqs=64,
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+        seed=0,
+        attention_config={"backend": backend},
+        compilation_config={"pass_config": {"enable_sp": True, "sp_min_token_num": 64}},
+    )
+
+    try:
+        pass_config = llm.llm_engine.vllm_config.compilation_config.pass_config
+        assert pass_config.enable_sp is False
+        assert pass_config.fuse_gemm_comms is False
+
+        random.seed(0)
+        prompts = [_random_prompt(10, 50) for _ in range(64)]
+        sampling_params = SamplingParams(
+            temperature=0.0, max_tokens=24, logprobs=5, seed=1234
+        )
+
+        bs1_results = []
+        for i, prompt in enumerate(prompts):
+            outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+            assert len(outputs) == 1, f"Prompt {i}: expected one output"
+            bs1_results.append(_extract_step_logprobs(outputs[0]))
+
+        outputs_batched = llm.generate(prompts, sampling_params, use_tqdm=False)
+        assert len(outputs_batched) == len(prompts)
+        for i, ((logprobs_bs1, tokens_bs1), output) in enumerate(
+            zip(bs1_results, outputs_batched)
+        ):
+            logprobs_bsN, tokens_bsN = _extract_step_logprobs(output)
+            assert logprobs_bs1 is not None, f"Prompt {i}: missing BS=1 logprobs"
+            assert logprobs_bsN is not None, f"Prompt {i}: missing BS=64 logprobs"
+            assert logprobs_bs1.shape == logprobs_bsN.shape, (
+                f"Prompt {i}: different number of steps: "
+                f"{len(logprobs_bs1)} (BS=1) vs {len(logprobs_bsN)} (BS=64)"
+            )
+            for step, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+                assert tokens_bs1[step] == tokens_bsN[step], (
+                    f"Prompt {i}, step {step}: different tokens: "
+                    f"{tokens_bs1[step]} (BS=1) vs {tokens_bsN[step]} (BS=64)"
+                )
+                assert torch.equal(a, b), (
+                    f"Prompt {i}, step {step}: bitwise logprob mismatch: "
+                    f"{a.item()} (BS=1) vs {b.item()} (BS=64)"
+                )
+    finally:
+        with contextlib.suppress(Exception):
+            llm.shutdown()
 
 
 @skip_unsupported
