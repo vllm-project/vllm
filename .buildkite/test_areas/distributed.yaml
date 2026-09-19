@@ -44,7 +44,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -75,7 +75,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
@@ -94,7 +94,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -118,7 +118,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
@@ -139,7 +139,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -388,7 +388,7 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
@@ -405,8 +405,10 @@ steps:
   - vllm/distributed/
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
   commands:
@@ -425,7 +427,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
       - vllm/v1/attention/backends/
