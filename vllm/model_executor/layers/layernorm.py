@@ -194,6 +194,60 @@ class GemmaRMSNorm(CustomOp):
         return out
 
 
+@CustomOp.register("layer_norm")
+class StandardLayerNorm(CustomOp):
+    """Standard (mean-centered) LayerNorm.
+
+    Drop-in for a bare `nn.LayerNorm` that dispatches to a fused XPU SYCL
+    kernel (vllm-xpu-kernels `layer_norm`, PR #577); falls back to the native
+    implementation off XPU or when the op isn't in the installed
+    vllm-xpu-kernels package.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        self.normalized_shape = (hidden_size,)
+        self.eps = eps
+        weight_dtype = dtype or torch.get_default_dtype()
+        self.weight: nn.Parameter | None = None
+        self.bias: nn.Parameter | None = None
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
+            if bias:
+                self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=weight_dtype))
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_layer_norm
+
+        if (
+            self.weight is None
+            or self.bias is None
+            or not hasattr(torch.ops._C, "layer_norm")
+        ):
+            return self.forward_native(x)
+        # empty_like preserves x's strides, but the kernel requires a
+        # contiguous out (unlike x, which it can handle non-contiguous).
+        out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+        torch.ops.vllm.xpu_layer_norm(out, x, self.weight, self.bias, self.eps)
+        return out
+
+    def extra_repr(self) -> str:
+        return f"hidden_size={self.normalized_shape[0]}, eps={self.eps}"
+
+
 # --8<-- [start:rms_norm_gated]
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):

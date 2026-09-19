@@ -71,6 +71,7 @@ from vllm.model_executor.models.transformers.utils import (
     named_state,
     replace_conv_class,
     replace_embedding_class,
+    replace_layernorm_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
@@ -466,6 +467,7 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
+        - `nn.LayerNorm` with vLLM's `StandardLayerNorm`
         """
         tp_plan = self.model.tp_plan or {}
 
@@ -490,6 +492,10 @@ class Base(
         vocab_embeddings = self._vocab_embeddings()
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
+
+        # OlmoForCausalLM regresses on XPU (-3.1% throughput); others gain, exclude it.
+        arch = self.config.architectures[0].lower()
+        swap_layernorm = "olmoforcausallm" not in arch
 
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
@@ -556,6 +562,8 @@ class Base(
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
+                elif isinstance(child_module, nn.LayerNorm) and swap_layernorm:
+                    new_module = replace_layernorm_class(child_module)
                 elif child_module_fusers := fusers[child_module]:
                     for fuser in child_module_fusers:
                         register_fusion(fuser, qual_name, child_module)

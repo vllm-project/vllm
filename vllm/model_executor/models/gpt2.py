@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import StandardLayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -156,11 +157,11 @@ class GPT2Block(nn.Module):
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = StandardLayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = StandardLayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPT2MLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
@@ -212,7 +213,7 @@ class GPT2Model(nn.Module):
             lambda prefix: GPT2Block(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = StandardLayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
