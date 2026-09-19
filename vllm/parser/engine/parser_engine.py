@@ -847,6 +847,12 @@ class ParserEngine(Parser):
                 content_str = ""
 
         content = content_str or None
+
+        if finished and self._tool_slots and content:
+            tools_called = self._build_extracted_result().tools_called
+            if tools_called:
+                content = self._strip_content_whitespace(content, tools_called=True)
+
         reasoning = "".join(reasoning_parts) or None
 
         if content or tool_call_deltas or reasoning:
