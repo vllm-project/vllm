@@ -32,7 +32,7 @@ from .registry import (
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import dummy_hf_overrides, skip_if_capability_restricted
 
 logger = init_logger(__name__)
 
@@ -179,6 +179,8 @@ def can_initialize(
 
         if not (current_platform.is_cuda() or current_platform.is_rocm()):
             pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
+
+    skip_if_capability_restricted(model_arch)
 
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
