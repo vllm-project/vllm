@@ -7,9 +7,12 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import functools
+
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -282,6 +285,383 @@ def kernel_paged_attention_2d(
     )
 
 
+# ---------------------------------------------------------------------------
+# Flash-decoding sequence partitioning for the Triton paged-attention fallback.
+#
+# The unpartitioned kernel launches a grid of (num_seqs, num_kv_heads). During
+# decode that is a handful of programs -- on qwen38 (num_kv_heads small, batch
+# often 1) it is single digits, against 104 CUs per MI210 die. The whole
+# sequence is walked by one program, so long context serialises and decode
+# collapses. The ROCm HIP kernel avoids this with _PARTITION_SIZE_ROCM = 256
+# and a second reduction pass; it is unavailable here because the free kernel
+# is numerically wrong for block_size > 64 on gfx90a (see
+# vllm/platforms/rocm.py, use_rocm_custom_paged_attention).
+#
+# So do the same thing in Triton: split the sequence into partitions, run one
+# program per (seq, kv_head, partition) accumulating an UNNORMALISED softmax
+# numerator plus its running max/denominator, then combine the partials.
+#
+# Env:
+#   VLLM_TRITON_PA_SEQ_PARTITION=0   disable (default: enabled)
+#   VLLM_TRITON_PA_TARGET_PROGRAMS   occupancy target (default 4 * #CUs)
+#   VLLM_TRITON_PA_SCRATCH_BUDGET_MB scratch cap (default 128)
+#   VLLM_TRITON_PA_TARGET_PROGRAMS   programs to aim for (default 4 * #CUs)
+# ---------------------------------------------------------------------------
+
+_PA_PARTITION_MIN = 512
+_PA_MAX_PARTITIONS = 1024
+def _pa_scratch_budget() -> int:
+    return envs.VLLM_TRITON_PA_SCRATCH_BUDGET_MB * 1024 * 1024
+
+
+@functools.lru_cache(maxsize=1)
+def _seq_partition_enabled() -> bool:
+    return envs.VLLM_TRITON_PA_SEQ_PARTITION
+
+
+@functools.lru_cache(maxsize=1)
+def _seq_partition_target_programs() -> int:
+    if envs.VLLM_TRITON_PA_TARGET_PROGRAMS:
+        return max(1, envs.VLLM_TRITON_PA_TARGET_PROGRAMS)
+    try:
+        cus = torch.cuda.get_device_properties(0).multi_processor_count
+    except Exception:
+        cus = 64
+    return 4 * cus
+
+
+def _choose_partition_size(
+    num_seqs: int, num_kv_heads: int, seq_len_bound: int, block_size: int,
+    num_query_heads: int = 32, head_size_padded: int = 256,
+) -> int:
+    """Partition size in tokens, or 0 to keep the single-program-per-seq path.
+
+    CUDAGRAPH SAFETY -- read before changing `seq_len_bound`.
+
+    Decode runs inside full cudagraphs, and RocmAttentionMetadataBuilder.
+    build_for_cudagraph_capture() does `seq_lens.fill_(1)`. So the *runtime*
+    max_seq_len seen at capture time is tiny and bears no relation to the
+    sequence lengths the captured graph will later replay against. Sizing the
+    partition grid from it would bake in too few partitions and silently drop
+    the tail of every long sequence -- wrong answers, not a slowdown.
+
+    Callers therefore pass a bound that is fixed for the life of a captured
+    graph: the block table's width times the physical block size, which by
+    construction covers max_model_len. An OVERSIZED grid is harmless (surplus
+    partitions store their -inf/0 sentinel and the reducer, which recomputes
+    num_parts from the true per-sequence length, ignores them). An UNDERSIZED
+    grid is not, so the bound must never shrink.
+
+    Within that constraint the partition count is chosen to fill the device
+    rather than to be maximal: it falls out of how far the (num_seqs,
+    num_kv_heads) grid is from the target occupancy. A large decode batch
+    already saturates and gets 0, which keeps scratch small by construction.
+    """
+    if not _seq_partition_enabled():
+        return 0
+    if seq_len_bound < 2 * _PA_PARTITION_MIN:
+        return 0
+    base = max(1, num_seqs * num_kv_heads)
+    if base >= _seq_partition_target_programs():
+        return 0  # the (seq, kv_head) grid already saturates the device
+    # Take the finest partition the scratch budget affords rather than sizing
+    # for occupancy AT THE BOUND: the bound is max_model_len, so occupancy
+    # sizing leaves most partitions empty at realistic context lengths. Surplus
+    # partitions cost one early-exiting program each.
+    bytes_per_part = max(1, num_seqs * num_query_heads * head_size_padded * 4)
+    max_parts = max(1, _pa_scratch_budget() // bytes_per_part)
+    max_parts = min(max_parts, _PA_MAX_PARTITIONS)
+    part_size = max(_PA_PARTITION_MIN, -(-seq_len_bound // max_parts))
+    # Quantise to a power of two: PARTITION_SIZE is a constexpr, so an
+    # unquantised value would trigger a fresh Triton compile per batch shape.
+    part_size = triton.next_power_of_2(part_size)
+    if part_size % block_size != 0:
+        part_size = -(-part_size // block_size) * block_size
+    parts = -(-seq_len_bound // part_size)
+    if parts <= 1:
+        return 0
+    while parts > _PA_MAX_PARTITIONS:
+        part_size *= 2
+        parts = -(-seq_len_bound // part_size)
+    return part_size
+
+
+@triton.jit
+def kernel_paged_attention_2d_partitioned(
+    tmp_acc_ptr,  # [num_seqs, num_query_heads, max_parts, HEAD_SIZE_PADDED] f32
+    tmp_m_ptr,  # [num_seqs, num_query_heads, max_parts] f32
+    tmp_l_ptr,  # [num_seqs, num_query_heads, max_parts] f32
+    query_ptr,  # [num_tokens, num_query_heads, head_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+    seq_lens_ptr,  # [num_seqs]
+    alibi_slopes_ptr,  # [num_query_heads]
+    scale,
+    k_scale,
+    v_scale,
+    num_query_heads: tl.constexpr,
+    num_queries_per_kv: tl.constexpr,
+    num_queries_per_kv_padded: tl.constexpr,
+    block_table_stride: tl.int64,
+    query_stride_0: tl.int64,
+    query_stride_1: tl.int64,
+    tmp_acc_stride_0: tl.int64,
+    tmp_acc_stride_1: tl.int64,
+    tmp_acc_stride_2: tl.int64,
+    tmp_ml_stride_0: tl.int64,
+    tmp_ml_stride_1: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    USE_ALIBI_SLOPES: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    x: tl.constexpr,
+    stride_k_cache_0: tl.int64,
+    stride_k_cache_1: tl.int64,
+    stride_k_cache_2: tl.int64,
+    stride_k_cache_3: tl.int64,
+    stride_k_cache_4: tl.int64,
+    stride_v_cache_0: tl.int64,
+    stride_v_cache_1: tl.int64,
+    stride_v_cache_2: tl.int64,
+    stride_v_cache_3: tl.int64,
+    filter_by_query_len: tl.constexpr,
+    query_start_len_ptr,  # [num_seqs+1]
+    PARTITION_SIZE: tl.constexpr,
+):
+    seq_idx = tl.program_id(0)
+    kv_head_idx = tl.program_id(1)
+    part_idx = tl.program_id(2)
+
+    if filter_by_query_len:
+        cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
+        cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
+        cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
+        if cur_batch_query_len > 1:
+            return
+    else:
+        cur_batch_in_all_start_index = seq_idx
+
+    query_head_idx = kv_head_idx * num_queries_per_kv + tl.arange(
+        0, num_queries_per_kv_padded
+    )
+    head_mask = query_head_idx < (kv_head_idx + 1) * num_queries_per_kv
+    head_mask = head_mask & (query_head_idx < num_query_heads)
+
+    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+    dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
+
+    ml_offset = seq_idx * tmp_ml_stride_0 + query_head_idx * tmp_ml_stride_1 + part_idx
+    acc_offset = (
+        seq_idx * tmp_acc_stride_0
+        + query_head_idx[:, None] * tmp_acc_stride_1
+        + part_idx * tmp_acc_stride_2
+    )
+
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
+    part_start = part_idx * PARTITION_SIZE
+
+    # A partition writes iff part_idx < cdiv(seq_len, PARTITION_SIZE), which is
+    # exactly the range the reducer reads (it recomputes num_parts from the true
+    # seq_len and masks). Surplus partitions are therefore never read and can
+    # exit without storing anything -- worth doing, because the grid is sized
+    # from a fixed bound, so at short context MOST partitions are surplus and
+    # their sentinel stores were the dominant cost.
+    if part_start >= seq_len:
+        return
+
+    M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
+    L = tl.zeros([num_queries_per_kv_padded], dtype=tl.float32)
+    acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED], dtype=tl.float32)
+
+    query_offset = (
+        cur_batch_in_all_start_index * query_stride_0
+        + query_head_idx[:, None] * query_stride_1
+    )
+    Q = tl.load(
+        query_ptr + query_offset + offs_d[None, :],
+        mask=dim_mask[None, :] & head_mask[:, None],
+        other=0.0,
+    )
+
+    block_table_offset = seq_idx * block_table_stride
+
+    if USE_ALIBI_SLOPES:
+        alibi_slope = tl.load(
+            alibi_slopes_ptr + query_head_idx, mask=head_mask, other=0.0
+        )
+
+    part_end = tl.minimum(seq_len, part_start + PARTITION_SIZE)
+    num_blocks = cdiv_fn(part_end - part_start, BLOCK_SIZE)
+
+    offs_n = tl.arange(0, BLOCK_SIZE)
+    for j in range(0, num_blocks):
+        start_n = part_start + j * BLOCK_SIZE
+        abs_token_idx = start_n + offs_n
+        kv_load_mask = abs_token_idx < seq_len
+        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
+        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
+
+        k_offset = (
+            p_block_idx[None, :] * stride_k_cache_0
+            + kv_head_idx * stride_k_cache_1
+            + (offs_d[:, None] // x) * stride_k_cache_2
+            + internal_offsets[None, :] * stride_k_cache_3
+            + (offs_d[:, None] % x) * stride_k_cache_4
+        )
+        v_offset = (
+            p_block_idx[:, None] * stride_v_cache_0
+            + kv_head_idx * stride_v_cache_1
+            + offs_d[None, :] * stride_v_cache_2
+            + internal_offsets[:, None] * stride_v_cache_3
+        )
+
+        K_load = tl.load(
+            key_cache_ptr + k_offset,
+            mask=dim_mask[:, None] & kv_load_mask[None, :],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
+        if K_load.dtype.is_fp8():
+            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+        else:
+            K = K_load
+
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :] & kv_load_mask[:, None],
+            other=0.0,
+            eviction_policy="evict_last",
+        )
+        if V_load.dtype.is_fp8():
+            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+        else:
+            V = V_load
+
+        seq_offset = abs_token_idx
+        seq_mask = seq_offset[None, :] < seq_len
+
+        qk = scale * tl.dot(Q, K)
+        S = tl.where(head_mask[:, None] & seq_mask, qk, float("-inf"))
+
+        context_len = seq_len - 1
+        if SLIDING_WINDOW > 0:
+            S = tl.where((context_len - seq_offset) < SLIDING_WINDOW, S, -10000)
+        if USE_ALIBI_SLOPES:
+            S += alibi_slope[:, None] * (seq_offset - context_len)
+
+        m_j = tl.maximum(M, tl.max(S, axis=1))
+        p = tl.exp(S - m_j[:, None])
+        p = tl.where(m_j[:, None] == float("-inf"), 0.0, p)
+        l_j = tl.sum(p, axis=1)
+
+        alpha = tl.exp(M - m_j)
+        alpha = tl.where(float("-inf") == M, 0.0, alpha)
+
+        acc = acc * alpha[:, None]
+        L = L * alpha + l_j
+        M = m_j
+        acc += tl.dot(p.to(V.dtype), V)
+
+    # Store the UNNORMALISED numerator plus (max, denominator). The division
+    # and the sink/fp8 epilogue happen once, in the reduce kernel.
+    tl.store(tmp_m_ptr + ml_offset, M, mask=head_mask)
+    tl.store(tmp_l_ptr + ml_offset, L, mask=head_mask)
+    tl.store(
+        tmp_acc_ptr + acc_offset + offs_d[None, :],
+        acc,
+        mask=dim_mask[None, :] & head_mask[:, None],
+    )
+
+
+@triton.jit
+def kernel_paged_attention_2d_reduce(
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    tmp_acc_ptr,
+    tmp_m_ptr,
+    tmp_l_ptr,
+    sink_ptr,  # [num_query_heads]
+    seq_lens_ptr,  # [num_seqs]
+    out_scale_inv,
+    output_stride_0: tl.int64,
+    output_stride_1: tl.int64,
+    tmp_acc_stride_0: tl.int64,
+    tmp_acc_stride_1: tl.int64,
+    tmp_acc_stride_2: tl.int64,
+    tmp_ml_stride_0: tl.int64,
+    tmp_ml_stride_1: tl.int64,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    PARTITION_SIZE: tl.constexpr,
+    MAX_PARTS_PADDED: tl.constexpr,
+    filter_by_query_len: tl.constexpr,
+    query_start_len_ptr,
+    USE_SINKS: tl.constexpr,
+    USE_FP8: tl.constexpr,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+):
+    seq_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+
+    if filter_by_query_len:
+        start = tl.load(query_start_len_ptr + seq_idx)
+        stop = tl.load(query_start_len_ptr + seq_idx + 1)
+        if stop - start > 1:
+            return
+        out_row = start
+    else:
+        out_row = seq_idx
+
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
+    num_parts = cdiv_fn(seq_len, PARTITION_SIZE)
+
+    offs_p = tl.arange(0, MAX_PARTS_PADDED)
+    part_mask = offs_p < num_parts
+
+    ml_base = seq_idx * tmp_ml_stride_0 + head_idx * tmp_ml_stride_1
+    m_p = tl.load(tmp_m_ptr + ml_base + offs_p, mask=part_mask, other=float("-inf"))
+    l_p = tl.load(tmp_l_ptr + ml_base + offs_p, mask=part_mask, other=0.0)
+
+    m = tl.max(m_p, axis=0)
+    if USE_SINKS:
+        sink = tl.load(sink_ptr + head_idx).to(tl.float32)
+        m = tl.maximum(m, sink)
+
+    # exp(-inf - -inf) is NaN, so mask empty partitions out explicitly rather
+    # than relying on the arithmetic.
+    alpha = tl.exp(m_p - m)
+    alpha = tl.where(part_mask & (m_p > float("-inf")), alpha, 0.0)
+
+    denom = tl.sum(l_p * alpha, axis=0)
+    if USE_SINKS:
+        denom += tl.exp(sink - m)
+
+    offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+    dim_mask = offs_d < HEAD_SIZE
+    acc_base = seq_idx * tmp_acc_stride_0 + head_idx * tmp_acc_stride_1
+    partials = tl.load(
+        tmp_acc_ptr + acc_base + offs_p[:, None] * tmp_acc_stride_2 + offs_d[None, :],
+        mask=part_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    )
+    out = tl.sum(partials * alpha[:, None], axis=0)
+    out = out / (denom + 1e-10)
+
+    if USE_FP8:
+        out = out * tl.load(out_scale_inv)
+        out = tl.clamp(out, FP8_MIN, FP8_MAX)
+
+    tl.store(
+        output_ptr + out_row * output_stride_0 + head_idx * output_stride_1 + offs_d,
+        out,
+        mask=dim_mask,
+    )
+
+
 def chunked_prefill_paged_decode(
     query,
     key,
@@ -457,6 +837,122 @@ def chunked_prefill_paged_decode(
             )
         else:
             processed_block_table = block_table.to(torch.int32)
+
+        # See _choose_partition_size: the bound must be fixed for the life of
+        # a captured cudagraph, so derive it from the block table's width
+        # rather than from the runtime max_seq_len (which capture sets to 1).
+        seq_len_bound = max(
+            max_seq_len, processed_block_table.shape[1] * real_block_size
+        )
+        part_size = _choose_partition_size(
+            num_seqs, num_kv_heads, seq_len_bound, TRITON_BLOCK_SIZE,
+            num_query_heads=num_query_heads,
+            head_size_padded=triton.next_power_of_2(head_size),
+        )
+        if part_size:
+            max_parts = (seq_len_bound + part_size - 1) // part_size
+            head_size_padded = triton.next_power_of_2(head_size)
+            tmp_acc = torch.empty(
+                (num_seqs, num_query_heads, max_parts, head_size_padded),
+                dtype=torch.float32,
+                device=query.device,
+            )
+            tmp_m = torch.empty(
+                (num_seqs, num_query_heads, max_parts),
+                dtype=torch.float32,
+                device=query.device,
+            )
+            tmp_l = torch.empty_like(tmp_m)
+            logger.warning_once(
+                "Triton paged decode: sequence partitioning ON "
+                "(%d seqs x %d kv heads x %d partitions of %d tokens).",
+                num_seqs,
+                num_kv_heads,
+                max_parts,
+                part_size,
+            )
+            kernel_paged_attention_2d_partitioned[
+                (
+                    num_seqs,
+                    num_kv_heads,
+                    max_parts,
+                )
+            ](
+                tmp_acc_ptr=tmp_acc,
+                tmp_m_ptr=tmp_m,
+                tmp_l_ptr=tmp_l,
+                query_ptr=query,
+                key_cache_ptr=key_cache,
+                value_cache_ptr=value_cache,
+                block_tables_ptr=processed_block_table,
+                seq_lens_ptr=seq_lens,
+                alibi_slopes_ptr=alibi_slopes,
+                scale=sm_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                num_query_heads=num_query_heads,
+                num_queries_per_kv=num_queries_per_kv,
+                num_queries_per_kv_padded=num_queries_per_kv_padded,
+                block_table_stride=processed_block_table.stride(0),
+                query_stride_0=query.stride(0),
+                query_stride_1=query.stride(1),
+                tmp_acc_stride_0=tmp_acc.stride(0),
+                tmp_acc_stride_1=tmp_acc.stride(1),
+                tmp_acc_stride_2=tmp_acc.stride(2),
+                tmp_ml_stride_0=tmp_m.stride(0),
+                tmp_ml_stride_1=tmp_m.stride(1),
+                BLOCK_SIZE=TRITON_BLOCK_SIZE,
+                PHYSICAL_BLOCK_SIZE=real_block_size,
+                HEAD_SIZE=head_size,
+                HEAD_SIZE_PADDED=head_size_padded,
+                USE_ALIBI_SLOPES=use_alibi_slopes,
+                SLIDING_WINDOW=sliding_window,
+                x=key_cache.shape[4],
+                stride_k_cache_0=key_cache.stride(0),
+                stride_k_cache_1=key_cache.stride(1),
+                stride_k_cache_2=key_cache.stride(2),
+                stride_k_cache_3=key_cache.stride(3),
+                stride_k_cache_4=key_cache.stride(4),
+                stride_v_cache_0=value_cache.stride(0),
+                stride_v_cache_1=value_cache.stride(1),
+                stride_v_cache_2=value_cache.stride(2),
+                stride_v_cache_3=value_cache.stride(3),
+                filter_by_query_len=True,
+                query_start_len_ptr=query_start_loc,
+                PARTITION_SIZE=part_size,
+            )
+            kernel_paged_attention_2d_reduce[
+                (
+                    num_seqs,
+                    num_query_heads,
+                )
+            ](
+                output_ptr=output,
+                tmp_acc_ptr=tmp_acc,
+                tmp_m_ptr=tmp_m,
+                tmp_l_ptr=tmp_l,
+                sink_ptr=sinks,
+                seq_lens_ptr=seq_lens,
+                out_scale_inv=1.0 / output_scale
+                if output_scale is not None
+                else 1.0,
+                output_stride_0=output.stride(0),
+                output_stride_1=output.stride(1),
+                tmp_acc_stride_0=tmp_acc.stride(0),
+                tmp_acc_stride_1=tmp_acc.stride(1),
+                tmp_acc_stride_2=tmp_acc.stride(2),
+                tmp_ml_stride_0=tmp_m.stride(0),
+                tmp_ml_stride_1=tmp_m.stride(1),
+                HEAD_SIZE=head_size,
+                HEAD_SIZE_PADDED=head_size_padded,
+                PARTITION_SIZE=part_size,
+                MAX_PARTS_PADDED=triton.next_power_of_2(max_parts),
+                filter_by_query_len=True,
+                query_start_len_ptr=query_start_loc,
+                USE_SINKS=sinks is not None,
+                USE_FP8=output_scale is not None,
+            )
+            return
 
         kernel_paged_attention_2d[
             (
