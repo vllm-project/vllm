@@ -15,6 +15,9 @@ import os
 
 import torch
 
+from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+    pack_skinny_int4,
+)
 from vllm.triton_utils import triton
 
 # ---------------------------------------------------------------------------
@@ -56,20 +59,27 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
 
     Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
     its int32 view from w_q_skinny, so no separate int32 buffer is returned.
+
+    The weights go through ``pack_skinny_int4``, the same packer the layer
+    uses, so the benchmark sees the production row stride — including the
+    gfx11 cliff padding. Building the buffer directly would always produce a
+    dense stride and silently measure a layout no model actually runs.
     """
     num_groups = K // group_size
 
-    # Random packed weights — actual values don't matter for throughput
-    w_q_skinny_i32 = torch.randint(
-        0, 2**31, (N, K // 8), dtype=torch.int32, device=device
-    )
-    w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
+    # Values don't matter for throughput, but the layout does.
+    unpacked = torch.randint(0, 16, (N, K), dtype=torch.int32, device=device)
+    w_q_skinny = pack_skinny_int4(unpacked)
+    del unpacked
     w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
 
-    # Raw per-group zero-points for asymmetric benchmarks
-    w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
-        torch.float16
-    )
+    # Per-group zero-points for asymmetric benchmarks, in the packed layout the
+    # kernels read: [N//8, num_groups] int32, row n's nibble at bits 4*(n%8).
+    zp_raw = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device)
+    shifts = (torch.arange(8, device=device, dtype=torch.int32) * 4)[:, None]
+    w_zp = torch.sum(
+        (zp_raw.view(N // 8, 8, num_groups) & 0xF) << shifts, dim=1, dtype=torch.int32
+    ).contiguous()
 
     # FP16 baseline for F.linear
     w_fp16 = torch.randn(N, K, dtype=torch.float16, device=device) * 0.01
