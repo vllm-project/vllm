@@ -47,6 +47,9 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
                 [np.arange(count, dtype=np.int32) for count in num_logits_per_req]
             )
         ).to(device),
+        seq_lens_cpu_upper_bound=torch.from_numpy(
+            np.array([10, 20, 30, 40], dtype=np.int32)
+        ),
     )
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = SimpleNamespace(logprobs_mode=logprobs_mode)

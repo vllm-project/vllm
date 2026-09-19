@@ -176,6 +176,7 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -185,6 +186,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             expanded_local_pos,
+            seq_lens_upper_bound_np,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
@@ -251,6 +253,7 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+                input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,

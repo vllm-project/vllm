@@ -51,6 +51,14 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+def test_verify_leaves_logits_processors_to_admission():
+    """verify() is runner-agnostic; LP validation lives in the admission
+    layer, so an unimportable FQCN must not fail verify()."""
+    SamplingParams().verify(
+        MockModelConfig(logits_processors=["no.such:Cls"]), None, None, None
+    )
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""
