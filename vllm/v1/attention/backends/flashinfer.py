@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import inspect
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -90,6 +93,16 @@ from vllm.v1.kv_cache_interface import (
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+
+if TYPE_CHECKING:
+    # Types of the opt-in unified paged-attention API
+    # (VLLM_FLASHINFER_PAGED_PREFILL); imported lazily at run time so the
+    # default path never loads the experimental package.
+    from flashinfer.prefill import (
+        PagedAttention,
+        PagedAttentionMetadata,
+        Resolution,
+    )
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
@@ -605,6 +618,17 @@ class TRTLLMPrefill:
 
 
 @dataclass
+class PagedPrefill:
+    """Metadata for prefill on the experimental unified FlashInfer API.
+
+    Opt-in via ``VLLM_FLASHINFER_PAGED_PREFILL``; see
+    :class:`PagedPrefillAdapter`.
+    """
+
+    attn: "PagedAttention"
+
+
+@dataclass
 class FlashInferTrtllmAPIDecode:
     """Metadata for XQA and trtllm-gen decode."""
 
@@ -657,7 +681,7 @@ class FlashInferMetadata:
     num_prefill_tokens: int
     causal: bool
 
-    prefill: FIPrefill | TRTLLMPrefill | None
+    prefill: FIPrefill | TRTLLMPrefill | PagedPrefill | None
     """
     Holds the metadata for the prefill portion of the batch.
     Will be `None` if `num_prefill_tokens == 0`.
@@ -678,6 +702,348 @@ class FlashInferMetadata:
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+
+
+# --- Experimental opt-in: unified FlashInfer paged prefill --------------------
+#
+# VLLM_FLASHINFER_PAGED_PREFILL=1 routes prefill through the experimental
+# unified paged-attention API; decode keeps the existing path. The API is
+# unreleased at the revision this opt-in pins, so that reference travels with
+# every rejection.
+
+PAGED_PREFILL_BACKEND = "fa2"
+PAGED_PREFILL_PINNED_REF = (
+    "FlashInfer PR #4015, head a05ffb0865a9a4b51609f09174cde4e423bfd290"
+)
+
+
+def _check_paged_prefill_api_surface(
+    resolve_paged_attention: Callable[..., "Resolution"],
+    paged_attention: type["PagedAttention"],
+    paged_attention_metadata: type["PagedAttentionMetadata"],
+) -> None:
+    """Reject a FlashInfer whose experimental API drifted from the pin.
+
+    The call shapes below are the only version evidence an unreleased API has.
+    Without this probe a drifted install would fail with a ``TypeError`` in the
+    middle of a batch instead of at start-up.
+    """
+    for name, entry, required in (
+        (
+            "resolve_paged_attention",
+            resolve_paged_attention,
+            (
+                "device",
+                "num_qo_heads",
+                "num_kv_heads",
+                "head_dim_qk",
+                "q_dtype",
+                "page_size",
+                "kv_layout",
+                "causal",
+                "need_lse",
+                "window_left",
+                "backend",
+            ),
+        ),
+        (
+            "PagedAttentionMetadata.dense",
+            paged_attention_metadata.dense,
+            (
+                "page_size",
+                "max_q_len",
+                "max_kv_len",
+                "qo_indptr_cpu",
+                "kv_seq_lens_cpu",
+            ),
+        ),
+        (
+            "PagedAttention.plan",
+            paged_attention.plan,
+            (
+                "num_qo_heads",
+                "num_kv_heads",
+                "head_dim_qk",
+                "q_dtype",
+                "kv_layout",
+                "causal",
+                "window_left",
+                "lse_mode",
+                "backend",
+            ),
+        ),
+        ("PagedAttention.run", paged_attention.run, ("out", "sm_scale")),
+    ):
+        missing = [
+            kw for kw in required if kw not in inspect.signature(entry).parameters
+        ]
+        if missing:
+            raise ImportError(
+                f"flashinfer.prefill.{name}() does not accept {missing}; the "
+                "installed FlashInfer's experimental paged-attention API does "
+                f"not match the pinned revision ({PAGED_PREFILL_PINNED_REF})"
+            )
+
+
+class PagedPrefillAdapter:
+    """Prefill on the experimental unified FlashInfer paged-attention API.
+
+    Opt-in via ``VLLM_FLASHINFER_PAGED_PREFILL=1``; decode keeps the existing
+    metadata and kernels. Prerequisites are checked once, at builder
+    construction, and anything the pinned contract cannot serve is rejected
+    there: the opt-in never reverts to the native FlashInfer prefill path,
+    which would report success for a path that never ran.
+    """
+
+    def __init__(self, builder: "FlashInferMetadataBuilder"):
+        capability = current_platform.get_device_capability()
+        arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
+        if capability is None or (capability.major, capability.minor) != (8, 9):
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL is validated on SM89 (L20) only; "
+                f"this device is {arch}. Unset the variable to use the default "
+                "FlashInfer prefill path."
+            )
+        if builder.model_config.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL supports fp16/bf16 only; the "
+                f"model dtype is {builder.model_config.dtype}."
+            )
+        if builder.cache_dtype != "auto":
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL requires an unquantized KV "
+                f"cache; this KV-cache group is {builder.cache_dtype!r}."
+            )
+        if builder.use_dcp:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL does not support decode context "
+                "parallelism: DCP rewrites the host sequence-length mirror to "
+                "DCP-local lengths while the device tensor stays global."
+            )
+        if builder.has_sinks:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL does not support attention sinks."
+            )
+        if builder.logits_soft_cap:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL does not support logits soft cap."
+            )
+        if builder.window_left != -1:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL serves ordinary causal attention "
+                f"only; this model requests window_left={builder.window_left}."
+            )
+        if builder.reorder_batch_threshold != 1:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL does not support speculative "
+                "decoding: its reorder puts multi-token draft requests in the "
+                "prefill slice."
+            )
+        if builder.attention_config.use_non_causal:
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL serves causal attention only."
+            )
+        if envs.VLLM_BATCH_INVARIANT:
+            # The unified API exposes no fixed split-KV policy, so this opt-in
+            # cannot honour VLLM_BATCH_INVARIANT's determinism pin.
+            raise ValueError(
+                "VLLM_FLASHINFER_PAGED_PREFILL does not support batch-invariant "
+                "mode."
+            )
+
+        try:
+            from flashinfer.prefill import (
+                PagedAttention,
+                PagedAttentionMetadata,
+                resolve_paged_attention,
+            )
+        except ImportError as exc:
+            raise ImportError(
+                "VLLM_FLASHINFER_PAGED_PREFILL=1 requires the experimental "
+                f"unified paged-attention API ({PAGED_PREFILL_PINNED_REF}); the "
+                f"installed FlashInfer does not provide it: {exc}"
+            ) from exc
+        _check_paged_prefill_api_surface(
+            resolve_paged_attention, PagedAttention, PagedAttentionMetadata
+        )
+
+        self._metadata_cls = PagedAttentionMetadata
+        # _pin_resolution() re-plans after the layout is known; keep the query
+        # reachable outside this scope instead of re-importing it there.
+        self._resolve_paged_attention = resolve_paged_attention
+        self._device = builder.device
+        self._page_size = builder.page_size
+        self._num_qo_heads = builder.num_qo_heads
+        self._num_kv_heads = builder.num_kv_heads
+        self._head_dim = builder.head_dim
+        self._q_dtype = builder.q_data_type_prefill
+        self._attn = PagedAttention(builder.device)
+        self._resolution: "Resolution | None" = None
+        # Seconds the init-time warmup took, or None while it has not run.
+        self.warmup_s: float | None = None
+        if builder.cache_config.kv_cache_layout is not None:
+            # The engine core resolves the layout once, before the KV cache is
+            # allocated, and get_resolved_kv_cache_layout() raises until then
+            # (vllm/config/cache.py), so this is the normal site. A builder
+            # constructed earlier pins the same Resolution at the first plan
+            # instead of failing the engine.
+            kv_layout = get_flashinfer_layout_string(builder.kv_cache_layout)
+            self._resolution = self._pin_resolution(kv_layout)
+            if envs.VLLM_FLASHINFER_PAGED_PREFILL_WARMUP:
+                self._warmup(self._resolution, kv_layout)
+
+    def _pin_resolution(self, kv_layout: str) -> "Resolution":
+        """Resolve the API once, before any plan: the returned Resolution fixes
+        the candidate set (and the layout) that every later plan() is checked
+        against, and is what keeps the opt-in from drifting to another backend.
+        """
+        resolution = self._resolve_paged_attention(
+            device=self._device,
+            num_qo_heads=self._num_qo_heads,
+            num_kv_heads=self._num_kv_heads,
+            head_dim_qk=self._head_dim,
+            q_dtype=self._q_dtype,
+            page_size=self._page_size,
+            kv_layout=kv_layout,
+            causal=True,
+            need_lse=False,
+            window_left=-1,
+            backend=PAGED_PREFILL_BACKEND,
+        )
+        logger.info_once(
+            "FlashInfer paged prefill uses the experimental unified API "
+            "(VLLM_FLASHINFER_PAGED_PREFILL=1): backend=%s, kv_layout=%s, "
+            "page_size=%d",
+            resolution.chosen,
+            resolution.kv_layout,
+            self._page_size,
+        )
+        return resolution
+
+    def _warmup(self, resolution: "Resolution", kv_layout: str) -> None:
+        """Pay this path's one-time cost at engine init, not in a request.
+
+        The first prefill a cold adapter plans is where the FA2 module variant
+        is built and loaded (``BatchPrefillWithPagedKVCacheWrapper.plan`` ->
+        ``get_batch_prefill_module``, a cached JIT build) and where the
+        controller's workspace is first touched; the paired engine A/B
+        measures both as a regression while they land inside the timed
+        window. The batch here is minimal on purpose: the module variant is
+        keyed on the static configuration (q/kv/o dtype, head dims,
+        page_size, sliding-window and soft-cap flags) and never on batch
+        shape, so one query token over one page loads the module the hot path
+        will run.
+
+        Reachable only from ``__init__``: the engine builds metadata builders
+        in ``initialize_metadata_builders``, before ``capture_model``, while
+        ``build()`` is also called during CUDA-graph capture and so never
+        prepares anything here.
+        """
+        started = time.perf_counter()
+        page = self._page_size
+        metadata = self._metadata_cls.dense(
+            torch.tensor([0, 1], dtype=torch.int32, device=self._device),
+            torch.tensor([page], dtype=torch.int32, device=self._device),
+            torch.zeros(1, 1, dtype=torch.int32, device=self._device),
+            page_size=page,
+            max_q_len=1,
+            max_kv_len=page,
+            qo_indptr_cpu=torch.tensor([0, 1], dtype=torch.int32),
+            kv_seq_lens_cpu=torch.tensor([page], dtype=torch.int32),
+        )
+        self._attn.plan(
+            metadata,
+            num_qo_heads=self._num_qo_heads,
+            num_kv_heads=self._num_kv_heads,
+            head_dim_qk=self._head_dim,
+            q_dtype=self._q_dtype,
+            kv_layout=kv_layout,
+            causal=True,
+            window_left=-1,
+            lse_mode="none",
+            backend=resolution,
+        )
+        kv_shape = (
+            (1, self._num_kv_heads, page, self._head_dim)
+            if kv_layout == "HND"
+            else (1, page, self._num_kv_heads, self._head_dim)
+        )
+        k_cache = torch.zeros(kv_shape, dtype=self._q_dtype, device=self._device)
+        query = torch.zeros(
+            1,
+            self._num_qo_heads,
+            self._head_dim,
+            dtype=self._q_dtype,
+            device=self._device,
+        )
+        self._attn.run(
+            query,
+            (k_cache, torch.zeros_like(k_cache)),
+            sm_scale=self._head_dim**-0.5,
+        )
+        self.warmup_s = time.perf_counter() - started
+        logger.info(
+            "FlashInfer paged prefill warmup (VLLM_FLASHINFER_PAGED_PREFILL=1): "
+            "backend=%s, kv_layout=%s, page_size=%d, batch=1x1, took %.3f s",
+            self._attn.backend,
+            kv_layout,
+            page,
+            self.warmup_s,
+        )
+
+    def build(
+        self,
+        qo_indptr: torch.Tensor,
+        qo_indptr_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        block_table_tensor: torch.Tensor,
+        prefill_start: int,
+        kv_layout: str,
+    ) -> PagedPrefill:
+        """Plan one prefill batch from the metadata vLLM already owns.
+
+        ``prefill_start`` is the first prefill request (decodes come first and
+        keep their existing path); both the device and the host offsets are
+        rebased onto the prefill tokens. The host mirrors are the ones vLLM
+        already maintains, so metadata construction and ``plan()`` stay
+        sync-free, and the host maxes the API requires are read from those
+        mirrors rather than from the device tensors. ``kv_layout`` is the
+        layout resolved for this batch: it is checked against the pinned
+        Resolution, so a layout that moved after init fails instead of
+        addressing the wrong memory.
+        """
+        if self._resolution is None:
+            self._resolution = self._pin_resolution(kv_layout)
+        qo_indptr_prefill = qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+        qo_indptr_prefill_cpu = (
+            qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
+        )
+        kv_seq_lens_cpu = seq_lens_cpu[prefill_start:]
+        query_lens_cpu = qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+        metadata = self._metadata_cls.dense(
+            qo_indptr_prefill,
+            seq_lens[prefill_start:],
+            block_table_tensor[prefill_start:],
+            page_size=self._page_size,
+            max_q_len=int(query_lens_cpu.max()),
+            max_kv_len=int(kv_seq_lens_cpu.max()),
+            qo_indptr_cpu=qo_indptr_prefill_cpu,
+            kv_seq_lens_cpu=kv_seq_lens_cpu,
+        )
+        self._attn.plan(
+            metadata,
+            num_qo_heads=self._num_qo_heads,
+            num_kv_heads=self._num_kv_heads,
+            head_dim_qk=self._head_dim,
+            q_dtype=self._q_dtype,
+            kv_layout=kv_layout,
+            causal=True,
+            window_left=-1,
+            lse_mode="none",
+            backend=self._resolution,
+        )
+        return PagedPrefill(attn=self._attn)
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -703,6 +1069,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             None  # Wrapper for non-causal prefill (DFlash)
         )
         self._decode_wrapper = None  # Wrapper for decode (general shape)
+        # Opt-in prefill on the experimental unified FlashInfer API.
+        self.paged_prefill: PagedPrefillAdapter | None = None
 
         if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
@@ -915,6 +1283,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype,
             arch,
         )
+        if envs.VLLM_FLASHINFER_PAGED_PREFILL:
+            # Rejects the whole configuration it cannot serve; never a fallback.
+            self.paged_prefill = PagedPrefillAdapter(self)
         # Preparing persistent buffers
         self.paged_kv_indptr = CpuGpuBuffer(
             max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=False
@@ -1323,6 +1694,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
+        if self.paged_prefill is not None:
+            # Rejected here rather than left to another path: cascade returns
+            # before the prefill branch below, and a non-causal batch would be
+            # planned as causal.
+            if use_cascade:
+                raise NotImplementedError(
+                    "VLLM_FLASHINFER_PAGED_PREFILL does not support cascade "
+                    "attention."
+                )
+            if not causal:
+                raise ValueError(
+                    "VLLM_FLASHINFER_PAGED_PREFILL does not support non-causal "
+                    "attention."
+                )
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
@@ -1341,6 +1726,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
+        # The opt-in unified API owns prefill whenever it is active; it never
+        # coexists with a second prefill implementation.
+        prefill_use_trtllm = prefill_use_trtllm and self.paged_prefill is None
         decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
             causal or self.use_xqa
         )
@@ -1570,6 +1958,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
                     max_seq_len=max_seq_len,
+                )
+            elif self.paged_prefill is not None:
+                # num_prefills > 0 and a non-TRTLLM prefill imply that the CPU
+                # mirrors were retrieved above (needs_seq_lens_cpu).
+                assert seq_lens_cpu is not None
+                attn_metadata.prefill = self.paged_prefill.build(
+                    qo_indptr=qo_indptr,
+                    qo_indptr_cpu=qo_indptr_cpu,
+                    seq_lens=seq_lens,
+                    seq_lens_cpu=seq_lens_cpu,
+                    block_table_tensor=block_table_tensor,
+                    prefill_start=prefill_start,
+                    kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
@@ -2150,7 +2551,19 @@ class FlashInferImpl(AttentionImpl):
                 layer._q_scale,
             )
 
-            if not prefill_use_trtllm:
+            if isinstance(attn_metadata.prefill, PagedPrefill):
+                # Opt-in path: the plan was built with the pinned Resolution in
+                # build(); reuse the K/V views above, write into the caller's
+                # prefill output slice, and pass this layer's scale per run.
+                attn_metadata.prefill.attn.run(
+                    prefill_query,
+                    kv_cache_tuple,
+                    out=output[
+                        num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                    ].view(num_prefill_tokens, self.num_heads, self.head_size),
+                    sm_scale=self.scale,
+                )
+            elif not prefill_use_trtllm:
                 assert isinstance(attn_metadata.prefill, FIPrefill)
                 prefill_wrapper = attn_metadata.prefill.wrapper
                 assert prefill_wrapper is not None
