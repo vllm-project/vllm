@@ -532,6 +532,182 @@ def test_nccl_weight_transfer_between_processes():
     )
 
 
+# --- Integration Test: Sparse NCCL Weight Transfer Between Ray Actors ---
+
+
+@ray.remote(num_gpus=1)
+class SparseNCCLInferenceActor:
+    """Inference-side sparse NCCL worker with a tiny load_weights model."""
+
+    def __init__(self):
+        import contextlib
+        from unittest.mock import MagicMock
+
+        import torch
+
+        from vllm.config.parallel import ParallelConfig
+        from vllm.config.weight_transfer import WeightTransferConfig
+        from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+            SparseNCCLWeightTransferEngine,
+        )
+
+        device = _set_ray_assigned_device()
+
+        class PatchModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_parameter(
+                    "w",
+                    torch.nn.Parameter(
+                        torch.full((4,), -1.0, device=device),
+                        requires_grad=False,
+                    ),
+                )
+
+            def load_weights(self, weights):
+                loaded = set()
+                for name, checkpoint_weight in weights:
+                    self.w.data.copy_(checkpoint_weight)
+                    loaded.add(name)
+                return loaded
+
+        config = WeightTransferConfig(backend="sparse_nccl")
+        vllm_config = MagicMock()
+        parallel_config = MagicMock(spec=ParallelConfig)
+        parallel_config.rank = 0
+        parallel_config.world_size = 1
+        parallel_config.data_parallel_rank = 0
+        parallel_config.data_parallel_index = 0
+        vllm_config.parallel_config = parallel_config
+        vllm_config.model_config = MagicMock()
+
+        self.model = PatchModel()
+        self.engine = SparseNCCLWeightTransferEngine(
+            config, vllm_config, device, self.model
+        )
+        # Transport-only test: bypass the set_current_vllm_config context that
+        # update_weights enters, since vllm_config here is a mock.
+        import vllm.config as _vllm_config_mod
+
+        _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        typed = self.engine.parse_init_info(init_info)
+        self.engine.init_transfer_engine(typed)
+
+    def start_weight_update(self) -> None:
+        self.engine.start_weight_update()
+
+    def update_weights(self, update_info: dict) -> None:
+        self.engine.update_weights(update_info)
+
+    def finish_weight_update(self) -> None:
+        self.engine.finish_weight_update()
+
+    def weight_tolist(self) -> list[float]:
+        return self.model.w.detach().float().cpu().tolist()
+
+    def shutdown(self) -> None:
+        self.engine.shutdown()
+
+
+@ray.remote(num_gpus=1)
+def sparse_trainer_send_noncontiguous_patch(
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    inference_handle,
+) -> bool:
+    """Trainer task: send a strided SparseWeightPatch over real NCCL."""
+    import torch
+
+    device = _set_ray_assigned_device()
+
+    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+        SparseNCCLTrainerInitInfo,
+        SparseNCCLTrainerWeightTransferEngine,
+        SparseWeightPatch,
+    )
+
+    class RayActorClient:
+        """Minimal client: trainer engine speaks plain dicts to the actor."""
+
+        def __init__(self, handle):
+            self.handle = handle
+
+        def init_weight_transfer_engine(self, init_info):
+            ray.get(self.handle.init_weight_transfer_engine.remote(init_info))
+
+        def start_weight_update(self):
+            ray.get(self.handle.start_weight_update.remote())
+
+        def update_weights(self, update_info):
+            ray.get(self.handle.update_weights.remote(update_info))
+
+        def finish_weight_update(self, weight_version=None):
+            ray.get(self.handle.finish_weight_update.remote())
+
+    engine = SparseNCCLTrainerWeightTransferEngine.trainer_init(
+        init_info=SparseNCCLTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            rank=0,
+        ),
+        client=RayActorClient(inference_handle),
+    )
+
+    # Logical sparse update [0]->10, [2]->20, built as stride-2 CUDA views so
+    # the public SparseWeightPatch API accepts non-contiguous tensors. Without
+    # sender-side contiguousization NCCL would ship [0,1]/[10,11].
+    indices = torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=device)[::2]
+    values = torch.tensor([10.0, 11.0, 20.0, 21.0], device=device)[::2]
+    assert not indices.is_contiguous()
+    assert not values.is_contiguous()
+
+    engine.send_weights(
+        [
+            SparseWeightPatch(
+                name="w",
+                indices=indices,
+                values=values,
+                full_shape=(4,),
+            )
+        ]
+    )
+    engine.shutdown()
+    return True
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2,
+    reason="Need at least 2 GPUs to run sparse NCCL weight transfer test.",
+)
+def test_sparse_nccl_noncontiguous_weight_transfer_between_processes():
+    """Real NCCL: strided sparse patch from trainer lands correctly on worker.
+
+    Mirrors test_nccl_weight_transfer_between_processes, but drives the sparse
+    trainer engine (which contiguousizes wire buffers) against a sparse worker
+    engine over PyNccl. Requires >=2 GPUs; skipped otherwise.
+    """
+    _init_ray_for_weight_transfer()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    world_size = 2  # 1 trainer + 1 inference worker
+
+    inference = SparseNCCLInferenceActor.remote()  # type: ignore[attr-defined]
+    try:
+        assert ray.get(
+            sparse_trainer_send_noncontiguous_patch.remote(
+                master_address, master_port, world_size, inference
+            )
+        )
+        assert ray.get(inference.weight_tolist.remote()) == [10.0, -1.0, 20.0, -1.0]
+    finally:
+        ray.get(inference.shutdown.remote())
+
+
 def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
     """Replay global expert patches through two EP-local loaders on CPU."""
 
