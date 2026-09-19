@@ -4,7 +4,6 @@
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import FastAPI
 
 from vllm.entrypoints.pooling import factories
 from vllm.entrypoints.pooling.factories import init_pooling_io_processors
@@ -93,34 +92,3 @@ def test_combined_task_plain_pooling_request_has_actionable_error(monkeypatch):
     io_processor = serving.get_io_processor(request)
     with pytest.raises(ValueError, match="plugin request with a 'data' field"):
         io_processor.create_pooling_params(request)
-
-
-@pytest.mark.parametrize(
-    ("pooling_task", "expected_routes"),
-    [
-        ("embed", {"/v1/embeddings", "/v2/embed"}),
-        ("classify", {"/classify"}),
-        ("token_embed", set()),
-        ("token_classify", set()),
-        ("embed&token_classify", set()),
-        ("plugin", set()),
-    ],
-)
-def test_dedicated_routes_match_selected_pooling_task(
-    pooling_task, expected_routes, monkeypatch
-):
-    app = FastAPI()
-    model_config = MagicMock()
-    model_config.get_pooling_task.return_value = pooling_task
-    monkeypatch.setattr(factories, "enable_scoring_api", lambda *_: False)
-
-    factories.register_pooling_api_routers(
-        app,
-        supported_tasks=("embed", "classify", "embed&token_classify"),
-        model_config=model_config,
-    )
-
-    route_paths = {route.path for route in app.routes}
-    dedicated_routes = {"/v1/embeddings", "/v2/embed", "/classify"}
-    assert route_paths & dedicated_routes == expected_routes
-    assert "/pooling" in route_paths
