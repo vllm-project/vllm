@@ -979,7 +979,7 @@ class SyncMPClient(MPClient):
         outputs = self.outputs_queue.get()
 
         if isinstance(outputs, Exception):
-            raise self._format_exception(outputs) from None
+            raise self._format_exception(outputs)
         if outputs.wave_complete is not None:
             self.engines_running = False
         return outputs
@@ -1206,7 +1206,7 @@ class AsyncMPClient(MPClient):
         assert self.outputs_queue is not None
         outputs = await self.outputs_queue.get()
         if isinstance(outputs, Exception):
-            raise self._format_exception(outputs) from None
+            raise self._format_exception(outputs)
         return outputs
 
     def _send_input(
