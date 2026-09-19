@@ -709,6 +709,14 @@ class FusedInputNorm(nn.Module):
         if self.is_identity:
             return grid_thw.to(visual_dtype)
 
+        # Pixtral passes unpadded CHW images, which may be non-contiguous.
+        # Normalize them directly to avoid a copy from flattening to the 2D path.
+        if grid_thw.ndim == 3:
+            assert grid_thw.shape[0] == self.channel
+            x = grid_thw.to(self.dtype)
+            x = x * self.weight[:, None, None] + self.bias[:, None, None]
+            return x.to(visual_dtype)
+
         assert grid_thw.ndim == 2
         patches, size = grid_thw.shape
         patch_size = size // self.channel
