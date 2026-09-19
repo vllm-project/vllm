@@ -289,11 +289,31 @@ class ExtensibleKVCache:
 
 def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
     """Blocks warmup may address: all of them, or, for an extensible cache,
-    those whose commit still leaves the reserved headroom free."""
+    those whose commit still leaves the reserved headroom free.
+
+    The count is agreed across ranks: it sets the shapes warmup runs and
+    whether a step runs at all, and a rank skipping a step others take part
+    in would leave them waiting in a collective.
+    """
     kv_cache = getattr(runner, "extensible_kv_cache", None)
     if kv_cache is not None:
-        return kv_cache.committable_blocks()
+        return _min_across_ranks(kv_cache.committable_blocks())
     return runner.kv_cache_config.num_blocks
+
+
+def _min_across_ranks(value: int) -> int:
+    from vllm.distributed.parallel_state import get_world_group
+
+    if not torch.distributed.is_initialized():
+        return value
+    world = get_world_group()
+    if world.world_size == 1:
+        return value
+    tensor = torch.tensor([value], dtype=torch.int64)
+    torch.distributed.all_reduce(
+        tensor, group=world.cpu_group, op=torch.distributed.ReduceOp.MIN
+    )
+    return int(tensor.item())
 
 
 def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:

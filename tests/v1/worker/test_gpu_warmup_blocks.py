@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker import extensible_kv_cache
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
@@ -190,6 +191,54 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+
+
+class _StubExtensibleCache:
+    def __init__(self, committable_blocks: int) -> None:
+        self.committable_blocks_value = committable_blocks
+        self.commits: list[int] = []
+
+    def committable_blocks(self) -> int:
+        return self.committable_blocks_value
+
+    def commit(self, num_blocks: int) -> None:
+        self.commits.append(num_blocks)
+
+
+def test_warmup_sizes_batches_by_the_rank_agreed_committable_count(monkeypatch):
+    """Each rank measures its own free memory; the warmup batch and what it
+    commits must follow the smallest count across ranks, or ranks run
+    different shapes and can skip steps the others wait on."""
+    # Locally 1024 blocks could be committed, another rank reports 3.
+    monkeypatch.setattr(extensible_kv_cache, "_min_across_ranks", lambda value: 3)
+    runner = _make_runner(
+        [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
+    )
+    cache = _StubExtensibleCache(1024)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    warmup_kernels(runner, recorder.execute_model, recorder.sample_tokens)
+
+    # One block per request at this length: 3 blocks less the null block fit
+    # two requests, not the four `max_num_seqs` allows.
+    assert len(recorder._held) == 2
+    assert cache.commits[0] == 3
+
+
+def test_mixed_warmup_skips_when_ranks_agree_too_few_blocks(monkeypatch):
+    monkeypatch.setattr(extensible_kv_cache, "_min_across_ranks", lambda value: 9)
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    cache = _StubExtensibleCache(1024)
+    runner.extensible_kv_cache = cache
+    recorder = _StepRecorder()
+
+    # 128 tokens need 9 blocks (8 prefill + 1 decode) beyond the null block.
+    assert not run_mixed_prefill_decode_warmup(
+        runner, recorder.execute_model, recorder.sample_tokens, num_tokens=128
+    )
+    assert cache.commits == []
+    assert recorder.steps == []
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "all", "align"])
