@@ -154,6 +154,83 @@ def test_json_object_array_and_bool_params_decode():
     }
 
 
+def _reject_json_constants(name: str):
+    """``parse_constant`` hook that refuses the ``NaN``/``Infinity`` extension.
+
+    ``json.loads`` accepts those tokens, but they are not part of JSON
+    (RFC 8259), so a strict client such as JavaScript ``JSON.parse`` rejects
+    them. Failing here is what a non-Python consumer of ``arguments`` would do.
+    """
+    msg = f"not valid JSON: {name}"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    [
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        # Valid JSON on the way in, but overflows to inf while decoding.
+        "1e999",
+        "-1e999",
+        # Non-finite nested inside a decoded container.
+        "[1e999]",
+        '{"limit": 1e999}',
+    ],
+)
+def test_non_finite_params_stay_raw_so_arguments_remain_valid_json(raw_value: str):
+    """Values that cannot round-trip to JSON are kept as the raw string.
+
+    ``json.loads`` accepts ``NaN``/``Infinity`` and overflows large exponents to
+    ``inf``, and ``json.dumps`` then writes those back as bare ``NaN``/
+    ``Infinity`` tokens. Emitting that would put an ``arguments`` payload on the
+    wire that no strict JSON parser can read, so the raw string is preserved
+    instead.
+    """
+    raw = (
+        "<|start|>assistant to=set_limit<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="set_limit">\n'
+        f'<atem:parameter name="value">{raw_value}</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    arguments = out.tool_calls[0].function.arguments
+
+    # The payload a strict (non-Python) client would have to parse.
+    parsed = json.loads(arguments, parse_constant=_reject_json_constants)
+    assert parsed == {"value": raw_value}
+
+
+def test_finite_numeric_params_still_decode():
+    """Guard for the check above: ordinary numbers must keep decoding.
+
+    Rejecting non-finite values must not turn every numeric parameter into a
+    string, so this pins the exponent and float forms that do round-trip.
+    """
+    raw = (
+        "<|start|>assistant to=set_limit<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="set_limit">\n'
+        '<atem:parameter name="exp">1e5</atem:parameter>\n'
+        '<atem:parameter name="neg_exp">1e-5</atem:parameter>\n'
+        '<atem:parameter name="pi">3.14</atem:parameter>\n'
+        '<atem:parameter name="count">123</atem:parameter>\n'
+        '<atem:parameter name="nested">[1, 2.5]</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, None)
+    assert json.loads(
+        out.tool_calls[0].function.arguments,
+        parse_constant=_reject_json_constants,
+    ) == {
+        "exp": 100000.0,
+        "neg_exp": 1e-5,
+        "pi": 3.14,
+        "count": 123,
+        "nested": [1, 2.5],
+    }
+
+
 # ------------------------------------------------- reasoning -> tool handoff
 
 
