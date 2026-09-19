@@ -253,6 +253,23 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     values = stats.data["data"]
     assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
 
+    failed_promotion_job = JobMetadata(
+        TransferJob(2, to_keys([3]), np.array([3]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(failed_promotion_job)
+    clock += 0.2
+    tracker.on_job_finished(
+        failed_promotion_job,
+        JobResult(job_id=2, success=False, transfer_time=0.42),
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+    tracker.assert_idle()
+
 
 def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time():
     """A completion carrying no transfer_time still records a latency sample."""
