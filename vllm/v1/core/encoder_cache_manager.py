@@ -265,13 +265,36 @@ class EncoderCacheManager:
     def free(self, request: Request) -> None:
         """Free all encoder input cache reference held by *request*.
 
-        For each cached input ID, `free_encoder_input` is invoked.
+        For exact `EncoderCacheManager` instances, repeated multimodal inputs
+        are released once per cache entry in the order of their last cached
+        input ID occurrence for the request. Subclasses keep the original
+        per-input `free_encoder_input` callback behavior.
+
         The data stays in memory until eviction is triggered by a future
         attempt allocation called by 'can_allocate'.
 
         Typically called when a request is finished, cancelled, or aborted.
         """
-        for input_id in list(self.get_cached_input_ids(request)):
+        input_ids = list(self.get_cached_input_ids(request))
+        if len(input_ids) <= 1 or type(self) is not EncoderCacheManager:
+            for input_id in input_ids:
+                self.free_encoder_input(request, input_id)
+            return
+
+        mm_hash_to_input_id: dict[str, int] = {}
+        for input_id in input_ids:
+            mm_hash = request.mm_features[input_id].identifier
+            if mm_hash in mm_hash_to_input_id:
+                del mm_hash_to_input_id[mm_hash]
+            mm_hash_to_input_id[mm_hash] = input_id
+
+        req_id = request.request_id
+        cached_input_ids = self.request_cached_ids.get(req_id)
+        if cached_input_ids is not None:
+            cached_input_ids.clear()
+            del self.request_cached_ids[req_id]
+
+        for input_id in mm_hash_to_input_id.values():
             self.free_encoder_input(request, input_id)
 
     def get_freed_mm_hashes(self) -> list[str]:
