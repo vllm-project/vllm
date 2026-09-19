@@ -136,3 +136,74 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
+
+
+def test_recoverssm_deferred_step_masks_freed_slots_and_survives_next_batch():
+    state = RecoverSSMState()
+    old = Mock(spec=RecoverSSMMetadata)
+    saved = Mock(spec=RecoverSSMMetadata)
+    saved.commit_recoverssm_state.return_value = None
+    old.snapshot_for_deferred_commit.return_value = saved
+    group = SimpleNamespace(layer_names=["layer"])
+    state.record_step({"layer": old}, [[group]], for_capture=False)
+    restore = state.defer_step()
+    newer = Mock(spec=RecoverSSMMetadata)
+    state.record_step({"layer": newer}, [[group]], for_capture=False)
+    restore_newer = state.defer_step()
+    restore()
+    state.commit_step(
+        torch.tensor([3, 2]),
+        torch.tensor([4, -1]),
+        state_indices=None,
+        num_accepted_tokens=torch.ones(5, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        saved.commit_recoverssm_state.call_args.args[0], torch.tensor([3, 0])
+    )
+    newer.commit_recoverssm_state.assert_not_called()
+    restore_newer()
+    assert state._step == (newer.snapshot_for_deferred_commit.return_value,)
+
+
+def test_kda_deferred_metadata_owns_inputs_but_shares_commit_context():
+    from vllm.models.kimi_k3.nvidia.kda_metadata import (
+        KDARecoverSSMAlignMetadata,
+        KDARecoverSSMCommitMetadata,
+        KimiK3KDAMetadata,
+    )
+
+    values = torch.arange(6, dtype=torch.int32).view(2, 3)
+    context = Mock()
+    meta = KimiK3KDAMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=6,
+        num_actual_tokens=6,
+        recoverssm_commit=KDARecoverSSMCommitMetadata(
+            state_indices=values,
+            query_start_loc=values[0],
+            request_indices=values[:, 0],
+            align=KDARecoverSSMAlignMetadata(values, values[:, 1], 8),
+        ),
+        recoverssm_context=context,
+    )
+    saved = meta.snapshot_for_deferred_commit()
+    values.fill_(-1)
+    commit = saved.recoverssm_commit
+    assert commit is not None and commit.align is not None
+    torch.testing.assert_close(
+        commit.state_indices, torch.arange(6, dtype=torch.int32).view(2, 3)
+    )
+    torch.testing.assert_close(
+        commit.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        commit.request_indices, torch.tensor([0, 3], dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        commit.align.num_computed_tokens, torch.tensor([1, 4], dtype=torch.int32)
+    )
+    assert saved.recoverssm_context is context
