@@ -20,6 +20,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -29,6 +30,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Group spec types that decode context parallelism knows how to place.
+# FullAttentionSpec shards across ranks. The other two are replicated:
+# dcp_world_size_for_kv_cache_spec gives them 1, so their groups keep an
+# unsharded slot mapping and every rank holds the whole state. For the QSA raw
+# key ring that is required, not merely allowed -- every rank must write every
+# token so the replicated selector reads identical rings.
+DCP_AWARE_SPECS = (FullAttentionSpec, MambaSpec, CircularBufferSpec)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -666,13 +675,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         if dcp_world_size > 1:
-            # DCP shards full-attention KV across ranks and replicates Mamba
-            # state; other spec types (e.g. sliding window) have no DCP-aware
-            # handling yet, so reject them explicitly.
+            # Reject a spec type with no DCP-aware placement (e.g. sliding
+            # window) rather than let it pick a policy by accident.
             for g in kv_cache_config.kv_cache_groups:
-                assert isinstance(g.kv_cache_spec, (FullAttentionSpec, MambaSpec)), (
+                assert isinstance(g.kv_cache_spec, DCP_AWARE_SPECS), (
                     "DCP with hybrid KV cache layouts only supports "
-                    "full-attention and Mamba groups, got: "
+                    "full-attention, Mamba and circular-buffer groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
         # Fine-grained hash hits require Mamba "align" and compatible cache

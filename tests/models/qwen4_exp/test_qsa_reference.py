@@ -250,6 +250,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     query_start_loc = torch.tensor([0, 4, 8, 12, 12], dtype=torch.int32, device=device)
     token_to_req = torch.tensor([0] * 4 + [1] * 4 + [2] * 4 + [0] * 4, device=device)
     common = SimpleNamespace(
+        is_dummy_batch=False,
         num_actual_tokens=16,
         num_reqs=4,
         max_query_len=4,
@@ -304,6 +305,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     token_to_req = torch.tensor([0] * 7 + [1] * 6 + [0] * 3, device=device)
     block_table = torch.tensor([[1], [0], [2]], dtype=torch.int32, device=device)
     common = SimpleNamespace(
+        is_dummy_batch=False,
         num_actual_tokens=16,
         num_reqs=3,
         max_query_len=7,
@@ -436,6 +438,9 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
         [0, 0, 0, 2, 2, 2, 2, 2], dtype=torch.int32, device=device
     )
     common = SimpleNamespace(
+        # A dummy batch now says so. An all-PAD slot mapping no longer
+        # implies it, because PAD also means another rank's position.
+        is_dummy_batch=True,
         num_actual_tokens=8,
         num_reqs=3,
         max_query_len=5,
@@ -553,6 +558,7 @@ def test_qsa_triton_metadata_matches_pytorch(
     seq_lens[0] = 10
     seq_lens[-1] = 20
     common = SimpleNamespace(
+        is_dummy_batch=False,
         num_actual_tokens=num_tokens,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
@@ -620,6 +626,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
         [0, num_mapped_tokens], dtype=torch.int32, device=device
     )
     common = SimpleNamespace(
+        is_dummy_batch=False,
         num_actual_tokens=num_tokens,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),

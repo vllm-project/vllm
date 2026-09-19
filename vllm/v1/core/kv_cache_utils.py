@@ -680,12 +680,24 @@ def hash_block_tokens(
 
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the token span of a cache block under DCP."""
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size
+    """Return the token span of a cache block under DCP.
+
+    A sharded group's block holds ``block_size`` slots drawn from
+    ``block_size * world`` consecutive positions, so its span is the scaled
+    one. A replicated group's block holds ``block_size`` consecutive positions
+    and its span is unscaled.
+
+    Ask the same question the ownership resolver answers, not whether the spec
+    is an attention spec. A replicated cache can be one -- the QSA raw key ring
+    and any ``dcp_transparent`` cache both are -- and scaling its span there
+    puts the scheduler's block accounting on boundaries the group does not
+    have.
+    """
+    attention_specs = [
+        s for s in iter_layer_specs(spec) if isinstance(s, AttentionSpec)
+    ]
+    if attention_specs and len(attention_specs) == len(iter_layer_specs(spec)):
+        return max(s.logical_block_span for s in attention_specs)
     return spec.block_size
 
 
@@ -706,6 +718,28 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
     return replace(spec, block_size=block_size)
 
 
+def stamp_dcp_shard_counts(
+    kv_cache_specs: dict[str, KVCacheSpec], dcp_world_size: int
+) -> dict[str, KVCacheSpec]:
+    """Resolve each spec's DCP ownership into a field, once, before grouping.
+
+    Grouping has to compare the token span a block-table entry covers, and it
+    has no ``VllmConfig`` in scope. Carrying the resolved count on the spec
+    keeps that comparison local and leaves every call site unchanged.
+    """
+    if dcp_world_size <= 1:
+        return kv_cache_specs
+    stamped: dict[str, KVCacheSpec] = {}
+    for name, spec in kv_cache_specs.items():
+        if isinstance(spec, AttentionSpec) and spec.dcp_shard_count is None:
+            # Unresolved only. A spec whose block_size already counts token
+            # positions has set this to 1 and must not be scaled again.
+            count = dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+            spec = replace(spec, dcp_shard_count=count)
+        stamped[name] = spec
+    return stamped
+
+
 def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the DCP size that owns this group's block geometry.
 
@@ -717,12 +751,27 @@ def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> 
     Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
     ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
     draft group would need a different spec, not this helper.
+
+    ``dcp_transparent`` on the spec overrides the type rule and forces 1. Use it
+    for a cache that shares a sharded spec type but addresses its slots
+    globally, or that must see the whole sequence.
     """
     if dcp_world_size <= 1:
         return 1
     inner = spec
     if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
+        # A group can hold members with opposite ownership once their spans
+        # agree, so sampling the first entry would answer by dict order. The
+        # sharded member decides the group's block geometry.
+        members = spec.kv_cache_specs.values()
+        if any(not getattr(m, "dcp_transparent", False) for m in members):
+            return dcp_world_size
+        inner = next(iter(members))
+    if getattr(inner, "dcp_transparent", False):
+        # Replicated on every rank. The spec type alone cannot decide this: a
+        # selector cache and the KV it selects from can share a spec type and
+        # still need opposite treatment.
+        return 1
     if isinstance(inner, FullAttentionSpec):
         return dcp_world_size
     return 1
@@ -2278,6 +2327,10 @@ def get_kv_cache_groups(
     """
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    kv_cache_spec = stamp_dcp_shard_counts(
+        kv_cache_spec, vllm_config.parallel_config.decode_context_parallel_size
+    )
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns an empty list to allow for the KVCacheManager to handle

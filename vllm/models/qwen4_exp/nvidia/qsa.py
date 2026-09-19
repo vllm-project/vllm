@@ -60,6 +60,16 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # No reordering: QSA runs one varlen path over the whole batch, and
+        # under DCP that path is still one kernel over this rank's share of the
+        # selection. Saying so is the point. The base class leaves the
+        # threshold at None, which reads the same but decides nothing, and the
+        # DCP guard would otherwise force decode-only batches if that default
+        # ever changed.
+        self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
+
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
@@ -127,7 +137,12 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
-    supports_dcp: bool = False
+    can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
+    # QSA scores are scaled into log2 before the softmax, so the LSE the kernel
+    # returns is base 2. The cross-rank combine branches on this, and getting it
+    # wrong corrupts the denominator without any other symptom.
+    lse_base_on_e: bool = False
     supports_pcp: bool = False
 
     def __init__(
@@ -169,10 +184,30 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         self.kv_cache_dtype = real_kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
-        if self.dcp_world_size != 1:
-            raise NotImplementedError(
-                "Qwen4Exp QSA does not support decode context parallelism"
+        self.cp_kv_cache_interleave_size = 1
+        # Localized selection scratch, allocated on the first DCP forward and
+        # reused. One allocation, during warmup, so capture sees a fixed buffer.
+        self._dcp_local_indices: torch.Tensor | None = None
+        if self.dcp_world_size > 1:
+            from vllm.config import get_current_vllm_config
+
+            config = get_current_vllm_config()
+            self.cp_kv_cache_interleave_size = (
+                config.parallel_config.cp_kv_cache_interleave_size
             )
+            # The compact-local id in ops/qsa_dcp.py agrees with the slot
+            # mapping only when the interleave divides the block the mapper
+            # shards in. That block is a whole multiple of this one, so this is
+            # the stricter test, and it is the same one vllm/config/vllm.py
+            # makes for DCP. Repeat it here because that check is skipped for
+            # NIXL P/D, and a mismatch reads the wrong keys with no other sign.
+            block_size = config.cache_config.block_size
+            if block_size % self.cp_kv_cache_interleave_size:
+                raise NotImplementedError(
+                    f"Qwen4Exp QSA DCP needs a block size ({block_size}) "
+                    f"divisible by cp_kv_cache_interleave_size "
+                    f"({self.cp_kv_cache_interleave_size})"
+                )
         if self.kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
@@ -233,6 +268,23 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
         from .ops.qsa import qsa_sparse_paged_attention
 
+        if self.dcp_world_size > 1:
+            self._forward_qsa_dcp(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                topk_buffer,
+                num_tokens,
+                attn_metadata.block_table,
+                token_to_req,
+                use_prefill_config,
+                output[:num_tokens],
+                output_gate[:num_tokens],
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+            return output
+
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
@@ -248,11 +300,100 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         )
         return output
 
+    def _forward_qsa_dcp(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        topk_buffer: torch.Tensor,
+        num_tokens: int,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+        use_prefill_config: bool,
+        output: torch.Tensor,
+        output_gate: torch.Tensor,
+        k_scale: float | None = None,
+        v_scale: float | None = None,
+    ) -> None:
+        """Attend over this rank's share of the selection, then merge.
+
+        QSA needs no separate local branch. Its current K/V are written into the
+        paged cache before attention and the impl drops the direct tensors, so
+        every key this rank can see is already ownership-filtered by the slot
+        mapping. FlashAttention splits context from local precisely because its
+        current K/V arrive as direct inputs on every rank. QSA's do not.
+
+        So: localize the selection, attend over what this rank owns, and merge
+        the partial results across ranks by their LSE.
+        """
+        from vllm.distributed.parallel_state import get_dcp_group
+        from vllm.v1.attention.ops.dcp import cp_lse_ag_out_rs
+
+        from .ops.qsa import qsa_sparse_paged_attention
+        from .ops.qsa_dcp import (
+            qsa_dcp_empty_owner_rows,
+            qsa_localize_dcp_indices,
+            qsa_neutralize_empty_owner_lse_,
+        )
+
+        group = get_dcp_group()
+
+        if self._dcp_local_indices is None:
+            self._dcp_local_indices = torch.empty_like(topk_buffer)
+        # The selector ran on a replicated cache, so this selection is the same
+        # on every rank. Keep only what this rank owns, as compact-local ids.
+        # Into scratch: the source buffer is the layer's, and MTP draft steps
+        # read it again after this one.
+        local_indices = qsa_localize_dcp_indices(
+            topk_buffer[:num_tokens],
+            self._dcp_local_indices[:num_tokens],
+            self.dcp_world_size,
+            self.dcp_rank,
+            self.cp_kv_cache_interleave_size,
+        )
+        empty_rows = qsa_dcp_empty_owner_rows(local_indices)
+
+        # Every rank computes every head, and the reduce-scatter in the merge
+        # hands each rank its own head slice back.
+        query_all_heads = group.all_gather(query.contiguous(), dim=1)
+        partial_out, partial_lse = qsa_sparse_paged_attention(
+            query_all_heads,
+            key_cache,
+            value_cache,
+            local_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+        )
+
+        # A rank that owns none of the selection contributes the identity of
+        # the merge. The reducer zeroes any row whose weight comes out zero, so
+        # the -inf is the whole fix; the NaN payload behind it cannot escape.
+        qsa_neutralize_empty_owner_lse_(partial_lse, empty_rows)
+
+        merged, _merged_lse = cp_lse_ag_out_rs(
+            partial_out.float(),
+            partial_lse.float(),
+            group,
+            return_lse=True,
+            is_lse_base_on_e=False,
+        )
+
+        # The gate is query-derived and identical on every rank, so it commutes
+        # with the merge. Apply it once here rather than once per rank. Round to
+        # the output dtype before the gate, as the fused kernel does, so a
+        # one-rank run matches the non-DCP path bit for bit.
+        gated = merged.to(output.dtype).float() * torch.sigmoid(
+            output_gate.view_as(merged).float()
+        )
+        output.copy_(gated)
+
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     """Merged Qwen full-attention owner with a QSA index side branch."""
-
-    supports_dcp = False
 
     def __init__(
         self,
@@ -283,12 +424,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.decode_context_parallel_size > 1
-        ):
+        if parallel_config.prefill_context_parallel_size > 1:
             raise NotImplementedError(
-                "Qwen4Exp QSA does not support context parallelism"
+                "Qwen4Exp QSA does not support prefill context parallelism"
             )
         if not getattr(config, "is_causal", True):
             raise NotImplementedError("Qwen4Exp QSA requires causal decoder attention")
