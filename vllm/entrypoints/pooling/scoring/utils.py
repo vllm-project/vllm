@@ -43,18 +43,61 @@ def truncate_text_to_tokens(
     text: str,
     tokenizer,
     max_tokens: int,
+    *,
+    prefix: str = "",
 ) -> str:
     """Truncate text to a maximum number of content tokens.
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count by 1-3 tokens due to BPE merge boundary changes.
+    the token count due to BPE merge boundary changes. When ``prefix`` is
+    provided, the combined tokenization is also kept within the text budget.
     """
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    if len(encoding["input_ids"]) <= max_tokens:
-        return text
-    char_end = encoding["offset_mapping"][max_tokens - 1][1]
-    return text[:char_end]
+    if max_tokens <= 0:
+        return ""
+
+    prefix_token_count = (
+        len(tokenizer.encode(prefix, add_special_tokens=False)) if prefix else 0
+    )
+    max_total_tokens = prefix_token_count + max_tokens
+    text_start = len(prefix)
+
+    while text:
+        encoding = tokenizer(
+            prefix + text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offsets = encoding["offset_mapping"]
+        text_offsets = [offset for offset in offsets if offset[1] > text_start]
+        if (
+            len(encoding["input_ids"]) <= max_total_tokens
+            and len(text_offsets) <= max_tokens
+        ):
+            break
+
+        char_ends: list[int] = []
+        if len(offsets) > max_total_tokens:
+            char_ends.append(
+                min(
+                    offsets[max_total_tokens - 1][1],
+                    offsets[max_total_tokens][0],
+                )
+            )
+        if len(text_offsets) > max_tokens:
+            char_ends.append(
+                min(
+                    text_offsets[max_tokens - 1][1],
+                    text_offsets[max_tokens][0],
+                )
+            )
+
+        char_end = max(min(char_ends) - text_start, 0)
+        if char_end >= len(text):
+            char_end = len(text) - 1
+        text = text[:char_end]
+
+    return text
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:

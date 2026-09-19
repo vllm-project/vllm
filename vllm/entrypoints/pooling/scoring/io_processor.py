@@ -666,16 +666,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
-                    if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-                        query_ids = tokenizer.encode(prompt_1, add_special_tokens=False)
-                        doc_ids = tokenizer.encode(prompt_2, add_special_tokens=False)
-                        doc_ids = doc_ids[:max_tokens_per_doc]
-                        input_ids = query_ids + doc_ids
-                        full_prompt = tokenizer.decode(input_ids)
-                        prompt_inputs = {"input_ids": input_ids}
-                    else:
-                        full_prompt = prompt_1 + prompt_2
-                        prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
+                    composed_prompt_2 = prompt_2
+                    if max_tokens_per_doc > 0 and isinstance(composed_prompt_2, str):
+                        composed_prompt_2 = truncate_text_to_tokens(
+                            composed_prompt_2,
+                            tokenizer,
+                            max_tokens_per_doc,
+                            prefix=prompt_1,
+                        )
+                    full_prompt = prompt_1 + composed_prompt_2
+                    prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
         # FIXME: For now, we only apply a template when one is explicitly provided.
