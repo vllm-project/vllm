@@ -24,6 +24,19 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
 
+# Set by sparse_attn_indexer when decode already wrote physical KV slot ids
+# (fuse_score_remap fused score+topk).
+_INDEXER_TOPK_PHYSICAL = False
+
+
+def set_indexer_topk_physical(value: bool) -> None:
+    global _INDEXER_TOPK_PHYSICAL
+    _INDEXER_TOPK_PHYSICAL = bool(value)
+
+
+def indexer_topk_is_physical() -> bool:
+    return _INDEXER_TOPK_PHYSICAL
+
 
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     """Bounds of the runs of adjacent rows that belong to one request: run
@@ -476,6 +489,20 @@ def triton_convert_req_index_to_global_index(
     When return_valid_counts is True, also returns the count of valid (non -1)
     indices per row, computed during the same kernel pass (no extra overhead).
     """
+    # Decode already fused page-table transform (fuse_score_remap).
+    if indexer_topk_is_physical() and not HAS_PREFILL_WORKSPACE:
+        if out is None:
+            out = token_indices
+        elif out.data_ptr() != token_indices.data_ptr():
+            out.copy_(token_indices)
+        if return_valid_counts:
+            valid = (token_indices != -1).sum(dim=-1).to(torch.int32)
+            if valid_counts_out is not None:
+                valid_counts_out.copy_(valid)
+                return out, valid_counts_out
+            return out, valid
+        return out
+
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
