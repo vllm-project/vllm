@@ -109,6 +109,9 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     """Architectures defaulting to breakable CUDA graphs on this platform."""
     from vllm.platforms import current_platform
 
+    if current_platform.is_cpu():
+        return frozenset()
+
     if current_platform.is_rocm():
         # Breakable CUDA graphs currently regress performance on ROCm for
         # models that can use torch.compile piecewise graphs instead. Do not

@@ -18,6 +18,7 @@ from vllm.models.qwen4_exp.config import (
     Qwen4ExpTextConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
@@ -155,8 +156,10 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
         ),
         speculative_config=None,
     )
-    with patch.object(
-        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
+    with (
+        patch.object(Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"),
+        # This platform-neutral validation is exercised with CPU-host tensors.
+        patch.object(current_platform, "is_cpu", return_value=False),
     ):
         if ple_layer_ids:
             with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):

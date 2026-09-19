@@ -238,6 +238,7 @@ def _qsa_sparse_paged_attention_reference(
 def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -290,6 +291,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -420,6 +422,7 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder._build_qsa_metadata = qsa_cache.build_qsa_metadata_triton
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False

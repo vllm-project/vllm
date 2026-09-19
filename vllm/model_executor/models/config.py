@@ -882,6 +882,12 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
                 "because non-first pipeline ranks do not receive the raw input_ids "
                 "it needs. Please run with PP=1."
             )
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cpu():
+            from vllm.models.qwen4_exp.cpu.runtime import verify_cpu_config
+
+            verify_cpu_config(vllm_config)
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
