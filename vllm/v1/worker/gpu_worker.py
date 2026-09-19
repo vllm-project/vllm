@@ -69,6 +69,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.extensible_tensor import granule_size
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
@@ -91,7 +92,7 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
-    measure_kv_cache_blocks,
+    measure_kv_cache_bytes,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -852,6 +853,10 @@ class Worker(WorkerBase):
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
         return vmm_unavailable_reason()
 
+    def kv_cache_commit_granule(self) -> int:
+        """Bytes one physical KV cache commit is rounded to on this device."""
+        return granule_size(torch.accelerator.current_device_index())
+
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
         self.requested_memory = request_memory(self.init_snapshot, self.cache_config)
@@ -900,22 +905,20 @@ class Worker(WorkerBase):
         kv_cache = self._v2_model_runner().extensible_kv_cache
         assert kv_cache is not None
         transient_peak = max(kv_cache.reserved_headroom_bytes, warmup_peak)
-        num_blocks = measure_kv_cache_blocks(
+        available = measure_kv_cache_bytes(
             init_free_memory=self.init_snapshot.free_memory,
             free_memory=free_memory,
             committed_bytes=kv_cache.physical_bytes,
             requested_memory=int(self.requested_memory),
-            bytes_per_block=kv_cache.bytes_per_block,
             transient_peak_bytes=transient_peak,
-            extra_margin_bytes=kv_cache.commit_rounding_overhead,
         )
-        num_blocks = (
-            reserve_mm_ipc_gpu_memory(
-                num_blocks * kv_cache.bytes_per_block,
-                self.model_config.multimodal_config,
-                getattr(self.parallel_config, "_api_process_count", 1),
-            )
-            // kv_cache.bytes_per_block
+        available = reserve_mm_ipc_gpu_memory(
+            available,
+            self.model_config.multimodal_config,
+            getattr(self.parallel_config, "_api_process_count", 1),
+        )
+        num_blocks = kv_cache.blocks_within(
+            available, aligned=self.vllm_config.kv_transfer_config is not None
         )
         logger.info(
             "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "

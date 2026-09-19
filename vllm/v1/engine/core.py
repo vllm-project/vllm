@@ -49,6 +49,7 @@ from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    align_extensible_kv_cache_capacity,
     finalize_extensible_kv_cache,
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
@@ -357,6 +358,14 @@ class EngineCore:
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
         extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        # A KV connector registers each committed segment for RDMA, which
+        # cannot span physical chunks: keep segment bounds granule-aligned.
+        commit_granule: int | None = None
+        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
+            commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
+            align_extensible_kv_cache_capacity(
+                vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule
+            )
         if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -372,6 +381,7 @@ class EngineCore:
                 kv_cache_configs,
                 scheduler_kv_cache_config,
                 compilation_times,
+                commit_granule,
             )
             self.model_executor.extend_kv_cache(num_blocks)
 
