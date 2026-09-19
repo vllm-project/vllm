@@ -5,14 +5,14 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.flashinfer import (
+    align_fp4_moe_weights_for_fi,
+    align_trtllm_fp4_moe_hidden_dim_for_fi,
+)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 from vllm.model_executor.layers.quantization.utils import flashinfer_fp4_moe
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 
 

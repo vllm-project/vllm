@@ -30,11 +30,11 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -408,7 +408,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     num_experts, intermediate, hidden
 ):
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.model_executor.layers.fused_moe.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
@@ -450,7 +450,7 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
         get_w2_permute_indices_with_cache,
     )
 
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.model_executor.layers.fused_moe.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
@@ -562,7 +562,7 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
     monkeypatch, intermediate, is_gated
 ):
     """Each raw reload clears padding left dirty by prior in-place conversion."""
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.model_executor.layers.fused_moe.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
@@ -657,7 +657,7 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     monkeypatch, cache_ndim, mode
 ):
     """A spawned IPC consumer restores views without transient method state."""
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.model_executor.layers.fused_moe.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
     from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
