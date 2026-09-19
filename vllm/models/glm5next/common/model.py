@@ -63,7 +63,6 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
-    SupportsPP,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -930,9 +929,7 @@ class Glm5NextModel(nn.Module):
         return loaded_params
 
 
-class Glm5NextForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
-):
+class Glm5NextForCausalLM(nn.Module, HasInnerState, MixtureOfExperts, IsHybrid):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
