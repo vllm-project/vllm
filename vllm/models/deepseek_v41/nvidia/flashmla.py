@@ -13,7 +13,6 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v41.sparse_mla import (
@@ -185,24 +184,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
-        num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         topk_indices = None
         topk_lens = None
         if not swa_only:
-            # Local indices filled by the index-source layer's indexer.
             assert attn_metadata is not None
-            assert swa_metadata.is_valid_token is not None
-            assert self.topk_indices_buffer is not None
-            block_size = attn_metadata.block_size // self.compress_ratio
-            is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
+            global_indices, topk_lens = self._decode_global_topk(
+                swa_metadata, attn_metadata
             )
             topk_indices = global_indices.view(num_decode_tokens, 1, -1)
 
