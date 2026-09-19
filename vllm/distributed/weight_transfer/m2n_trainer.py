@@ -354,7 +354,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
             self.client.finish_weight_update()
 
     def _send(self) -> None:
-        """Reshard each local shard into a replicated full tensor on the workers."""
+        """Reshard each local shard into its worker-planned destination."""
         m2n = self._m2n
         comm = comm_ptr(self.group)
         stream = torch.cuda.current_stream()
