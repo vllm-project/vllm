@@ -26,6 +26,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "dots_tool_parser",
         "DotsToolParser",
     ),
+    "berrylm": (
+        "berrylm_engine_tool_parser",
+        "BerryLMEngineToolParser",
+    ),
     "deepseek_v3": (  # name
         "deepseekv3_tool_parser",  # filename
         "DeepSeekV3ToolParser",  # class_name
