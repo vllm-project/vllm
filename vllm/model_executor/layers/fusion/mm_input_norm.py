@@ -30,13 +30,6 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 logger = init_logger(__name__)
 
-# torch dtype -> triton dtype mapping used for COMPUTE_DTYPE constexpr.
-_TL_DTYPE = {
-    torch.float16: tl.float16,
-    torch.bfloat16: tl.bfloat16,
-    torch.float32: tl.float32,
-}
-
 _SUPPORTED_INPUTS = (
     torch.uint8,
     torch.float16,
