@@ -529,6 +529,28 @@ def test_rms_norm_batch_invariance(dtype):
     )
 
 
+@skip_if_not_cuda
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scale", [0.005, 1.0])
+def test_rms_norm_batch_invariant_matches_eager_under_torch_compile(dtype, scale):
+    """Dynamo traces the Triton kernel and Inductor re-emits it, passing the
+    Python float ``eps`` as fp64 where the eager launch passes fp32. The kernel
+    keeps ``eps`` in fp32 so both paths produce the same bits. Small activations
+    (embedding scale) make ``mean(x^2)`` comparable to ``eps``, where the fp64
+    addition changes the rounding."""
+    torch.manual_seed(0)
+    x = scale * torch.randn(578, 4096, device="cuda", dtype=dtype)
+    weight = (1 + 0.1 * torch.randn(4096, device="cuda")).to(dtype)
+    eps = 1e-5
+
+    def norm(inp, w):
+        return rms_norm_batch_invariant(inp, w, eps)
+
+    eager = norm(x, weight)
+    compiled = torch.compile(norm, backend="inductor", fullgraph=True)(x, weight)
+    assert torch.equal(eager, compiled)
+
+
 if __name__ == "__main__":
     # Run a quick smoke test
     print("Running quick smoke test of RMS norm implementations...")

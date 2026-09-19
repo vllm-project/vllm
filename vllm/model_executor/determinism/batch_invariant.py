@@ -954,7 +954,9 @@ def _rms_norm_kernel(
 
     # Step 2: Compute RMS (root mean square) in float32
     mean_sq = sum_sq / n_cols
-    rms = tl.sqrt(mean_sq + eps)
+    # Inductor passes the Python float `eps` as fp64 when it re-emits this
+    # kernel under torch.compile; keep the arithmetic in fp32 like the eager launch.
+    rms = tl.sqrt(mean_sq + eps.to(tl.float32))
     inv_rms = 1.0 / rms
 
     # Step 3: Normalize and apply weight
