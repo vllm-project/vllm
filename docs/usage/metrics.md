@@ -45,6 +45,30 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-nixl"
 
+## Simple CPU Offload Connector Metrics
+
+These metrics are exposed when the `SimpleCPUOffloadConnector` KV connector
+is configured (e.g. `--kv-transfer-config='{"kv_connector":
+"SimpleCPUOffloadConnector", "kv_role": "kv_both", "extra_config":
+{"kv_offload_backend": "disk", "disk_path": "/mnt/nvme/kv"}}'`). They are
+updated once per engine step.
+
+Caveats to keep in mind when interpreting them:
+
+- A "completed" store means the write syscalls returned; it is **not**
+  fsync-durable, and the disk backend's file is process-lifetime scratch,
+  unlinked at startup and shutdown.
+- `save_outcomes_total` classifies eager-mode boundary hand-off stores;
+  lazy-mode stores are not classified.
+- `used_blocks` counts blocks pinned by in-flight transfers or cache hits;
+  warm cached blocks that are evictable are not counted. Use the
+  `capacity_blocks` label of `simple_kv_offload_info` as the denominator.
+- Counters and gauges are quantized to engine steps. They are reported by the
+  scheduler process and reflect engine-wide logical block counts, not values
+  pooled from individual tensor-parallel workers.
+
+--8<-- "gen:metrics-simple-kv-offload"
+
 ## Model Flops Utilization (MFU) Performance Metrics
 
 These metrics are available via `--enable-mfu-metrics`:
