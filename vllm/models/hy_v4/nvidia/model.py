@@ -189,7 +189,7 @@ class HYV4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """iHC forward: each sub-block reduces and re-scatters the channels."""
+        """IHC forward: each sub-block reduces and re-scatters the channels."""
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
