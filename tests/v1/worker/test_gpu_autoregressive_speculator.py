@@ -123,6 +123,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         draft_model_config=draft_model_config,
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
+        enable_adaptive_verification=False,
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
@@ -157,11 +158,11 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.device = device
         speculator.max_num_tokens = 4
         speculator.max_num_reqs = 2
-        speculator.num_speculative_steps = 1
         speculator.hidden_size = 3
         speculator.dtype = torch.float32
         speculator.draft_model_config = draft_model_config
         speculator.supports_mm_inputs = False
+        speculator.use_acceptance_estimator = False
 
     checked_configs = []
 
@@ -196,6 +197,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
+    speculator.use_acceptance_estimator = False
     speculator.vllm_config = SimpleNamespace(model_config=object())
     speculator.max_num_tokens = 4
     speculator.hidden_size = 3
@@ -220,6 +222,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
+    speculator.use_acceptance_estimator = False
     speculator.vllm_config = SimpleNamespace(model_config=object())
     draft_model = _TextOnlyDraftModel()
     speculator.test_draft_model = draft_model
@@ -252,6 +255,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator = object.__new__(MultiModuleMTPSpeculator)
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
+    speculator.use_acceptance_estimator = False
     speculator.cached_draft_input_embeds = None
     speculator.vllm_config = SimpleNamespace(model_config=object())
     speculator.max_num_tokens = 4
