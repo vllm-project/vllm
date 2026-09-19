@@ -6,10 +6,11 @@ For every incoming checkpoint parameter the worker needs a destination buffer
 plus its placement over the inference mesh. Two outcomes are possible:
 
 * **direct** — when the model is not quantized, the parameter maps 1:1 onto a
-  live vLLM parameter whose shape is either identical to the checkpoint shape
-  (replicated) or differs on exactly one dim by the shard-axis factor. The
-  reshard writes straight into the live parameter, so each rank receives only
-  its own shard and nothing is copied afterwards.
+  live vLLM parameter and its loader is a small, known-safe copy or tensor-
+  parallel loader. The loader's declared input/output dimension determines the
+  placement; shapes are validation, not an inference mechanism. The reshard
+  writes straight into the live parameter, so each rank receives only its own
+  shard and nothing is copied afterwards.
 * **fallback** — anything else. The reshard delivers the whole tensor to every
   rank and `load_weights` does the sharding, exactly as the broadcast NCCL
   backend does. Fused parameters (`qkv_proj`, `gate_up_proj`, MoE `w13`/`w2`)
@@ -20,9 +21,11 @@ Correctness never depends on a parameter resolving — the fallback is always
 available and is the same path the existing backend uses.
 """
 
+import inspect
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import cast
 
 import torch
@@ -64,32 +67,90 @@ class M2NDestination:
         return self.tensor is not None
 
 
-def _shard_dim(
-    global_shape: Sequence[int],
-    local_shape: Sequence[int],
+def _base_loader_shard_dim(
+    param: torch.nn.Parameter,
     shard_axis_size: int,
 ) -> int | None:
-    """Tensor dim the local shape shards, `REPLICATE`, or None if unresolvable.
+    """Return a known-safe loader's declared shard dim, or reject it.
 
-    Derived from the shapes alone rather than the parameter's `output_dim` /
-    `input_dim`, so it stays honest for any layer type: a mismatch anywhere it
-    cannot explain simply falls back.
+    Loader identity is deliberately fail-closed. A missing loader is not
+    treated as ``default_weight_loader`` because a model-level ``load_weights``
+    implementation may transform the tensor before it reaches that default.
+    Wrappers and partials are also rejected: recognizing their wrapped callable
+    would ignore behavior added by the wrapper.
     """
+    loader = getattr(param, "weight_loader", None)
+    if loader is None or isinstance(loader, partial):
+        return None
+
+    owner = loader.__self__ if inspect.ismethod(loader) else None
+    loader_fn = loader.__func__ if inspect.ismethod(loader) else loader
+
+    # Lazy imports avoid making the weight-transfer registry import all model
+    # executor layers during normal vLLM startup.
+    from vllm.model_executor.layers.linear import (
+        ColumnParallelLinear,
+        ReplicatedLinear,
+        RowParallelLinear,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    replicated_loaders = {
+        default_weight_loader,
+        ReplicatedLinear.weight_loader,
+    }
+    column_loaders = {
+        ColumnParallelLinear.weight_loader,
+        ColumnParallelLinear.weight_loader_v2,
+    }
+    row_loaders = {
+        RowParallelLinear.weight_loader,
+        RowParallelLinear.weight_loader_v2,
+    }
+
+    # These attributes signal packing, a transform, or pre-sharded checkpoint
+    # storage. Such semantics cannot be reproduced by a plain M2N placement.
+    # Check them before accepting replicated loaders too: model-level loading
+    # may transform a tensor before handing it to an otherwise plain copier.
+    metadata_attrs = ("packed_dim", "packed_factor", "marlin_tile_size")
+    flag_attrs = ("needs_scalar_to_array", "is_sharded_weight", "is_transposed")
+    if any(getattr(param, attr, None) is not None for attr in metadata_attrs):
+        return None
+    if any(bool(getattr(param, attr, False)) for attr in flag_attrs):
+        return None
+
+    if loader_fn in replicated_loaders:
+        return REPLICATE
+    if loader_fn not in column_loaders | row_loaders:
+        return None
+
+    if owner is None or getattr(owner, "tp_size", None) != shard_axis_size:
+        return None
+
+    attr = "output_dim" if loader_fn in column_loaders else "input_dim"
+    dim = getattr(param, attr, None)
+    return dim if isinstance(dim, int) and dim >= 0 else None
+
+
+def _validated_shard_dim(
+    global_shape: Sequence[int],
+    local_shape: Sequence[int],
+    declared_dim: int,
+    shard_axis_size: int,
+) -> int | None:
+    """Validate a loader-declared shard dimension against both shapes."""
     if len(global_shape) != len(local_shape):
         return None
-    differing = [
-        i
-        for i, (whole, local) in enumerate(zip(global_shape, local_shape))
-        if whole != local
-    ]
-    if not differing:
-        return REPLICATE
-    if len(differing) > 1:
+
+    if declared_dim == REPLICATE:
+        return REPLICATE if tuple(global_shape) == tuple(local_shape) else None
+    if declared_dim >= len(global_shape):
         return None
-    dim = differing[0]
-    if local_shape[dim] * shard_axis_size != global_shape[dim]:
-        return None
-    return dim
+    for dim, (whole, local) in enumerate(zip(global_shape, local_shape)):
+        expected = local * shard_axis_size if dim == declared_dim else local
+        if whole != expected:
+            return None
+    return declared_dim
 
 
 def resolve_parameter_destinations(
@@ -122,7 +183,11 @@ def resolve_parameter_destinations(
             and param.data.is_contiguous()
             and num_workers % shard_axis_size == 0
         ):
-            dim = _shard_dim(shape, param.shape, shard_axis_size)
+            declared_dim = _base_loader_shard_dim(param, shard_axis_size)
+            if declared_dim is not None:
+                dim = _validated_shard_dim(
+                    shape, param.shape, declared_dim, shard_axis_size
+                )
 
         if dim is None or dim == REPLICATE:
             # A replicated parameter is identical on every rank, so it needs no

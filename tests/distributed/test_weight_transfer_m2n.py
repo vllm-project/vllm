@@ -9,6 +9,8 @@ and multiple GPUs, so it is exercised separately.
 """
 
 import logging
+from functools import wraps
+from types import MethodType
 from unittest.mock import Mock
 
 import pybase64 as base64
@@ -43,6 +45,11 @@ from vllm.distributed.weight_transfer.m2n_source import (
     placements_from_tensor,
 )
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
 VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
@@ -367,6 +374,11 @@ def _m2n_worker_receive(
                         device=device,
                     )
                 )
+                self.weight.output_dim = 0
+                self.weight.weight_loader = MethodType(
+                    ColumnParallelLinear.weight_loader,
+                    Mock(tp_size=world_size - 1),
+                )
 
         def load_weights(self, weights):
             for name, tensor in weights:
@@ -510,8 +522,17 @@ class _Model(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.column = torch.nn.Parameter(torch.zeros(8, 16))
+        self.column.output_dim = 0
+        self.column.weight_loader = MethodType(
+            ColumnParallelLinear.weight_loader, Mock(tp_size=2)
+        )
         self.row = torch.nn.Parameter(torch.zeros(16, 8))
+        self.row.input_dim = 1
+        self.row.weight_loader = MethodType(
+            RowParallelLinear.weight_loader, Mock(tp_size=2)
+        )
         self.norm = torch.nn.Parameter(torch.zeros(16))
+        self.norm.weight_loader = default_weight_loader
         self.fused = torch.nn.Parameter(torch.zeros(24, 16))
 
 
@@ -557,6 +578,95 @@ class TestDestinationResolution:
         [destination] = _resolve(["mlp.gate_proj.weight"], [torch.float32], [(16, 16)])
         assert not destination.direct
         assert destination.placements is REPLICATED
+
+    def test_unknown_loader_falls_back_despite_matching_name_and_shape(self):
+        model = _Model()
+        model.norm.weight_loader = lambda param, weight: param.data.copy_(weight)
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["norm"],
+            [torch.float32],
+            [(16,)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
+
+    def test_missing_loader_is_not_assumed_to_be_a_plain_copy(self):
+        model = _Model()
+        del model.norm.weight_loader
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["norm"],
+            [torch.float32],
+            [(16,)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
+
+    def test_wrapped_known_loader_falls_back(self):
+        model = _Model()
+
+        @wraps(default_weight_loader)
+        def wrapped_loader(param, weight):
+            default_weight_loader(param, weight)
+
+        model.norm.weight_loader = wrapped_loader
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["norm"],
+            [torch.float32],
+            [(16,)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
+
+    def test_replicated_loader_with_transform_metadata_falls_back(self):
+        model = _Model()
+        model.norm.is_transposed = True
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["norm"],
+            [torch.float32],
+            [(16,)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
+
+    def test_packed_dim_zero_falls_back(self):
+        model = _Model()
+        model.column.packed_dim = 0
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["column"],
+            [torch.float32],
+            [(16, 16)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
+
+    def test_loader_declared_dim_wins_over_shape_guessing(self):
+        model = _Model()
+        model.column.output_dim = 1
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["column"],
+            [torch.float32],
+            [(16, 16)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert not destination.direct
 
     def test_shape_the_tp_factor_cannot_explain_falls_back(self):
         [destination] = _resolve(["fused"], [torch.float32], [(16, 16)])
