@@ -23,6 +23,7 @@ if not torch.cuda.is_available():
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import (
+    _gumbel_sample_reduce_kernel,
     _uniform64_from_random53,
     gumbel_sample,
     murmur3_hash32,
@@ -328,6 +329,51 @@ def test_drafting_uses_a_separate_noise_stream():
 
 
 # ----------------------------- Edge cases ----------------------------------
+
+
+@pytest.mark.parametrize("num_blocks", [1, 3, 243, 1025])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_final_reduction_preserves_argmax_and_token_mapping(num_blocks, dtype):
+    """Preserve first-index ties, NaNs, FP64 precision and mapped token IDs."""
+    values = torch.randn(8, num_blocks, dtype=dtype, device=DEVICE)
+    ids = torch.arange(8 * num_blocks, device=DEVICE, dtype=torch.int64)
+    ids = ids.reshape(8, num_blocks).flip(-1)
+    values[0].fill_(float("-inf"))
+    values[1].fill_(float("inf"))
+    values[2].fill_(float("nan"))
+    values[3].fill_(1.0)
+    values[4, 0] = float("inf")
+    values[4, -1] = float("nan")
+    values[5, 0] = float("nan")
+    values[5, -1] = float("inf")
+    values[6].fill_(1.0)
+    values[6, -1] = 1.0 + 1e-12
+    output = torch.empty(8, dtype=torch.int64, device=DEVICE)
+
+    def run():
+        _gumbel_sample_reduce_kernel[(8,)](
+            values,
+            ids,
+            output,
+            num_blocks,
+            BLOCK_SIZE=triton.next_power_of_2(num_blocks),
+        )
+
+    def check():
+        expected = ids.gather(1, values.argmax(dim=-1, keepdim=True)).view(-1)
+        assert torch.equal(output, expected)
+
+    run()
+    check()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    # Replay must read new values and token mappings, not capture-time data.
+    values.fill_(-1.0)
+    values[:, -1] = 2.0
+    ids.add_(123)
+    graph.replay()
+    check()
 
 
 def test_greedy_temperature_zero_returns_argmax():
