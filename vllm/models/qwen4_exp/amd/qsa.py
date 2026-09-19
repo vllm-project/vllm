@@ -9,6 +9,7 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -44,9 +45,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
-)
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -139,7 +137,7 @@ class Qwen4ExpQSAImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
     ) -> None:
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        triton_reshape_and_cache_flash(
+        ops.reshape_and_cache_flash(
             key,
             value,
             key_cache,
