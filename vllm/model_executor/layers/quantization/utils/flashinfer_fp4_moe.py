@@ -404,22 +404,17 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             is_gated_activation=is_gated,
         )
     else:
-        # Swizzle the block scales for other FI NVFP4 MoE kernels.
+        # Pad intermediate before swizzle. Gated w13 is 2*N rows, so 64-align
+        # makes the stacked dim a multiple of swizzle_blockscale's 128.
+        min_alignment = 64 if is_gated else 128
+        w13, w13_scale, w2, w2_scale, padded_intermediate = (
+            align_fp4_moe_weights_for_fi(
+                w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
+            )
+        )
+        layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
         w13_scale = swizzle_blockscale(w13_scale)
-
-        # Apply padding if needed.
-        pad_size = w13_scale.size(1) - w13.size(1)
-        if pad_size > 0:
-            if is_act_and_mul:
-                raise NotImplementedError(
-                    "Intermediate size padding for w1 and w3, for %s "
-                    "NvFp4 backend, but this is not currently supported",
-                    backend.value,
-                )
-            w13 = torch.nn.functional.pad(w13, (0, 0, 0, pad_size))
-            w2 = torch.nn.functional.pad(w2, (0, pad_size // 2, 0, 0))
-            w2_scale = torch.nn.functional.pad(w2_scale, (0, pad_size // 16))
-
         w2_scale = swizzle_blockscale(w2_scale)
 
     return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale

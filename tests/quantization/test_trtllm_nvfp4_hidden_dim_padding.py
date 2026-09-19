@@ -14,22 +14,26 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
+from vllm.utils.math_utils import round_up
 
 
 def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
     monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
 
     num_experts = 3
+    hidden_dim = 32
     layer = SimpleNamespace(
         activation=SimpleNamespace(is_gated=False),
         moe_config=SimpleNamespace(
             moe_parallel_config=SimpleNamespace(enable_eplb=False)
         ),
     )
-    w13 = torch.zeros((num_experts, 2, 1), dtype=torch.uint8)
-    w2 = torch.zeros((num_experts, 2, 1), dtype=torch.uint8)
-    w13_scale = torch.zeros((num_experts, 2, 1), dtype=torch.float8_e4m3fn)
-    w2_scale = torch.zeros((num_experts, 2, 1), dtype=torch.float8_e4m3fn)
+    w13 = torch.zeros((num_experts, 2, hidden_dim // 2), dtype=torch.uint8)
+    w2 = torch.zeros((num_experts, hidden_dim, 1), dtype=torch.uint8)
+    w13_scale = torch.zeros(
+        (num_experts, 2, hidden_dim // 16), dtype=torch.float8_e4m3fn
+    )
+    w2_scale = torch.zeros((num_experts, hidden_dim, 1), dtype=torch.float8_e4m3fn)
     weight_scale = torch.ones(num_experts)
 
     outputs = prepare_nvfp4_moe_layer_for_fi_or_cutlass(
@@ -148,6 +152,81 @@ def test_align_trtllm_fp4_moe_intermediate_pads_gate_and_up_separately():
         up_scale,
     )
 
+    assert torch.count_nonzero(out_w13[:, intermediate:padded_intermediate]) == 0
+    assert torch.count_nonzero(out_w13[:, padded_intermediate + intermediate :]) == 0
+    assert torch.count_nonzero(out_w13_scale[:, intermediate:padded_intermediate]) == 0
+    assert (
+        torch.count_nonzero(out_w13_scale[:, padded_intermediate + intermediate :]) == 0
+    )
+    torch.testing.assert_close(out_w2[:, :, : intermediate // 2], w2)
+    torch.testing.assert_close(out_w2_scale[:, :, : intermediate // 16], w2_scale)
+    assert torch.count_nonzero(out_w2[:, :, intermediate // 2 :]) == 0
+    assert torch.count_nonzero(out_w2_scale[:, :, intermediate // 16 :]) == 0
+
+
+def test_cutlass_nvfp4_moe_pads_gated_intermediate_for_qwen38_tp4(monkeypatch):
+    # Qwen3.8-Flash-Next NVFP4: moe_intermediate_size=640, TP=4 -> 160/rank.
+    # Stacked gate+up rows are 320; swizzle_blockscale rounds that to 384.
+    def swizzle_pad_rows(scale: torch.Tensor) -> torch.Tensor:
+        padded_rows = round_up(scale.size(1), 128)
+        if padded_rows == scale.size(1):
+            return scale
+        out = scale.new_zeros((scale.size(0), padded_rows, scale.size(2)))
+        out[:, : scale.size(1)] = scale
+        return out
+
+    monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", swizzle_pad_rows)
+
+    intermediate = 160
+    padded_intermediate = 192
+    hidden_dim = 128
+
+    gate = torch.ones((1, intermediate, hidden_dim // 2), dtype=torch.uint8)
+    up = torch.full_like(gate, 2)
+    w13 = torch.cat((gate, up), dim=1)
+    gate_scale = torch.full((1, intermediate, hidden_dim // 16), 3, dtype=torch.uint8)
+    up_scale = torch.full_like(gate_scale, 4)
+    w13_scale = torch.cat((gate_scale, up_scale), dim=1)
+    w2 = torch.full((1, hidden_dim, intermediate // 2), 5, dtype=torch.uint8)
+    w2_scale = torch.full((1, hidden_dim, intermediate // 16), 6, dtype=torch.uint8)
+
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False),
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+
+    out_w13, out_w13_scale, _, _, out_w2, out_w2_scale, _, _ = (
+        prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+            backend=NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            layer=layer,
+            w13=w13,
+            w13_scale=w13_scale,
+            w13_scale_2=torch.ones(1),
+            a13_scale=torch.tensor([1.0]),
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_scale_2=torch.ones(1),
+            a2_scale=torch.tensor([1.0]),
+            is_act_and_mul=True,
+        )
+    )
+
+    assert layer.moe_config.intermediate_size_per_partition == padded_intermediate
+    assert out_w13.shape[1] == 2 * padded_intermediate
+    # FLASHINFER_CUTLASS reorders [gate, up] to [up, gate], then split-pads.
+    torch.testing.assert_close(out_w13[:, :intermediate], up)
+    torch.testing.assert_close(
+        out_w13[:, padded_intermediate : padded_intermediate + intermediate],
+        gate,
+    )
+    torch.testing.assert_close(out_w13_scale[:, :intermediate], up_scale)
+    torch.testing.assert_close(
+        out_w13_scale[:, padded_intermediate : padded_intermediate + intermediate],
+        gate_scale,
+    )
     assert torch.count_nonzero(out_w13[:, intermediate:padded_intermediate]) == 0
     assert torch.count_nonzero(out_w13[:, padded_intermediate + intermediate :]) == 0
     assert torch.count_nonzero(out_w13_scale[:, intermediate:padded_intermediate]) == 0
