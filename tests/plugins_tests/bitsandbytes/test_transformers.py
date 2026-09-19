@@ -7,6 +7,7 @@ import pytest
 from vllm.platforms import current_platform
 
 from ...models.utils import check_logprobs_close
+from ...utils import skip_on_hf_hub_download_error
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_cdna
@@ -21,7 +22,9 @@ if current_platform.is_rocm():
     "model, quantization_kwargs",
     [
         (
-            "meta-llama/Llama-3.2-1B-Instruct",
+            # Ungated mirror of meta-llama/Llama-3.2-1B-Instruct, so the test
+            # does not depend on HF gated-repo auth.
+            "unsloth/Llama-3.2-1B-Instruct",
             {
                 "quantization": "bitsandbytes",
             },
@@ -39,28 +42,29 @@ def test_transformers_backend_quantization(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(
-        model,
-        model_impl="auto",
-        enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-        )
+    with skip_on_hf_hub_download_error():
+        with vllm_runner(
+            model,
+            model_impl="auto",
+            enforce_eager=True,
+            **quantization_kwargs,  # type: ignore[arg-type]
+        ) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
+            )
 
-    with vllm_runner(
-        model,
-        model_impl="transformers",
-        enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
-    ) as vllm_model:
-        model_config = vllm_model.llm.llm_engine.model_config
-        assert model_config.using_transformers_backend()
+        with vllm_runner(
+            model,
+            model_impl="transformers",
+            enforce_eager=True,
+            **quantization_kwargs,  # type: ignore[arg-type]
+        ) as vllm_model:
+            model_config = vllm_model.llm.llm_engine.model_config
+            assert model_config.using_transformers_backend()
 
-        transformers_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-        )
+            transformers_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
+            )
 
     check_logprobs_close(
         outputs_0_lst=transformers_outputs,

@@ -14,7 +14,7 @@ from vllm_bnb_plugin import bitsandbytes_loader as bnb
 from vllm.platforms import current_platform
 
 from ...models.utils import check_embeddings_close, check_logprobs_close
-from ...utils import multi_gpu_test
+from ...utils import multi_gpu_test, skip_on_hf_hub_download_error
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_cdna
@@ -53,18 +53,18 @@ models_pre_quant_8bit_to_test = [
     ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
 ]
 
+# Inflight quantization of the 7B model materializes it in both the HF and
+# vLLM runners on one GPU; cap memory and skip cudagraph capture to avoid
+# OOM flakes on shared agents.
+MISTRAL_7B_VLLM_MODEL_KWARGS = dict(
+    gpu_memory_utilization=0.85, enforce_eager=True, max_model_len=1024
+)
 
-def log_generated_texts(prompts, outputs, runner_name):
-    logged_texts = []
-    for i, (_, generated_text) in enumerate(outputs):
-        logged_texts.append(
-            {
-                "prompt": prompts[i],
-                "runner_name": runner_name,
-                "generated_text": generated_text,
-            }
-        )
-    return logged_texts
+
+def vllm_model_kwargs_for(model_name):
+    if "Mistral-7B" in model_name:
+        return dict(MISTRAL_7B_VLLM_MODEL_KWARGS)
+    return {}
 
 
 def validate_generated_texts(
@@ -76,40 +76,43 @@ def validate_generated_texts(
     hf_model_kwargs=None,
     vllm_tp_size=1,
     max_tokens=8,
+    num_logprobs=5,
+    vllm_model_kwargs=None,
 ):
-    with vllm_runner(
-        model_name,
-        quantization=None if pre_quant else "bitsandbytes",
-        tensor_parallel_size=vllm_tp_size,
-        enforce_eager=False,
-        default_torch_num_threads=1,
-        tokenizer_mode="hf",
-        load_format="hf",
-        config_format="hf",
-    ) as llm:
-        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
-        vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
+    with skip_on_hf_hub_download_error():
+        with vllm_runner(
+            model_name,
+            **dict(
+                quantization=None if pre_quant else "bitsandbytes",
+                tensor_parallel_size=vllm_tp_size,
+                enforce_eager=False,
+                default_torch_num_threads=1,
+                tokenizer_mode="hf",
+                load_format="hf",
+                config_format="hf",
+                **(vllm_model_kwargs or {}),
+            ),
+        ) as llm:
+            vllm_outputs = llm.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs
+            )
 
-    if hf_model_kwargs is None:
-        hf_model_kwargs = {}
+        if hf_model_kwargs is None:
+            hf_model_kwargs = {}
 
-    with hf_runner(
-        model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
-    ) as llm:
-        hf_outputs = llm.generate_greedy(prompts, max_tokens)
-        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
+        with hf_runner(
+            model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
+        ) as llm:
+            hf_outputs = llm.generate_greedy_logprobs_limit(
+                prompts, max_tokens, num_logprobs
+            )
 
-    for hf_log, vllm_log in zip(hf_logs, vllm_logs):
-        hf_str = hf_log["generated_text"]
-        vllm_str = vllm_log["generated_text"]
-        prompt = hf_log["prompt"]
-        assert hf_str == vllm_str, (
-            f"Model: {model_name}"
-            f"Mismatch between HF and vLLM outputs:\n"
-            f"Prompt: {prompt}\n"
-            f"HF Output: '{hf_str}'\n"
-            f"vLLM Output: '{vllm_str}'"
-        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
@@ -118,7 +121,13 @@ def test_load_4bit_bnb_model(
 ) -> None:
     hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(load_in_4bit=True))
     validate_generated_texts(
-        hf_runner, vllm_runner, example_prompts[:1], model_name, False, hf_model_kwargs
+        hf_runner,
+        vllm_runner,
+        example_prompts[:1],
+        model_name,
+        False,
+        hf_model_kwargs,
+        vllm_model_kwargs=vllm_model_kwargs_for(model_name),
     )
 
 
@@ -154,6 +163,7 @@ def test_load_tp_4bit_bnb_model(
         False,
         hf_model_kwargs,
         vllm_tp_size=2,
+        vllm_model_kwargs=vllm_model_kwargs_for(model_name),
     )
 
 
@@ -171,6 +181,7 @@ def test_load_pp_4bit_bnb_model(
         False,
         hf_model_kwargs,
         vllm_tp_size=2,
+        vllm_model_kwargs=vllm_model_kwargs_for(model_name),
     )
 
 
@@ -191,22 +202,23 @@ def test_4bit_bnb_moe_model(
             bnb_4bit_use_double_quant=True,
         )
     )
-    with vllm_runner(
-        model_name,
-        quantization="bitsandbytes",
-        enforce_eager=False,
-        default_torch_num_threads=1,
-    ) as llm:
-        vllm_outputs = llm.generate_greedy_logprobs(
-            example_prompts, max_tokens=32, num_logprobs=5
-        )
+    with skip_on_hf_hub_download_error():
+        with vllm_runner(
+            model_name,
+            quantization="bitsandbytes",
+            enforce_eager=False,
+            default_torch_num_threads=1,
+        ) as llm:
+            vllm_outputs = llm.generate_greedy_logprobs(
+                example_prompts, max_tokens=32, num_logprobs=5
+            )
 
-    with hf_runner(
-        model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
-    ) as llm:
-        transformers_outputs = llm.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens=32, num_logprobs=5
-        )
+        with hf_runner(
+            model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
+        ) as llm:
+            transformers_outputs = llm.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens=32, num_logprobs=5
+            )
     check_logprobs_close(
         outputs_0_lst=transformers_outputs,
         outputs_1_lst=vllm_outputs,
@@ -227,25 +239,28 @@ def test_4bit_bnb_embedding_model(
 ) -> None:
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with vllm_runner(
-        model_name,
-        runner="pooling",
-        dtype=dtype,
-        gpu_memory_utilization=0.5,
-        quantization="bitsandbytes",
-        default_torch_num_threads=1,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.embed(example_prompts)
+    with skip_on_hf_hub_download_error():
+        with vllm_runner(
+            model_name,
+            runner="pooling",
+            dtype=dtype,
+            gpu_memory_utilization=0.5,
+            quantization="bitsandbytes",
+            default_torch_num_threads=1,
+        ) as vllm_model:
+            vllm_outputs = vllm_model.embed(example_prompts)
 
-    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(load_in_4bit=True))
-    with hf_runner(
-        model_name,
-        dtype=dtype,
-        model_kwargs=hf_model_kwargs,
-        is_sentence_transformer=True,
-        default_torch_num_threads=1,
-    ) as hf_model:
-        hf_outputs = hf_model.encode(example_prompts)
+        hf_model_kwargs = dict(
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True)
+        )
+        with hf_runner(
+            model_name,
+            dtype=dtype,
+            model_kwargs=hf_model_kwargs,
+            is_sentence_transformer=True,
+            default_torch_num_threads=1,
+        ) as hf_model:
+            hf_outputs = hf_model.encode(example_prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
