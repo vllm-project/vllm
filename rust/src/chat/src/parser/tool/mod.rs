@@ -40,6 +40,7 @@ pub mod names {
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
+    pub const MIMO: &str = "mimo";
 }
 
 /// Constructor signature for one registered tool parser implementation.
@@ -82,6 +83,7 @@ impl ToolParserFactory {
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
+            .register_parser::<Qwen3XmlToolParser>(names::MIMO)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
@@ -120,7 +122,8 @@ impl ToolParserFactory {
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
             .register_pattern("seed-oss", names::SEED_OSS)
-            .register_pattern("seedoss", names::SEED_OSS);
+            .register_pattern("seedoss", names::SEED_OSS)
+            .register_pattern("mimo", names::MIMO);
 
         factory
     }
