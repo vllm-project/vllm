@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 import vllm._custom_ops as ops
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -128,6 +129,7 @@ class K3DSparkDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class K3DSparkModel(nn.Module):
     def __init__(
         self,
