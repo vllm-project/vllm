@@ -18,12 +18,12 @@ from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -45,13 +45,18 @@ if TYPE_CHECKING:
 # LSE/output combine
 
 
-def mask_dcp_empty_shards_(
-    lse: torch.Tensor,
+def _validate_dcp_empty_shard_args(
     seq_lens: torch.Tensor | None,
     query_start_loc: torch.Tensor | None,
-) -> None:
+) -> bool:
+    """Validate the empty-shard mask inputs.
+
+    Returns True when masking is requested, False when it is disabled. Raises on
+    an inconsistent pair. Performs no device work so it is safe to call from a
+    CUDA-graph-captured region.
+    """
     if seq_lens is None and query_start_loc is None:
-        return
+        return False
     if seq_lens is None or query_start_loc is None:
         raise ValueError("seq_lens and query_start_loc must be provided together")
     if (
@@ -60,6 +65,24 @@ def mask_dcp_empty_shards_(
         or query_start_loc.shape[0] != seq_lens.shape[0] + 1
     ):
         raise ValueError("query_start_loc must contain one boundary per sequence")
+    return True
+
+
+def mask_dcp_empty_shards_(
+    lse: torch.Tensor,
+    seq_lens: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+) -> None:
+    if not _validate_dcp_empty_shard_args(seq_lens, query_start_loc):
+        return
+    assert seq_lens is not None and query_start_loc is not None
+
+    # A DCP rank can receive no local sequences during CUDA graph warmup even
+    # though the padded LSE buffer still has rows. In that case every row is an
+    # empty shard; avoid indexing the empty seq_lens tensor below.
+    if seq_lens.shape[0] == 0:
+        lse.fill_(float("-inf"))
+        return
 
     row_indices = torch.arange(
         lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
@@ -110,8 +133,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         N_ROUNDED: tl.constexpr,
         IS_BASE_E: tl.constexpr,
     ):
-        """
-        Apply the all-gathered lses to correct each local rank's attention
+        """Apply the all-gathered lses to correct each local rank's attention
         output. we still need perform a cross-rank reduction to obtain the
         final attention output.
 
@@ -124,6 +146,17 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
                 Pointer to output tensor of shape [ B, H, D ]
             vlse_ptr (triton.PointerType):
                 Pointer to output tensor of shape [ B, H ]
+            outputs_stride_B (int): Batch stride of ``outputs_ptr``
+            outputs_stride_H (int): Head stride of ``outputs_ptr``
+            outputs_stride_D (int): Head-dim stride of ``outputs_ptr``
+            lses_stride_N (int): Rank stride of ``lses_ptr``
+            lses_stride_B (int): Batch stride of ``lses_ptr``
+            lses_stride_H (int): Head stride of ``lses_ptr``
+            lse_idx (int): Index of this rank's lse within the all-gathered tensor
+            HEAD_DIM: Head dimension, as a constexpr
+            N_ROUNDED: Rank count rounded to a power of two, as a constexpr
+            IS_BASE_E: Whether the lses are natural-log based, as a constexpr
+
         """
         batch_idx = tl.program_id(axis=0).to(tl.int64)
         head_idx = tl.program_id(axis=1).to(tl.int64)
@@ -353,9 +386,11 @@ def correct_attn_out(
         lses: Tensor of shape [ N, B, H ]
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
+        is_lse_base_on_e: Whether the lses use base e rather than base 2
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.
+
     """
     if ctx is None:
         ctx = CPTritonContext()
@@ -408,8 +443,7 @@ def _cp_lse_common(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
@@ -443,8 +477,7 @@ def cp_lse_ag_out_rs(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -476,8 +509,7 @@ def cp_lse_ag_out_ar(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -505,8 +537,7 @@ def _lse_weighted_combine(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    CPU reference implementation for LSE-weighted combination.
+    """CPU reference implementation for LSE-weighted combination.
 
     This is a pure PyTorch implementation used for testing and validation.
 
@@ -522,6 +553,7 @@ def _lse_weighted_combine(
 
     Returns:
         Combined output [B, H, D], and optionally global LSE [B, H]
+
     """
     N, B, H, D = outputs.shape
 
@@ -603,6 +635,9 @@ def _dcp_a2a_pack_send_kernel(
     out_ptr,
     lse_ptr,
     send_ptr,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    num_seqs,
     out_stride_B,
     out_stride_H,
     out_stride_D,
@@ -616,10 +651,32 @@ def _dcp_a2a_pack_send_kernel(
     HEAD_DIM: tl.constexpr,
     H_PER_RANK: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    NUM_SEQS_POW2: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     local_head_idx = tl.program_id(1).to(tl.int64)
     d_offsets = tl.arange(0, HEAD_DIM)
+
+    # Empty-shard masking, fused in to avoid a separate per-layer pass over the
+    # LSE. Rows that belong to a request with no local KV shard, and rows past
+    # the end of the batch (CUDA-graph padding), must not contribute to the
+    # combine, which the reduction achieves by giving them an LSE of -inf.
+    row_is_empty = False
+    if HAS_MASK:
+        # searchsorted(query_start_loc[1:], batch_idx, right=True), i.e. the
+        # number of request boundaries at or below this row.
+        seq_offsets = tl.arange(0, NUM_SEQS_POW2)
+        boundaries = tl.load(
+            query_start_loc_ptr + 1 + seq_offsets,
+            mask=seq_offsets < num_seqs,
+            other=2**31 - 1,
+        )
+        seq_idx = tl.sum((boundaries <= batch_idx).to(tl.int32), axis=0)
+        seq_idx = tl.minimum(seq_idx, num_seqs - 1)
+        num_rows = tl.load(query_start_loc_ptr + num_seqs)
+        seq_len = tl.load(seq_lens_ptr + seq_idx)
+        row_is_empty = (batch_idx >= num_rows) | (seq_len == 0)
 
     for rank_idx in tl.static_range(N):
         src_head_idx = rank_idx * H_PER_RANK + local_head_idx
@@ -642,6 +699,8 @@ def _dcp_a2a_pack_send_kernel(
         lse_val = tl.load(
             lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H
         ).to(tl.float32)
+        if HAS_MASK:
+            lse_val = tl.where(row_is_empty, -float("inf"), lse_val)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + HEAD_DIM * send_stride_D,
@@ -797,12 +856,21 @@ def _dcp_a2a_pack_send(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> None:
-    mask_dcp_empty_shards_(cp_attn_lse, seq_lens, query_start_loc)
+    # The empty-shard mask is fused into the pack kernel below rather than
+    # applied as a separate pass: the mask is a pure function of seq_lens and
+    # query_start_loc, which are identical for every MLA layer in a step, while
+    # the eager form costs eight launch-bound kernels per layer.
+    has_mask = _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
+    num_seqs = seq_lens.shape[0] if has_mask and seq_lens is not None else 0
+
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
     _dcp_a2a_pack_send_kernel[grid](
         cp_attn_out,
         cp_attn_lse,
         send_buffer,
+        seq_lens,
+        query_start_loc,
+        num_seqs,
         cp_attn_out.stride(0),
         cp_attn_out.stride(1),
         cp_attn_out.stride(2),
@@ -816,6 +884,11 @@ def _dcp_a2a_pack_send(
         HEAD_DIM=head_dim,
         H_PER_RANK=h_per_rank,
         LSE_PACK_DIM=lse_pack_dim,
+        HAS_MASK=has_mask,
+        # Only the arange bound is a constexpr: num_seqs itself is a runtime
+        # argument so the kernel specializes on at most log2(max_num_seqs)
+        # variants instead of one per distinct batch size.
+        NUM_SEQS_POW2=triton.next_power_of_2(max(num_seqs, 1)),
     )
 
 
@@ -872,8 +945,7 @@ def dcp_a2a_lse_reduce(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Combine partial attention outputs across DCP ranks using All-to-All.
+    """Combine partial attention outputs across DCP ranks using All-to-All.
 
     The output and LSE are packed into a single output-dtype buffer, sent
     with one All-to-All, then unpacked and combined with exact LSE weighting.
@@ -891,6 +963,7 @@ def dcp_a2a_lse_reduce(
     Returns:
         Combined output [B, H/N, D] (head-scattered)
         If return_lse=True, also returns global_lse [B, H/N]
+
     """
     world_size = cp_group.world_size
 

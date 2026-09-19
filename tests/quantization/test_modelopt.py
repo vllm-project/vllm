@@ -127,6 +127,23 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
@@ -324,7 +341,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
-            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+            "model.language_model.layers.1.experts.gate_up_proj": {
                 "quant_algo": "NVFP4",
                 "group_size": 16,
             },
@@ -336,10 +353,10 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
     )
     config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_rename_mapper())
 
-    expected_prefix = "language_model.model.layers.0.moe.experts"
+    expected_prefix = "language_model.model.layers.0.experts"
     assert set(config.quantized_layers) == {
         expected_prefix,
-        "language_model.model.layers.1.moe.gate_up_proj",
+        "language_model.model.layers.1.experts.gate_up_proj",
     }
     assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
