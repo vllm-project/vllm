@@ -288,10 +288,60 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     return chunkk, fits
 
 
+# A weight row stride that is a multiple of the aliasing period makes the multi-row
+# global loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by
+# one cache line dodges the collision and keeps each row aligned. Maps a GPU arch to
+# its (aliasing period, cache line) in bytes; an arch absent from this table is not
+# known to alias and is left alone.
+CACHE_ALIASING_GEOMETRY: dict[str, tuple[int, int]] = {
+    "gfx11": (2048, 128),
+}
+
+
+def cache_aliasing_pad_elems(k: int, element_size: int, gcn_arch: str) -> int:
+    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing, or 0
+    when the stride does not alias or the arch is not known to alias.
+
+    Args:
+        k: Number of elements per weight row.
+        element_size: Size of one element in bytes.
+        gcn_arch: GCN arch of the target GPU, e.g. ``"gfx1151"``.
+
+    Returns:
+        The number of elements to add to the row stride.
+    """
+    for arch, (period, cache_line) in CACHE_ALIASING_GEOMETRY.items():
+        if gcn_arch.startswith(arch):
+            if (k * element_size) % period != 0:
+                return 0
+            return cache_line // element_size
+    return 0
+
+
+def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
+    """Offset a dense weight's row stride so it stops aliasing.
+
+    Returns a view with the original shape whose row stride is one cache line
+    wider, or ``weight`` unchanged when the pad does not apply.
+    """
+    from vllm.platforms.rocm import get_gcn_arch
+
+    if not (envs.VLLM_ROCM_LINEAR_PADDING and current_platform.is_rocm()):
+        return weight
+    if weight.dim() != 2 or not weight.is_contiguous():
+        return weight
+    pad = cache_aliasing_pad_elems(
+        weight.shape[1], weight.element_size(), get_gcn_arch()
+    )
+    if pad == 0:
+        return weight
+    return torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -333,27 +383,46 @@ def rocm_unquantized_gemm_impl(
 
         return gemm_a16w16(x, weight, bias)
 
-    use_skinny = (
+    skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
         # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and skinny_operands_compatible
     )
 
-    if use_skinny:
+    # wvSplitK allows row strides. Perf impact is only validated on gfx11.
+    weight_ok_for_wvsplitk = weight.is_contiguous() or (
+        on_gfx11() and weight.stride(1) == 1
+    )
+
+    use_wvsplitk = (
+        skinny_gemm_enabled
+        and weight_ok_for_wvsplitk
+        and (bias is None or bias.is_contiguous())
+        and m > 8
+        and 0 < n <= 5
+    )
+
+    use_llmm1 = (
+        skinny_gemm_enabled
+        and weight.is_contiguous()
+        and bias is None
+        and m % 4 == 0
+        and n == 1
+        and k <= 8192
+    )
+
+    if use_wvsplitk or use_llmm1:
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         x_view = x.reshape(-1, x.size(-1)).contiguous()
-        if m > 8 and 0 < n <= 5:
-            cu_count = num_compute_units()
+        if use_wvsplitk:
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
-            return out.reshape(*x.shape[:-1], weight.shape[0])
-        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+        else:
             out = ops.LLMM1(weight, x_view, 4)
-            return out.reshape(*x.shape[:-1], weight.shape[0])
+        return out.reshape(*x.shape[:-1], weight.shape[0])
 
     if rocm_aiter_ops.is_tgemm_enabled():
         from aiter.tuned_gemm import tgemm
