@@ -477,18 +477,33 @@ def test_marlin_gemm(
     assert max_diff < 0.04
 
 
-def test_marlin_gemm_subset_input():
-    quant_type = scalar_types.uint4b8
+@pytest.mark.parametrize(
+    "quant_type,dtype,size_m,size_k,size_n",
+    [
+        (scalar_types.uint4b8, torch.float16, 32, 1024, 2048),
+        (scalar_types.float8_e4m3fn, torch.bfloat16, 255, 4096, 24576),
+        (scalar_types.float8_e4m3fn, torch.bfloat16, 256, 4096, 24576),
+        (scalar_types.float8_e4m3fn, torch.bfloat16, 257, 4096, 24576),
+        (scalar_types.float8_e4m3fn, torch.bfloat16, 511, 5120, 34816),
+        (scalar_types.float8_e4m3fn, torch.bfloat16, 1025, 8192, 32768),
+    ],
+)
+def test_marlin_gemm_subset_input(quant_type, dtype, size_m, size_k, size_n):
+    """Cover strided inputs, partial tiles, and the large-M launch boundary."""
     group_size = 128
 
-    size_m, size_k, size_n = 32, 1024, 2048
-    big_m = size_m * 2
-    big_k = size_k * 2
+    big_m = size_m + 8
+    big_k = size_k + 16
 
-    a_input = rand_data((big_m, big_k))[8 : size_m + 8, 8 : size_k + 8]
-    b_weight = rand_data((size_k, size_n))
+    a_input = rand_data((big_m, big_k), dtype)[8 : size_m + 8, 8 : size_k + 8]
+    b_weight = rand_data((size_k, size_n), dtype)
 
-    w_ref, marlin_q_w, marlin_s = marlin_quantize(b_weight, quant_type, group_size)
+    if quant_type == scalar_types.float8_e4m3fn:
+        w_ref, marlin_q_w, marlin_s = marlin_quant_fp8_torch(
+            b_weight.T, group_size, input_dtype=dtype
+        )
+    else:
+        w_ref, marlin_q_w, marlin_s = marlin_quantize(b_weight, quant_type, group_size)
 
     marlin_zp = marlin_make_empty(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
