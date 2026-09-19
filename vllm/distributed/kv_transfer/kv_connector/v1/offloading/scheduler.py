@@ -1837,6 +1837,9 @@ class OffloadingConnectorScheduler:
         """
         return bool(self._jobs) or self.manager.has_pending_work()
 
+    def poll_pending_work(self) -> None:
+        self.manager.poll_pending_work()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 

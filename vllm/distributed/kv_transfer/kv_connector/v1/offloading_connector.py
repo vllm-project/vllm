@@ -202,6 +202,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_pending_push_work()
 
+    def poll_pending_work(self) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.poll_pending_work()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)

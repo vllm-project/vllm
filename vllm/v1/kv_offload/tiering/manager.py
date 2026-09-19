@@ -893,6 +893,19 @@ class TieringOffloadingManager(OffloadingManager):
         )
 
     @override
+    def poll_pending_work(self) -> None:
+        """Service the secondary tiers between scheduler steps.
+
+        The same sweep on_schedule_end() runs at the end of a step: finished
+        jobs are collected and every tier serves its external requests. The
+        per-step gate is untouched, so the next step still polls once before
+        its own lookups.
+        """
+        self._process_finished_jobs()
+        for tier in self.secondary_tiers:
+            tier.serve_external_requests(self._tier_parents[tier])
+
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield events owned by the primary and secondary tiers.
 
