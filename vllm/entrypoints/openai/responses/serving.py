@@ -1032,6 +1032,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=tool_calls,
                 logprobs=logprobs,
                 tools=request.tools,
+                encrypted_reasoning=request.is_include_encrypted_reasoning(),
             )
 
         # Fallback when no parser is configured
@@ -1191,7 +1192,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor(tools=request.tools)
+        processor = SimpleStreamingEventProcessor(
+            tools=request.tools,
+            encrypt_reasoning=request.is_include_encrypted_reasoning(),
+        )
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
