@@ -1016,3 +1016,4 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         rtol=0,
         atol=0,
     )
+

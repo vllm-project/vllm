@@ -80,9 +80,44 @@ class DSparkMarkovHead(nn.Module):
         self.markov_w2._retain_weight_for_gather = retain_weight_for_gather
         self.markov_w2.is_w4a16_nvfp4 = False
 
+    @property
+    def markov_rank(self) -> int:
+        return int(self.markov_w1.weight.shape[1])
+
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         """r-dim Markov embedding of ``token_ids`` ([B] -> [B, r])."""
         return self.markov_w1(token_ids)
+
+    def supports_candidate_walk(self) -> bool:
+        """Whether the fused top-k walk can read these weights directly."""
+        from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import (
+            walk_is_supported,
+        )
+
+        return walk_is_supported(
+            self.markov_w1.weight,
+            self.markov_w2.weight,
+            tp_size=self.markov_w2.tp_size,
+        )
+
+    def candidate_scores(
+        self,
+        markov_embed: torch.Tensor,  # [B, r]
+        values: torch.Tensor,  # [B, k] base logits of the candidates
+        index: torch.Tensor,  # [B, k] candidate ids (draft vocab)
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Markov-corrected logits for the ``k`` candidates ([B, k]).
+
+        Reference implementation of the pruned head: only the gathered ``W2``
+        rows of the candidates take part in the projection, so this is
+        ``[B, k, r] @ [B, r, 1]`` instead of ``[B, r] @ [r, V]``. Equivalent to
+        ``markov_bias(embed)`` gathered at ``index``, which is what the fused
+        walk kernel computes inline.
+        """
+        weight = self.markov_w2.weight[index]
+        bias = torch.matmul(weight, markov_embed.unsqueeze(-1)).squeeze(-1)
+        return values + bias.to(values.dtype) * scale
 
     def bias(
         self,
@@ -284,6 +319,16 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def supports_markov_candidate_walk(self) -> bool:
+        """Whether this checkpoint can run the candidate-pruned Markov walk."""
+        head = getattr(self.model, "markov_head", None)
+        return head is not None and head.supports_candidate_walk()
+
+    def markov_walk_inputs(self) -> tuple[torch.Tensor, torch.Tensor, float]:
+        """``(W1, W2, logit scale)`` weights consumed by the fused walk."""
+        head = self.model.markov_head
+        return head.markov_w1.weight, head.markov_w2.weight, self.logits_processor.scale
 
     def apply_markov_bias_gathered(
         self,

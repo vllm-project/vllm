@@ -163,6 +163,9 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         checkpoint also ships d2t/t2d remap tables.
     - mask_token_id (required): token id for parallel-drafting mask slots.
     - markov_rank / markov_head_type: low-rank Markov logit-bias head.
+    - markov_topk / markov_bias_topk: inference-time candidate budgets for the
+      Markov head (0 =
+        full-vocab projection). Weights are unchanged either way.
     - block_size: semi-autoregressive draft block size.
     - enable_confidence_head / confidence_head_with_markov: confidence head.
     - aux_hidden_state_layer_ids (required): target layer indices feeding the
@@ -200,6 +203,8 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         "mask_token_id",
         "markov_rank",
         "markov_head_type",
+        "markov_topk",
+        "markov_bias_topk",
         "block_size",
         "enable_confidence_head",
         "confidence_head_with_markov",
