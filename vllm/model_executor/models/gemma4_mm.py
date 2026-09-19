@@ -1325,7 +1325,7 @@ class Gemma4ForConditionalGeneration(
         )
         pool_position_ids = pixel_position_ids
 
-        if self._enable_mm_lora:
+        if getattr(self, "_enable_mm_lora", False):
             max_soft_tokens = vision_cfg.default_output_length
             mm_processor_kwargs = getattr(
                 getattr(self, "multimodal_config", None),
@@ -1372,7 +1372,7 @@ class Gemma4ForConditionalGeneration(
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            if self._enable_mm_lora:
+            if getattr(self, "_enable_mm_lora", False):
                 max_batch_size = len(items)
             else:
                 free, total = torch.accelerator.get_memory_info()
