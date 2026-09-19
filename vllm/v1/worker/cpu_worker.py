@@ -288,7 +288,12 @@ class CPUWorker(Worker):
             encoder=self.compilation_config.encoder_compilation_time,
         )
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        profiler_kwargs: dict | None = None,
+    ):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
