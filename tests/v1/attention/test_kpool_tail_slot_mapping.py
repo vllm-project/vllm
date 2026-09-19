@@ -274,6 +274,16 @@ def test_builder_build_falls_back_without_positions():
     assert meta.slot_mapping is cam.slot_mapping
 
 
+def test_builder_updates_draft_mapping():
+    builder = make_tail_builder()
+    cam = make_common_metadata([[15], [16]], [5, 9])
+    meta = KpoolTailMetadataBuilder.build(builder, 0, cam)
+    assert cam.positions is not None
+    cam.positions.add_(1)
+    builder.update_draft_decode_metadata(meta)
+    assert meta.slot_mapping[:2].tolist() == [5 * KPOOL, 9 * KPOOL + 1]
+
+
 def test_builder_reuses_slot_mapping_storage():
     builder = make_tail_builder()
     first = make_common_metadata([list(range(10))], [5])
