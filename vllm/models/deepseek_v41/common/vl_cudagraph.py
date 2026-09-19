@@ -115,11 +115,16 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         backend = self.vision.blocks[0].attn.attn.attn_backend
-        if backend == AttentionBackendEnum.FLASHINFER:
+        # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
+        # .tolist() on CUDA cu_seqlens; neither can be captured.
+        if backend in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TORCH_SDPA,
+        ):
             raise ValueError(
-                "cudagraph_mm_encoder is not supported with the FlashInfer "
+                f"cudagraph_mm_encoder is not supported with the {backend.name} "
                 "ViT attention backend for DeepSeek-V4.1. Set "
-                "VLLM_VIT_ATTN_BACKEND=FLASH_ATTN or disable "
+                "--mm-encoder-attn-backend FLASH_ATTN or disable "
                 "cudagraph_mm_encoder."
             )
 
