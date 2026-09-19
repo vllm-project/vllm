@@ -50,6 +50,21 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Prefill peer coordinates required when ``do_remote_prefill`` is set on D.
+_REQUIRED_PUSH_REMOTE_PREFILL_FIELDS = (
+    "remote_engine_id",
+    "remote_host",
+    "remote_port",
+    "tp_size",
+)
+
+
+def _push_remote_prefill_params_ready(params: dict[str, Any]) -> bool:
+    """Return True when Push D-side registration can read remote coordinates."""
+    return all(
+        params.get(key) is not None for key in _REQUIRED_PUSH_REMOTE_PREFILL_FIELDS
+    )
+
 
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     """Push-specific scheduler logic (WRITE-based KV transfer).
@@ -116,7 +131,15 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
+        if isinstance(params, dict) and params.get("do_remote_prefill"):
+            if not _push_remote_prefill_params_ready(params):
+                logger.warning(
+                    "Got invalid KVTransferParams: %s. This "
+                    "request will not utilize KVTransfer",
+                    params,
+                )
+                params["do_remote_prefill"] = False
+                return 0, False
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
@@ -141,6 +164,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         if not params:
             return
+        if not isinstance(params, dict):
+            logger.warning(
+                "Got invalid KVTransferParams: %s. This "
+                "request will not utilize KVTransfer",
+                params,
+            )
+            return
 
         # P side: track the request as in-batch so the lease accounting
         # matches what the worker expects on the next step.
@@ -160,6 +190,17 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if num_external_tokens <= 0:
             # Nothing to receive: full prefix-cache hit on D, no
             # registration to stage.
+            return
+
+        if not _push_remote_prefill_params_ready(params):
+            # Present ``do_remote_prefill`` without peer coordinates cannot
+            # register safely; refuse KV transfer rather than KeyError.
+            logger.warning(
+                "Got invalid KVTransferParams: %s. This "
+                "request will not utilize KVTransfer",
+                params,
+            )
+            params["do_remote_prefill"] = False
             return
 
         # First-pass D path: stash registration data the worker will
