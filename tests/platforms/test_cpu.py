@@ -44,6 +44,7 @@ def _cpu_config(
         architecture=architecture or model_type,
         has_inner_state=True,
         use_mla=False,
+        hf_config=SimpleNamespace(model_type=model_type),
         hf_text_config=SimpleNamespace(
             model_type=model_type,
             layer_types=layer_types,
@@ -150,3 +151,61 @@ def test_cpu_accelerated_gdn_dtype_policy(
 
     CpuPlatform.check_and_update_config(config)
     assert cache_config.mamba_ssm_cache_dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    (
+        "connector",
+        "extra_config",
+        "explicit_layout",
+        "avx512_bf16_supported",
+        "expected_layout",
+    ),
+    [
+        pytest.param("NixlConnector", None, None, True, "DS", id="nixl"),
+        pytest.param("NixlPullConnector", None, None, True, "DS", id="nixl-pull"),
+        pytest.param("NixlPushConnector", None, None, True, "DS", id="nixl-push"),
+        pytest.param(
+            "MultiConnector",
+            {
+                "connectors": [
+                    {
+                        "kv_connector": "ExampleConnector",
+                        "kv_connector_extra_config": {},
+                    },
+                    {
+                        "kv_connector": "NixlConnector",
+                        "kv_connector_extra_config": {},
+                    },
+                ]
+            },
+            None,
+            True,
+            "DS",
+            id="multi-nixl",
+        ),
+        pytest.param("NixlConnector", None, "SD", True, "SD", id="explicit-override"),
+        pytest.param("OffloadingConnector", None, None, True, "SD", id="non-nixl"),
+        pytest.param(
+            "OffloadingConnector", None, None, False, None, id="non-nixl-no-avx"
+        ),
+    ],
+)
+def test_cpu_conv_state_layout_selection(
+    connector: str,
+    extra_config: dict | None,
+    explicit_layout: str | None,
+    avx512_bf16_supported: bool,
+    expected_layout: str,
+) -> None:
+    from vllm.platforms.cpu import _get_cpu_conv_state_layout
+
+    assert (
+        _get_cpu_conv_state_layout(
+            explicit_layout=explicit_layout,
+            connector=connector,
+            extra_config=extra_config,
+            avx512_bf16_supported=avx512_bf16_supported,
+        )
+        == expected_layout
+    )

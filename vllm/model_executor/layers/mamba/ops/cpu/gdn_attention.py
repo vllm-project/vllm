@@ -105,14 +105,15 @@ def _cpu_gdn_attention_nonspec(
 
     # C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
     # AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
+    # Present both cache layouts to the public C++ op as (slots, dim, state_len):
+    # SD storage is a transposed view, while DS storage already has that shape.
+    # The DS adapter stages DS into the original SGL kernel's SD buffer.
     use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
     if use_cpp_conv:
-        # C++ conv requires [num_allocated_slots, kernel - 1, conv_dim] (SD).
-        if is_conv_state_dim_first():
-            raise RuntimeError("C++ CPU GDN attention requires `SD` conv_state layout.")
-        conv_state = conv_state.transpose(1, 2)
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(1, 2)
     else:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -416,7 +417,6 @@ def _spec_forward(
 
     can_use_native_conv = (
         torch.cpu._is_amx_tile_supported()
-        and not is_conv_state_dim_first()
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -509,8 +509,6 @@ def _spec_aware_nonspec(
     state_indices_tensor = state_indices_tensor.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
-    if is_amx and is_conv_state_dim_first():
-        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
 
     if not is_amx:
         conv_weights = _unpacked_conv_weight(layer)
@@ -664,8 +662,6 @@ def _spec_aware_nonspec_subset(
     prefill_state_indices = prefill_state_indices.contiguous()
 
     is_amx = torch.cpu._is_amx_tile_supported()
-    if is_amx and is_conv_state_dim_first():
-        raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
 
     if is_amx:
         conv_out = ops.causal_conv1d_fwd_cpu(

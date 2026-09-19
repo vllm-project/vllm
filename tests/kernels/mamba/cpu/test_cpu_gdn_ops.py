@@ -473,15 +473,109 @@ def _conv_inputs(total_tokens: int):
     return x, weight, bias
 
 
+def _conv_states(
+    num_slots: int,
+    state_len: int,
+    dim: int = CONV_DIM,
+    layout: str = "SD",
+) -> torch.Tensor:
+    if layout == "SD":
+        return torch.zeros(num_slots, state_len, dim, dtype=torch.bfloat16).transpose(
+            1, 2
+        )
+    assert layout == "DS"
+    return torch.zeros(num_slots, dim, state_len, dtype=torch.bfloat16)
+
+
 def _sd_conv_states(
     num_slots: int, state_len: int, dim: int = CONV_DIM
 ) -> torch.Tensor:
-    storage = torch.zeros(num_slots, state_len, dim, dtype=torch.bfloat16)
-    return storage.transpose(1, 2)
+    return _conv_states(num_slots, state_len, dim, "SD")
 
 
 def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor:
     return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+
+
+@pytest.mark.parametrize("layout", ["SD", "DS"])
+@torch.inference_mode()
+def test_gdn_nonspec_dispatches_conv_state_layout(
+    layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Python call site transposes SD state and passes DS state directly."""
+    num_slots = 2
+    state_len = CONV_KERNEL - 1
+    if layout == "SD":
+        conv_state = torch.zeros(num_slots, state_len, CONV_DIM)
+    else:
+        conv_state = torch.zeros(num_slots, CONV_DIM, state_len)
+
+    forwarded_conv_state = None
+
+    def record_update(**kwargs):
+        nonlocal forwarded_conv_state
+        forwarded_conv_state = kwargs["conv_states"]
+        return kwargs["x"]
+
+    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: True)
+    monkeypatch.setattr(
+        gdn_attention,
+        "is_conv_state_dim_first",
+        lambda: layout == "DS",
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "causal_conv1d_update_cpu",
+        record_update,
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_cpu",
+        lambda **kwargs: torch.zeros(1, 1, CONV_DIM),
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(
+            weight=torch.empty(CONV_DIM, 1, CONV_KERNEL),
+            bias=None,
+        ),
+        A_log=torch.empty(1),
+        dt_bias=torch.empty(1, dtype=torch.bfloat16),
+        kv_cache=[conv_state, torch.empty(num_slots, 1, 2, 2)],
+        rearrange_mixed_qkv=lambda x: (x, x, x),
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=1,
+        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+    )
+    gdn_attention._cpu_gdn_attention_nonspec(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv=torch.zeros(1, CONV_DIM, dtype=torch.bfloat16),
+        b=torch.zeros(1, 1, dtype=torch.bfloat16),
+        a=torch.zeros(1, 1, dtype=torch.bfloat16),
+        core_attn_out=torch.zeros(1, CONV_DIM, dtype=torch.bfloat16),
+    )
+
+    assert forwarded_conv_state is not None
+    if layout == "SD":
+        assert forwarded_conv_state.shape == (num_slots, CONV_DIM, state_len)
+        assert forwarded_conv_state.stride() == (
+            state_len * CONV_DIM,
+            1,
+            CONV_DIM,
+        )
+        assert forwarded_conv_state.data_ptr() == conv_state.data_ptr()
+    else:
+        assert forwarded_conv_state is conv_state
 
 
 @torch.inference_mode()
@@ -748,8 +842,9 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
     not torch.cpu._is_amx_tile_supported(),
     reason="requires AMX support",
 )
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
+def test_causal_conv1d_update_cpu_accepts_wide_state(layout: str) -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
     batch_size = 3
@@ -757,11 +852,11 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
     x, weight, bias = _conv_inputs(batch_size)
     conv_state_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
 
-    narrow_state = _sd_conv_states(batch_size, state_len)
+    narrow_state = _conv_states(batch_size, state_len, layout=layout)
     narrow_state.copy_(
         tensor_cache(narrow_state.numel(), torch.bfloat16).view_as(narrow_state)
     )
-    wide_state = _sd_conv_states(batch_size, wide_state_len)
+    wide_state = _conv_states(batch_size, wide_state_len, layout=layout)
     wide_state[:, :, :state_len].copy_(narrow_state)
     wide_state[:, :, state_len:].fill_(7)
     wide_tail = wide_state[:, :, state_len:].clone()
@@ -839,6 +934,7 @@ def _ref_causal_conv1d_update_cpu_multi(
         (4, 16, [16, 10, 5, 1], True, True, False),
     ],
 )
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
 def test_causal_conv1d_update_cpu_multi_token_matches_python(
     batch_size: int,
@@ -847,6 +943,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
     has_bias: bool,
     silu_activation: bool,
     is_vnni: bool,
+    layout: str,
 ) -> None:
     dim = 96
     state_len = seq_len + 2
@@ -858,7 +955,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
     conv_state_indices = torch.arange(batch_size - 1, -1, -1, dtype=torch.int32)
     num_accepted_tokens = torch.tensor(accepted_counts, dtype=torch.int32)
 
-    conv_states_ref = _sd_conv_states(batch_size, state_len, dim)
+    conv_states_ref = _conv_states(batch_size, state_len, dim, layout)
     conv_states_ref.copy_(
         tensor_cache(conv_states_ref.numel(), torch.bfloat16).view_as(conv_states_ref)
     )
@@ -924,8 +1021,11 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
     reason="causal_conv1d_fwd_cpu requires AVX-512BF16 (Intel Xeon or AMD EPYC)",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> None:
+def test_causal_conv1d_fwd_cpu_two_call_split(
+    total_tokens: int, split: int, layout: str
+) -> None:
     """C++ prefill conv op must honor ``has_initial_state`` so a two-call split
     matches the single-call result.
 
@@ -950,11 +1050,10 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
             is_vnni=False,
         ).contiguous()
 
-    # conv_state layout passed by the AMX branch: [num_slots, dim, state_len].
-    cs_full = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+    cs_full = _conv_states(1, state_len, layout=layout).to(x.dtype)
     out_full = amx(x, cs_full, False)
 
-    cs_split = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
+    cs_split = _conv_states(1, state_len, layout=layout).to(x.dtype)
     out1 = amx(x[:split], cs_split, False)
     out2 = amx(x[split:], cs_split, True)
     out_split = torch.cat([out1, out2], dim=1)
@@ -966,8 +1065,9 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     not torch.cpu._is_amx_tile_supported(),
     reason="requires AMX support",
 )
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
+def test_causal_conv1d_fwd_cpu_accepts_wide_state(layout: str) -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
     is_vnni = True
@@ -978,11 +1078,11 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
     cache_indices = torch.tensor([2, 0], dtype=torch.int32)
     has_initial_state = torch.tensor([True, False])
 
-    narrow_state = _sd_conv_states(3, state_len)
+    narrow_state = _conv_states(3, state_len, layout=layout)
     narrow_state.copy_(
         tensor_cache(narrow_state.numel(), torch.bfloat16).view_as(narrow_state)
     )
-    wide_state = _sd_conv_states(3, wide_state_len)
+    wide_state = _conv_states(3, wide_state_len, layout=layout)
     wide_state[:, :, :state_len].copy_(narrow_state)
     wide_state[:, :, state_len:].fill_(7)
     wide_tail = wide_state[:, :, state_len:].clone()
@@ -1095,17 +1195,10 @@ def _run_prefill_torch(x, weight, bias, seq_lens):
     return out.transpose(0, 1).contiguous(), conv_states
 
 
-def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
+def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False, layout: str = "SD"):
     num_seqs = len(seq_lens)
     packed_w = ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
-    if is_vnni:
-        # C++-branch layout: kv-cache "SD" [slots, state_len, dim] transposed to
-        # [slots, dim, state_len] (a non-contiguous view).
-        conv_state = torch.zeros(
-            num_seqs, _STATE_LEN, CONV_DIM, dtype=x.dtype
-        ).transpose(1, 2)
-    else:
-        conv_state = torch.zeros(num_seqs, CONV_DIM, _STATE_LEN, dtype=x.dtype)
+    conv_state = _conv_states(num_seqs, _STATE_LEN, CONV_DIM, layout).to(x.dtype)
     qsl = torch.tensor(
         [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
     )
@@ -1126,13 +1219,191 @@ def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
 @pytest.mark.skipif(
     not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
 )
-@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
-def test_conv_cpp_matches_torch(seq_lens):
+def test_conv_cpp_fixed_prefill_indexed_initial_state() -> None:
+    """Fixed-length prefill keeps DS and SD state updates equivalent."""
+    batch_size = 3
+    seq_len = 7
+    state_len = _STATE_LEN + 5
+    x, weight, bias = _conv_inputs(batch_size * seq_len)
+    x = x.view(batch_size, seq_len, CONV_DIM).transpose(1, 2)
+    cache_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False, True])
+    logical_state = tensor_cache(
+        batch_size * CONV_DIM * state_len, torch.bfloat16
+    ).view(batch_size, CONV_DIM, state_len)
+    state_sd = _conv_states(batch_size, state_len, CONV_DIM, "SD")
+    state_ds = _conv_states(batch_size, state_len, CONV_DIM, "DS")
+    state_sd.copy_(logical_state)
+    state_ds.copy_(logical_state)
+
+    packed_weight = _maybe_pack_conv_weight(weight, False)
+    out_sd = ops.causal_conv1d_fwd_cpu(
+        x=x,
+        weight=packed_weight,
+        bias=bias,
+        conv_states=state_sd,
+        query_start_loc=None,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+    out_ds = ops.causal_conv1d_fwd_cpu(
+        x=x,
+        weight=packed_weight,
+        bias=bias,
+        conv_states=state_ds,
+        query_start_loc=None,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=False,
+    )
+
+    torch.testing.assert_close(out_ds, out_sd, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(state_ds, state_sd, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@torch.inference_mode()
+def test_conv_update_cpp_ds_padded_slot_stride() -> None:
+    """Indexed DS updates honor a slot stride larger than one state payload."""
+    batch_size = 3
+    state_len = _STATE_LEN + 4
+    slot_stride = CONV_DIM * state_len + 17
+    x, weight, bias = _conv_inputs(batch_size)
+    cache_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
+    logical_state = tensor_cache(
+        batch_size * CONV_DIM * state_len, torch.bfloat16
+    ).view(batch_size, CONV_DIM, state_len)
+
+    storage = torch.empty(batch_size * slot_stride + 32, dtype=torch.bfloat16)
+    state_ds = torch.as_strided(
+        storage,
+        (batch_size, CONV_DIM, state_len),
+        (slot_stride, state_len, 1),
+    )
+    state_sd = _conv_states(batch_size, state_len, CONV_DIM, "SD")
+    state_ds.copy_(logical_state)
+    state_sd.copy_(logical_state)
+
+    out_ds = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=state_ds,
+        weight=weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=cache_indices,
+        is_vnni=False,
+    )
+    out_sd = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=state_sd,
+        weight=weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=cache_indices,
+        is_vnni=False,
+    )
+
+    torch.testing.assert_close(out_ds, out_sd, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(state_ds, state_sd, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_causal_conv1d_rejects_invalid_ds_metadata() -> None:
+    dim = CONV_DIM
+    weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    x_2d = torch.zeros(1, dim, dtype=torch.bfloat16)
+
+    invalid_layout = torch.empty_strided(
+        (1, dim, _STATE_LEN),
+        (dim * _STATE_LEN, 2, 1),
+        dtype=torch.bfloat16,
+    )
+    with pytest.raises(RuntimeError, match="must use SD.*or DS"):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=invalid_layout,
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+    with pytest.raises((RuntimeError, IndexError), match="out of range"):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=_conv_states(1, _STATE_LEN, dim, "DS"),
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([1], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+    with pytest.raises(RuntimeError):
+        ops.causal_conv1d_update_cpu(
+            x=x_2d,
+            conv_states=_conv_states(1, _STATE_LEN - 1, dim, "DS"),
+            weight=weight,
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+        )
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_rejects_invalid_ds_history() -> None:
+    dim = CONV_DIM
+    x = torch.zeros(1, 2, dim, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="history window exceeds"):
+        ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=_conv_states(1, 3, dim, "DS"),
+            weight=torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16),
+            bias=None,
+            silu_activation=False,
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            is_vnni=False,
+            num_accepted_tokens=torch.tensor([2], dtype=torch.int32),
+        )
+
+
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_requires_initial_state_metadata() -> None:
+    x = torch.zeros(1, 1, CONV_DIM, dtype=torch.bfloat16).transpose(1, 2)
+    with pytest.raises(RuntimeError, match="has_initial_state is required"):
+        torch.ops._C.causal_conv1d_fwd_cpu(
+            x,
+            torch.zeros(CONV_DIM, CONV_KERNEL, dtype=torch.bfloat16),
+            None,
+            _conv_states(1, _STATE_LEN, CONV_DIM, "DS"),
+            None,
+            torch.tensor([0], dtype=torch.int32),
+            None,
+            False,
+            -1,
+            False,
+        )
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
+@torch.inference_mode()
+def test_conv_cpp_matches_torch(seq_lens, layout):
     """C++ causal_conv1d_fwd_cpu matches the torch fallback within bf16 tol."""
     x, weight, bias = _conv_inputs(sum(seq_lens))
     out_torch, state_torch = _run_prefill_torch(x, weight, bias, seq_lens)
-    out_cpp, state_cpp = _run_prefill_cpp(x, weight, bias, seq_lens)
+    out_cpp, state_cpp = _run_prefill_cpp(x, weight, bias, seq_lens, layout=layout)
     torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(state_cpp, state_torch, atol=1e-2, rtol=1e-2)
 
@@ -1140,14 +1411,69 @@ def test_conv_cpp_matches_torch(seq_lens):
 @pytest.mark.skipif(
     not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
 )
-@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
+def test_conv_cpp_indexed_initial_state_matches_torch(layout):
+    """Indexed initial states match the torch reference for both layouts."""
+    seq_lens = [7, 65]
+    num_slots = 3
+    cache_indices = torch.tensor([2, 0], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, True])
+    x, weight, bias = _conv_inputs(sum(seq_lens))
+    initial_state = tensor_cache(
+        num_slots * CONV_DIM * _STATE_LEN, torch.bfloat16
+    ).view(num_slots, CONV_DIM, _STATE_LEN)
+    state_torch = initial_state.clone()
+    state_cpp = _conv_states(num_slots, _STATE_LEN, CONV_DIM, layout)
+    state_cpp.copy_(initial_state)
+    qsl = torch.tensor(
+        [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
+    )
+
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu as causal_conv1d_torch,
+    )
+
+    out_torch = causal_conv1d_torch(
+        x=x.transpose(0, 1).contiguous(),
+        weight=weight,
+        bias=bias,
+        conv_states=state_torch,
+        query_start_loc=qsl,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        activation="silu",
+    )
+    out_cpp = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=ops.causal_conv1d_weight_pack(weight),
+        bias=bias,
+        conv_states=state_cpp,
+        query_start_loc=qsl,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=True,
+    )
+
+    torch.testing.assert_close(
+        out_cpp.transpose(0, 1), out_torch.transpose(0, 1), atol=1e-2, rtol=1e-2
+    )
+    torch.testing.assert_close(state_cpp, state_torch, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
+@torch.inference_mode()
+def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens, layout):
     """Swapping torch -> C++ conv must not increase error vs an fp32 oracle."""
     x, weight, bias = _conv_inputs(sum(seq_lens))
     oracle = _conv_fp32_oracle(x, weight, bias, seq_lens)
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
-    out_cpp, _ = _run_prefill_cpp(x, weight, bias, seq_lens)
+    out_cpp, _ = _run_prefill_cpp(x, weight, bias, seq_lens, layout=layout)
     err_torch = (out_torch.float() - oracle).abs().mean().item()
     err_cpp = (out_cpp.float() - oracle).abs().mean().item()
     assert err_cpp <= err_torch + 1e-3, (
@@ -1160,14 +1486,17 @@ def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
     not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
+def test_conv_cpp_vnni_packed_matches_torch(seq_lens, layout):
     """The exact runtime prefill sequence (VNNI-packed weight + SD-layout
     conv_state view + is_vnni=True) must match the torch fallback. Validates
     the packing + layout handoff on any AVX-512BF16 CPU."""
     x, weight, bias = _conv_inputs(sum(seq_lens))
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
-    out_vnni, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
+    out_vnni, _ = _run_prefill_cpp(
+        x, weight, bias, seq_lens, is_vnni=True, layout=layout
+    )
     torch.testing.assert_close(out_vnni, out_torch, atol=1e-2, rtol=1e-2)
 
 
@@ -1175,8 +1504,9 @@ def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
     not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
 )
 @pytest.mark.parametrize("batch", DECODE_BATCH_SIZES)
+@pytest.mark.parametrize("layout", ["SD", "DS"])
 @torch.inference_mode()
-def test_conv_update_cpp_matches_torch(batch):
+def test_conv_update_cpp_matches_torch(batch, layout):
     """Decode conv: causal_conv1d_update_cpu matches causal_conv1d_update_torch,
     including the in-place conv_state update (the next-step handoff)."""
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
@@ -1188,8 +1518,9 @@ def test_conv_update_cpp_matches_torch(batch):
         CONV_DIM, CONV_KERNEL
     )
     bias = tensor_cache(CONV_DIM, torch.bfloat16)
-    conv_state = tensor_cache(batch * CONV_DIM * _STATE_LEN, torch.bfloat16).view(
-        batch, CONV_DIM, _STATE_LEN
+    conv_state = _conv_states(batch, _STATE_LEN, CONV_DIM, layout)
+    conv_state.copy_(
+        tensor_cache(batch * CONV_DIM * _STATE_LEN, torch.bfloat16).view_as(conv_state)
     )
 
     cs_torch = conv_state.clone()
