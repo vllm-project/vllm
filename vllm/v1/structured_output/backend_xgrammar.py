@@ -4,6 +4,7 @@
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import torch
 
@@ -244,17 +245,22 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
+    visited: set[int] = set()
 
-    def check_object(obj: dict[str, Any]) -> bool:
-        if not isinstance(obj, dict):
+    def check_object(obj: Any) -> bool:
+        if not isinstance(obj, dict) or id(obj) in visited:
             return False
+        visited.add(id(obj))
+
+        # Without type, each type-specific keyword still applies to its type.
+        schema_type = obj.get("type")
 
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+        if schema_type in (None, "integer", "number") and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
+        if schema_type in (None, "array") and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
@@ -262,7 +268,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for strings
         if (
-            obj.get("type") == "string"
+            schema_type in (None, "string")
             and "format" in obj
             and obj["format"] not in STRING_SUPPORTED_FORMATS
         ):
@@ -275,23 +281,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if obj.get("type") == "string" and _has_pattern_and_length_bounds(obj):
-            return True
-
-        # propertyNames validates names, so it is a string schema even when it
-        # omits "type", which is the form that escapes the check above.
-        if (
-            obj.get("type") == "object"
-            and isinstance(obj.get("propertyNames"), dict)
-            and _has_pattern_and_length_bounds(obj["propertyNames"])
-        ):
+        if schema_type in (None, "string") and _has_pattern_and_length_bounds(obj):
             return True
 
         # FIXME: propertyNames conflicts with properties/patternProperties/
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
         if (
-            obj.get("type") == "object"
+            schema_type in (None, "object")
             and "propertyNames" in obj
             and (
                 "properties" in obj
@@ -305,21 +302,67 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
         if (
-            obj.get("type") == "object"
+            schema_type in (None, "object")
             and isinstance(obj.get("patternProperties"), dict)
             and ("properties" in obj or len(obj["patternProperties"]) > 1)
         ):
             return True
 
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
+        # Local references can make otherwise literal values into schemas.
+        ref = obj.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            target: Any = schema
+            try:
+                for part in unquote(ref[2:]).split("/"):
+                    part = part.replace("~1", "/").replace("~0", "~")
+                    target = (
+                        target[int(part)] if isinstance(target, list) else target[part]
+                    )
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass  # Leave invalid references to the grammar validator.
+            else:
+                if check_object(target):
                     return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
+
+        # Visit only schema-valued keywords, not literal values or annotations.
+        for key in (
+            "properties",
+            "patternProperties",
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+            "dependencies",
+        ):
+            value = obj.get(key)
+            if isinstance(value, dict) and any(
+                check_object(subschema) for subschema in value.values()
+            ):
+                return True
+
+        for key in (
+            "additionalProperties",
+            "unevaluatedProperties",
+            "propertyNames",
+            "contains",
+            "additionalItems",
+            "unevaluatedItems",
+            "not",
+            "if",
+            "then",
+            "else",
+            "contentSchema",
+            "items",
+            "prefixItems",
+            "allOf",
+            "anyOf",
+            "oneOf",
+        ):
+            value = obj.get(key)
+            if isinstance(value, list):
+                if any(check_object(subschema) for subschema in value):
+                    return True
+            elif check_object(value):
+                return True
 
         return False
 
