@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import errno
+import fcntl
 import mmap
 import os
 import time
@@ -109,6 +110,7 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
+        self._mmap_identity: tuple[int, int] | None = None
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
@@ -132,6 +134,8 @@ class SharedOffloadRegion:
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
                 self._creator = True
+                stat = os.fstat(self.fd)
+                self._mmap_identity = (stat.st_dev, stat.st_ino)
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(
@@ -145,6 +149,9 @@ class SharedOffloadRegion:
                     self.total_size_bytes / 1e9,
                 )
 
+            stat = os.fstat(self.fd)
+            self._mmap_identity = (stat.st_dev, stat.st_ino)
+
             self.mmap_obj: mmap.mmap | None = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
@@ -157,8 +164,7 @@ class SharedOffloadRegion:
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if self._creator:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.mmap_path)
+                self.unlink()
                 self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
@@ -188,8 +194,7 @@ class SharedOffloadRegion:
                 barrier()
             except Exception:
                 if self._creator:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.mmap_path)
+                    self.unlink()
                     self._creator = False
                 self.mmap_obj.close()
                 os.close(self.fd)
@@ -197,9 +202,8 @@ class SharedOffloadRegion:
                 self.fd = None
                 raise
             if self._creator:
-                os.unlink(self.mmap_path)
+                self.unlink()
                 self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
@@ -235,6 +239,20 @@ class SharedOffloadRegion:
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+
+    def unlink(self) -> bool:
+        """Unlink the pathname only if it still names our mapped file."""
+        assert self.fd is not None
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                stat = os.stat(self.mmap_path)
+                if (stat.st_dev, stat.st_ino) == self._mmap_identity:
+                    os.unlink(self.mmap_path)
+                    return True
+            return False
+        finally:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
 
     @property
     def base_tensor(self) -> torch.Tensor:
@@ -371,18 +389,17 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
             self.mmap_obj = None
+        if self._creator and getattr(self, "mmap_path", None):
+            try:
+                self.unlink()
+            except Exception:
+                logger.warning(
+                    "Failed to unlink path %s", self.mmap_path, exc_info=True
+                )
+            self._creator = False
         if self.fd is not None:
             try:
                 os.close(self.fd)
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._creator and getattr(self, "mmap_path", None):
-            try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed mmap file %s", self.mmap_path)
-            except Exception:
-                logger.warning(
-                    "Failed to unlink path %s", self.mmap_path, exc_info=True
-                )
-            self._creator = False
