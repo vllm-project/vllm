@@ -374,8 +374,13 @@ class Engram(BaseEngram):
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
         if self._prefetch_stream is None:
             return super().prepare_embeddings(hash_ids)
-        rows = self.staged_rows[: hash_ids.shape[0]]
-        assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        # DP row selection uses the unpadded per-replica token slot.
+        rows = (
+            self.staged_rows[: hash_ids.shape[0]]
+            if self.embed_tokens.dp_size > 1
+            else self._staged_embeddings(hash_ids.shape[0])
+        )
+        assert rows.shape[0] >= hash_ids.shape[0], "engram staging buffer too small"
         self._start_prefetch(hash_ids, rows, self._prefetch_stream)
 
     @eager_break_during_capture

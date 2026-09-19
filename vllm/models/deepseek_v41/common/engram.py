@@ -44,6 +44,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
@@ -51,11 +52,35 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
+
+from .engram_parallel import exchange_heads_for_tokens
 
 logger = init_logger(__name__)
 
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
+
+
+def _engram_sp_all_to_all(rows: torch.Tensor) -> torch.Tensor:
+    output = torch.empty_like(rows)
+    torch.distributed.all_to_all_single(output, rows, group=get_tp_group().device_group)
+    return output
+
+
+def _engram_sp_all_to_all_fake(rows: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(rows)
+
+
+direct_register_custom_op(
+    op_name="engram_sp_all_to_all",
+    op_func=_engram_sp_all_to_all,
+    fake_impl=_engram_sp_all_to_all_fake,
+)
+
+
+def _engram_sp_exchange(rows: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.engram_sp_all_to_all(rows)
 
 
 def _is_prime(n: int) -> bool:
@@ -580,6 +605,7 @@ def _engram_head_shard_weight_loader(
         "vocab_start",
         "vocab_end",
         "num_rows",
+        "num_tokens",
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
@@ -593,6 +619,7 @@ def _engram_lookup_kernel(
     vocab_start,
     vocab_end,
     num_rows,
+    num_tokens,
     ids_stride_t,
     ids_stride_h,
     HEAD_START: tl.constexpr,
@@ -605,7 +632,7 @@ def _engram_lookup_kernel(
 ):
     """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
 
-    Only this rank's heads are read; padded heads write zeros for all-gather.
+    Only this rank's heads are read; padded heads and token rows write zeros.
     `weight`/`scales` may address pinned host memory through UVA.
     """
     cols = tl.arange(0, DIM)
@@ -615,12 +642,12 @@ def _engram_lookup_kernel(
         valid = rows < num_rows
         head = HEAD_START + rows % LOCAL_HEADS
         token = (rows // LOCAL_HEADS).to(tl.int64)
+        owned = valid & (token < num_tokens) & (head < TOTAL_HEADS)
         index = tl.load(
             ids + token * ids_stride_t + head * ids_stride_h,
-            mask=valid & (head < TOTAL_HEADS),
+            mask=owned,
             other=-1,
         ).to(tl.int64)
-        owned = valid & (head < TOTAL_HEADS)
         owned &= (index >= vocab_start) & (index < vocab_end)
         local = tl.where(owned, index - vocab_start, 0)
         values = tl.load(
@@ -706,11 +733,11 @@ class ParallelEngramEmbedding(nn.Module):
     def lookup(
         self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
     ) -> None:
-        """Look up local heads of [T, heads] into [T, local_heads, dim] bf16.
+        """Look up local heads, zeroing any extra token rows in ``out``.
 
         `background` limits the grid to leave SMs for concurrent work.
         """
-        rows = indices.shape[0] * self.part_n_hash_cols
+        rows = out.shape[0] * self.part_n_hash_cols
         if not rows:
             return
         weight, scales = self._storage()
@@ -726,6 +753,7 @@ class ParallelEngramEmbedding(nn.Module):
             self.vocab_start_idx,
             self.vocab_end_idx,
             rows,
+            indices.shape[0],
             indices.stride(0),
             indices.stride(1),
             HEAD_START=self.head_start,
@@ -953,6 +981,10 @@ class Engram(nn.Module):
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+        self._staged_token_multiple = (
+            self.embed_tokens.tp_size if self.use_sequence_parallel else 1
+        )
+        max_tokens += -max_tokens % self._staged_token_multiple
         # Persistent storage keeps lookup addresses stable across graph replays.
         self.staged_rows = torch.empty(
             max_tokens,
@@ -961,14 +993,20 @@ class Engram(nn.Module):
             dtype=torch.bfloat16,
         )
 
+    def _staged_embeddings(self, num_tokens: int) -> torch.Tensor:
+        # Hand-staged callers retain the unpadded exchange path.
+        multiple = getattr(self, "_staged_token_multiple", 1)
+        num_tokens += -num_tokens % multiple
+        return self.staged_rows[:num_tokens]
+
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Look up rows before the decoder layers consume them."""
-        rows = self.staged_rows[: hash_ids.shape[0]]
-        assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        rows = self._staged_embeddings(hash_ids.shape[0])
+        assert rows.shape[0] >= hash_ids.shape[0], "engram staging buffer too small"
         self.embed_tokens.lookup(hash_ids, rows)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
-        return self.staged_rows[:num_tokens]
+        return self._staged_embeddings(num_tokens)
 
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
@@ -976,19 +1014,12 @@ class Engram(nn.Module):
         if self.embed_tokens.tp_size == 1:
             return rows[:, : self.embed_tokens.n_hash_cols]
         if self.use_sequence_parallel:
-            tp_size = self.embed_tokens.tp_size
-            num_tokens, local_heads, dim = rows.shape
-            gathered = tensor_model_parallel_all_gather(rows, dim=0)
-            chunk = (num_tokens + tp_size - 1) // tp_size
-            out = rows.new_empty((chunk, self.embed_tokens.n_hash_cols, dim))
-            _engram_select_rows(
-                gathered,
-                out,
-                num_tokens,
-                get_tensor_model_parallel_rank() * chunk,
-                local_heads * dim,
+            return exchange_heads_for_tokens(
+                rows,
+                self.embed_tokens.tp_size,
+                self.embed_tokens.n_hash_cols,
+                _engram_sp_exchange,
             )
-            return out
         rows = tensor_model_parallel_all_gather(rows, dim=1)
         return rows[:, : self.embed_tokens.n_hash_cols]
 
