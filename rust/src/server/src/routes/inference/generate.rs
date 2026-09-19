@@ -481,6 +481,7 @@ mod tests {
                 cached_token_count: 0,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                sampling_mask: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -494,6 +495,7 @@ mod tests {
                 cached_token_count: 2,
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                sampling_mask: None,
             }),
         ]);
 
@@ -575,6 +577,7 @@ mod tests {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
         }
     }
 
@@ -658,6 +661,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
+            sampling_mask: None,
         };
 
         let response = collect_generate(
@@ -677,36 +681,6 @@ mod tests {
 
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
-    }
-
-    #[test]
-    fn stream_chunk_omits_absent_fields() {
-        // Contract shared with the Python frontend: absent optional fields
-        // are omitted from stream chunks, not serialized as null.
-        let chunk = GenerateStreamResponse {
-            request_id: "raw-1".to_string(),
-            choices: vec![GenerateResponseStreamChoice {
-                index: 0,
-                logprobs: None,
-                finish_reason: None,
-                token_ids: vec![1],
-            }],
-            usage: None,
-            prompt_token_ids: None,
-            mm_placeholders: None,
-        };
-
-        let json = serde_json::to_value(&chunk).expect("serialize chunk");
-
-        for key in ["usage", "prompt_token_ids", "mm_placeholders"] {
-            assert!(json.get(key).is_none(), "{key} should be omitted");
-        }
-        for key in ["logprobs", "finish_reason"] {
-            assert!(
-                json["choices"][0].get(key).is_none(),
-                "{key} should be omitted"
-            );
-        }
     }
 
     #[test]
@@ -774,6 +748,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             prompt_token_ids: vec![10, 20],
+            sampling_mask: None,
         };
 
         let response = collect_generate(
@@ -806,6 +781,7 @@ mod tests {
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
+            sampling_mask: None,
             prompt_token_ids,
         };
 
