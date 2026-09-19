@@ -134,17 +134,21 @@ def _check_marlin_supported(
     if quant_type not in supported_types:
         return (
             False,
-            f"Marlin does not support weight_bits = {quant_type}. "
-            f"Only types = {supported_types} "
-            f"are supported (for group_size = {group_size}, "
-            f"device_capability = {device_capability}, zp = {has_zp}).",
+            (
+                f"Marlin does not support weight_bits = {quant_type}. "
+                f"Only types = {supported_types} "
+                f"are supported (for group_size = {group_size}, "
+                f"device_capability = {device_capability}, zp = {has_zp})."
+            ),
         )
     if group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
         return (
             False,
-            f"Marlin does not support group_size = {group_size}. "
-            f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
-            "are supported.",
+            (
+                f"Marlin does not support group_size = {group_size}. "
+                f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
+                "are supported."
+            ),
         )
 
     return True, None
