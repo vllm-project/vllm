@@ -1091,6 +1091,7 @@ class NemotronH_Nano_VL_V2(
         self, pixel_values: torch.Tensor, imgs_sizes: list[tuple[int, int]]
     ):
         """Dynamic resolution extract_feature for images."""
+        pixel_values = pixel_values.to(dtype=self.llm_dtype)
         _, vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
@@ -1109,6 +1110,7 @@ class NemotronH_Nano_VL_V2(
         # When num_frames is provided and temporal_patch_size > 1, consecutive
         #   frames are grouped into tubelets — the batch size must be a multiple
         #   of T so chunk boundaries don't split a tubelet.
+        pixel_values = pixel_values.to(dtype=self.llm_dtype)
         N, _C, H, W = pixel_values.shape
 
         T = self.video_temporal_patch_size if num_frames is not None else 1
