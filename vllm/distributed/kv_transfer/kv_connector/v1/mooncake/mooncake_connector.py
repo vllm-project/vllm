@@ -10,6 +10,7 @@ from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -41,6 +42,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    derive_mamba_conv_split,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -48,11 +52,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.torch_utils import get_dtype_size, is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -185,6 +190,7 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
+    consumer_kv_replicated: bool = False,
     total_num_kv_heads: int | None = None,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
@@ -223,6 +229,12 @@ def _compute_sender_transfer_plan(
     if producer_cache_replicated:
         return True, 0, 0, local_kv_block_len
 
+    if consumer_kv_replicated:
+        # The consumer TP group is wider than the KV-head count, so each
+        # consumer rank holds a full replica of its head group's region rather
+        # than a shard of the producer's region. Copy the region whole.
+        return True, 0, 0, local_kv_block_len
+
     ratio_abs = -tp_ratio
     return (
         True,
@@ -254,6 +266,7 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
+    group_specs: list | None = None,
     total_num_kv_heads: int | None = None,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
@@ -268,17 +281,56 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if total_num_kv_heads is not None:
+    if group_specs is None and total_num_kv_heads is not None:
         # TP ranks beyond the KV-head count replicate existing shards.
         local_tp_size = min(local_tp_size, total_num_kv_heads)
         remote_tp_size = min(remote_tp_size, total_num_kv_heads)
-    elif producer_cache_replicated:
+    elif producer_cache_replicated and group_specs is None:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+    consumer_kv_replicated = (
+        total_num_kv_heads is not None and remote_tp_size > total_num_kv_heads
+    )
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
+        # Replication is a per-group property: an attention group replicates
+        # when TP > KV-head count, while Mamba/GDN states always shard by
+        # head count. A global flag would wrongly apply attention replication
+        # to mamba regions (e.g. Falcon-H1 P TP4 -> D TP2 with 2 KV heads and
+        # 24 mamba heads silently scrambles the mamba state).
+        is_mamba = group_specs is not None and isinstance(
+            group_specs[local_region.group_index].kv_cache_spec,
+            MambaSpec,
+        )
+        if group_specs is not None and producer_cache_replicated and not is_mamba:
+            # Producer ranks hold whole replicated attention regions; each
+            # sending rank copies its region whole, so lengths must match.
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake KV region length mismatch for replicated "
+                    f"producer KV at region {idx}: "
+                    f"local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
+        # Consumer ranks replicate whole head groups instead of sharding
+        # the producer region; Mamba/GDN states still shard by head count.
+        if (
+            group_specs is not None
+            and tp_ratio < 0
+            and consumer_kv_replicated
+            and not is_mamba
+        ):
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake KV region length mismatch for replicated "
+                    f"consumer KV at region {idx}: "
+                    f"local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1288,9 +1340,16 @@ class MooncakeConnectorWorker:
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            # Hybrid GDN/Mamba models need per-group replication rules; plain
+            # attention models follow the head-clamping path from #52516.
+            group_specs=(
+                list(self.kv_cache_config.transfer_groups)
+                if self.kv_cache_config.has_mamba_layers
+                else None
+            ),
             total_num_kv_heads=(
                 None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
+                if self.use_mla and not self.kv_cache_config.has_mamba_layers
                 else self.transfer_topo.total_num_kv_heads
             ),
         )
@@ -1607,6 +1666,21 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    producer_kv_replicated=(
+                        not isinstance(
+                            group_specs[local_region.group_index].kv_cache_spec,
+                            MambaSpec,
+                        )
+                        and self._producer_cache_is_replicated()
+                    ),
+                    consumer_kv_replicated=(
+                        not isinstance(
+                            group_specs[local_region.group_index].kv_cache_spec,
+                            MambaSpec,
+                        )
+                        and agent_meta.remote_tp_size
+                        > self.transfer_topo.total_num_kv_heads
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -1735,49 +1809,93 @@ class MooncakeConnectorWorker:
             # One raw page tensor per layer; for Mamba that page holds all the
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
-            block_is_contiguous = is_non_overlapping_and_dense(cache[0])
-            if not block_is_contiguous:
-                # Non-block-compact layouts scatter a block across per-head
-                # regions; each region's blocks are contiguous.
-                region_caches = [cache[:, head] for head in range(cache.shape[1])]
-                assert all(
-                    is_non_overlapping_and_dense(region[0]) for region in region_caches
+
+            if isinstance(layer_spec, MambaSpec):
+                # The block page packs each state contiguously before any
+                # padding. Register every state as its own region with its
+                # real unpadded byte length so heterogeneous-TP slicing stays
+                # head-aligned instead of cutting across padding.
+                base_addr = cache.data_ptr()
+                block_len = cache.stride(0) * cache.element_size()
+                conv_bytes = prod(layer_spec.shapes[0]) * get_dtype_size(
+                    layer_spec.dtypes[0]
                 )
-            else:
-                region_caches = [cache]
+                if is_conv_state_dim_first():
+                    # The conv state concatenates sub-projections (GDN: Q, K,
+                    # V) along the dim axis, and each sub-projection shards
+                    # across TP independently. Register one region per
+                    # sub-projection so the per-region heterogeneous-TP split
+                    # never cuts across a projection boundary. Only the DS
+                    # (dim, state_len) layout keeps each sub-projection
+                    # contiguous.
+                    split = derive_mamba_conv_split(layer_spec, self.tp_size)
+                    region_entries = [
+                        (offset, size) for offset, size in split.local_conv_offsets
+                    ]
+                else:
+                    region_entries = [(0, conv_bytes)]
+                state_offset = conv_bytes
+                shape: tuple[int, ...]
+                dtype: torch.dtype
+                for shape, dtype in zip(layer_spec.shapes[1:], layer_spec.dtypes[1:]):
+                    state_bytes = prod(shape) * get_dtype_size(dtype)
+                    region_entries.append((state_offset, state_bytes))
+                    state_offset += state_bytes
 
-            for region_cache in region_caches:
-                base_addr = region_cache.data_ptr()
-                block_len = region_cache.stride(0) * region_cache.element_size()
-                region_base_addresses.append(base_addr)
-
-                if isinstance(layer_spec, KpoolTailSpec):
-                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
-                    assert (
-                        layer_spec.page_size_bytes
-                        % self._physical_blocks_per_logical_kv_block
-                        == 0
+                for state_offset, kv_block_len in region_entries:
+                    region_base_addresses.append(base_addr + state_offset)
+                    self.block_len_per_layer.append(block_len)
+                    self.kv_block_len_per_layer.append(kv_block_len)
+                    self.registered_layer_names.append(layer_name)
+                    self.registered_layer_indices.append(layer_index)
+                    self.registered_group_indices.append(
+                        self.kv_cache_config.transfer_group_index_by_layer[layer_name]
                     )
-                    kv_block_len = (
-                        layer_spec.page_size_bytes
-                        // self._physical_blocks_per_logical_kv_block
+            else:
+                block_is_contiguous = is_non_overlapping_and_dense(cache[0])
+                if not block_is_contiguous:
+                    # Non-block-compact layouts scatter a block across per-head
+                    # regions; each region's blocks are contiguous.
+                    region_caches = [cache[:, head] for head in range(cache.shape[1])]
+                    assert all(
+                        is_non_overlapping_and_dense(region[0])
+                        for region in region_caches
                     )
                 else:
-                    kv_block_len = block_len
-                if kv_block_len > block_len:
-                    raise RuntimeError(
-                        "Mooncake transfer length exceeds physical block stride "
-                        f"for {layer_name}: kv_block_len={kv_block_len}, "
-                        f"block_len={block_len}."
+                    region_caches = [cache]
+
+                for region_cache in region_caches:
+                    base_addr = region_cache.data_ptr()
+                    block_len = region_cache.stride(0) * region_cache.element_size()
+                    region_base_addresses.append(base_addr)
+
+                    if isinstance(layer_spec, KpoolTailSpec):
+                        kv_block_len = layer_spec.unpadded_page_size_bytes // 2
+                    elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                        assert (
+                            layer_spec.page_size_bytes
+                            % self._physical_blocks_per_logical_kv_block
+                            == 0
+                        )
+                        kv_block_len = (
+                            layer_spec.page_size_bytes
+                            // self._physical_blocks_per_logical_kv_block
+                        )
+                    else:
+                        kv_block_len = block_len
+                    if kv_block_len > block_len:
+                        raise RuntimeError(
+                            "Mooncake transfer length exceeds physical block stride "
+                            f"for {layer_name}: kv_block_len={kv_block_len}, "
+                            f"block_len={block_len}."
+                        )
+                    self.block_len_per_layer.append(block_len)
+                    self.kv_block_len_per_layer.append(kv_block_len)
+                    self.registered_layer_names.append(layer_name)
+                    self.registered_layer_indices.append(layer_index)
+                    self.registered_group_indices.append(
+                        self.kv_cache_config.transfer_group_index_by_layer[layer_name]
                     )
-                self.block_len_per_layer.append(block_len)
-                self.kv_block_len_per_layer.append(kv_block_len)
-                self.registered_layer_names.append(layer_name)
-                self.registered_layer_indices.append(layer_index)
-                self.registered_group_indices.append(
-                    self.kv_cache_config.transfer_group_index_by_layer[layer_name]
-                )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             if storage_addr not in seen_storage_ptrs:
@@ -2229,6 +2347,8 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        producer_kv_replicated: bool = False,
+        consumer_kv_replicated: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2237,7 +2357,10 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
+            producer_cache_replicated=producer_kv_replicated,
+            consumer_kv_replicated=consumer_kv_replicated,
+            # Head re-sharding (#52516) only applies to plain attention
+            # models; MLA/hybrid layouts keep the per-group flags above.
             total_num_kv_heads=(
                 None
                 if self.use_mla or self.kv_cache_config.has_mamba_layers
