@@ -290,6 +290,11 @@ class KernelConfig:
     Explicit values raise RuntimeError when their constraints are not met.
     """
 
+    dsv41_prefill_main_kv_reuse_mb: int = Field(default=0, ge=0, le=512)
+    """GPU MiB reserved for exact main-KV gather reuse within a DeepSeek-V4.1
+    decoder prefill group. Zero disables the experimental path.
+    """
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
