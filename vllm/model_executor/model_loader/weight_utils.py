@@ -868,6 +868,35 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+_INDEX_OWNERSHIP_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _index_owned_elsewhere(st_file: str, name: str) -> bool:
+    """Whether the index maps *name* to a shard other than *st_file*.
+
+    An overlay checkpoint repoints selected tensors at replacement shards but
+    cannot remove the originals, which live in shards still referenced for
+    their other tensors. Without this the stale copy is yielded too, under the
+    same name, and filename sort order silently decides which one the model
+    gets. Absent an index, or absent an entry, nothing is skipped.
+    """
+    folder = os.path.dirname(st_file)
+    weight_map = _INDEX_OWNERSHIP_CACHE.get(folder)
+    if weight_map is None:
+        weight_map = {}
+        for candidate in sorted(glob.glob(os.path.join(folder, "*.index.json"))):
+            try:
+                with open(candidate) as handle:
+                    weight_map = json.load(handle).get("weight_map", {})
+            except (OSError, ValueError):
+                weight_map = {}
+            if weight_map:
+                break
+        _INDEX_OWNERSHIP_CACHE[folder] = weight_map
+    owner = weight_map.get(name)
+    return owner is not None and owner != os.path.basename(st_file)
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -964,8 +993,11 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
-                    yield name, param
+                if should_skip_weight(name, local_expert_ids):
+                    continue
+                if _index_owned_elsewhere(st_file, name):
+                    continue
+                yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -982,6 +1014,8 @@ def safetensors_weights_iterator(
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
+                        continue
+                    if _index_owned_elsewhere(st_file, name):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -1000,6 +1034,8 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
+                        continue
+                    if _index_owned_elsewhere(st_file, name):
                         continue
                     param = f.get_tensor(name)
                     yield name, param
