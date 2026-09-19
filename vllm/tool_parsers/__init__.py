@@ -226,6 +226,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "apertus_tool_parser",
         "ApertusToolParser",
     ),
+    "xing4_0": (
+        "xing4_0_tool_parser",
+        "Xing4_0ToolParser",
+    ),
 }
 
 
