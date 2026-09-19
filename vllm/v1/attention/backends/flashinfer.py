@@ -87,6 +87,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -985,7 +986,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+        layer_names = (
+            list(kv_cache_spec.kv_cache_specs)
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else []
+        )
+        num_qo_heads = (
+            get_num_attention_heads_from_layers(vllm_config, layer_names)
+            if layer_names
+            else None
+        ) or vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
         is_xqa_arch = current_platform.is_device_capability(
