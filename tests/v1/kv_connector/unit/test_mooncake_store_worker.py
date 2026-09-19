@@ -398,6 +398,8 @@ def _write_mooncake_config(tmp_path, config: dict[str, object]) -> str:
 def _install_fake_mooncake(monkeypatch, store_instance: MagicMock):
     class FakeReplicateConfig:
         def __init__(self) -> None:
+            self.replica_num = 1
+            self.nof_replica_num = 0
             self.preferred_segment = ""
 
     fake_store_module = types.ModuleType("mooncake.store")
@@ -2666,9 +2668,12 @@ def test_save_decode_cache_keeps_transfer_path_enabled(tmp_path, monkeypatch):
     assert w._capacity_only is False
 
 
-def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
-    tmp_path,
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("replica_config", "expected_replicas"),
+    [({}, (1, 0)), ({"replica_num": 0, "nof_replica_num": 1}, (0, 1))],
+)
+def test_requester_worker_init_builds_replicate_config(
+    tmp_path, monkeypatch, replica_config, expected_replicas
 ):
     store = MagicMock()
     store.setup.return_value = 0
@@ -2690,6 +2695,7 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
         _make_vllm_config(
             extra_config={
                 "preferred_segment": "10.0.0.7:50053",
+                **replica_config,
             }
         ),
         _make_kv_cache_config(),
@@ -2697,6 +2703,10 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
 
     assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
+    assert (
+        w.store_replicate_config.replica_num,
+        w.store_replicate_config.nof_replica_num,
+    ) == expected_replicas
 
 
 def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
@@ -2954,6 +2964,8 @@ def test_requester_worker_group_semantics_string_true_enables(
 
     class FakeReplicateConfig:
         def __init__(self) -> None:
+            self.replica_num = 1
+            self.nof_replica_num = 0
             self.group_ids = None
 
     fake_store_module = types.ModuleType("mooncake.store")

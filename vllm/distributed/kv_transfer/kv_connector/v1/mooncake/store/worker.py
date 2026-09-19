@@ -1482,9 +1482,22 @@ class MooncakeStoreWorker:
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
         setup_mooncake_store(self.store, store_config, local_hostname)
 
+        self.store_replicate_config = ReplicateConfig()
+        for field in ("replica_num", "nof_replica_num"):
+            if field in extra_config:
+                value = extra_config[field]
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"{field} must be a non-negative integer")
+                setattr(self.store_replicate_config, field, value)
+        if (
+            self.store_replicate_config.replica_num
+            + getattr(self.store_replicate_config, "nof_replica_num", 0)
+            == 0
+        ):
+            raise ValueError("At least one memory or NoF replica is required")
+
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
-        self.store_replicate_config = ReplicateConfig()
         self.enable_group_semantics = (
             str(extra_config.get("enable_group_semantics", "False")).strip().lower()
             == "true"
