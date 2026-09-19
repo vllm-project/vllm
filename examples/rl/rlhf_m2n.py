@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RLHF with FSDP2 training and vLLM tensor-parallel inference using **NCCL M2N**
+"""RLHF with FSDP2 training and vLLM tensor-parallel inference using **NCCL M2N**
 sharding-aware weight transfer.
 
 Layout (4 GPUs, no colocation):
@@ -29,6 +28,7 @@ from __future__ import annotations
 
 import os
 
+import pybase64 as base64
 import ray
 import torch
 import torch.distributed as dist
@@ -38,6 +38,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.weight_transfer import (
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
@@ -93,9 +94,7 @@ class FSDPTrainWorker:
     def ready(self):
         return True
 
-    def setup_engine(
-        self, llm_handle, master_address, master_port, world_size, num_workers
-    ):
+    def setup_engine(self, llm_handle, nccl_unique_id_b64, world_size, num_workers):
         """Build the trainer engine on every FSDP rank.
 
         `DTensorModuleSource` reads each parameter's FSDP device mesh and
@@ -104,8 +103,7 @@ class FSDPTrainWorker:
         """
         self.engine = WeightTransferTrainerFactory.trainer_init(
             init_info=M2NTrainerInitInfo(
-                master_address=master_address,
-                master_port=master_port,
+                nccl_unique_id_b64=nccl_unique_id_b64,
                 world_size=world_size,
                 num_trainer_ranks=FSDP_WORLD_SIZE,
                 # One DP group of TP=2 workers; declared so both sides
@@ -168,16 +166,16 @@ def main():
 
     # Trainer ranks [0, FSDP_WORLD_SIZE) and inference ranks after them share
     # one communicator, so the two meshes are contiguous rank intervals.
-    master_address = get_ip()
-    master_port = get_open_port()
+    nccl = NCCLLibrary()
+    nccl_unique_id_b64 = base64.b64encode(
+        bytes(nccl.ncclGetUniqueId().internal)
+    ).decode()
     world_size = FSDP_WORLD_SIZE + num_workers
 
     print("[transfer] Initializing nccl_m2n weight transfer (all FSDP ranks)...")
     ray.get(
         [
-            w.setup_engine.remote(
-                llm, master_address, master_port, world_size, num_workers
-            )
+            w.setup_engine.remote(llm, nccl_unique_id_b64, world_size, num_workers)
             for w in fsdp_workers
         ]
     )
