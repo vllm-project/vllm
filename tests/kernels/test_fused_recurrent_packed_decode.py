@@ -9,29 +9,134 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
+    _get_packed_decode_launch_config,
+)
+
+
+@pytest.fixture(autouse=True)
+def clear_packed_decode_launch_config_cache():
+    _get_packed_decode_launch_config.cache_clear()
+    yield
+    _get_packed_decode_launch_config.cache_clear()
+
+
+@pytest.mark.parametrize(
+    (
+        "batch_size",
+        "num_key_heads",
+        "num_value_heads",
+        "key_dim",
+        "value_dim",
+        "is_sm120",
+        "expected_bv",
+    ),
+    [
+        (1, 16, 16, 128, 128, True, 16),
+        (24, 16, 16, 128, 128, True, 16),
+        (25, 16, 16, 128, 128, True, 32),
+        (16, 8, 16, 128, 128, True, 32),
+        (16, 16, 8, 128, 128, True, 32),
+        (16, 16, 16, 64, 128, True, 32),
+        (16, 16, 16, 128, 64, True, 32),
+        (16, 16, 16, 128, 128, False, 32),
+    ],
+)
+def test_packed_decode_launch_config(
+    monkeypatch: pytest.MonkeyPatch,
+    batch_size: int,
+    num_key_heads: int,
+    num_value_heads: int,
+    key_dim: int,
+    value_dim: int,
+    is_sm120: bool,
+    expected_bv: int,
+):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda capability, device_id=0: is_sm120,
+    )
+
+    config = _get_packed_decode_launch_config(
+        batch_size,
+        num_key_heads,
+        num_value_heads,
+        key_dim,
+        value_dim,
+        device_index=0,
+    )
+
+    assert config == (expected_bv, 1, 3)
+
+
+def test_packed_decode_launch_config_cache_is_per_device(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[tuple[int, int]] = []
+
+    def is_sm120(capability: int, device_id: int = 0) -> bool:
+        calls.append((capability, device_id))
+        return device_id == 1
+
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        is_sm120,
+    )
+    shape = (16, 16, 16, 128, 128)
+
+    assert _get_packed_decode_launch_config(*shape, 0) == (32, 1, 3)
+    assert _get_packed_decode_launch_config(*shape, 1) == (16, 1, 3)
+    assert _get_packed_decode_launch_config(*shape, 1) == (16, 1, 3)
+    assert calls == [(120, 0), (120, 1)]
+
 
 DEVICE = current_platform.device_type
 
-pytestmark = pytest.mark.skipif(
+requires_accelerator = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Gated delta rule Triton kernels require a CUDA-alike or XPU device.",
 )
 
 
+@requires_accelerator
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
+@pytest.mark.parametrize(
+    ("batch_size", "num_key_heads", "num_value_heads", "simulate_sm120"),
+    [
+        pytest.param(16, 4, 8, False, id="fallback-b16"),
+        pytest.param(32, 4, 8, False, id="fallback-b32"),
+        pytest.param(16, 16, 16, True, id="sm120-optimized"),
+    ],
+)
 def test_fused_recurrent_packed_decode_matches_reference(
-    dtype: torch.dtype, strided_mixed_qkv: bool
+    monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+    strided_mixed_qkv: bool,
+    batch_size: int,
+    num_key_heads: int,
+    num_value_heads: int,
+    simulate_sm120: bool,
 ):
     torch.manual_seed(0)
 
-    # Small but representative GDN config (Qwen3Next defaults are K=128, V=128).
-    B = 32
-    H = 4
-    HV = 8  # grouped value attention: HV must be divisible by H
+    # Cover generic grouped-value fallback and Qwen3.5-0.8B's optimized shape.
+    B = batch_size
+    H = num_key_heads
+    HV = num_value_heads
     K = 128
     V = 128
     qkv_dim = 2 * (H * K) + (HV * V)
+
+    if simulate_sm120:
+        monkeypatch.setattr(
+            current_platform,
+            "is_device_capability",
+            lambda capability, device_id=0: capability == 120,
+        )
+        assert _get_packed_decode_launch_config(B, H, HV, K, V, 0) == (16, 1, 3)
 
     device = torch.device(DEVICE)
 
@@ -109,6 +214,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
     torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
 
 
+@requires_accelerator
 def test_packed_decode_keeps_beta_in_fp32():
     device = torch.device(DEVICE)
     dtype = torch.bfloat16
@@ -140,6 +246,7 @@ def test_packed_decode_keeps_beta_in_fp32():
     )
 
 
+@requires_accelerator
 def test_packed_decode_supports_large_batch_head_grid():
     B, H, HV, K, V = 1024, 8, 64, 1, 1
     device = torch.device(DEVICE)
