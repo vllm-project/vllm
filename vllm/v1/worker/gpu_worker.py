@@ -1248,8 +1248,8 @@ class Worker(WorkerBase):
             return self.model_runner.pool()  # type: ignore
         return None
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.model_runner.take_draft_token_ids()
+    def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        return self.model_runner.take_draft_token_ids(step_id=step_id)
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled
