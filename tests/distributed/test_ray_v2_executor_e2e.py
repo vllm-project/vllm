@@ -9,6 +9,8 @@ import pathlib
 import pytest
 import ray
 
+from ..utils import multi_gpu_test
+
 pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
 
 MODEL = "facebook/opt-125m"
@@ -57,7 +59,7 @@ class _AsyncLLMActor:
             distributed_executor_backend="ray",
             enforce_eager=True,
             max_model_len=256,
-            gpu_memory_utilization=0.8,
+            gpu_memory_utilization=0.5,
         )
         vllm_config = engine_args.create_engine_config()
         vllm_config.parallel_config.placement_group = pg
@@ -114,6 +116,7 @@ class _AsyncLLMActor:
 AsyncLLMActor = ray.remote(num_cpus=0, max_concurrency=1)(_AsyncLLMActor)
 
 
+@multi_gpu_test(num_gpus=4)
 def test_multi_replicas(ray_init):
     pg1 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
     pg2 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
@@ -135,6 +138,7 @@ def test_multi_replicas(ray_init):
     assert len(out2) > 0
 
 
+@multi_gpu_test(num_gpus=4)
 def test_multi_replicas_with_bundle_indices(ray_init):
     pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 4, strategy="PACK")
     ray.get(pg.ready())
@@ -155,6 +159,7 @@ def test_multi_replicas_with_bundle_indices(ray_init):
     assert len(out2) > 0
 
 
+@multi_gpu_test(num_gpus=2)
 def test_env_var_and_runtime_env_propagation():
     """Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
     propagate to RayWorkerProc actors.

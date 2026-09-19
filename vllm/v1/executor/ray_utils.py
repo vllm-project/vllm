@@ -282,6 +282,33 @@ def assert_ray_available():
         )
 
 
+def _get_pg_table_with_retry(
+    placement_group: "PlacementGroup",
+    timeout_s: float = 30.0,
+    interval_s: float = 0.5,
+) -> dict:
+    """Fetch the placement group table, retrying while the GCS has not yet
+    propagated the bundle info.
+
+    `ray.util.placement_group_table` can return an empty dict (rather than
+    raising) if the GCS hasn't finished registering the placement group yet.
+    Retry briefly instead of letting callers hit a confusing ``KeyError``.
+    """
+    start = time.monotonic()
+    pg_data = placement_group_table(placement_group)
+    while not pg_data.get("bundles_to_node_id"):
+        if time.monotonic() - start > timeout_s:
+            raise RuntimeError(
+                f"Failed to fetch placement group table for "
+                f"{placement_group.id} within {timeout_s} seconds. "
+                "The placement group may not exist or the GCS state may "
+                "not have propagated yet."
+            )
+        time.sleep(interval_s)
+        pg_data = placement_group_table(placement_group)
+    return pg_data
+
+
 def _verify_bundles(
     placement_group: "PlacementGroup",
     parallel_config: ParallelConfig,
@@ -298,7 +325,7 @@ def _verify_bundles(
     assert ray.is_initialized(), (
         "Ray is not initialized although distributed-executor-backend is ray."
     )
-    pg_data = placement_group_table(placement_group)
+    pg_data = _get_pg_table_with_retry(placement_group)
     # bundle_idx -> node_id
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
     # bundle_idx -> bundle (e.g., {"GPU": 1})
@@ -375,7 +402,7 @@ def get_bundles_for_indices(
         f" but got {bundle_indices=}"
     )
 
-    pg_data = placement_group_table(placement_group)
+    pg_data = _get_pg_table_with_retry(placement_group)
     pg_bundle_to_node = pg_data["bundles_to_node_id"]
     node_id_to_ip = {
         n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
@@ -414,7 +441,7 @@ def get_bundles_sorted_by_node(
           (3, node-C),
       ]
     """
-    pg_data = placement_group_table(placement_group)
+    pg_data = _get_pg_table_with_retry(placement_group)
     bundle_to_node = pg_data["bundles_to_node_id"]
 
     ray_device_key = current_platform.ray_device_key

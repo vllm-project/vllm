@@ -2,6 +2,29 @@ group: Miscellaneous Intel
 depends_on:
   - image-build-xpu
 steps:
+- label: Ray Dependency Compatibility Check (Intel)
+  key: ray-dependency-compatibility-check-intel
+  timeout_in_minutes: 25
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - requirements/
+    - setup.py
+    - vllm/platforms/xpu.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'bash .buildkite/scripts/check-ray-compatibility.sh'
+
 - label: V1 Core + KV + Metrics
   key: v1-core-kv-metrics-intel
   timeout_in_minutes: 45
@@ -33,6 +56,9 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/executor &&
+      export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 &&
+      pytest -v -s v1/metrics/test_ray_metrics.py &&
+      unset VLLM_USE_RAY_V2_EXECUTOR_BACKEND &&
       VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit'
 
 - label: V1 Sample + Logits
@@ -132,6 +158,36 @@ steps:
       cd tests &&
       pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
+
+- label: RayExecutorV2 (4 GPUs)
+  key: ray-executor-v2-4-gpus
+  timeout_in_minutes: 60
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/executor/ray_executor_v2.py
+    - vllm/v1/executor/ray_utils.py
+    - vllm/v1/executor/abstract.py
+    - vllm/v1/executor/multiproc_executor.py
+    - tests/distributed/test_ray_v2_executor.py
+    - tests/distributed/test_ray_v2_executor_e2e.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 &&
+      cd tests &&
+      pytest -v -s distributed/test_ray_v2_executor.py &&
+      pytest -v -s distributed/test_ray_v2_executor_e2e.py'
 
 - label: NixlConnector PD accuracy (4 GPUs)
   key: nixlconnector-pd-accuracy-4-gpus

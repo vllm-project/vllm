@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import pytest
 import ray
+import torch
 from torch.distributed import TCPStore
 
 from vllm import LLM
@@ -58,10 +59,20 @@ def ensure_ray_initialized():
         ray.init(ignore_reinit_error=True)
 
 
+def skip_if_not_enough_gpus(num_gpus: int):
+    available = torch.accelerator.device_count()
+    if available < num_gpus:
+        pytest.skip(
+            f"Need at least {num_gpus} GPUs to run this test, "
+            f"but only {available} are available."
+        )
+
+
 @pytest.fixture
 def create_placement_group(request):
     ensure_ray_initialized()
     num_gpus = request.param
+    skip_if_not_enough_gpus(num_gpus)
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
     pg = ray.util.placement_group(bundles, strategy="PACK")
     ray.get(pg.ready())
@@ -72,7 +83,12 @@ def create_placement_group(request):
 @pytest.fixture
 def executor(request):
     """Create a RayExecutorV2 and shut it down after the test."""
-    executor = RayExecutorV2(vllm_config=request.param)
+    vllm_config = request.param
+    skip_if_not_enough_gpus(
+        vllm_config.parallel_config.tensor_parallel_size
+        * vllm_config.parallel_config.pipeline_parallel_size
+    )
+    executor = RayExecutorV2(vllm_config=vllm_config)
     yield executor
     executor.shutdown()
 
@@ -161,6 +177,7 @@ def test_colocated_dist_init_stores_hold_distinct_ports(monkeypatch):
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])
 def test_ray_v2_executor(tp_size, pp_size):
     """Validate RayExecutorV2 with various TP/PP configs."""
+    skip_if_not_enough_gpus(tp_size * pp_size)
     vllm_config = create_vllm_config(
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
@@ -267,6 +284,7 @@ def test_ray_v2_executor_worker_death(executor):
 
 def test_ray_v2_executor_shutdown():
     """Validate graceful shutdown: ray.kill() terminates all worker actors."""
+    skip_if_not_enough_gpus(2)
     executor = RayExecutorV2(vllm_config=create_vllm_config(tensor_parallel_size=2))
     assert executor.rpc_broadcast_mq is not None
     assert len(executor.response_mqs) == executor.world_size
@@ -298,6 +316,7 @@ def test_ray_v2_run_refs_stored_for_monitoring(executor):
 @pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
 def test_ray_v2_single_node_generation(tp_size, pp_size):
     """End-to-end LLM generation with RayExecutorV2."""
+    skip_if_not_enough_gpus(tp_size * pp_size)
     llm = LLM(
         model=MODEL,
         tensor_parallel_size=tp_size,
@@ -374,6 +393,7 @@ def test_ray_v2_invalid_bundle_indices(
 @pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
 def test_ray_v2_single_node_generation_with_pg(tp_size, pp_size):
     """E2E LLM generation with a user-provided placement group."""
+    skip_if_not_enough_gpus(tp_size * pp_size)
     ensure_ray_initialized()
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(tp_size * pp_size)]
     pg = ray.util.placement_group(bundles, strategy="PACK")

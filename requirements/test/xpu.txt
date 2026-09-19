@@ -183,6 +183,8 @@ dpcpp-cpp-rt==2026.0.0
     #   onemkl-sycl-rng
     #   onemkl-sycl-sparse
     #   torch
+dpctl==0.22.1
+    # via -r requirements/test/xpu.in
 einops==0.8.2
     # via -r requirements/test/../common.txt
 email-validator==2.3.0
