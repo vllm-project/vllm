@@ -269,6 +269,11 @@ class BatchSharder:
             expanded_idx_mapping=local_expanded_idx_mapping,
             expanded_local_pos=local_expanded_local_pos,
             seq_lens=local_seq_lens,
+            # Localised like seq_lens: it is indexed by batch position, and a consumer
+            # holding local row indices would otherwise read another request's length.
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound[
+                torch.from_numpy(local_req_indices_np)
+            ],
             logits_indices=local_logits_indices,
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,

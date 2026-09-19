@@ -16,6 +16,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.dry import DryState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import (
@@ -51,6 +52,7 @@ class Sampler:
         self.req_states = req_states
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(req_states)
+        self.dry_state = DryState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
@@ -70,6 +72,7 @@ class Sampler:
     ) -> None:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
+        self.dry_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
@@ -82,6 +85,7 @@ class Sampler:
         self.needs_logits_processing[req_idx] = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
+            or self.dry_state.use_dry[req_idx]
             or self.bad_words_state.num_bad_words.np[req_idx] > 0
             or (
                 self.thinking_budget_state.enabled
@@ -96,6 +100,7 @@ class Sampler:
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes()
+        self.dry_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
@@ -131,6 +136,9 @@ class Sampler:
         expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
         input_ids = input_batch.input_ids[input_batch.logits_indices]
+        # CPU-side sequence lengths, already materialized by the model runner, so DRY
+        # can size its window without a device read. See apply_dry.
+        seq_lens_np = input_batch.seq_lens_cpu_upper_bound.numpy()
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -147,6 +155,7 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             return_logprobs=logprobs_dims is not None,
+            seq_lens_np=seq_lens_np,
         )
 
         if self.trace_replay_state is not None:
@@ -216,6 +225,7 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
+        seq_lens_np: np.ndarray | None = None,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
@@ -235,6 +245,15 @@ class Sampler:
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
+        )
+
+        # Apply the DRY penalty in place after the standard penalties
+        # (llama.cpp's sampler-chain order).
+        self.dry_state.apply_dry(
+            logits,
+            idx_mapping_np,
+            seq_lens_np,
+            expanded_logits=logits.shape[0] != idx_mapping_np.shape[0],
         )
 
         # Apply bad words masking in place.
@@ -283,6 +302,7 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         return_logprobs: bool = False,
+        seq_lens_np: np.ndarray | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -293,6 +313,7 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             skip_top_k_top_p=True,
+            seq_lens_np=seq_lens_np,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np

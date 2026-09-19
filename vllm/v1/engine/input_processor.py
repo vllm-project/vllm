@@ -130,6 +130,13 @@ class InputProcessor:
                     "enabled. Start the engine with --enable-trace-replay "
                     "to use it."
                 )
+            if params.dry_multiplier and not self.vllm_config.use_v2_model_runner:
+                raise VLLMValidationError(
+                    "dry_multiplier is set but DRY is only implemented for "
+                    "Model Runner V2, and this engine is running the V1 model "
+                    "runner. The startup log names the feature that caused the "
+                    "fallback."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
