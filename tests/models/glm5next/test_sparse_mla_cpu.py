@@ -3,13 +3,13 @@
 import pytest
 import torch
 
+from vllm.models.glm5next.cpu.mla import Glm5NextCPUSparseImpl
 from vllm.models.glm5next.cpu.sparse_indexer import (
     _expand_pool_ids,
     _pool_compress,
     _quantize_cache_vector,
     fwht128_quant_fp8,
 )
-from vllm.models.glm5next.cpu.mla import Glm5NextCPUSparseImpl
 
 
 def _reference_fwht(x: torch.Tensor) -> torch.Tensor:
