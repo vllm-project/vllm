@@ -136,7 +136,7 @@ class ServeSubcommand(CLISubcommand):
         # Elastic EP currently only supports running with at most one API server.
         if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
             logger.warning(
-                "Elastic EP only supports running with with at most one API server. "
+                "Elastic EP only supports running with at most one API server. "
                 "Capping api_server_count from %d to 1.",
                 args.api_server_count,
             )
