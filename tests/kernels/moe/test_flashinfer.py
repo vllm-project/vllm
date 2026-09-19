@@ -538,8 +538,6 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe = moe_config
     method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
     method.moe_kernel = None
-    # process_weights_after_loading delegates to moe_kernel.fused_experts;
-    # the sentinel needs that attribute after #57405's refactor.
     mock_kernel = MagicMock()
     monkeypatch.setattr(
         method,
