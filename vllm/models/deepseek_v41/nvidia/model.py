@@ -218,6 +218,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         if self.use_sequence_parallel:
             self.attn.wo_b.reduce_results = False
+            self.attn.project_before_all_gather = (
+                not vllm_config.parallel_config.use_ubatching
+                and vllm_config.lora_config is None
+                and vllm_config.speculative_config is None
+                and not envs.VLLM_BATCH_INVARIANT
+            )
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -441,7 +447,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             if capture_previous_aux:
                 previous_aux = aux
 
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and not self.attn.use_projected_all_gather(
+            positions.shape[0]
+        ):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
