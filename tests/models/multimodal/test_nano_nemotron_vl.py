@@ -77,6 +77,23 @@ class _VisionModel:
         self.loaded_weights = list(weights)
 
 
+class _RecordingVisionModel:
+    def __init__(self) -> None:
+        self.input_dtype: torch.dtype | None = None
+
+    def __call__(self, pixel_values, **kwargs):
+        self.input_dtype = pixel_values.dtype
+        batch, _, height, width = pixel_values.shape
+        patch_count = (height // 2) * (width // 2)
+        return None, torch.zeros(
+            batch,
+            patch_count,
+            2,
+            dtype=pixel_values.dtype,
+            device=pixel_values.device,
+        )
+
+
 class _FakeTensor:
     """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
     .detach().clone() chain used by load_weights for buffered mm weights;
@@ -149,6 +166,26 @@ def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
 
     with pytest.raises(AssertionError):
         model.load_weights([("sound_encoder.encoder.weight", object())])
+
+
+@pytest.mark.parametrize("dynamic_resolution", [False, True])
+def test_nano_nemotron_vl_casts_pixels_to_model_dtype(dynamic_resolution: bool):
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    vision_model = _RecordingVisionModel()
+    object.__setattr__(model, "vision_model", vision_model)
+    object.__setattr__(model, "llm_dtype", torch.bfloat16)
+    object.__setattr__(model, "mlp1", torch.nn.Identity())
+    object.__setattr__(model, "patch_size", 2)
+    object.__setattr__(model, "downsample_ratio", 1.0)
+    object.__setattr__(model, "ps_version", "v2")
+    pixel_values = torch.ones(1, 3, 4, 4, dtype=torch.float32)
+
+    if dynamic_resolution:
+        model.extract_feature_dynamic(pixel_values, imgs_sizes=[(4, 4)])
+    else:
+        model.extract_feature(pixel_values)
+
+    assert vision_model.input_dtype == torch.bfloat16
 
 
 def _make_mm_items_with_video_bytes(

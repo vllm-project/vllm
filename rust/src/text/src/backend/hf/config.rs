@@ -84,10 +84,11 @@ impl HfSpecialTokens {
 
 /// Minimal subset of `config.json` (the model's main HF config).
 ///
-/// This intentionally supports only the two layouts we currently care about in
+/// This intentionally supports only the layouts we currently care about in
 /// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
 /// - composite models that expose a single nested `text_config`
+/// - Nemotron composite models that expose a single nested `llm_config`
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
@@ -103,6 +104,7 @@ pub struct ModelConfig {
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
     text_config: Option<Box<ModelConfig>>,
+    llm_config: Option<Box<ModelConfig>>,
 }
 
 /// Minimal subset of `generation_config.json`.
@@ -188,19 +190,21 @@ impl ModelConfig {
     /// Return the config that the Rust frontend treats as the text/LLM config.
     ///
     /// This is deliberately narrower than Python/transformers: we only support
-    /// either the top-level config itself or a single nested `text_config`.
+    /// either the top-level config itself or a single nested text config.
     fn effective_text_config(&self) -> &Self {
-        self.text_config.as_deref().unwrap_or(self)
+        self.text_config.as_deref().or(self.llm_config.as_deref()).unwrap_or(self)
     }
 
     /// Return the effective Hugging Face `model_type` used by the Rust
     /// frontend.
     ///
     /// This follows the same simplified text-config selection as the rest of
-    /// this type: the top-level config wins, otherwise a single nested
-    /// `text_config` may provide the value.
+    /// this type: the top-level config wins, otherwise a nested `text_config` or `llm_config` may provide the value.
     pub fn model_type(&self) -> Option<&str> {
-        self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
+        self.model_type
+            .as_deref()
+            .or_else(|| self.text_config.as_deref().and_then(ModelConfig::model_type))
+            .or_else(|| self.llm_config.as_deref().and_then(ModelConfig::model_type))
     }
 
     /// Return the effective model vocabulary size, following the same
@@ -208,7 +212,8 @@ impl ModelConfig {
     pub fn vocab_size(&self) -> Result<u32> {
         if let Some(vocab_size) = self.vocab_size {
             Ok(vocab_size)
-        } else if let Some(text_config) = self.text_config.as_deref() {
+        } else if let Some(text_config) = self.text_config.as_deref().or(self.llm_config.as_deref())
+        {
             text_config.vocab_size()
         } else {
             Err(Error::Tokenizer(
@@ -222,7 +227,8 @@ impl ModelConfig {
     pub(super) fn eos_token_ids(&self) -> &[u32] {
         if let Some(eos_token_id) = self.eos_token_id.as_ref() {
             eos_token_id.as_slice()
-        } else if let Some(text_config) = self.text_config.as_deref() {
+        } else if let Some(text_config) = self.text_config.as_deref().or(self.llm_config.as_deref())
+        {
             text_config.eos_token_ids()
         } else {
             &[]
@@ -403,6 +409,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
+    }
+
+    #[test]
+    fn model_config_uses_llm_config_for_nemotron_composite_models() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "model_type": "nemotron_h_omni",
+                "llm_config": {
+                    "model_type": "nemotron_h",
+                    "vocab_size": 131072,
+                    "n_routed_experts": 256,
+                    "eos_token_id": 2
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.model_type(), Some("nemotron_h_omni"));
+        assert_eq!(config.vocab_size().unwrap(), 131072);
+        assert_eq!(config.eos_token_ids(), &[2]);
+        assert_eq!(config.num_experts(), 256);
     }
 
     #[test]

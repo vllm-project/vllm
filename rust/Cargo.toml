@@ -61,7 +61,7 @@ indexmap = "2.13.0"
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "24c676dd49d73f05cb4068aade2e60397a5c0afe", default-features = false, features = ["native-tls"] }
+llm-multimodal = { git = "https://github.com/biswapanda/llm-multimodal", rev = "58c38eb2de7b6a263bd09b3e985b6e693c81dd9e", default-features = false, features = ["native-tls"] }
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
