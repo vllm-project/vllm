@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1182,6 +1182,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> TokensInput | MultiModalInput:
         """Pre-expand `prompt_embeds` sentinels before delegating to the MM
         processor, then attach `prompt_embeds` modality data to the result.
@@ -1194,22 +1195,30 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         coordinate space, no offset shifting needed afterwards.
         """
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is not None:
-            tensors, placeholder_token_id = prompt_embeds_info
-            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-                list(prompt["prompt_token_ids"]), mm_updates
+        if prompt_embeds_info is None:
+            return super()._process_tokens(
+                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
             )
 
-        engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
-
-        if prompt_embeds_info is not None:
-            tensors, _ = prompt_embeds_info
-            self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
-            )
+        tensors, placeholder_token_id = prompt_embeds_info
+        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+            list(prompt["prompt_token_ids"]), mm_updates
+        )
+        # Truncate here rather than in the base class: the `prompt_embeds` spans
+        # are not in `mm_placeholders` until `_apply_prompt_embeds_to_engine_input`
+        # runs below, so a bound applied there would not see them.
+        engine_input = super()._process_tokens(
+            prompt, skip_mm_cache=skip_mm_cache, tok_params=None
+        )
+        self._truncate_expanded_prompt(
+            engine_input, tok_params, extra_mm_updates=mm_updates
+        )
+        self._apply_prompt_embeds_to_engine_input(
+            cast(MultiModalInput, engine_input),
+            tensors,
+            mm_updates,
+        )
 
         return engine_input
 
@@ -1219,27 +1228,34 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is not None:
-            tensors, placeholder_token_id = prompt_embeds_info
-            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-                list(prompt["prompt_token_ids"]), mm_updates
+        if prompt_embeds_info is None:
+            return await super()._process_tokens_async(
+                prompt, skip_mm_cache=skip_mm_cache, tok_params=tok_params
             )
 
-        engine_input = await super()._process_tokens_async(
-            prompt, skip_mm_cache=skip_mm_cache
+        tensors, placeholder_token_id = prompt_embeds_info
+        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+            list(prompt["prompt_token_ids"]), mm_updates
         )
-
-        if prompt_embeds_info is not None:
-            tensors, _ = prompt_embeds_info
-            self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
-            )
+        # Truncate here rather than in the base class: the `prompt_embeds` spans
+        # are not in `mm_placeholders` until `_apply_prompt_embeds_to_engine_input`
+        # runs below, so a bound applied there would not see them.
+        engine_input = await super()._process_tokens_async(
+            prompt, skip_mm_cache=skip_mm_cache, tok_params=None
+        )
+        self._truncate_expanded_prompt(
+            engine_input, tok_params, extra_mm_updates=mm_updates
+        )
+        self._apply_prompt_embeds_to_engine_input(
+            cast(MultiModalInput, engine_input),
+            tensors,
+            mm_updates,
+        )
 
         return engine_input
 
