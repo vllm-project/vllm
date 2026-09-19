@@ -124,6 +124,16 @@ def _use_v41_mxfp8_kv_record() -> bool:
     return current_platform.is_device_capability_family(100)
 
 
+def _supports_v41_fp4_compressed_cache() -> bool:
+    if current_platform.is_device_capability_family(100):
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+    return False
+
+
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
     kv_cache_dtype: CacheDType,
@@ -134,8 +144,9 @@ def _resolve_dsv4_kv_cache_dtype(
 
     Both layouts are paged; they differ in the per-token block format. The
     packed formats are ``uint8``-backed: ``fp8_ds_mla`` is UE8M0 block-scaled
-    fp8 throughout, ``nvfp4_ds_mla`` keeps that sliding-window record and
-    stores the compressed cache as NVFP4. An unspecific ``--kv-cache-dtype``
+    fp8 throughout, while the ``mxfp4_ds_mla`` and ``nvfp4_ds_mla`` formats
+    keep the backend's FP8 sliding-window record and store only the compressed
+    cache as FP4. An unspecific ``--kv-cache-dtype``
     (``auto`` / ``fp8``) resolves to ``packed_kv_cache_dtype``, the record this
     layer's kernel prefers, and the canonical string is written back onto
     ``cache_config`` so the page-size specs pick the right per-token slot.
@@ -497,19 +508,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
         self.swa_bytes_per_token = 528 if self.kv_mxfp8 else 584
-        # nvfp4_ds_mla keeps the MXFP8 sliding-window record and stores the
-        # compressed cache as NVFP4 (256 B of e2m1 pairs + 32 e4m3 scales).
-        self.compressed_bytes_per_token = (
-            288 if self.kv_cache_dtype == "nvfp4_ds_mla" else self.swa_bytes_per_token
-        )
+        # FP4 formats keep the backend's FP8 sliding-window record.
+        self.compressed_bytes_per_token = {
+            "mxfp4_ds_mla": 272,  # 256 B e2m1 + 16 UE8M0 scales
+            "nvfp4_ds_mla": 288,  # 256 B e2m1 + 32 E4M3 scales
+        }.get(self.kv_cache_dtype, self.swa_bytes_per_token)
         # One alignment for every page in the block: the block stride is their
         # sum, and 512 satisfies both TMA strides in play (512 for the V4.1
         # fp8 record, 256 for NVFP4).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
-        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+        if (
+            self.kv_cache_dtype in ("mxfp4_ds_mla", "nvfp4_ds_mla")
+            and not _supports_v41_fp4_compressed_cache()
+        ):
             raise ValueError(
-                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
-                "decodes only on SM100."
+                f"{self.kv_cache_dtype} is supported only by a compatible "
+                "FP4 sparse-MLA backend on SM100 or gfx950."
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay
@@ -1059,7 +1073,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
-        uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+        uses_fp8_ds_mla_layout = self.kv_cache_dtype in (
+            "fp8_ds_mla",
+            "mxfp4_ds_mla",
+            "nvfp4_ds_mla",
+        )
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -1116,11 +1134,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
         # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
-        # nvfp4_ds_mla is packed too: its compressed record is NVFP4 but the
-        # sliding-window record stays the V4.1 MXFP8 one, so the indexer page
-        # takes the same alignment either way.
+        # FP4 compressed records keep the backend's FP8 sliding-window format,
+        # so every page retains the backend's alignment.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype in (
             "fp8_ds_mla",
+            "mxfp4_ds_mla",
             "nvfp4_ds_mla",
         )
         page_alignment = (
