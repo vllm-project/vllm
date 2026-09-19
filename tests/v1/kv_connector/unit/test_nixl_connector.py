@@ -10,6 +10,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -2897,6 +2898,52 @@ def test_empty_recv_is_reported_only_when_awaited(
 
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert (request_id in done_recving) is awaiting_kvs
+
+
+@pytest.mark.parametrize("is_hma", [False, True])
+@pytest.mark.parametrize(
+    "local_block_ids,awaiting_kvs",
+    [((), False), (([],), False), (([],), True), (([1, 2, 3],), True)],
+)
+def test_handshake_failure_reports_only_awaited_recvs(
+    recv_worker, is_hma, local_block_ids, awaiting_kvs
+):
+    """A failed cleanup handshake must not complete an already-aborted request."""
+    worker = recv_worker
+    worker._is_hma_required = is_hma
+    worker._recving_metadata.clear()
+    worker._remote_agents = {}
+    worker._handshake_lock = contextlib.nullcontext()
+    worker._ready_requests = queue.Queue()
+    worker._reqs_to_process = set()
+    worker.pcp_rank = 0
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": "prefill",
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+        awaiting_kvs=awaiting_kvs,
+    )
+    handshake = Future[None]()
+    handshake.set_exception(RuntimeError("handshake failed"))
+    with patch.object(worker, "_ensure_handshake", return_value=handshake):
+        worker.start_load_kv(metadata)
+
+    results = worker.get_transfer_results()
+    expected = {"request"} if awaiting_kvs else set()
+    assert results.finished_recving == results.failed_recving == expected
+    assert worker.get_block_ids_with_load_errors() == (
+        set(local_block_ids[0]) if awaiting_kvs and not is_hma else set()
+    )
+    assert not worker._recving_metadata
+    assert not worker._recv_failures
+    assert not worker._pending_recv_notifs
 
 
 @patch(
