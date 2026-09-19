@@ -16,7 +16,7 @@ from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
 logger = init_logger(__name__)
 
 try:
-    from opentelemetry import trace
+    from opentelemetry import metrics, trace
     from opentelemetry.context.context import Context
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
         OTLPSpanExporter as OTLPGrpcExporter,
@@ -28,6 +28,7 @@ try:
     from opentelemetry.sdk.environment_variables import (
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
+    from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -84,6 +85,20 @@ def init_otel_tracer(
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
     set_tracer_provider(trace_provider)
+
+    # Each SDK Tracer builds a TracerMetrics; with no MeterProvider set, that
+    # materializes a new ProxyMeter + instruments per get_tracer call, and
+    # instrument_otel calls get_tracer per request. That leaks ~5 heap objects
+    # per request and grows gen-2 GC pauses over process lifetime. A
+    # reader-less MeterProvider makes those instruments cached no-ops.
+    if type(metrics.get_meter_provider()).__name__ == "_ProxyMeterProvider":
+        logger.debug(
+            "No OTel MeterProvider configured; installing a no-op one so SDK "
+            "tracer metrics do not leak proxy meters. Configure a "
+            "MeterProvider before vLLM initializes tracing to use OTel "
+            "metrics."
+        )
+        metrics.set_meter_provider(MeterProvider())
 
     atexit.register(trace_provider.shutdown)
 

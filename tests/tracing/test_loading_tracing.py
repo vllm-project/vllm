@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import gc
 
 import pytest
+from opentelemetry import metrics, trace
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from tests.tracing.conftest import FAKE_TRACE_SERVER_ADDRESS, FakeTraceService
@@ -58,6 +60,30 @@ class TestCoreInstrumentation:
         child_span = next(s for s in spans if s["name"] == "child")
 
         assert child_span["parent_span_id"] == parent_span["span_id"]
+
+
+class TestMeterProviderSetup:
+    """init_tracer must install a MeterProvider so the SDK's per-tracer
+    metrics instruments don't materialize a new ProxyMeter per call."""
+
+    def test_no_proxy_meter_leak(self, monkeypatch, trace_service):
+        """Repeated get_tracer calls (as done per request by
+        instrument_otel) must not accumulate proxy objects."""
+        monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
+        init_tracer("test.meter", FAKE_TRACE_SERVER_ADDRESS)
+
+        assert type(metrics.get_meter_provider()).__name__ != "_ProxyMeterProvider"
+
+        def count_proxies():
+            gc.collect()
+            return sum(
+                1 for o in gc.get_objects() if "proxy" in type(o).__name__.lower()
+            )
+
+        before = count_proxies()
+        for _ in range(100):
+            trace.get_tracer("leak.probe")
+        assert count_proxies() - before == 0
 
 
 class TestInterProcessPropagation:
