@@ -155,6 +155,20 @@ def shard_sequence_parallel_mlp(
     )
 
 
+def can_shard_sequence_parallel_shared_expert(vllm_config: VllmConfig) -> bool:
+    """Whether the active MoE backend preserves the SP shared-expert contract.
+
+    MegaMoE invokes the shared expert directly. DeepEP v2 invokes it through
+    ``MoERunner``, but its EP combine returns the routed output in the local
+    sequence-sharded layout, so the shared expert can use the same
+    all-gather/partial-GEMM/reduce-scatter implementation.
+    """
+    return (
+        vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        or vllm_config.parallel_config.all2all_backend == "deepep_v2"
+    )
+
+
 def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     # Both feature flags may be enabled; the worker's static SP topology binds
     # its singleton to exactly one mode.
@@ -656,10 +670,12 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
-                # Only the MegaMoE path calls the shared experts directly; the
-                # FusedMoE path below hands them to the runner, which fuses
-                # their reduction and assumes the replicated layout.
-                can_shard_sequence_parallel=self.use_mega_moe,
+                # MegaMoE calls the shared expert directly. DeepEP v2 hands it
+                # to MoERunner, but preserves the local SP output layout needed
+                # by the sharded shared-expert path.
+                can_shard_sequence_parallel=can_shard_sequence_parallel_shared_expert(
+                    vllm_config
+                ),
                 run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
