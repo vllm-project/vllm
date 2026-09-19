@@ -436,8 +436,9 @@ def test_should_split():
         ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
         (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
-        # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        # include the exact configured max even when it is off the default step
+        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
+        (None, 300, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 300),
         # max_num_batched_tokens <= max_cudagraph_capture_size should always be
         # captured even if not landing on a 16-stride step
         (None, 2048, 1, False, 257, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
