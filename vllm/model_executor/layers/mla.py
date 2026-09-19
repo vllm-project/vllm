@@ -78,6 +78,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
         fuse_qkv_rmsnorm: bool = False,
+        attn_backend=None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -133,6 +134,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             dcp_q_replicate=self.dcp_q_replicate,
             use_sparse=self.is_sparse,
+            attn_backend=attn_backend,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
             index_group_builder=mla_modules.index_group_builder,

@@ -29,7 +29,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
@@ -37,6 +36,12 @@ from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
+
+if current_platform.is_cpu():
+    from vllm.models.glm5next.cpu.mla import Glm5NextCPUSparseBackend
+    from vllm.models.glm5next.cpu.sparse_indexer import fwht128_quant_fp8
+else:
+    from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 
 # Shared torch.compile config for the indexer's small-kernel leaves. The MLA
 # indexer runs under breakable-CG (CompilationMode.NONE), which blocks FX-graph
@@ -154,6 +159,15 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
             spec,
             storage_block_size=page_size * self._index_kpool,
         )
+
+    def get_attn_backend(self):
+        if current_platform.is_cpu():
+            from vllm.models.glm5next.cpu.mla import Glm5NextCPUIndexerBackend
+
+            return Glm5NextCPUIndexerBackend
+        from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+
+        return DeepseekV32IndexerBackend
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
@@ -581,6 +595,9 @@ class Glm5NextMLAAttention(nn.Module):
             prefix,
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
+            attn_backend=(
+                Glm5NextCPUSparseBackend if current_platform.is_cpu() else None
+            ),
         )
 
     def forward(
