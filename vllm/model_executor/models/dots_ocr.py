@@ -9,7 +9,7 @@ from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -104,20 +104,16 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
