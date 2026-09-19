@@ -808,12 +808,3 @@ void vocab_parallel_embedding(
     const torch::stable::Tensor& weight, int64_t org_vocab_start_index,
     int64_t org_vocab_end_index, int64_t num_org_vocab_padding,
     int64_t added_vocab_start_index, int64_t added_vocab_end_index);
-
-// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
-void ngram_compute_n_gram_ids(
-    int64_t ne_n, int64_t ne_k, torch::stable::Tensor& ne_weights,
-    torch::stable::Tensor& ne_mods,
-    torch::stable::Tensor& exclusive_ne_embedder_size_sums,
-    torch::stable::Tensor& exclusive_req_len_sums,
-    torch::stable::Tensor& ne_token_table, torch::stable::Tensor& row_indices,
-    torch::stable::Tensor& column_starts, torch::stable::Tensor& n_gram_ids);

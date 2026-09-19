@@ -28,7 +28,6 @@ BASE_TRUST_REMOTE_CODE_MODELS = {
     "stepfun-ai/Step-3.5-Flash",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
-    "meituan-longcat/LongCat-Flash-Chat",
 }
 
 BASE_MODELS_TO_TEST = [
@@ -51,6 +50,7 @@ BASE_MODELS_TO_TEST = [
     "lmsys/gpt-oss-20b-bf16",
     "deepseek-ai/DeepSeek-V3.2-Exp",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meituan-longcat/LongCat-Flash-Chat",
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
 # (target_model, draft_model, trust_remote_code)

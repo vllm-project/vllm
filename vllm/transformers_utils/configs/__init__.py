@@ -55,6 +55,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "Lfm2MoeConfig": "vllm.transformers_utils.configs.lfm2_moe",
+    "LongcatFlashConfig": "transformers",
     "MedusaConfig": "vllm.transformers_utils.configs.medusa",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
@@ -149,6 +150,7 @@ __all__ = [
     "IsaacConfig",
     "RWConfig",
     "Lfm2MoeConfig",
+    "LongcatFlashConfig",
     "MedusaConfig",
     "MiDashengLMConfig",
     "MiniMaxM3Config",
