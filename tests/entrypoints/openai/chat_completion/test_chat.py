@@ -1037,6 +1037,32 @@ def test_chat_completion_request_rejects_unknown_reasoning_effort():
         )
 
 
+@pytest.mark.parametrize(
+    ("reasoning_effort", "request_budget", "expected_budget"),
+    [
+        ("low", None, 4096),
+        ("high", 123, 123),
+        ("max", None, None),
+        (None, None, None),
+    ],
+)
+def test_reasoning_effort_budget_fallback(
+    reasoning_effort, request_budget, expected_budget
+):
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        reasoning_effort=reasoning_effort,
+        thinking_token_budget=request_budget,
+    )
+    sampling_params = request.to_sampling_params(
+        max_tokens=100,
+        default_sampling_params={},
+        reasoning_effort_budgets={"low": 4096, "high": 32768},
+    )
+    assert sampling_params.thinking_token_budget == expected_budget
+
+
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
     for n_value in [1, 2, 5, 10]:
