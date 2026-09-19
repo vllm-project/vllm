@@ -80,6 +80,49 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
+def test_extract_reasoning_truncated_output_without_markers_is_reasoning():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    # Thinking prompts end with THINK_OPEN, so output truncated by max_tokens
+    # contains neither think marker and must stay reasoning content.
+    reasoning, content = parser.extract_reasoning_content(
+        "step one of the reasoning",
+        request,
+    )
+
+    assert reasoning == "step one of the reasoning"
+    assert content is None
+
+
+def test_extract_reasoning_open_marker_without_close_is_reasoning():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"{THINK_OPEN}step one",
+        request,
+    )
+
+    assert reasoning == "step one"
+    assert content is None
+
+
+def test_extract_reasoning_response_opener_without_think_markers_is_content():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    # Output that skips the think channel and opens the response channel
+    # directly is regular content, not unterminated reasoning.
+    reasoning, content = parser.extract_reasoning_content(
+        f"{RESPONSE_OPEN}answer",
+        request,
+    )
+
+    assert reasoning is None
+    assert content == "answer"
+
+
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     parser = ReasoningOnlyParser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
