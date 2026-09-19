@@ -74,6 +74,12 @@ class ObservabilityConfig:
     module in the model and attach information such as input/output shapes to
     nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
 
+    debug_tensor_dump_output_folder: str | None = None
+    """Directory for opt-in decoder-layer tensor dumps."""
+
+    debug_tensor_dump_layers: list[int] | None = None
+    """Decoder layer indices to dump. Dumps all layers when unset."""
+
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
 
