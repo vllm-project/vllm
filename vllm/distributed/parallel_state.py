@@ -205,6 +205,19 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
+def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
+    """All-reduce an XPU graph buffer without allocating a copy."""
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    torch.distributed.all_reduce(tensor, group=group.device_group)
+
+
+def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
+    return None
+
+
 def reduce_scatter(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
@@ -397,6 +410,13 @@ direct_register_custom_op(
     op_name="all_reduce",
     op_func=all_reduce,
     fake_impl=all_reduce_fake,
+)
+
+direct_register_custom_op(
+    op_name="inplace_all_reduce",
+    op_func=inplace_all_reduce,
+    mutates_args=["tensor"],
+    fake_impl=inplace_all_reduce_fake,
 )
 
 direct_register_custom_op(
@@ -737,10 +757,12 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        if envs.VLLM_XPU_ENABLE_XPU_GRAPH and input_.device.type == "xpu":
+            torch.ops.vllm.inplace_all_reduce(input_, group_name=self.unique_name)
+            return input_
         if self.use_custom_op_call:
             return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
-        else:
-            return self._all_reduce_out_place(input_)
+        return self._all_reduce_out_place(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if self.device_communicator is None:
