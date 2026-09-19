@@ -39,6 +39,7 @@ from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
 from .base import Base
@@ -181,23 +182,18 @@ class MoEMixin(MixtureOfExperts, Base):
         text_config = self.text_config
 
         # Positional arguments
-        num_experts = self.model_config.get_num_experts()
-        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
+        num_experts_names = CONFIG_FIELD_ALIASES["num_experts"]
+        num_experts = getattr_iter(text_config, num_experts_names, None)
+        top_k_names = CONFIG_FIELD_ALIASES["num_experts_per_token"]
+        top_k = getattr_iter(text_config, top_k_names, None)
         assert top_k is not None
         hidden_size = text_config.hidden_size
-        intermediate_size = getattr_iter(
-            text_config, ["moe_intermediate_size", "intermediate_size"], None
-        )
+        intermediate_size_names = CONFIG_FIELD_ALIASES["moe_intermediate_size"]
+        intermediate_size = getattr_iter(text_config, intermediate_size_names, None)
         assert intermediate_size is not None
 
-        num_shared_experts = getattr_iter(
-            text_config,
-            [
-                "n_shared_experts",  # DeepSeek, Docs, GLM
-                "moe_num_shared_experts",  # Aria, Ernie
-            ],
-            0,
-        )
+        num_shared_experts_names = CONFIG_FIELD_ALIASES["num_shared_experts"]
+        num_shared_experts = getattr_iter(text_config, num_shared_experts_names, 0)
 
         # Common kwargs
         norm_topk_prob = getattr(text_config, "norm_topk_prob", None)
@@ -276,6 +272,9 @@ class MoEMixin(MixtureOfExperts, Base):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
+                    # Whether the expert weights are stored in transposed format.
+                    # Comes from Transformers `use_experts_implementation` decorator.
+                    is_transposed = getattr(experts, "is_transposed", False)
                     # If the config does not specify num_shared_experts, but
                     # the model has shared experts, we assume there is one.
                     if self.num_shared_experts == 0:
@@ -309,6 +308,7 @@ class MoEMixin(MixtureOfExperts, Base):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
+                        is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
                     fuser = MoEBlockFuser.match(moe_block, experts_name)
@@ -347,6 +347,11 @@ class MoEMixin(MixtureOfExperts, Base):
                         gate = fuser.gate(moe_block, prefix, router_dtype)
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
+                            renormalize=(
+                                layer_renormalize
+                                if fuser.renormalize is None
+                                else fuser.renormalize
+                            ),
                             is_sequence_parallel=(
                                 self.parallel_config.use_sequence_parallel_moe
                             ),
