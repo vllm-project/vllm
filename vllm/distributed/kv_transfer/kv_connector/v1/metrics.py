@@ -1,5 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Base metrics infrastructure for KV connectors.
+
+Aggregation pipeline (multi-TP-rank):
+-------------------------------------
+1. Each TP rank's connector worker collects per-transfer telemetry into
+   a connector-specific `KVConnectorStats` subclass (e.g., `NixlKVConnectorStats`).
+   Methods like `record_transfer()` append to internal lists.
+
+2. At the sync interval, each worker serializes its stats via `to_dict()`
+   and sends the payload to the logger process (single per engine).
+
+3. Logger process calls `KVConnectorLogging.observe(payload)` for each
+   worker's payload:
+   a. Deserializes via `connector_cls.build_kv_connector_stats(payload)`
+   b. Calls `accumulator.aggregate(worker_stats)` which CONCATENATES
+      the worker's observation lists onto the accumulator's lists
+      (list.extend semantics, NOT element-wise sum/avg).
+
+4. After all TP ranks have reported, the accumulator holds the
+   concatenated observations from ALL workers for the interval.
+
+5. At the logging interval, `KVConnectorLogging.log()` calls
+   `accumulator.reduce()` which computes summary statistics (mean, p90,
+   throughput, etc.) over the FULL concatenated sample set from all
+   workers. This yields cluster-level aggregates for the interval.
+
+6. For Prometheus metrics, `KVConnectorProm.observe(accumulator.to_dict())`
+   iterates the accumulated lists and calls `observe()`/`inc()` on
+   histograms/counters. Each observation from each worker contributes
+   one sample to the histogram.
+
+Key invariant: `aggregate()` uses list.extend (concatenation). `reduce()`
+computes statistics over the concatenated list. This ensures that
+percentiles, means, and throughputs reflect the true distribution across
+all transfers from all TP ranks, not an average of per-rank averages.
+"""
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypeVar
 

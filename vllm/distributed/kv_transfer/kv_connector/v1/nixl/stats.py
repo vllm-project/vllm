@@ -1,6 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stats and Prometheus metrics for the NIXL connector."""
+"""Stats and Prometheus metrics for the NIXL connector.
+
+This module implements the metrics collection, aggregation, and reporting
+pipeline for NIXL KV cache transfers.
+
+Aggregation semantics (multi-TP-rank):
+--------------------------------------
+Each TP rank runs a NIXL connector worker that collects per-transfer
+telemetry into a local `NixlKVConnectorStats` instance via `record_transfer`
+and related methods. At the sync interval (controlled by the scheduler),
+each worker's stats are serialized via `to_dict()` and sent to the logger
+process.
+
+The logger process (single per engine) calls `KVConnectorLogging.observe()`
+which:
+1. Deserializes each worker's payload into a `NixlKVConnectorStats` object
+2. Calls `aggregate()` on the accumulator, which extends the internal lists
+   with the incoming worker's observations (concat semantics, NOT sum/avg).
+3. Repeats for all TP ranks, so the accumulator holds the concatenated
+   observations from ALL workers for the interval.
+
+At the logging interval, `log()` calls `reduce()` on the accumulated stats.
+`reduce()` computes summary statistics (mean, p90, throughput, etc.) over
+the full concatenated sample set from all workers. This yields cluster-level
+aggregates for the interval.
+
+Prometheus metrics (`NixlPromMetrics.observe()`) are recorded per-engine
+(after aggregation) by iterating the accumulated lists and calling
+`observe()`/`inc()` on histograms/counters. Each observation from each
+worker contributes one sample to the histogram.
+
+Key point: `aggregate()` uses list.extend (concatenation), NOT element-wise
+addition. `reduce()` computes statistics over the concatenated list.
+"""
 
 import copy
 from dataclasses import dataclass
