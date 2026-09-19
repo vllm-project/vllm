@@ -115,6 +115,15 @@ pub struct RenderArgs {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     #[arg(long)]
     revision: Option<String>,
+    /// Name or path of the Hugging Face tokenizer to use. Defaults to `model`.
+    #[arg(long)]
+    tokenizer: Option<String>,
+    /// Tokenizer revision on the Hugging Face Hub. Defaults to `revision`.
+    #[arg(long)]
+    tokenizer_revision: Option<String>,
+    /// Name or path of the Hugging Face config to use. Defaults to `model`.
+    #[arg(long)]
+    hf_config_path: Option<String>,
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
     hf_overrides: HfOverrides,
@@ -170,6 +179,9 @@ impl RenderArgs {
         RenderConfig {
             model: self.model,
             revision: self.revision,
+            tokenizer: self.tokenizer,
+            tokenizer_revision: self.tokenizer_revision,
+            hf_config_path: self.hf_config_path,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
@@ -214,6 +226,21 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub revision: Option<String>,
+
+    /// Name or path of the Hugging Face tokenizer to use. Defaults to `model`.
+    #[arg(long)]
+    #[serde(default)]
+    pub tokenizer: Option<String>,
+
+    /// Tokenizer revision on the Hugging Face Hub. Defaults to `revision`.
+    #[arg(long)]
+    #[serde(default)]
+    pub tokenizer_revision: Option<String>,
+
+    /// Name or path of the Hugging Face config to use. Defaults to `model`.
+    #[arg(long)]
+    #[serde(default)]
+    pub hf_config_path: Option<String>,
 
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     /// Objects merge recursively and arrays/scalars replace existing values.
@@ -525,6 +552,9 @@ impl SharedRuntimeArgs {
             },
             model: self.model,
             revision: self.revision,
+            tokenizer: self.tokenizer,
+            tokenizer_revision: self.tokenizer_revision,
+            hf_config_path: self.hf_config_path,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -583,6 +613,9 @@ impl SharedRuntimeArgs {
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             revision: self.revision,
+            tokenizer: self.tokenizer,
+            tokenizer_revision: self.tokenizer_revision,
+            hf_config_path: self.hf_config_path,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -797,6 +830,9 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.revision.clone(),
+            self.runtime.tokenizer.clone(),
+            self.runtime.tokenizer_revision.clone(),
+            self.runtime.hf_config_path.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),

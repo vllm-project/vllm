@@ -38,6 +38,12 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B-Instruct",
         "--revision",
         "release",
+        "--tokenizer",
+        "Qwen/tokenizer",
+        "--tokenizer-revision",
+        "tokenizer-release",
+        "--hf-config-path",
+        "Qwen/config",
         "--port",
         "8080",
         "--max-model-len",
@@ -58,6 +64,12 @@ fn render_args_build_config_without_tls() {
 
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
     assert_eq!(config.revision.as_deref(), Some("release"));
+    assert_eq!(config.tokenizer.as_deref(), Some("Qwen/tokenizer"));
+    assert_eq!(
+        config.tokenizer_revision.as_deref(),
+        Some("tokenizer-release")
+    );
+    assert_eq!(config.hf_config_path.as_deref(), Some("Qwen/config"));
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, Some(32768));
@@ -177,6 +189,9 @@ fn serve_args_forward_python_flags_with_separator() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        tokenizer: None,
+                        tokenizer_revision: None,
+                        hf_config_path: None,
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1017,6 +1032,9 @@ fn frontend_args_accept_json() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        tokenizer: None,
+                        tokenizer_revision: None,
+                        hf_config_path: None,
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1207,7 +1225,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","tokenizer":"Qwen/tokenizer","tokenizer_revision":"tokenizer-release","hf_config_path":"Qwen/config","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -1216,6 +1234,12 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
     assert_eq!(args.runtime.revision.as_deref(), Some("release"));
+    assert_eq!(args.runtime.tokenizer.as_deref(), Some("Qwen/tokenizer"));
+    assert_eq!(
+        args.runtime.tokenizer_revision.as_deref(),
+        Some("tokenizer-release")
+    );
+    assert_eq!(args.runtime.hf_config_path.as_deref(), Some("Qwen/config"));
     assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
@@ -1688,6 +1712,9 @@ fn serve_args_accept_handshake_aliases() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        tokenizer: None,
+                        tokenizer_revision: None,
+                        hf_config_path: None,
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1842,6 +1869,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            tokenizer_revision: None,
+            hf_config_path: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -1935,6 +1965,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            tokenizer_revision: None,
+            hf_config_path: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2050,6 +2083,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            tokenizer_revision: None,
+            hf_config_path: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2196,16 +2232,50 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
 }
 
 #[test]
-fn serve_revision_reaches_frontend_and_managed_engine() {
-    let cli =
-        Cli::try_parse_from(["vllm-rs", "serve", "test/model", "--revision", "release"]).unwrap();
+fn serve_hf_sources_reach_frontend_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "test/model",
+        "--revision",
+        "release",
+        "--tokenizer",
+        "test/tokenizer",
+        "--tokenizer-revision",
+        "tokenizer-release",
+        "--hf-config-path",
+        "test/config",
+    ])
+    .unwrap();
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
+    let frontend = args.to_frontend_config("tcp://localhost:1234".into());
+    assert_eq!(frontend.revision.as_deref(), Some("release"));
+    assert_eq!(frontend.tokenizer.as_deref(), Some("test/tokenizer"));
     assert_eq!(
-        args.to_frontend_config("tcp://localhost:1234".into()).revision.as_deref(),
-        Some("release")
+        frontend.tokenizer_revision.as_deref(),
+        Some("tokenizer-release")
     );
+    assert_eq!(frontend.hf_config_path.as_deref(), Some("test/config"));
     let engine = args.to_managed_engine_config(1234);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+    assert!(
+        engine
+            .python_args
+            .windows(2)
+            .any(|args| args == ["--tokenizer", "test/tokenizer"])
+    );
+    assert!(
+        engine
+            .python_args
+            .windows(2)
+            .any(|args| args == ["--tokenizer-revision", "tokenizer-release"])
+    );
+    assert!(
+        engine
+            .python_args
+            .windows(2)
+            .any(|args| args == ["--hf-config-path", "test/config"])
+    );
 }

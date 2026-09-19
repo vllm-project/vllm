@@ -56,6 +56,35 @@ pub struct ResolvedModelFiles {
     config_temp_path: Option<Arc<tempfile::TempPath>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ResolvedMetadataFiles {
+    generation_config_path: Option<PathBuf>,
+    preprocessor_config_path: Option<PathBuf>,
+    video_preprocessor_config_path: Option<PathBuf>,
+    processor_config_path: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+}
+
+impl ResolvedMetadataFiles {
+    fn from_model_files(files: &ResolvedModelFiles) -> Self {
+        Self {
+            generation_config_path: files.generation_config_path.clone(),
+            preprocessor_config_path: files.preprocessor_config_path.clone(),
+            video_preprocessor_config_path: files.video_preprocessor_config_path.clone(),
+            processor_config_path: files.processor_config_path.clone(),
+            config_path: files.config_path.clone(),
+        }
+    }
+
+    fn has_any_file(&self) -> bool {
+        self.generation_config_path.is_some()
+            || self.preprocessor_config_path.is_some()
+            || self.video_preprocessor_config_path.is_some()
+            || self.processor_config_path.is_some()
+            || self.config_path.is_some()
+    }
+}
+
 impl ResolvedModelFiles {
     /// Materialize a merge-patched config owned by these resolved model files.
     pub fn apply_overrides(&mut self, overrides: &HfOverrides) -> Result<()> {
@@ -101,6 +130,195 @@ impl ResolvedModelFiles {
             )));
         }
         resolve_remote_model_files(model_id, repo, &cache).await
+    }
+
+    /// Resolve files while allowing the tokenizer and model config to come from
+    /// independent Hugging Face sources. Tokenizer config and chat templates
+    /// follow the tokenizer, generation config follows the model config, and
+    /// multimodal processor configs follow the model.
+    pub async fn new_with_sources(
+        model_id: &str,
+        revision: Option<&str>,
+        tokenizer_id: Option<&str>,
+        tokenizer_revision: Option<&str>,
+        hf_config_path: Option<&str>,
+    ) -> Result<Self> {
+        if tokenizer_id.is_none() && tokenizer_revision.is_none() && hf_config_path.is_none() {
+            return Self::new(model_id, revision).await;
+        }
+
+        let tokenizer_id = tokenizer_id.unwrap_or(model_id);
+        let tokenizer_revision = tokenizer_revision.or(revision);
+        let tokenizer_files = Self::new(tokenizer_id, tokenizer_revision).await?;
+        let config_id = hf_config_path.unwrap_or(model_id);
+
+        let model_metadata = if same_source(model_id, revision, tokenizer_id, tokenizer_revision) {
+            ResolvedMetadataFiles::from_model_files(&tokenizer_files)
+        } else {
+            let require_config = same_source(config_id, revision, model_id, revision);
+            resolve_metadata_files(model_id, revision, require_config).await?
+        };
+
+        let config_metadata = if same_source(config_id, revision, tokenizer_id, tokenizer_revision)
+        {
+            ResolvedMetadataFiles::from_model_files(&tokenizer_files)
+        } else if same_source(config_id, revision, model_id, revision) {
+            model_metadata.clone()
+        } else {
+            resolve_metadata_files(config_id, revision, true).await?
+        };
+        let config_metadata = validate_config_source(config_metadata, config_id, revision, true)?;
+
+        Ok(Self {
+            tokenizer: tokenizer_files.tokenizer,
+            tokenizer_config_path: tokenizer_files.tokenizer_config_path,
+            generation_config_path: config_metadata.generation_config_path,
+            preprocessor_config_path: model_metadata.preprocessor_config_path,
+            video_preprocessor_config_path: model_metadata.video_preprocessor_config_path,
+            processor_config_path: model_metadata.processor_config_path,
+            chat_template_path: tokenizer_files.chat_template_path,
+            config_path: config_metadata.config_path,
+            config_temp_path: None,
+        })
+    }
+}
+
+fn same_source(
+    left_id: &str,
+    left_revision: Option<&str>,
+    right_id: &str,
+    right_revision: Option<&str>,
+) -> bool {
+    left_id == right_id && left_revision.unwrap_or("main") == right_revision.unwrap_or("main")
+}
+
+async fn resolve_metadata_files(
+    source_id: &str,
+    revision: Option<&str>,
+    require_config: bool,
+) -> Result<ResolvedMetadataFiles> {
+    if Path::new(source_id).is_dir() {
+        let files = resolve_local_metadata_files(Path::new(source_id));
+        return validate_config_source(files, source_id, revision, require_config);
+    }
+
+    let repo = Repo::with_revision(
+        source_id.to_string(),
+        RepoType::Model,
+        revision.unwrap_or("main").to_string(),
+    );
+    // TODO: Let hf-hub read HF_HUB_CACHE after upgrading to 1.0.
+    let cache = std::env::var_os("HF_HUB_CACHE")
+        .map(|path| Cache::new(path.into()))
+        .unwrap_or_else(Cache::from_env);
+    let cached = resolve_cached_metadata_files(&cache, &repo);
+    if cached.has_any_file() && (!require_config || cached.config_path.is_some()) {
+        return Ok(cached);
+    }
+    if is_hf_hub_offline() {
+        return validate_config_source(cached, source_id, revision, require_config);
+    }
+
+    let files = resolve_remote_metadata_files(source_id, repo, &cache).await?;
+    validate_config_source(files, source_id, revision, require_config)
+}
+
+fn validate_config_source(
+    files: ResolvedMetadataFiles,
+    source_id: &str,
+    revision: Option<&str>,
+    require_config: bool,
+) -> Result<ResolvedMetadataFiles> {
+    if require_config && files.config_path.is_none() {
+        return Err(Error::Tokenizer(format!(
+            "config source '{source_id}' at revision '{}' does not contain config.json",
+            revision.unwrap_or("main")
+        )));
+    }
+    Ok(files)
+}
+
+fn resolve_local_metadata_files(model_dir: &Path) -> ResolvedMetadataFiles {
+    ResolvedMetadataFiles {
+        generation_config_path: local_file_if_exists(model_dir, "generation_config.json"),
+        preprocessor_config_path: local_file_if_exists(model_dir, "preprocessor_config.json"),
+        video_preprocessor_config_path: local_file_if_exists(
+            model_dir,
+            "video_preprocessor_config.json",
+        ),
+        processor_config_path: local_file_if_exists(model_dir, "processor_config.json"),
+        config_path: local_file_if_exists(model_dir, "config.json"),
+    }
+}
+
+async fn resolve_remote_metadata_files(
+    source_id: &str,
+    model_repo: Repo,
+    cache: &Cache,
+) -> Result<ResolvedMetadataFiles> {
+    let api = build_api(cache).map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+    let repo = api.repo(model_repo);
+    let info = repo.info().await.map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to fetch model '{source_id}': {}",
+            error.as_report()
+        ))
+    })?;
+    let siblings = info
+        .siblings
+        .iter()
+        .map(|sibling| sibling.rfilename.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    Ok(ResolvedMetadataFiles {
+        generation_config_path: download_if_present(
+            &repo,
+            source_id,
+            &siblings,
+            "generation_config.json",
+        )
+        .await?,
+        preprocessor_config_path: download_if_present(
+            &repo,
+            source_id,
+            &siblings,
+            "preprocessor_config.json",
+        )
+        .await?,
+        video_preprocessor_config_path: download_if_present(
+            &repo,
+            source_id,
+            &siblings,
+            "video_preprocessor_config.json",
+        )
+        .await?,
+        processor_config_path: download_if_present(
+            &repo,
+            source_id,
+            &siblings,
+            "processor_config.json",
+        )
+        .await?,
+        config_path: download_if_present(&repo, source_id, &siblings, "config.json").await?,
+    })
+}
+
+fn resolve_cached_metadata_files(cache: &Cache, repo: &Repo) -> ResolvedMetadataFiles {
+    let cache_repo = cache.repo(repo.clone());
+    let snapshot_dir = (repo.revision().len() == 40
+        && repo.revision().bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| cache.path().join(repo.folder_name()).join("snapshots").join(repo.revision()));
+    let get_file = |name: &str| match &snapshot_dir {
+        Some(dir) => local_file_if_exists(dir, name),
+        None => cache_repo.get(name),
+    };
+
+    ResolvedMetadataFiles {
+        generation_config_path: get_file("generation_config.json"),
+        preprocessor_config_path: get_file("preprocessor_config.json"),
+        video_preprocessor_config_path: get_file("video_preprocessor_config.json"),
+        processor_config_path: get_file("processor_config.json"),
+        config_path: get_file("config.json"),
     }
 }
 
@@ -531,6 +749,93 @@ mod tests {
         assert_eq!(
             files.tokenizer_config_path,
             Some(dir.path().join("tokenizer_config.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_model_files_use_independent_local_sources() {
+        let model = tempdir().unwrap();
+        fs::write(model.path().join("config.json"), r#"{"source":"model"}"#).unwrap();
+        fs::write(model.path().join("tokenizer.json"), "{}").unwrap();
+        fs::write(model.path().join("preprocessor_config.json"), "{}").unwrap();
+        fs::write(model.path().join("processor_config.json"), "{}").unwrap();
+
+        let tokenizer = tempdir().unwrap();
+        fs::write(tokenizer.path().join("tokenizer.json"), "{}").unwrap();
+        fs::write(tokenizer.path().join("tokenizer_config.json"), "{}").unwrap();
+        fs::write(
+            tokenizer.path().join("chat_template.jinja"),
+            "{{ messages }}",
+        )
+        .unwrap();
+        fs::write(
+            tokenizer.path().join("config.json"),
+            r#"{"source":"tokenizer"}"#,
+        )
+        .unwrap();
+
+        let config = tempdir().unwrap();
+        fs::write(config.path().join("config.json"), r#"{"source":"config"}"#).unwrap();
+        fs::write(config.path().join("generation_config.json"), "{}").unwrap();
+
+        let files = ResolvedModelFiles::new_with_sources(
+            model.path().to_str().unwrap(),
+            Some("model-revision"),
+            Some(tokenizer.path().to_str().unwrap()),
+            Some("tokenizer-revision"),
+            Some(config.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            files.tokenizer.path(),
+            tokenizer.path().join("tokenizer.json")
+        );
+        assert_eq!(
+            files.tokenizer_config_path,
+            Some(tokenizer.path().join("tokenizer_config.json"))
+        );
+        assert_eq!(
+            files.chat_template_path,
+            Some(tokenizer.path().join("chat_template.jinja"))
+        );
+        assert_eq!(files.config_path, Some(config.path().join("config.json")));
+        assert_eq!(
+            files.generation_config_path,
+            Some(config.path().join("generation_config.json"))
+        );
+        assert_eq!(
+            files.preprocessor_config_path,
+            Some(model.path().join("preprocessor_config.json"))
+        );
+        assert_eq!(
+            files.processor_config_path,
+            Some(model.path().join("processor_config.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_local_config_source_requires_config_json() {
+        let model = tempdir().unwrap();
+        fs::write(model.path().join("tokenizer.json"), "{}").unwrap();
+        fs::write(model.path().join("config.json"), "{}").unwrap();
+        let config = tempdir().unwrap();
+
+        let error = ResolvedModelFiles::new_with_sources(
+            model.path().to_str().unwrap(),
+            None,
+            None,
+            None,
+            Some(config.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap_err();
+
+        let message = thiserror_ext::AsReport::as_report(&error).to_string();
+        assert!(
+            message.contains("does not contain config.json"),
+            "{message}"
         );
     }
 
