@@ -13,11 +13,15 @@ from torch.nn import functional as F
 
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
-import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
+)
+from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
+from vllm.models.qwen4_exp.amd.ple_layer import (
+    Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
 )
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
@@ -1715,3 +1719,116 @@ def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     expected_normed = grouped_norm(expected_gated, norm_conv)
     assert torch.equal(gated, expected_gated)
     torch.testing.assert_close(normed, expected_normed, atol=1e-2, rtol=1e-2)
+
+
+def _build_amd_pinned_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, Qwen4ExpPLELayerAMD, Qwen4ExpPLEPinnedHostEmbedding, torch.Tensor]:
+    """Build an AMD PLE layer backed by a small pinned (UVA) embedding."""
+    _mock_etp_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    layer_name = "test.ple"
+    layer = Qwen4ExpPLELayerAMD.__new__(Qwen4ExpPLELayerAMD)
+    nn.Module.__init__(layer)
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    layer.ple_embedding = SimpleNamespace(ngram_embedding=embedding)
+
+    monkeypatch.setattr(
+        amd_ple_layer,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={layer_name: layer}),
+    )
+
+    loaded_weight = (
+        torch.arange(12, dtype=torch.float32).reshape(4, 3).to(torch.bfloat16)
+    )
+    copy_ple_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+        tp_start=0,
+        tp_end=4,
+    )
+    embedding.quant_method.process_weights_after_loading(embedding)
+    return layer_name, layer, embedding, loaded_weight
+
+
+def test_amd_pinned_embedding_output_written_under_compile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The AMD pinned lookup op must survive aot_autograd/Inductor.
+
+    The op writes via the declared-mutated ``output``. Without
+    ``mutates_args=["output"]`` the call is dead-code-eliminated, the UVA lookup
+    never runs, and the returned ``output`` stays untouched.
+    """
+    layer_name, _, embedding, loaded_weight = _build_amd_pinned_layer(monkeypatch)
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = torch.zeros(
+        ngram_ids.shape[0], 2 * 3, dtype=torch.bfloat16, device="cuda:0"
+    )
+
+    def lookup(ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(ids, out, layer_name)
+        return out
+
+    torch.compile(lookup)(ngram_ids, output)
+    torch.cuda.current_stream().synchronize()
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The AMD pinned lookup op must be capture-safe.
+
+    It launches a single kernel on the current stream, so a cudagraph capture
+    reproduces the lookup into ``output`` without cross-stream work.
+    """
+    layer_name, _, embedding, loaded_weight = _build_amd_pinned_layer(monkeypatch)
+
+    ngram_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = torch.zeros(
+        ngram_ids.shape[0], 2 * 3, dtype=torch.bfloat16, device="cuda:0"
+    )
+
+    def lookup(ids: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(ids, out, layer_name)
+        return out
+
+    graph = torch.cuda.CUDAGraph()
+    warmup_stream = torch.cuda.Stream(device="cuda:0")
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            lookup(ngram_ids, output)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    with torch.cuda.graph(graph):
+        lookup(ngram_ids, output)
+    graph.replay()
+    torch.cuda.current_stream().synchronize()
+
+    expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
