@@ -27,6 +27,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
 | `Gemma4ForConditionalGeneration` | `Gemma-4` | ✅︎ | ✅︎ | ❌︎ |
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
+| `LlavaOnevisionForConditionalGeneration` | `LLaVA-OneVision` | ✅︎ | ✅︎ | ❌︎ |
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
@@ -48,6 +49,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Glm4vForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Gemma4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `InternVLChatModel` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `LlavaOnevisionForConditionalGeneration` | ✅︎ | ❔ | ❔ | ❔ |
 | `KimiVLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Llama4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Qwen2VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
