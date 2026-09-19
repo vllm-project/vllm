@@ -27,7 +27,7 @@ with tracer.start_as_current_span("client-span", kind=SpanKind.CLIENT) as span:
         "prompt": prompt,
         "max_tokens": 10,
         "n": 3,
-        "use_beam_search": "true",
+        "use_beam_search": True,
         "temperature": 0.0,
         # "stream": True,
     }
