@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 #
-# This file contains code copied from the flash-linear-attention project.
-# The original source code was licensed under the MIT license and included
-# the following copyright notice:
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Kimi-K3 KDA extension of fused_sigmoid_gating (ported from ATOM):
+# adds lower_bound / is_kda gate paths matching fused_recurrent_kda.
 
 import torch
 
@@ -18,6 +16,7 @@ from vllm.triton_utils import tl, triton
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -28,6 +27,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     dt_bias,
     beta,
     threshold,
+    lower_bound,
     q,
     k,
     v,
@@ -38,8 +38,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N: tl.int64,  # num of sequences
-    T: tl.int64,  # num of tokens
+    N: tl.int64,
+    T: tl.int64,
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -47,17 +47,20 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    stride_a_token,
+    stride_b_token,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
+    USE_INITIAL_STATE: tl.constexpr,
+    INPLACE_FINAL_STATE: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -74,7 +77,6 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         all = B * T
 
     if T == 0:
-        # no tokens to process for this sequence
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -86,13 +88,13 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
     p_A_log = A_log + i_hv
     if not IS_KDA:
-        p_a = a + bos * HV + i_hv
+        p_a = a + bos * stride_a_token + i_hv
         p_dt_bias = dt_bias + i_hv
     else:
         p_a = a + (bos * HV + i_hv) * K + o_k
         p_dt_bias = dt_bias + i_hv * K + o_k
 
-    p_b = b + bos * HV + i_hv
+    p_b = b + bos * stride_b_token + i_hv
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
@@ -106,11 +108,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            # Load state index and check for invalid entries
             state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
                 tl.int64
             )
-            # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
@@ -125,41 +125,36 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         b_b = tl.load(p_b).to(tl.float32)
 
-        # If the model is loaded in fp16, without the .float() here, A might be -inf
         x = tl.load(p_a).to(tl.float32) + tl.load(p_dt_bias).to(tl.float32)
-        softplus_x = tl.where(
-            beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
-        )
-        b_g = -tl.exp(tl.load(p_A_log).to(tl.float32)) * softplus_x
+        b_A = tl.load(p_A_log).to(tl.float32)
+        if USE_LOWER_BOUND:
+            b_g = lower_bound * tl.sigmoid(tl.exp(b_A) * x)
+        else:
+            softplus_x = tl.where(
+                beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x
+            )
+            b_g = -tl.exp(b_A) * softplus_x
 
-        # compute beta_output = sigmoid(b)
         b_beta = tl.sigmoid(b_b.to(tl.float32))
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q * (tl.rsqrt(tl.sum(b_q * b_q) + 1e-6))
             b_k = b_k * (tl.rsqrt(tl.sum(b_k * b_k) + 1e-6))
         b_q = b_q * scale
-        # [BV, BK]
         if not IS_KDA:
             b_h *= tl.exp(b_g)
         else:
             b_h *= tl.exp(b_g[None, :])
-        # [BV]
         b_v -= tl.sum(b_h * b_k[None, :], 1)
         b_v *= b_beta
-        # [BV, BK]
         b_h += b_v[:, None] * b_k[None, :]
-        # [BV]
         b_o = tl.sum(b_h * b_q[None, :], 1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for invalid entries
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
-            # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
                 p_ht = ht + final_state_idx * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
@@ -169,13 +164,12 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
-        # Update pointers for next timestep
         p_q += H * K
         p_k += H * K
         p_o += HV * V
         p_v += HV * V
-        p_b += HV
-        p_a += HV
+        p_b += stride_b_token
+        p_a += stride_a_token
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -186,6 +180,7 @@ def fused_sigmoid_gating_delta_rule_update(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    o: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
     scale: float = None,
@@ -196,12 +191,8 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    lower_bound: float | None = None,
 ):
-    """
-    Fused triton implementation of sigmoid gating delta rule update.
-    This function uses a single fused kernel that combines both sigmoid gating
-    computation and the recurrent delta rule update for better performance.
-    """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -222,7 +213,10 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    if o is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        o = o.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -241,11 +235,12 @@ def fused_sigmoid_gating_delta_rule_update(
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
-        a=a.contiguous(),
-        b=b.contiguous(),
+        a=a,
+        b=b,
         dt_bias=dt_bias,
         beta=beta,
         threshold=threshold,
+        lower_bound=lower_bound,
         q=q.contiguous(),
         k=k.contiguous(),
         v=v.contiguous(),
@@ -265,6 +260,8 @@ def fused_sigmoid_gating_delta_rule_update(
         V=V,
         BK=BK,
         BV=BV,
+        stride_a_token=a.stride(-3) if is_kda else a.stride(-2),
+        stride_b_token=b.stride(-2),
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
