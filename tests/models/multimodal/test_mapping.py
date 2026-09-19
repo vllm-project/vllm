@@ -74,6 +74,44 @@ def test_cosmos3_new_checkpoint_weights_mapper():
     )
 
 
+def test_cosmos3_modelopt_quantizer_weights_mapper():
+    """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
+    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
+    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (it has no parameter for them) while keeping the latter."""
+    from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
+
+    mapper = Cosmos3ForConditionalGeneration.hf_to_vllm_mapper
+
+    # Native ModelOpt quantizer buffers are dropped.
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.to_q.input_quantizer._amax",
+                "layers.0.self_attn.to_q.weight_quantizer._amax",
+                "layers.0.self_attn.to_q.weight_quantizer._scale",
+                "layers.0.mlp.down_proj.output_quantizer._amax",
+            ]
+        )
+        == []
+    )
+
+    # The FP8 scale sidecars vLLM actually consumes are kept and remapped.
+    assert mapper.apply_list(
+        [
+            "layers.0.self_attn.to_q.weight",
+            "layers.0.self_attn.to_q.weight_scale",
+            "layers.0.self_attn.to_q.input_scale",
+            "layers.0.mlp.down_proj.input_scale",
+        ]
+    ) == [
+        "language_model.model.layers.0.self_attn.q_proj.weight",
+        "language_model.model.layers.0.self_attn.q_proj.weight_scale",
+        "language_model.model.layers.0.self_attn.q_proj.input_scale",
+        "language_model.model.layers.0.mlp.down_proj.input_scale",
+    ]
+
+
 def test_cosmos3_edge_checkpoint_weights_mapper():
     from vllm.model_executor.models.cosmos3_edge import (
         Cosmos3EdgeForConditionalGeneration,
@@ -132,6 +170,7 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
                 "layers.0.self_attn.to_add_out.weight",
                 "layers.0.self_attn.norm_added_q.weight",
                 "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.k_norm_und_for_gen.weight",
                 "layers.0.self_attn.q_proj_moe_gen.weight",
                 "layers.0.mlp_moe_gen.up_proj.weight",
                 "norm_moe_gen.weight",
@@ -145,8 +184,38 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
     )
 
 
+@pytest.mark.cpu_test
+def test_bailing_vl_mapper_handles_module_and_parameter_names():
+    from vllm.model_executor.models.bailing_moe_v3_vl import (
+        BailingMoeV3VLForConditionalGeneration,
+    )
+
+    mapper = BailingMoeV3VLForConditionalGeneration.hf_to_vllm_mapper
+    names = {
+        "model.visual": "visual",
+        "model.visual.blocks.0.attn.qkv.weight": "visual.blocks.0.attn.qkv.weight",
+        "model.linear_proj": "linear_proj",
+        "linear_proj.0": "linear_proj.linear_fc1",
+        "model.linear_proj.0.weight": "linear_proj.linear_fc1.weight",
+        "linear_proj.2": "linear_proj.linear_fc2",
+        "linear_proj.2.weight_scale": "linear_proj.linear_fc2.weight_scale",
+        "model.linear_proj.2.bias": "linear_proj.linear_fc2.bias",
+        "linear_proj.linear_fc1.weight": "linear_proj.linear_fc1.weight",
+        "model.linear_proj.linear_fc2.weight": "linear_proj.linear_fc2.weight",
+        "model.layers.0.attention.q_proj.weight": (
+            "language_model.model.layers.0.self_attn.q_proj.weight"
+        ),
+        "model.layers.0.mlp.experts.3.up_proj.weight": (
+            "language_model.model.layers.0.mlp.experts.3.up_proj.weight"
+        ),
+        "lm_head": "language_model.lm_head",
+        "lm_head.weight": "language_model.lm_head.weight",
+    }
+    assert mapper.apply_list(list(names)) == list(names.values())
+
+
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
-    """Create weights from safetensors checkpoint metadata"""
+    """Create weights from safetensors checkpoint metadata."""
     metadata = try_get_safetensors_metadata(repo)
     weight_names = list(metadata.weight_map.keys())
     with torch.device("meta"):
@@ -154,9 +223,7 @@ def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
 
 
 def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
-    """
-    Create weights from a dummy meta deserialized hf base model with name conversion
-    """
+    """Create weights from a dummy meta-deserialized HF base model, with renaming."""
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
         model = AutoModel.from_config(config)
@@ -164,9 +231,7 @@ def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
 
 
 def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
-    """
-    Create weights from a dummy meta deserialized hf model with name conversion
-    """
+    """Create weights from a dummy meta deserialized hf model with name conversion."""
     model_cls: PreTrainedModel = getattr(transformers, model_arch)
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):

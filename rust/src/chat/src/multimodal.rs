@@ -11,12 +11,12 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
-use itertools::izip;
+use itertools::{Either, izip};
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
@@ -24,6 +24,7 @@ use llm_multimodal::{
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
     VisionProcessorRegistry,
 };
+use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -32,17 +33,20 @@ use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
-use crate::renderer::RenderedPrompt;
+use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
 mod expand;
 mod image;
+mod input;
 mod item;
+mod preprocessed;
 mod tensor;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
+pub use self::input::MultimodalInput;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -52,6 +56,50 @@ pub struct MultimodalModelInfo {
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    limit_mm_per_prompt: MmLimitPerPrompt,
+}
+
+/// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
+///
+/// Modalities absent from the map are unlimited.
+pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
+
+pub use vllm_engine_core_client::protocol::multimodal::MmModality;
+
+/// One modality's limit, in either of the two shapes Python accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "an item count, or an object with an optional `count` field"
+)]
+pub enum MmLimitSpec {
+    /// Legacy form: `"image": 16`
+    Count(usize),
+
+    /// Configurable form:
+    /// `"video": {"count": 1, "num_frames": 32}`
+    Options {
+        /// Absent means unlimited, matching an absent modality.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+
+        /// Preserve Python-owned options for forwarding. Never interpreted
+        /// here: they size the engine's dummy-profiling encoder cache, which
+        /// has no Rust counterpart.
+        #[serde(flatten)]
+        extra: BTreeMap<String, serde_json::Value>,
+    },
+}
+
+impl MmLimitSpec {
+    /// The configured item count, or `None` when this modality is unlimited.
+    pub fn count(&self) -> Option<usize> {
+        match self {
+            Self::Count(count) => Some(*count),
+            Self::Options { count, .. } => *count,
+        }
+    }
 }
 
 /// Model metadata and tokenizer access shared by all multimodal specs.
@@ -108,6 +156,10 @@ struct ResolvedMultimodalSpec {
     modality: Modality,
     field_layouts: EncoderFieldLayouts,
     keep_on_cpu_keys: HashSet<String>,
+    /// Spec-declared wire key for the primary encoder input tensor, when it
+    /// differs from the per-modality default (e.g. `"patches"` for
+    /// DeepSeek-V4.1 images).
+    encoder_input_key: Option<String>,
 }
 
 impl ResolvedMultimodalSpec {
@@ -117,10 +169,14 @@ impl ResolvedMultimodalSpec {
             modality,
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
+            encoder_input_key: raw.encoder_input_key_for(modality),
         }
     }
 
-    fn primary_key(&self) -> &'static str {
+    fn primary_key(&self) -> &str {
+        if let Some(key) = &self.encoder_input_key {
+            return key;
+        }
         match self.modality {
             Modality::Image => image::IMAGE_PRIMARY_KEY,
             Modality::Video => video::VIDEO_PRIMARY_KEY,
@@ -287,6 +343,7 @@ impl MultimodalModelInfo {
         model_type: Option<String>,
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -319,7 +376,12 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        Self::from_loaded(context, preprocessor_config, video_preprocessor_config)
+        Self::from_loaded(
+            context,
+            preprocessor_config,
+            video_preprocessor_config,
+            limit_mm_per_prompt,
+        )
     }
 
     /// Resolve multimodal support from an assembled context and parsed
@@ -328,6 +390,7 @@ impl MultimodalModelInfo {
         context: MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -356,6 +419,7 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            limit_mm_per_prompt,
         }))
     }
 
@@ -485,7 +549,8 @@ pub(crate) async fn finalize_rendered_prompt(
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
-    if !request.has_multimodal() {
+    let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
+    if media_parts.is_empty() {
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
@@ -497,63 +562,92 @@ pub(crate) async fn finalize_rendered_prompt(
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
-    let media_parts = extract_media_parts(request)?;
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
 
-/// Extract media parts from chat messages in message/content order.
-///
-/// Assistant history is skipped because generated assistant blocks are already
-/// represented as text for prompt rendering in this crate.
-fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
-    let mut all_parts = Vec::new();
-    for message in &request.messages {
-        let content = match message {
-            ChatMessage::System { content }
-            | ChatMessage::Developer { content, .. }
-            | ChatMessage::User { content }
-            | ChatMessage::ToolResponse { content, .. } => content,
-            ChatMessage::Assistant { .. } => continue,
-        };
-        let ChatContent::Parts(parts) = content else {
-            continue;
-        };
-        for part in parts {
-            match part {
-                ChatContentPart::Text { .. } => {}
-                ChatContentPart::ImageUrl {
-                    image_url,
-                    detail,
-                    uuid,
-                } => all_parts.push(MediaContentPart::ImageUrl {
-                    url: image_url.clone(),
-                    detail: *detail,
-                    uuid: uuid.clone(),
-                }),
-                ChatContentPart::VideoUrl { video_url, uuid } => {
-                    all_parts.push(MediaContentPart::VideoUrl {
-                        url: video_url.clone(),
-                        uuid: uuid.clone(),
-                    })
+/// Resolve media parts in the placeholder order reported by the renderer.
+fn extract_media_parts(
+    request: &ChatRequest,
+    media_order: Option<&[MediaPartSource]>,
+) -> Result<Vec<MediaContentPart>> {
+    let parts = match media_order {
+        // Resolve exactly the sources selected by the renderer, in placeholder order.
+        Some(media_order) => Either::Left(media_order.iter().map(|source| -> Result<_> {
+            let message = request.messages.get(source.message_index).ok_or_else(|| {
+                multimodal!(
+                    "renderer reported missing chat message {} for multimodal content",
+                    source.message_index
+                )
+            })?;
+            let content = match message {
+                ChatMessage::System { content }
+                | ChatMessage::Developer { content, .. }
+                | ChatMessage::User { content }
+                | ChatMessage::ToolResponse { content, .. } => content,
+                ChatMessage::Assistant { .. } => {
+                    bail_multimodal!("renderer reported multimodal assistant content")
                 }
-                ChatContentPart::InputAudio { data, format, uuid } => {
-                    all_parts.push(MediaContentPart::AudioUrl {
-                        url: input_audio_data_url(data, format.as_deref())?,
-                        uuid: uuid.clone(),
-                    })
-                }
-                ChatContentPart::AudioUrl { audio_url, uuid } => {
-                    all_parts.push(MediaContentPart::AudioUrl {
-                        url: audio_url.clone(),
-                        uuid: uuid.clone(),
-                    })
-                }
+            };
+            let ChatContent::Parts(parts) = content else {
+                bail_multimodal!("renderer reported multimodal content in a text-only chat message")
+            };
+            let part = parts.get(source.content_part_index).ok_or_else(|| {
+                multimodal!(
+                    "renderer reported missing content part {} in chat message {}",
+                    source.content_part_index,
+                    source.message_index
+                )
+            })?;
+            Ok(part)
+        })),
+        // Fall back to all media in request message and content-part order (e.g. Jinja).
+        None => Either::Right(request.messages.iter().flat_map(|message| {
+            let content = match message {
+                ChatMessage::System { content }
+                | ChatMessage::Developer { content, .. }
+                | ChatMessage::User { content }
+                | ChatMessage::ToolResponse { content, .. } => Some(content),
+                ChatMessage::Assistant { .. } => None,
+            };
+            match content {
+                Some(ChatContent::Parts(parts)) => parts.as_slice(),
+                _ => &[],
             }
-        }
-    }
-    Ok(all_parts)
+            .iter()
+            .filter(|part| part.is_multimodal())
+            .map(Ok)
+        })),
+    };
+    parts
+        .map(|part| match part? {
+            ChatContentPart::Text { .. } => {
+                bail_multimodal!("renderer reported a text part as multimodal content")
+            }
+            ChatContentPart::ImageUrl {
+                image_url,
+                detail,
+                uuid,
+            } => Ok(MediaContentPart::ImageUrl {
+                url: image_url.clone(),
+                detail: *detail,
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
+                url: video_url.clone(),
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
+                url: input_audio_data_url(data, format.as_deref())?,
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
+                url: audio_url.clone(),
+                uuid: uuid.clone(),
+            }),
+        })
+        .collect()
 }
 
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
@@ -567,14 +661,93 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     Ok(format!("data:{mime_type};base64,{data}"))
 }
 
+/// The modality a content part counts against, or `None` for plain text.
+///
+/// Embedding inputs share their base modality's budget rather than getting one
+/// of their own, matching Python's `modality.replace("_embeds", "")` in
+/// `vllm/entrypoints/chat_utils.py`.
+fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
+    match part {
+        MediaContentPart::Text { .. } => None,
+        MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageData { .. }
+        | MediaContentPart::ImageEmbeds { .. } => Some(MmModality::Image),
+        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
+            Some(MmModality::Audio)
+        }
+        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
+            Some(MmModality::Video)
+        }
+    }
+}
+
 impl MultimodalModelInfo {
+    /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
+    /// per-modality item count, before any fetch/decode work is spent on them.
+    ///
+    /// Modalities without a configured count are unlimited.
+    fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
+        self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
+    }
+
+    fn validate_modality_limits(
+        &self,
+        modalities: impl IntoIterator<Item = MmModality>,
+    ) -> Result<()> {
+        let mut counts: HashMap<MmModality, usize> = HashMap::new();
+        for modality in modalities {
+            *counts.entry(modality).or_default() += 1;
+        }
+
+        for (modality, count) in counts {
+            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
+            else {
+                continue;
+            };
+            if count > limit {
+                return Err(Error::MmLimitExceeded {
+                    modality: modality.as_str().to_string(),
+                    limit,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate inline storage, batching, and placeholder ranges, then check
+    /// this model's supported modalities and item-count limits.
+    ///
+    /// `prompt_len` must include all expanded multimodal placeholders.
+    pub(crate) fn prepare_preprocessed(
+        &self,
+        mut features: MmFeatures,
+        prompt_len: usize,
+    ) -> Result<MmFeatures> {
+        preprocessed::validate_features(&mut features, prompt_len)?;
+        for feature in &features {
+            let supported = match feature.modality {
+                MmModality::Image => self.image.is_some(),
+                MmModality::Video => self.video.is_some(),
+                MmModality::Audio => self.audio.is_some(),
+            };
+            if !supported {
+                return Err(Error::UnsupportedModality {
+                    modality: feature.modality.as_str().to_owned(),
+                });
+            }
+        }
+        self.validate_modality_limits(features.iter().map(|feature| feature.modality))?;
+        Ok(features)
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
-    async fn prepare_multimodal(
+    pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
@@ -584,8 +757,7 @@ impl MultimodalModelInfo {
         if media_parts_len == 0 {
             return Ok(Vec::new());
         }
-        // TODO: enforce per-modality item-count limits, aligned with the
-        // engine's `--limit-mm-per-prompt` semantics.
+        self.validate_mm_limits(&media_parts)?;
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
@@ -617,7 +789,11 @@ impl MultimodalModelInfo {
             for (item, range) in izip!(media.items, media_ranges) {
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
-                    modality: media.modality.to_string(),
+                    modality: match media.modality {
+                        Modality::Image | Modality::ImageEmbeds => MmModality::Image,
+                        Modality::Video => MmModality::Video,
+                        Modality::Audio => MmModality::Audio,
+                    },
                     identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
                     mm_position: range,
                     mm_hash: Some(item.hash),
@@ -737,6 +913,9 @@ mod tests {
     pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
     pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
+    pub(super) const DEEPSEEK_V41_IMAGE_ID: u32 = 129264;
+    pub(super) const DEEPSEEK_V41_IMAGE_PAD_ID: u32 = 129265;
+
     fn llama4_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
             .with_regular_token("<|image_start|>", LLAMA4_IMAGE_START_ID)
@@ -753,10 +932,11 @@ mod tests {
             .with_regular_token("<|video_pad|>", QWEN3_VIDEO_PAD_ID)
     }
 
-    fn test_info(
+    fn test_info_with_limits(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
             model_id: format!("{model_type}-test"),
@@ -769,9 +949,18 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            limit_mm_per_prompt,
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
+    }
+
+    fn test_info(
+        model_type: &str,
+        config: serde_json::Value,
+        tokenizer: TestTokenizer,
+    ) -> MultimodalModelInfo {
+        test_info_with_limits(model_type, config, tokenizer, HashMap::new())
     }
 
     fn llama4_info() -> MultimodalModelInfo {
@@ -783,16 +972,19 @@ mod tests {
         test_info("llama4", config, llama4_tokenizer())
     }
 
-    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
-        let config = serde_json::json!({
+    fn qwen3_vl_config() -> serde_json::Value {
+        serde_json::json!({
             "model_type": "qwen3_vl",
             "image_token_id": QWEN3_IMAGE_PAD_ID,
             "video_token_id": QWEN3_VIDEO_PAD_ID,
             "vision_start_token_id": 151652,
             "vision_end_token_id": 151653,
             "vision_config": {"patch_size": 16}
-        });
-        test_info("qwen3_vl", config, qwen3_vl_tokenizer())
+        })
+    }
+
+    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
+        test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
     }
 
     #[test]
@@ -837,6 +1029,33 @@ mod tests {
         assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
+    fn deepseek_v41_info() -> MultimodalModelInfo {
+        let config = serde_json::json!({
+            "model_type": "deepseek_v41",
+            "image_token_id": DEEPSEEK_V41_IMAGE_ID,
+        });
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<｜deepseek_image｜>", DEEPSEEK_V41_IMAGE_ID)
+            .with_regular_token("<|place_holder_mm_span_0436|>", DEEPSEEK_V41_IMAGE_PAD_ID);
+        test_info("deepseek_v41", config, tokenizer)
+    }
+
+    #[test]
+    fn deepseek_v41_resolves_image_support_only() {
+        let info = deepseek_v41_info();
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<｜deepseek_image｜>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
+        let image = info.image.as_ref().expect("image support");
+        assert_eq!(image.placeholder.marker_token_id, DEEPSEEK_V41_IMAGE_ID);
+        assert_eq!(image.placeholder.embed_token_id, DEEPSEEK_V41_IMAGE_ID);
+        // The engine's forward kwargs pop `patches` (not `pixel_values`).
+        assert_eq!(image.spec.primary_key(), "patches");
+    }
+
     #[test]
     fn input_audio_uses_connector_data_urls() {
         assert_eq!(
@@ -852,5 +1071,189 @@ mod tests {
             "data:application/octet-stream;base64,CCCC"
         );
         assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+    }
+
+    #[test]
+    fn extract_media_parts_uses_request_order_or_explicit_selection() {
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::user(vec![
+                    ChatContentPart::text("before image"),
+                    ChatContentPart::ImageUrl {
+                        image_url: "data:image/png;base64,image-b".to_string(),
+                        detail: None,
+                        uuid: Some("image-b".to_string()),
+                    },
+                ]),
+                ChatMessage::user(vec![ChatContentPart::ImageUrl {
+                    image_url: "data:image/png;base64,image-a".to_string(),
+                    detail: None,
+                    uuid: Some("image-a".to_string()),
+                }]),
+                ChatMessage::assistant_text("answer"),
+                ChatMessage::user("follow-up"),
+            ],
+            ..ChatRequest::for_test()
+        };
+        let media_order = [
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 0,
+            },
+            MediaPartSource {
+                message_index: 0,
+                content_part_index: 1,
+            },
+        ];
+
+        let selections = [None, Some(&media_order[..]), Some(&[][..])];
+        let uuids = selections.map(|order| {
+            extract_media_parts(&request, order)
+                .unwrap()
+                .into_iter()
+                .map(|part| match part {
+                    MediaContentPart::ImageUrl { uuid, .. } => uuid,
+                    _ => panic!("expected image URL"),
+                })
+                .collect::<Vec<_>>()
+        });
+
+        expect_test::expect![[r#"
+            [
+                [
+                    Some(
+                        "image-b",
+                    ),
+                    Some(
+                        "image-a",
+                    ),
+                ],
+                [
+                    Some(
+                        "image-a",
+                    ),
+                    Some(
+                        "image-b",
+                    ),
+                ],
+                [],
+            ]
+        "#]]
+        .assert_debug_eq(&uuids);
+    }
+
+    fn image_url_part() -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: "https://example.com/image.png".to_string(),
+            detail: None,
+            uuid: None,
+        }
+    }
+
+    fn qwen3_vl_info_with_limits(limit_mm_per_prompt: MmLimitPerPrompt) -> MultimodalModelInfo {
+        test_info_with_limits(
+            "qwen3_vl",
+            qwen3_vl_config(),
+            qwen3_vl_tokenizer(),
+            limit_mm_per_prompt,
+        )
+    }
+
+    #[test]
+    fn validate_mm_limits_ignores_text_parts() {
+        let info = qwen3_vl_info();
+        let parts = vec![
+            MediaContentPart::Text {
+                text: "hello".to_string(),
+            },
+            MediaContentPart::Text {
+                text: "world".to_string(),
+            },
+        ];
+        assert!(info.validate_mm_limits(&parts).is_ok());
+    }
+
+    #[test]
+    fn validate_mm_limits_leaves_unconfigured_modalities_unlimited() {
+        let info = qwen3_vl_info();
+        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+
+        assert!(info.validate_mm_limits(&parts).is_ok());
+    }
+
+    #[test]
+    fn validate_mm_limits_enforces_configured_limit_at_the_boundary() {
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
+        assert!(info.validate_mm_limits(&[image_url_part()]).is_ok());
+
+        let error = info.validate_mm_limits(&[image_url_part(), image_url_part()]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+        // Confirms the HTTP-mapping bug found during implementation stays fixed:
+        // this must map to 400, not 500.
+        assert!(error.is_request_validation_error());
+    }
+
+    #[test]
+    fn validate_mm_limits_counts_image_embeds_against_the_image_limit() {
+        let info =
+            qwen3_vl_info_with_limits(HashMap::from([(MmModality::Image, MmLimitSpec::Count(1))]));
+        let image_embeds_part = MediaContentPart::ImageEmbeds {
+            payload: serde_json::Value::String("AAAA".to_string()),
+            uuid: None,
+        };
+
+        let error = info.validate_mm_limits(&[image_url_part(), image_embeds_part]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+    }
+
+    /// An options object without a `count` carries only profiling keys, which
+    /// say nothing about how many items are allowed.
+    #[test]
+    fn validate_mm_limits_treats_a_count_less_options_object_as_unlimited() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmModality::Image,
+            MmLimitSpec::Options {
+                count: None,
+                extra: BTreeMap::from([("width".to_string(), serde_json::json!(512))]),
+            },
+        )]));
+
+        assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
+    }
+
+    fn parse_limits(json: &str) -> MmLimitPerPrompt {
+        serde_json::from_str(json).expect("limit map should parse")
+    }
+
+    #[test]
+    fn limit_map_parses_both_shapes_python_accepts() {
+        let limits = parse_limits(r#"{"image": 16, "video": {"count": 1, "num_frames": 32}}"#);
+
+        assert_eq!(limits[&MmModality::Image].count(), Some(16));
+        assert_eq!(limits[&MmModality::Video].count(), Some(1));
+        assert_eq!(limits.get(&MmModality::Audio), None);
+    }
+
+    #[test]
+    fn limit_map_rejects_keys_python_does_not_accept() {
+        assert!(serde_json::from_str::<MmLimitPerPrompt>(r#"{"image_embeds": 1}"#).is_err());
+    }
+
+    /// Managed mode forwards this map back to Python as JSON, where
+    /// `BaseDummyOptions.count` is a non-optional `int` under `extra="forbid"`.
+    /// Emitting `"count": null` would make the engine subprocess fail to start.
+    #[test]
+    fn limit_map_round_trips_without_emitting_a_null_count() {
+        let source = r#"{"video":{"num_frames":32}}"#;
+        let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
+
+        assert_eq!(encoded, source);
     }
 }

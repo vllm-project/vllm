@@ -21,8 +21,7 @@ def get_lora_capture_cases(
     lora_config: "LoRAConfig | None",
     compilation_config: "CompilationConfig",
 ) -> list[int]:
-    """
-    Return num_active_loras values for cudagraph capture.
+    """Return num_active_loras values for cudagraph capture.
 
     When cudagraph_specialize_lora=True: powers of 2 up to max_loras, plus
     max_loras+1. When False: [0, max_loras+1]. When LoRA disabled: [0].
@@ -59,8 +58,12 @@ def create_lora_capture_hook(
         return None
 
     def hook(num_active_loras: int, num_reqs: int, num_tokens: int) -> None:
+        # Match InputBatch.make_dummy: distribute the remainder evenly so no
+        # dummy request exceeds ceil(num_tokens / num_reqs) tokens.
         num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled[-1] += num_tokens % num_reqs
+        num_extra = num_tokens % num_reqs
+        if num_extra > 0:
+            num_scheduled[-num_extra:] += 1
         with runner.maybe_select_dummy_loras(
             lora_config, num_scheduled, num_active_loras=num_active_loras
         ):

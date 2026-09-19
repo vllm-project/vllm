@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
@@ -10,7 +11,7 @@ from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -22,7 +23,11 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -50,16 +55,14 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_vision_encoder_info
 
 
 class Mistral3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
@@ -73,9 +76,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
 
 
 class Mistral3PatchMerger(nn.Module):
-    """
-    Learned merging of spatial_merge_size ** 2 patches
-    """
+    """Learned merging of spatial_merge_size ** 2 patches."""
 
     def __init__(
         self, vision_hidden_size: int, spatial_merge_size: int, patch_size: int
@@ -170,12 +171,58 @@ class Mistral3MultiModalProjector(nn.Module):
         return hidden_states
 
 
+class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
+    def __init__(self, hf_config: Mistral3Config, image_size: int) -> None:
+        super().__init__(hf_config)
+        self.image_size = image_size
+
+    def get_image_size(self) -> int:
+        return self.image_size
+
+    def get_patch_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        max_size = self.get_image_size()
+        ratio = max(image_width / max_size, image_height / max_size)
+
+        if ratio > 1:
+            image_width = math.floor(image_width / ratio)
+            image_height = math.floor(image_height / ratio)
+
+        patch_size = self.vision_config.patch_size
+        assert isinstance(self.hf_config, Mistral3Config)
+        spatial_merge_size = self.hf_config.spatial_merge_size
+
+        # The HF processor rounds each dimension up to the vision patch size
+        # before the projector drops incomplete spatial-merge groups. This is
+        # not equivalent to rounding directly to the merged patch size.
+        num_width_patches = (image_width - 1) // patch_size + 1
+        num_height_patches = (image_height - 1) // patch_size + 1
+
+        ncols = num_width_patches // spatial_merge_size
+        nrows = num_height_patches // spatial_merge_size
+        return ncols, nrows
+
+
 class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Mistral3Config:
         return self.ctx.get_hf_config(Mistral3Config)
 
-    def get_vision_encoder_info(self):
-        return get_vision_encoder_info(self.get_hf_config())
+    def get_vision_encoder_info(
+        self,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> PixtralHFEncoderInfo:
+        processor = self.get_hf_processor()
+        size = processor.image_processor.size
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
+        if override_size := merged_kwargs.get("size"):
+            size = size | override_size
+
+        image_size = size["longest_edge"]
+        return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
@@ -201,7 +248,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo]):
+class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -214,51 +261,45 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        pixel_values = processed_outputs.get("pixel_values")
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None:
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
-            image_sizes = processed_outputs["image_sizes"]
+            image_sizes = processed_data["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
 
-            processed_outputs["pixel_values"] = [
+            processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -286,7 +327,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(hf_config)
+        encoder_info = self.info.get_vision_encoder_info(hf_processor_mm_kwargs)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -317,6 +358,7 @@ def _get_num_hidden_layers(hf_config: Mistral3Config) -> int:
 
     Args:
         hf_config: Model config with vision feature layer(s).
+
     """
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -540,9 +582,12 @@ class Mistral3ForConditionalGeneration(
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`Mistral3ImagePixelInputs`][vllm.model_executor.models.mistral3.Mistral3ImagePixelInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -564,9 +609,7 @@ class Mistral3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

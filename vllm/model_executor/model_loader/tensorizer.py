@@ -66,6 +66,7 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
+_TENSORIZER_ENGINE_CLEANUP_GRACE_S = 10.0
 
 
 def is_valid_deserialization_uri(uri: str | None) -> bool:
@@ -402,8 +403,7 @@ class TensorizerArgs:
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        """Tensorizer CLI arguments"""
-
+        """Tensorizer CLI arguments."""
         # Tensorizer options arg group
         group = parser.add_argument_group(
             "tensorizer options",
@@ -592,8 +592,7 @@ def tensorizer_weights_iterator(
 
 
 def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
-    """
-    Infer if the model is a vLLM model by checking the weights for
+    """Infer if the model is a vLLM model by checking the weights for
     a vLLM tensorized marker.
 
     Args:
@@ -602,6 +601,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
     Returns:
         bool: True if the model is a vLLM model, False otherwise.
+
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     deserializer = TensorDeserializer(
@@ -620,7 +620,9 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 
 def serialize_extra_artifacts(
-    tensorizer_args: TensorizerArgs, served_model_name: str | list[str] | None
+    tensorizer_args: TensorizerArgs,
+    served_model_name: str | list[str] | None,
+    revision: str | None = None,
 ) -> None:
     if not isinstance(served_model_name, str):
         raise ValueError(
@@ -631,6 +633,7 @@ def serialize_extra_artifacts(
     with tempfile.TemporaryDirectory() as tmpdir:
         hf_api().snapshot_download(
             served_model_name,
+            revision=revision,
             local_dir=tmpdir,
             ignore_patterns=[
                 "*.pt",
@@ -692,7 +695,11 @@ def serialize_vllm_model(
         serializer.write_module(model)
         serializer.close()
 
-    serialize_extra_artifacts(tensorizer_args, model_config.served_model_name)
+    serialize_extra_artifacts(
+        tensorizer_args,
+        model_config.served_model_name,
+        revision=model_config.revision,
+    )
 
     logger.info("Successfully serialized model to %s", str(output_file))
     return model
@@ -703,7 +710,7 @@ def tensorize_vllm_model(
     tensorizer_config: TensorizerConfig,
     generate_keyfile: bool = True,
 ):
-    """Utility to load a model and then serialize it with Tensorizer
+    """Utility to load a model and then serialize it with Tensorizer.
 
     Intended to be used separately from running a vLLM server since it
     creates its own Engine instance.
@@ -730,15 +737,42 @@ def tensorize_vllm_model(
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine = LLMEngine.from_vllm_config(engine_config)
-    engine.collective_rpc(
-        "save_tensorized_model",
-        kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-    )
+    error: BaseException | None = None
+    try:
+        engine.collective_rpc(
+            "save_tensorized_model",
+            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
+        )
+    except BaseException as operation_error:
+        error = operation_error
+
+    def shutdown_engine_core() -> None:
+        engine.engine_core.shutdown(
+            timeout=(
+                envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+                + _TENSORIZER_ENGINE_CLEANUP_GRACE_S
+            )
+        )
+
+    for name, callback in (
+        ("renderer", engine.renderer.shutdown),
+        ("engine core", shutdown_engine_core),
+    ):
+        try:
+            callback()
+        except BaseException as shutdown_error:
+            logger.exception("Failed to shut down tensorization %s", name)
+            if error is None:
+                error = shutdown_error
+            elif hasattr(error, "add_note"):
+                error.add_note(f"{name} shutdown also failed: {shutdown_error!r}")
+
+    if error is not None:
+        raise error
 
 
 def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
-    """
-    Uses tensorizer to serialize a LoRA adapter. Assumes that the files
+    """Uses tensorizer to serialize a LoRA adapter. Assumes that the files
     needed to load a LoRA adapter are a safetensors-format file called
     adapter_model.safetensors and a json config file called adapter_config.json.
 

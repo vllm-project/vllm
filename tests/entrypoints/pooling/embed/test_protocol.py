@@ -75,6 +75,41 @@ class TestBuildTypedEmbeddingsBinary:
         # 0.0 >= 0 is True, so bit=1 for all => 127 (signed)
         assert result.binary[0] == [127]
 
+    def test_negative_zero_treated_as_positive(self):
+        """Packing follows ``value >= 0``, not the IEEE-754 sign bit.
+
+        ``-0.0 >= 0`` is True, so these bits must be set. An implementation
+        reading the sign bit instead would pack -128 here.
+        """
+        result = build_typed_embeddings([[-0.0] * 8], ["binary"])
+        assert result.binary is not None
+        assert result.binary[0] == [127]
+
+    def test_negative_denormal_treated_as_negative(self):
+        """Sign is decided at float64 precision.
+
+        The smallest float64 denormal underflows to -0.0 in float32, where
+        ``>= 0`` is True; narrowing the comparison would wrongly pack 127.
+        """
+        result = build_typed_embeddings([[-5e-324] * 8], ["binary"])
+        assert result.binary is not None
+        assert result.binary[0] == [-128]
+
+    def test_empty_input(self):
+        result = build_typed_embeddings([], ["binary", "ubinary"])
+        assert result.binary == []
+        assert result.ubinary == []
+
+    @pytest.mark.parametrize("embs", [[0.1] * 8, [[[0.1] * 8] * 2]], ids=["1d", "3d"])
+    def test_non_2d_input_raises(self, embs):
+        """A malformed batch must raise rather than pack along the last axis.
+
+        Packing a 1D or 3D input would silently emit wrongly shaped
+        ``binary``/``ubinary`` values instead of reporting an error.
+        """
+        with pytest.raises(ValueError, match="2D batch"):
+            build_typed_embeddings(embs, ["binary"])
+
     def test_non_multiple_of_8_raises(self):
         embs = [[0.1] * 7]
         with pytest.raises(ValueError, match="multiple of 8"):

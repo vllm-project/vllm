@@ -3,15 +3,19 @@
 
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::serde_as;
 
+use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -112,6 +116,24 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    /// Multi-modal hashes the engine could not find in its receiver cache,
+    /// because the frontend sent `data: None` for an item the engine had
+    /// already evicted. Non-empty makes the output retryable: a frontend that
+    /// keeps a metadata-only shadow of the engine cache drops these entries and
+    /// resends the request with the item data attached.
+    ///
+    /// TODO: always `None` here, since this client has no multi-modal processor
+    /// cache and always sends item data inline. Act on it once the Rust
+    /// frontend grows one.
+    #[serde(default)]
+    pub mm_cache_miss_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<MaybeWireSamplingMask>,
+    /// Per-request speculative-decoding acceptance metrics, set on the final
+    /// output when `--per-request-spec-decode-metrics` is enabled. Opaque here;
+    /// the Rust frontend does not yet surface it in responses.
+    #[serde(default)]
+    pub spec_decode_metrics: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -122,15 +144,15 @@ impl EngineCoreOutput {
 
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         self.new_logprobs = (self.new_logprobs.take())
             .map(|value| value.resolve(frames, "new_logprobs"))
             .transpose()?;
         self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
             .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
+            .transpose()?;
+        self.new_sampling_mask = (self.new_sampling_mask.take())
+            .map(|value| value.resolve(frames, "new_sampling_mask"))
             .transpose()?;
         Ok(())
     }
@@ -140,11 +162,14 @@ impl EngineCoreOutput {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L186-L214>
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 struct WireEngineCoreOutputs {
     #[serde(default)]
     engine_index: u32,
     /// Outputs grouped for this client in the current engine tick.
+    // Match msgspec's append-only schema evolution, including Omni extensions.
+    #[serde_as(deserialize_as = "Vec<AllowTrailingFields>")]
     #[serde(default)]
     outputs: Vec<EngineCoreOutput>,
     #[serde(default)]
@@ -228,10 +253,7 @@ impl From<DpControlOutput> for EngineCoreOutputs {
 impl EngineCoreOutputs {
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         if let Self::RequestBatch(batch) = self {
             for output in &mut batch.outputs {
                 output.resolve_in_place(frames)?;
@@ -347,10 +369,7 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
 
 /// Decode one ordinary or multipart engine-core output message into the strong
 /// typed public protocol shape.
-pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
-where
-    Frame: AsRef<[u8]>,
-{
+pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
     let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
@@ -372,18 +391,9 @@ mod tests {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![42],
-                new_logprobs: None,
-                new_prompt_logprobs_tensors: None,
-                pooling_output: None,
                 finish_reason: Some(EngineCoreFinishReason::Length),
                 stop_reason: Some(StopReason::Text("stop".to_string())),
-                events: None,
-                kv_transfer_params: None,
-                ec_transfer_params: None,
-                trace_headers: None,
-                prefill_stats: None,
-                routed_experts: None,
-                num_nans_in_logits: 0,
+                ..Default::default()
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -400,6 +410,61 @@ mod tests {
         assert_eq!(
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn engine_core_outputs_ignore_appended_fields() {
+        let output = EngineCoreOutput {
+            request_id: "req-1".into(),
+            new_token_ids: vec![42],
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            ..Default::default()
+        };
+        let mut fields = crate::protocol::decode_value(&encode_msgpack(&output).unwrap())
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        // Omni appends multimodal_output, is_segment_finished, and
+        // new_prompt_len_snapshot. Unknown payloads may contain nested values.
+        fields.extend([
+            OpaqueValue::Map(vec![(
+                "audio".into(),
+                OpaqueValue::Array(vec![OpaqueValue::Ext(1, vec![0, 1])]),
+            )]),
+            false.into(),
+            OpaqueValue::Nil,
+        ]);
+        let wire = (0, vec![OpaqueValue::Array(fields); 2]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        // A second output also checks that the first output's tail was consumed.
+        assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
+    }
+
+    #[test]
+    fn engine_core_output_requires_valid_known_fields() {
+        for fields in [
+            vec![],
+            vec!["req-1".into()],
+            vec!["req-1".into(), OpaqueValue::Nil],
+            vec!["req-1".into(), OpaqueValue::Array(vec![]), false.into()],
+        ] {
+            let wire = (0, vec![OpaqueValue::Array(fields)]);
+            let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+            assert!(decode_engine_core_outputs(&frames).is_err());
+        }
+        let wire = (0, vec![("req-1", vec![42_u32])]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        assert_eq!(
+            decoded.as_request_batch().unwrap().outputs,
+            vec![EngineCoreOutput {
+                request_id: "req-1".into(),
+                new_token_ids: vec![42],
+                ..Default::default()
+            }]
         );
     }
 
@@ -437,6 +502,9 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            mm_cache_miss_hashes: None,
+                            new_sampling_mask: None,
+                            spec_decode_metrics: None,
                         },
                     ],
                     scheduler_stats: None,

@@ -15,6 +15,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    KVCacheLayout,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -99,12 +101,12 @@ def test_get_block_size_falls_back_to_cache_config_when_no_kv_cache_config():
     assert block_size == 16
 
 
-# ---- MLA-verifier absorption ------------------------------------------------
+# ---- Packed MLA grouping ----------------------------------------------------
 
 
-def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
-    # HiddenStateCacheSpec subclasses MLAAttentionSpec, so an MLA + sliding-
-    # window MLA verifier absorbs it into the MLA group instead of isolating it.
+def test_hidden_state_group_isolated_from_packed_mla_groups():
+    # HiddenStateCacheSpec subclasses MLAAttentionSpec, but grouping must pull
+    # it out before packing compatible MLA cache specs.
     dt = torch.bfloat16
     spec = {
         "layers.0.mla": MLAAttentionSpec(
@@ -116,11 +118,113 @@ def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
         "cache_only_layers.61": _hidden(64),
     }
     vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
     groups = get_kv_cache_groups(vllm_config, spec)
-    assert not any(isinstance(g.kv_cache_spec, HiddenStateCacheSpec) for g in groups)
+    hidden_group_ids = [
+        i
+        for i, group in enumerate(groups)
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    ]
+    assert len(hidden_group_ids) == 1
     cfg = SimpleNamespace(kv_cache_groups=groups)
-    with pytest.raises(ValueError, match="MLA verifiers are unsupported"):
-        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
+    assert (
+        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == hidden_group_ids[0]
+    )
+
+
+def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
+    # Packed grouping keeps groups with unequal page sizes (blocks are strided
+    # by the widest group), so the hidden group is appended without padding.
+    hidden = _hidden(16)
+    spec = {
+        "layers.0.attn": _full(16),
+        "layers.1.mamba": MambaSpec(
+            block_size=16, shapes=((1024,),), dtypes=(torch.float32,)
+        ),
+        "cache_only_layers.61": hidden,
+    }
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    groups = get_kv_cache_groups(vllm_config, spec)
+    page_sizes = {g.kv_cache_spec.page_size_bytes for g in groups}
+    assert len(page_sizes) > 1, "spec must exercise the packed grouping path"
+    hidden_group_ids = [
+        i
+        for i, group in enumerate(groups)
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    ]
+    assert len(hidden_group_ids) == 1
+    assert groups[hidden_group_ids[0]].kv_cache_spec == hidden
+    cfg = SimpleNamespace(kv_cache_groups=groups)
+    assert (
+        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == hidden_group_ids[0]
+    )
+
+
+# ---- abort-path robustness --------------------------------------------------
+
+
+def _bare_connector() -> ExampleHiddenStatesConnector:
+    """Instance with scheduler-side state but bypassing ``__init__`` (no engine)."""
+    conn = ExampleHiddenStatesConnector.__new__(ExampleHiddenStatesConnector)
+    conn._request_filenames = {}
+    conn._pending_saves = {}
+    conn._lock_fds = {}
+    conn._cache_kv_group_id = 1
+    conn._connector_metadata = None
+    conn._req_copy_events = {}
+    conn._accumulated_finished_req_ids = set()
+    return conn
+
+
+def test_get_finished_count_is_one():
+    # Only TP rank 0 writes, so KVOutputAggregator must expect a single
+    # finished_sending notification per request (not the TP world size).
+    assert _bare_connector().get_finished_count() == 1
+
+
+def test_request_finished_is_noop_for_never_scheduled_request():
+    # A request aborted while still queued never reaches build_connector_meta,
+    # so no filename was recorded. request_finished must not raise KeyError.
+    conn = _bare_connector()
+    request = SimpleNamespace(request_id="cmpl-aborted", kv_transfer_params=None)
+    assert conn.request_finished(request, []) == (False, None)
+
+
+def test_request_finished_all_groups_handles_missing_group():
+    # Guard against indexing a nonexistent per-group block table.
+    conn = _bare_connector()
+    conn._cache_kv_group_id = 2
+    request = SimpleNamespace(request_id="cmpl-aborted", kv_transfer_params=None)
+    assert conn.request_finished_all_groups(request, ([], [])) == (False, None)
+
+
+def test_get_finished_does_not_report_untracked_request():
+    # A never-scheduled aborted request has no copy event. get_finished must not
+    # report it as done_sending, or the scheduler asserts it is still tracked.
+    conn = _bare_connector()
+    assert conn.get_finished({"cmpl-aborted"}) == (None, None)
+    assert conn._accumulated_finished_req_ids == set()
+
+
+def test_get_finished_reports_tracked_completed_request():
+    conn = _bare_connector()
+
+    class _DoneEvent:
+        def query(self) -> bool:
+            return True
+
+    conn._req_copy_events["cmpl-done"] = _DoneEvent()
+    done_sending, done_recving = conn.get_finished({"cmpl-done"})
+    assert done_sending == {"cmpl-done"}
+    assert done_recving is None
