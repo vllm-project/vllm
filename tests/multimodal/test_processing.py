@@ -1420,6 +1420,7 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
         # HF-processing time, one entry per lazy item.
         self.seen_original_bytes = list[bytes]()
         self.fail_hf_processor = False
+        self.hf_calls = 0
 
     def _get_hf_mm_inputs(self, mm_items, hf_kwargs):
         for items in mm_items.values():
@@ -1440,6 +1441,7 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
         images = hf_data.get("images") or []
         if not images:
             return BatchFeature()
+        self.hf_calls += 1
         return BatchFeature({"pixel_values": torch.zeros(len(images), 1)})
 
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
@@ -1453,8 +1455,9 @@ class _LazyTestProcessor(BaseMultiModalProcessor):
 
     def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
         # One placeholder update per image item so the modality is present
-        # in the grouped updates consumed by `_merge_mm_kwargs`.
-        return [PromptInsertion("image", [0], [0])]
+        # in the grouped updates consumed by `_merge_mm_kwargs`. An index
+        # target keeps `apply()` usable without a tokenizer.
+        return [PromptInsertion("image", PromptIndexTargets.start(), [0])]
 
 
 class _CountingDecoder:
@@ -1577,3 +1580,122 @@ def test_lazy_miss_bytes_released_on_hf_processor_error():
 
     assert processor.seen_original_bytes == [b"image-bytes"]
     assert lazy.original_bytes == b""
+
+
+def _lazy_inputs(processor, lazy_items):
+    mm_items = MultiModalDataParser().parse_mm_data({"image": lazy_items})
+    return ProcessorInputs(prompt=[], mm_data_items=mm_items)
+
+
+@pytest.mark.asyncio
+async def test_lazy_phase1_does_not_block_mm_worker():
+    """While request A's decode is in flight, request B's phase 1 must be
+    able to run on the same single-worker executor (i.e. phase 1 submits
+    decodes without joining them)."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    processor = _LazyTestProcessor(with_cache=True)
+    executor = ThreadPoolExecutor(max_workers=1)  # stands in for _mm_executor
+
+    decode_entered = threading.Event()
+    release_decode = threading.Event()
+
+    def gated_decode():
+        decode_entered.set()
+        release_decode.wait(timeout=30)
+        return Image.new("RGB", (4, 4))
+
+    inputs_a = _lazy_inputs(processor, [LazyMedia(gated_decode, b"a-bytes")])
+    inputs_b = _lazy_inputs(
+        processor, [LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")]
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        state_a = await loop.run_in_executor(
+            executor, processor.apply_phase1, inputs_a, TimingContext(enabled=False)
+        )
+        assert len(state_a.decodes) == 1
+        await asyncio.to_thread(decode_entered.wait, 30)
+        assert decode_entered.is_set()
+
+        # B's phase 1 + decode + phase 2 all complete while A's decode is
+        # still blocked: the mm worker is not occupied by A's decode.
+        state_b = await asyncio.wait_for(
+            loop.run_in_executor(
+                executor, processor.apply_phase1, inputs_b, TimingContext(enabled=False)
+            ),
+            timeout=30,
+        )
+        await state_b.wait_decodes_async()
+        result_b = await asyncio.wait_for(
+            loop.run_in_executor(executor, processor.apply_phase2, state_b),
+            timeout=30,
+        )
+        assert not release_decode.is_set()
+        assert result_b["mm_kwargs"]["image"][0] is not None
+
+        release_decode.set()
+        await state_a.wait_decodes_async()
+        result_a = await asyncio.wait_for(
+            loop.run_in_executor(executor, processor.apply_phase2, state_a),
+            timeout=30,
+        )
+        assert result_a["mm_kwargs"]["image"][0] is not None
+    finally:
+        release_decode.set()
+        executor.shutdown(wait=True)
+
+
+def test_lazy_phase2_rederives_miss_to_hit():
+    """If another request caches a miss item between phase 1 and phase 2
+    (A1, B1, B2, A2 interleaving), phase 2 must re-check the cache and skip
+    reprocessing instead of blindly applying the HF processor."""
+    processor = _LazyTestProcessor(with_cache=True)
+    data = b"shared-bytes"
+
+    # A starts first: its phase 1 sees a cache miss and submits the decode.
+    lazy_a = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    inputs_a = _lazy_inputs(processor, [lazy_a])
+    state_a = processor.apply_phase1(inputs_a, TimingContext(enabled=False))
+    state_a.wait_decodes()
+
+    # B's whole apply interleaves between A's phases and caches the content.
+    lazy_b = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    hf_before = processor.hf_calls
+    processor.apply(_lazy_inputs(processor, [lazy_b]), TimingContext(enabled=False))
+    assert processor.hf_calls == hf_before + 1
+
+    # A's phase 2 re-checks the cache, finds the hit, and skips reprocessing.
+    result_a = processor.apply_phase2(state_a)
+    assert processor.hf_calls == hf_before + 1
+    assert result_a["mm_kwargs"]["image"][0] is not None
+
+
+def test_lazy_phase2_handles_hit_eviction():
+    """If a phase-1 hit is evicted before phase 2, phase 2 must fall back to
+    decoding and processing it instead of asserting on a missing cache
+    entry."""
+    processor = _LazyTestProcessor(with_cache=True)
+    data = b"evict-me"
+
+    first = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    _cached_apply(processor, [first])
+    assert processor.hf_calls == 1
+
+    lazy2 = LazyMedia(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    inputs2 = _lazy_inputs(processor, [lazy2])
+    state = processor.apply_phase1(inputs2, TimingContext(enabled=False))
+
+    # Hit in phase 1: nothing to decode, bytes released after hashing.
+    assert not state.decodes
+    assert lazy2.original_bytes == b""
+
+    # The item is evicted between the phases; the decode closure still
+    # holds the bytes, so the phase-2 fallback can process it.
+    processor.cache.clear_cache()  # type: ignore[union-attr]
+    result = processor.apply_phase2(state)
+
+    assert processor.hf_calls == 2
+    assert result["mm_kwargs"]["image"][0] is not None

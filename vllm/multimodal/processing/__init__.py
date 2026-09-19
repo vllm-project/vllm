@@ -6,6 +6,7 @@ from .inputs import ProcessorInputs
 from .processor import (
     BaseMultiModalProcessor,
     EncDecMultiModalProcessor,
+    MultiModalApplyState,
     PromptIndexTargets,
     PromptInsertion,
     PromptReplacement,
@@ -23,6 +24,7 @@ __all__ = [
     "BaseMultiModalProcessor",
     "cached_encode",
     "EncDecMultiModalProcessor",
+    "MultiModalApplyState",
     "PromptUpdate",
     "PromptIndexTargets",
     "PromptUpdateDetails",

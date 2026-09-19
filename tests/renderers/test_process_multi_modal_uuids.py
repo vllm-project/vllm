@@ -245,3 +245,55 @@ def test_validate_mm_uuids_does_not_decode_lazy_media():
     renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-lazy")
 
     assert decoder_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
+    """Two-phase `_process_multimodal_async` must free the single
+    `_mm_executor` worker while a lazy decode is in flight, so a second
+    request's phase 1 can interleave (cross-request decode overlap)."""
+    import asyncio
+    import threading
+
+    from vllm.multimodal.media import LazyMedia
+
+    renderer = _build_renderer()
+    processor = renderer.get_mm_processor()
+    assert processor.supports_two_phase_apply
+
+    tokenizer = renderer.tokenizer
+    prompt = tokenizer.encode("<|vision_start|><|image_pad|><|vision_end|>")
+
+    decode_entered = threading.Event()
+    release_decode = threading.Event()
+
+    def gated_decode():
+        decode_entered.set()
+        release_decode.wait(timeout=60)
+        return stop_pil_image
+
+    try:
+        task_a = asyncio.create_task(
+            renderer._process_multimodal_async(
+                prompt, {"image": [LazyMedia(gated_decode, b"a-bytes")]}, None, None
+            )
+        )
+        await asyncio.to_thread(decode_entered.wait, 60)
+
+        # B runs to completion while A's decode is still blocked; with the
+        # old single-call blocking apply, B would queue behind A on the
+        # single mm worker.
+        result_b = await asyncio.wait_for(
+            renderer._process_multimodal_async(
+                prompt, {"image": [cherry_pil_image]}, None, None
+            ),
+            timeout=60,
+        )
+        assert not release_decode.is_set()
+        assert result_b["mm_kwargs"]["image"][0] is not None
+
+        release_decode.set()
+        result_a = await asyncio.wait_for(task_a, timeout=60)
+        assert result_a["mm_kwargs"]["image"][0] is not None
+    finally:
+        release_decode.set()

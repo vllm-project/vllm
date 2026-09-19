@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -38,7 +38,7 @@ from vllm.multimodal.parse import (
     ProcessorBatchItems,
     parse_mm_uuids,
 )
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, MultiModalApplyState
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
@@ -133,7 +133,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._mm_executor
         )
-        self._process_multimodal_async = make_async(
+        # Blocking fallback for processors whose subclassed apply() (or
+        # _cached_apply_hf_processor) is not phase-aware; see
+        # BaseMultiModalProcessor.supports_two_phase_apply.
+        self._process_multimodal_blocking_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
         self._safe_load_prompt_embeds_async = make_async(
@@ -850,6 +853,61 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
+    def _get_mm_processor(self, skip_mm_cache: bool) -> "BaseMultiModalProcessor":
+        if skip_mm_cache and self._readonly_mm_processor is not None:
+            return self._readonly_mm_processor
+        return self.get_mm_processor()
+
+    def _process_multimodal_phase1(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple["BaseMultiModalProcessor", MultiModalApplyState]:
+        """Parse + hash + cache lookup + decode submission, without joining
+        the decodes; runs on the single-worker `_mm_executor`."""
+        mm_processor = self._get_mm_processor(skip_mm_cache)
+
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+
+        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuid_items = parse_mm_uuids(mm_uuids)
+
+        mm_uuid_items = self._process_mm_uuids(
+            mm_data, mm_data_items, mm_uuid_items, mm_req_id
+        )
+
+        mm_processor_inputs = MMProcessorInputs(
+            prompt,
+            mm_data_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            media_io_kwargs=media_io_kwargs or {},
+        )
+        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        with set_default_torch_num_threads():
+            state = mm_processor.apply_phase1(mm_processor_inputs, mm_timing_ctx)
+        return mm_processor, state
+
+    def _process_multimodal_phase2(
+        self,
+        mm_processor: "BaseMultiModalProcessor",
+        state: MultiModalApplyState,
+    ) -> "MultiModalInput":
+        """HF processing + cache merge; runs on `_mm_executor` after the
+        state's decode futures completed."""
+        with set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply_phase2(state)
+
+        self.update_mm_cache_stats()
+
+        return mm_inputs
+
     def _process_multimodal(
         self,
         prompt: list[int],
@@ -860,10 +918,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
-        if skip_mm_cache and self._readonly_mm_processor is not None:
-            mm_processor = self._readonly_mm_processor
-        else:
-            mm_processor = self.get_mm_processor()
+        mm_processor = self._get_mm_processor(skip_mm_cache)
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
@@ -889,6 +944,51 @@ class BaseRenderer(ABC, Generic[_T]):
         self.update_mm_cache_stats()
 
         return mm_inputs
+
+    async def _process_multimodal_async(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> "MultiModalInput":
+        """Two-phase `_process_multimodal`: the single mm worker runs phase
+        1 (parse/hash/cache lookup/decode submission) and phase 2 (HF
+        processing/cache merge), while the decode futures are awaited here
+        on the event loop, so the worker is never blocked on decoding and
+        can interleave other requests' phases."""
+        mm_processor = self._get_mm_processor(skip_mm_cache)
+
+        if not mm_processor.supports_two_phase_apply:
+            return await self._process_multimodal_blocking_async(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs=media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
+
+        loop = asyncio.get_running_loop()
+        mm_processor, state = await loop.run_in_executor(
+            self._mm_executor,
+            partial(
+                self._process_multimodal_phase1,
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs=media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            ),
+        )
+        await state.wait_decodes_async()
+        return await loop.run_in_executor(
+            self._mm_executor, self._process_multimodal_phase2, mm_processor, state
+        )
 
     def _process_tokens(
         self,
