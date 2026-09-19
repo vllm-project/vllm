@@ -758,6 +758,7 @@ class PCPManager:
         input_batch: InputBatch,
         input_ids: torch.Tensor,
     ) -> None:
+        self.draft_prefill_batch = None
         if input_batch is not self._global_batch or self._local_batch is None:
             return
         local_batch = self._local_batch
