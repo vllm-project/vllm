@@ -110,6 +110,10 @@ class Parser:
         self.model_tokenizer = tokenizer
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
+        # Remember whether THIS request offered tools. The parser itself is
+        # built from the server's --tool-call-parser flag, so its presence
+        # says nothing about the request.
+        self._tools = tools
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
                 tokenizer, *args, model_config=model_config, **kwargs
@@ -617,7 +621,7 @@ class DelegatingParser(Parser):
         return not state.reasoning_ended
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
-        if self._tool_parser is None:
+        if self._tool_parser is None or not self._tools:
             return False
         return state.reasoning_ended
 
