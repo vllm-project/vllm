@@ -775,6 +775,16 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
+    pp_intermediate_tensors_are_sequence_sharded: bool = False
+    """Whether all PP intermediate tensors share a TP-local token layout.
+
+    When True, matching TP ranks send their local tensors directly without
+    TP slicing or all-gather. Hidden states, residuals and auxiliary outputs
+    must all use the same token partition on sending and receiving stages.
+    Set before model loading completes; this describes the PP boundary layout,
+    not whether the model uses sequence parallelism internally.
+    """
+
     make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
     """Called when PP rank > 0 for profiling purposes."""
 
@@ -859,7 +869,8 @@ def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
         return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
-    return isinstance(model, SupportsPP)
+    # The optional boundary layout must not exclude existing structural models.
+    return isinstance(model, _SupportsPPType)
 
 
 def _supports_pp_inspect(model: type[object] | object) -> bool:
