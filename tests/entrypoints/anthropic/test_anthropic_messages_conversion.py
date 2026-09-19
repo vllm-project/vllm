@@ -1413,6 +1413,47 @@ class TestDetectMergeInlineSystem:
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
+    def test_no_template_tokenizer_without_flag_merges(self):
+        """No chat_template and a tokenizer that does not declare inline
+        system support → merge."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(None, object()) is True
+        )
+
+    def test_no_template_tokenizer_declares_inline_support(self):
+        """No chat_template but the tokenizer's encoder renders inline system
+        messages → keep them in place so the prefix stays cacheable."""
+
+        class _EncoderTokenizer:
+            supports_inline_system_messages = True
+
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(
+                None, _EncoderTokenizer()
+            )
+            is False
+        )
+
+    def test_no_template_truthy_non_bool_flag_merges(self):
+        """Only an explicit ``True`` opts out of merging (a mock attribute
+        must not)."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(None, MagicMock())
+            is True
+        )
+
+    def test_deepseek_v4_tokenizer_declares_inline_support(self):
+        """The DeepSeek V4 encoder wrapper opts out of merging."""
+        from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
+
+        class _FakeHfTokenizer:
+            def get_added_vocab(self):
+                return {}
+
+        tok = get_deepseek_v4_tokenizer(_FakeHfTokenizer())
+        assert tok.supports_inline_system_messages is True
+        assert AnthropicServingMessages._detect_merge_inline_system(None, tok) is False
+
 
 # ======================================================================
 # Full (non-streaming) response conversion: messages_full_converter
