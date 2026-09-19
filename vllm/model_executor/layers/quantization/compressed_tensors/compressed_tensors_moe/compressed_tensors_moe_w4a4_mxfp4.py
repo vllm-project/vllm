@@ -201,10 +201,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             pass
         else:
             logger.warning_once(
-                "Your GPU does not have native support for FP4 computation "
-                "but FP4 quantization is being used. Weight-only FP4 "
-                "compression will be used leveraging the Marlin kernel. "
-                "This may degrade performance for compute-heavy workloads."
+                "FP4 quantization is being used, but no native FP4 kernel was selected "
+                "for this layer. Weight-only FP4 compression will be used leveraging "
+                "the Marlin kernel. This may degrade performance for compute-heavy "
+                "workloads."
             )
             prepare_moe_fp4_layer_for_marlin(layer)
 
