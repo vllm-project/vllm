@@ -1245,7 +1245,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         HummingIndexedExperts,
     )
-    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.model_executor.layers.fused_moe.oracle import humming as humming_oracle
     from vllm.utils import humming
 
     top_k, num_experts = 6, 12
@@ -1289,7 +1289,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
                 ),
             )
 
-    humming_utils.convert_to_humming_moe_kernel_format(
+    humming_oracle.convert_to_humming_moe_kernel_format(
         layer,
         weight_schema=weight_schema,
         input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
@@ -1298,7 +1298,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     layer.local_num_experts = layer.global_num_experts = num_experts
     layer.hidden_size = hidden_size
     layer.intermediate_size_per_partition = intermediate_size
-    quant_config = humming_utils.get_humming_moe_quant_config(layer)
+    quant_config = humming_oracle.get_humming_moe_quant_config(layer)
     experts = HummingIndexedExperts(
         moe_config=moe_config,
         quant_config=quant_config,
@@ -1646,6 +1646,80 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         w2=torch.empty(num_experts, 1),
         topk_ids=torch.empty(1, top_k, dtype=torch.long),
     ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA")
+@pytest.mark.parametrize("gemm_type", ["indexed", "grouped"])
+def test_humming_moe_method_matches_torch(monkeypatch, workspace_init, gemm_type):
+    """The oracle must preserve expert weights and routing through the method."""
+    pytest.importorskip("humming")
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.quantization.humming import (
+        HummingLayerQuantizationConfig,
+        HummingMoEMethod,
+    )
+    from vllm.utils import humming
+
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", gemm_type)
+    set_random_seed(42)
+    config = make_dummy_moe_config(
+        num_experts=4, experts_per_token=2, hidden_dim=256, intermediate_size=256
+    )
+    weight_schema = humming.ModeloptNvfp4WeightSchema()
+    quant_config = HummingLayerQuantizationConfig(
+        weight_schema,
+        humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
+    )
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        method = HummingMoEMethod(quant_config, config)
+        layer = torch.nn.Module()
+        layer.moe_config = config
+        layer.params_dtype = torch.bfloat16
+        layer.activation = config.activation
+        layer.global_num_experts = 4
+        layer.expert_map = torch.tensor([2, 0, 3, 1], dtype=torch.int32)
+        layer._expert_routing_tables = lambda: None
+        method.create_weights(layer, 4, 256, 256, torch.bfloat16)
+        for name, param in layer.named_parameters():
+            if name.endswith("_weight"):
+                param.data.copy_(torch.randint(0, 256, param.shape, dtype=torch.uint8))
+            else:
+                param.data.fill_(0.125 if name.endswith("weight_scale_2") else 0.25)
+
+        reference_weights = []
+        for name in ("w13", "w2"):
+            tensors = {
+                k.removeprefix(name + "_"): v
+                for k, v in layer.state_dict().items()
+                if k.startswith(name + "_")
+            }
+            schema, tensors = weight_schema.convert_humming(
+                tensors,
+                shape_n_stacks=[256, 256] if name == "w13" else [256],
+                shape_k_stacks=[256],
+                param_dtype=torch.bfloat16,
+                num_experts=4,
+            )
+            reference_weights.append(schema.dequant_tensors(tensors).to(torch.bfloat16))
+
+        method.process_weights_after_loading(layer)
+        x = torch.randn(17, 256, dtype=torch.bfloat16) * 0.2
+        scores = torch.randn(17, 4)
+        topk_weights, topk_ids = scores.softmax(-1).topk(2)
+        with set_forward_context(None, vllm_config, num_tokens=17):
+            actual = method.apply(
+                layer, x, topk_weights, topk_ids.to(torch.int32), None, None
+            )
+        expected = torch_moe(
+            x,
+            *reference_weights,
+            scores,
+            2,
+            global_num_experts=4,
+            expert_map=layer.expert_map,
+        )
+        torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.05)
 
 
 def test_humming_indexed_writes_supplied_output_buffer():
