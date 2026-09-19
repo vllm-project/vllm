@@ -42,42 +42,37 @@ When new data is passed in, we first check which items are in the cache, and whi
 
 ### Fused Normalisation on the Device
 
-To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we offload the heavy numerical preprocessing from the CPU to the GPU and optimise data movement.
+To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we move the **normalisation and rescaling** steps from the CPU to the device and optimises data movement.
 
 #### Fusing Normalisation and Rescaling on the GPU
 
-Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
+Traditionally, the CPU divides pixel values by 255, then subtracts the mean and divides by the standard deviation. we fuse these steps into a single per-channel affine transform on the device.
 
-`FusedMMInputNorm` implements this via `fused_mm_input_norm_triton`, which applies a single per-channel affine transform:
+`FusedMMInputNorm` dispatches to `fused_mm_input_norm_triton` on CUDA, which applies:
 
-```text
-y = x * weight[c] + bias[c]
-```
-
-equivalent to:
-
-```text
-y = (x * rescale_factor - image_mean[c]) / image_std[c]
-```
+    y = x * weight[c] + bias[c]
+      = (x * rescale_factor - image_mean[c]) / image_std[c]
 
 with:
 
-```text
-weight[c] = rescale_factor / image_std[c]
-bias[c]   = -image_mean[c] / image_std[c]
-```
+    weight[c] = rescale_factor / image_std[c]
+    bias[c]   = -image_mean[c] / image_std[c]
 
-The kernel takes raw pixel values (`uint8`), performs one fused multiply-add per channel, and folds the rescale factor into `weight`—no separate divide-by-255 step.
+The kernel accepts `uint8`, `float16`, `bfloat16` and `float32` inputs. The `uint8` path is the primary fast path: raw bytes travel to the device unprocessed, and the rescale factor is folded into `weight` — no separate divide-by-255 step. Compute is always done in fp32 inside the kernel.
 
-#### Optimized Data Path for Fused Normalisation
+#### Optimized Data Path
 
-The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_mm_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
+    Before: CPU decode → CPU resize → CPU rescale (÷255) → CPU normalize
+            → cast to bf16 → PCIe (2 B/elem) → GPU
 
-Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_mm_input_norm_triton` (fp32 compute) → `visual_dtype` (bf16) output.
+    After:  CPU decode → CPU resize → uint8 pixel_values
+            → PCIe (1 B/elem) → GPU fused affine (fp32 compute) → bf16
+
+The transfer path **Entrypoint (API server / offline LLM) → Engine Core(scheduler + workers) → Device Memory** stays in `uint8`. On the device,`fused_mm_input_norm_triton` computes in fp32 internally and writes the requested `visual_dtype` (a per-call argument to `forward_*`, commonly `bf16`) directly, without materialising a global fp32 intermediate.
 
 #### Toggle: `mm_device_do_normalize`
 
-This GPU‑side fusion is controlled by a config flag called **`mm_device_do_normalize`**.
+GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 - When `True`, normalisation and rescaling are done on the GPU using the `FusedMMInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
 - The flag is **enabled by default** for all models that support it.

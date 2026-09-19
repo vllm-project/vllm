@@ -187,13 +187,17 @@ class FusedMMInputNorm(CustomOp):
     Equivalent to: output = (input * rescale_factor - mean) / std
 
     Dtype semantics:
-    ``inputs_dtype`` — ``uint8`` when ``mm_device_do_normalize`` is enabled
-    (raw bytes travel to the device unprocessed); equals ``outputs_dtype``
-    otherwise.
-    ``compute`` (the constructor's ``dtype``) — precision used to store and
-    apply ``weight``/``bias``; normally ``torch.float32``.
-    ``outputs_dtype`` (a.k.a. ``visual_dtype``) — output tensor dtype only;
-    independent of ``compute`` (e.g. compute fp32, emit bf16).
+
+    * Input dtype — the dtype of the ``grid_thw`` argument to ``forward_*``.
+      It is ``uint8`` when ``mm_device_do_normalize`` is enabled (raw bytes
+      travel to the device unprocessed) and equals ``visual_dtype``
+      otherwise.
+    * Compute dtype — exposed via the ``compute_dtype`` property and set by
+      the constructor's ``dtype`` argument. It is the precision used to
+      store and apply ``weight`` / ``bias``; normally ``torch.float32``.
+    * Output dtype — the ``visual_dtype`` argument of ``forward_*``. It
+      controls the output tensor dtype only and is independent of the
+      compute dtype (e.g. compute fp32, emit bf16).
 
     Platform dispatch:
 
@@ -231,17 +235,10 @@ class FusedMMInputNorm(CustomOp):
         # so torch.allclose does not introduce a device synchronization while
         # the model is being initialized. The buffers registered below are then
         # moved to the caller's default device.
-        inv_rescale = 1.0 / rescale_factor
-        image_mean_cpu = (
-            torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu")
-            * inv_rescale
-        )
-        image_std_cpu = (
-            torch.tensor(image_std, dtype=self.compute_dtype, device="cpu")
-            * inv_rescale
-        )
-        weight_cpu = 1.0 / image_std_cpu
-        bias_cpu = -image_mean_cpu / image_std_cpu
+        mean_cpu = torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu")
+        std_cpu = torch.tensor(image_std, dtype=self.compute_dtype, device="cpu")
+        weight_cpu = rescale_factor / std_cpu
+        bias_cpu = -mean_cpu / std_cpu
         self.is_identity = bool(
             torch.allclose(weight_cpu, torch.ones_like(weight_cpu))
             and torch.allclose(bias_cpu, torch.zeros_like(bias_cpu))
@@ -289,14 +286,7 @@ class FusedMMInputNorm(CustomOp):
     ) -> tuple[bool, bool, list[float], list[float], float]:
         """Load ``(do_rescale, do_normalize, image_mean, image_std,
         rescale_factor)`` from the processor config, falling back to the image
-        processor object.
-
-        Returns concrete, non-``None`` values: ``image_mean`` / ``image_std``
-        are ``list[float]`` and ``rescale_factor`` is ``float``. Explicit
-        per-variable narrowing is used rather than ``assert None not in [...]``
-        because mypy cannot narrow individual variables from a container-level
-        ``in`` check.
-        """
+        processor object."""
         model = model_config.model
         revision = model_config.revision
 
@@ -309,13 +299,16 @@ class FusedMMInputNorm(CustomOp):
         rescale_factor: Any = config.get("rescale_factor", None)
 
         # Fallback to the image_processor object if any parameter is missing.
-        if None in [
-            do_rescale,
-            do_normalize,
-            image_mean,
-            image_std,
-            rescale_factor,
-        ]:
+        if any(
+            v is None
+            for v in (
+                do_rescale,
+                do_normalize,
+                image_mean,
+                image_std,
+                rescale_factor,
+            )
+        ):
             image_processor = get_processor(model, revision=revision).image_processor
 
             if do_rescale is None:
@@ -333,8 +326,9 @@ class FusedMMInputNorm(CustomOp):
         if not do_rescale:
             rescale_factor = 1.0
         if not do_normalize:
-            image_mean = [0.0, 0.0, 0.0]
-            image_std = [1.0, 1.0, 1.0]
+            num_channels = 3
+            image_mean = [0.0] * num_channels
+            image_std = [1.0] * num_channels
 
         # Explicit per-variable narrowing: mypy cannot narrow ``Any | None``
         # via ``assert None not in [...]``, but it *can* narrow each variable
@@ -395,12 +389,18 @@ class FusedMMInputNorm(CustomOp):
         out: torch.Tensor | None,
     ) -> tuple[int, int, torch.Tensor | None]:
         """Validate ``out`` (if provided) and return ``(patches, size, out_view)``."""
-        assert grid_thw.ndim == 2
+        assert grid_thw.ndim == 2, (
+            f"grid_thw must be 2D (patches, size), got {grid_thw.dim()}D "
+            f"with shape {tuple(grid_thw.shape)}"
+        )
         patches, size = grid_thw.shape
 
         out_view: torch.Tensor | None = None
         if out is not None:
-            assert out.dim() == 2, f"out must be 2D, got {out.dim()}D"
+            assert out.dim() == 2, (
+                f"out must be 2D (patches, size), got {out.dim()}D "
+                f"with shape {tuple(out.shape)}"
+            )
             assert out.shape[0] >= patches, (
                 f"out.shape[0]={out.shape[0]} < grid_thw.shape[0]={patches}"
             )
@@ -483,7 +483,7 @@ class FusedMMInputNorm(CustomOp):
             not HAS_TRITON
             or grid_thw.dtype not in _SUPPORTED_INPUTS
             or visual_dtype not in _SUPPORTED_OUTPUTS
-            or self.weight.dtype is not torch.float32
+            or self.weight.dtype != torch.float32
             or not self.weight.is_contiguous()
             or not self.bias.is_contiguous()
         ):

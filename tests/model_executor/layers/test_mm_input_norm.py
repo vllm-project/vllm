@@ -62,20 +62,35 @@ _RGB_RESCALE = 1.0 / 255.0
 @requires_accelerator
 class TestFusedMMInputNormModule:
     @pytest.mark.parametrize("num_patches", [1, 37, 70000])
-    def test_matches_reference(self, num_patches: int):
+    @pytest.mark.parametrize(
+        "in_dtype",
+        [torch.bfloat16, torch.uint8],
+        ids=["bfloat16", "uint8"],
+    )
+    def test_matches_reference(self, num_patches: int, in_dtype: torch.dtype):
         """Including num_patches above the old cuDNN batch-norm grid limit
-        (~65535), which used to raise CUDNN_STATUS_INTERNAL_ERROR."""
+        (~65535), which used to raise CUDNN_STATUS_INTERNAL_ERROR.
+        """
         channel = 3
         patch_size = 14 * 14
 
         set_random_seed(0)
-        pixel_values = torch.randint(
-            0,
-            256,
-            (num_patches, channel * patch_size),
-            dtype=torch.float32,
-            device=_DEVICE,
-        )
+        if in_dtype == torch.uint8:
+            pixel_values = torch.randint(
+                0,
+                256,
+                (num_patches, channel * patch_size),
+                dtype=torch.uint8,
+                device=_DEVICE,
+            )
+        else:
+            pixel_values = torch.randint(
+                0,
+                256,
+                (num_patches, channel * patch_size),
+                dtype=torch.float32,
+                device=_DEVICE,
+            )
 
         norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
@@ -586,10 +601,9 @@ class TestFusedMMInputNormConstruction:
         assert norm.weight.shape == (channel,)
         assert norm.bias.shape == (channel,)
 
-        inv_rescale = 1.0 / _RGB_RESCALE
-        mean = torch.tensor(_RGB_MEAN, dtype=torch.float32) * inv_rescale
-        std = torch.tensor(_RGB_STD, dtype=torch.float32) * inv_rescale
-        torch.testing.assert_close(norm.weight, 1.0 / std)
+        mean = torch.tensor(_RGB_MEAN, dtype=torch.float32)
+        std = torch.tensor(_RGB_STD, dtype=torch.float32)
+        torch.testing.assert_close(norm.weight, _RGB_RESCALE / std)
         torch.testing.assert_close(norm.bias, -mean / std)
 
     @pytest.mark.parametrize(
