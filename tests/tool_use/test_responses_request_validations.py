@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
@@ -36,6 +37,13 @@ def test_responses_request_with_no_tools():
         {"input": "Hello", "model": "test-model", "tools": []}
     )
     assert request.tool_choice == "none"
+
+
+def test_responses_request_rejects_scalar_tools():
+    with pytest.raises(ValidationError, match="Input should be a valid list"):
+        ResponsesRequest.model_validate(
+            {"input": "Hello", "model": "test-model", "tools": 3}
+        )
 
 
 def test_responses_request_no_tools_tool_choice_none():
