@@ -25,7 +25,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingParamsUpdate,
 )
-from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -119,8 +118,7 @@ class BertPooler(SequencePooler):
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
-            projector=lambda x: self.dense(x),
-            activation=LambdaPoolerActivation(self.act_fn),
+            projector=lambda x: self.act_fn(self.dense(x)),
         )
 
 
