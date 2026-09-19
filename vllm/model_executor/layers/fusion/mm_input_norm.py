@@ -93,13 +93,6 @@ def fused_mm_input_norm_triton(
 ):
     """Fused per-channel affine transform for normalisation.
 
-    Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
-    Equivalent to::
-
-        outputs[:N] = (inputs * weight.view(1, C, 1) + bias.view(1, C, 1)).to(
-            outputs.dtype
-        )
-
     Args:
         inputs: Input tensor, shape ``(N, C, L)``. Must be contiguous; the
             caller is expected to materialize a contiguous copy beforehand.
@@ -242,9 +235,9 @@ class FusedMMInputNorm(CustomOp):
         # moved to the caller's default device.
         inv_rescale = 1.0 / rescale_factor
         image_mean_cpu = (
-            torch.tensor(image_mean, dtype=dtype, device="cpu") * inv_rescale
+            torch.tensor(image_mean, dtype=self.compute_dtype, device="cpu") * inv_rescale
         )
-        image_std_cpu = torch.tensor(image_std, dtype=dtype, device="cpu") * inv_rescale
+        image_std_cpu = torch.tensor(image_std, dtype=self.compute_dtype, device="cpu") * inv_rescale
         weight_cpu = 1.0 / image_std_cpu
         bias_cpu = -image_mean_cpu / image_std_cpu
         self.is_identity = bool(
@@ -260,7 +253,7 @@ class FusedMMInputNorm(CustomOp):
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
 
-        if not self.is_identity and dtype != torch.float32:
+        if not self.is_identity and self.compute_dtype != torch.float32:
             logger.warning_once(
                 "FusedMMInputNorm is initialized with compute dtype=%s, which "
                 "is not torch.float32. The per-channel weight/bias are stored "
@@ -268,7 +261,7 @@ class FusedMMInputNorm(CustomOp):
                 "precision loss during rescale + normalise. Recommend "
                 "dtype=torch.float32 for computation; use visual_dtype in "
                 "forward() to select the output tensor dtype.",
-                dtype,
+                self.compute_dtype,
             )
 
     @property
