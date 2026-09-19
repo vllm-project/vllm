@@ -4,6 +4,7 @@
 from argparse import ArgumentError
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
@@ -106,6 +107,7 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
 
 
+<<<<<<< HEAD
 def test_data_parallel_start_rank_zero_infers_hybrid_lb():
     """An explicit --data-parallel-start-rank 0 must be treated the same as
     any other explicit start rank when inferring hybrid LB mode, not as
@@ -121,3 +123,24 @@ def test_data_parallel_start_rank_zero_infers_hybrid_lb():
 
     assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
     assert vllm_config.parallel_config.data_parallel_rank == 0
+=======
+def test_prefix_cache_hit_rate_window_from_cli():
+    """CLI flag --prefix-cache-hit-rate-window propagates to ObservabilityConfig."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Default value is 1000 (backward compatible)
+    args = parser.parse_args([])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.prefix_cache_hit_rate_window == 1000
+
+    # Custom value propagates correctly end-to-end
+    args = parser.parse_args(["--prefix-cache-hit-rate-window", "500"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.prefix_cache_hit_rate_window == 500
+
+    # Invalid value (zero) is rejected by Pydantic Field(gt=0)
+    parser.exit_on_error = False
+    with pytest.raises(ValidationError):
+        args = parser.parse_args(["--prefix-cache-hit-rate-window", "0"])
+        EngineArgs.from_cli_args(args=args).create_engine_config()
+>>>>>>> a3a6eb77c (observability: make prefix cache hit-rate window configurable)
