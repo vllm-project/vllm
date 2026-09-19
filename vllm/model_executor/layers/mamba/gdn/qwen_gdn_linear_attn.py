@@ -914,7 +914,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
         if use_fused_gdn_decode:
-            core_attn_out = torch.zeros(
+            # Padding slots are guaranteed to be cleared to avoid NaN
+            # Either with .zero_() or inlined within the GDN kernel 
+            core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
@@ -1742,7 +1744,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b=b[:num_actual_tokens],
             a=a[:num_actual_tokens],
             output_gate=output_gate[:num_actual_tokens],
-            core_attn_out=core_attn_out[:num_actual_tokens],
+            core_attn_out=core_attn_out,
             attn_metadata=attn_metadata,
         )
 
@@ -1794,6 +1796,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if isinstance(attn_metadata_raw, dict):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
+            core_attn_out.zero_()
             self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
             return
 
@@ -1878,6 +1881,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if isinstance(attn_metadata_raw, dict):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
+            core_attn_out.zero_()
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
@@ -1895,6 +1899,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 attn_metadata=attn_metadata,
             )
             return
+        # Prefill, mixed batches and decode fallbacks retain zeroed padding.
+        # Specialized MTP decode kernel will zero the padding directly.
+        core_attn_out.zero_()
         self._forward_core(
             mixed_qkv=mixed_qkv,
             b=b.contiguous(),

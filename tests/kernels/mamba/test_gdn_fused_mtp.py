@@ -252,6 +252,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("padding_tokens", [0, 3])
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
@@ -259,6 +260,7 @@ def test_fused_model_path_matches_reference(
     draft_tokens: list[int],
     expected_fused_calls: int,
     output_gate_activation: str,
+    padding_tokens: int,
 ) -> None:
     """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
@@ -316,7 +318,8 @@ def test_fused_model_path_matches_reference(
         CONV_DIM, 1, CONV_KERNEL, dtype=torch.bfloat16, device=device
     )
     norm_weight = torch.randn(V, dtype=torch.float32, device=device)
-    num_tokens = batch.compute_num_tokens()
+    num_actual_tokens = batch.compute_num_tokens()
+    num_tokens = num_actual_tokens + padding_tokens
     mixed_qkv = 0.1 * torch.randn(
         num_tokens, CONV_DIM, dtype=torch.bfloat16, device=device
     )
@@ -362,7 +365,7 @@ def test_fused_model_path_matches_reference(
         output_gate_activation,
     )
     context.no_compile_layers = {PREFIX: fused_layer}
-    fused_out = torch.zeros_like(output_gate)
+    fused_out = torch.full_like(output_gate, float("nan"))
     fused_op = qwen_gdn_linear_attn.ops.fused_gdn_decode_post_conv_mtp
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),
@@ -380,6 +383,12 @@ def test_fused_model_path_matches_reference(
         )
 
     assert fused_mock.call_count == expected_fused_calls
+    torch.testing.assert_close(
+        fused_out[num_actual_tokens:],
+        torch.zeros_like(fused_out[num_actual_tokens:]),
+        atol=0,
+        rtol=0,
+    )
     torch.testing.assert_close(
         fused_layer.kv_cache[0], reference_layer.kv_cache[0], atol=0, rtol=0
     )

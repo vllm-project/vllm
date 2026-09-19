@@ -268,6 +268,7 @@ def test_fused_post_conv_l0():
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("padding_tokens", [0, 3])
 @torch.inference_mode()
 def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     head_ratio: int,
@@ -276,7 +277,9 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     state_dtype: torch.dtype,
     norm_dtype: torch.dtype,
     output_gate_activation: str,
+    padding_tokens: int,
 ) -> None:
+    """Live outputs match the reference and padding is zero."""
     if torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
     if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
@@ -361,6 +364,14 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
             norm_before_gate=True,
             activation=output_gate_activation,
         )
+        output_storage = torch.full(
+            (num_tokens + padding_tokens + 2, HV, V),
+            17.0,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        out = output_storage[1:-1]
+        out.fill_(float("nan"))
         actual = ops.fused_gdn_decode_post_conv_mtp(
             mixed_qkv=mixed_qkv,
             a=a,
@@ -373,13 +384,18 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
             state=state_actual,
             output_gate=output_gate,
             norm_weight=norm_weight,
-            out=torch.empty_like(output_gate),
+            out=out,
             scale=scale,
             norm_eps=eps,
             output_gate_activation=output_gate_activation,
         )
 
-        output_error = (actual.float() - expected.float()).norm()
+        torch.testing.assert_close(
+            actual[num_tokens:], torch.zeros_like(actual[num_tokens:]), atol=0, rtol=0
+        )
+        assert torch.all(output_storage[0] == 17)
+        assert torch.all(output_storage[-1] == 17)
+        output_error = (actual[:num_tokens].float() - expected.float()).norm()
         output_relative_l2 = output_error / expected.float().norm().clamp_min(1e-20)
         assert output_relative_l2 < 5e-4, (
             f"MTP output relative L2 mismatch at step {step}: "
