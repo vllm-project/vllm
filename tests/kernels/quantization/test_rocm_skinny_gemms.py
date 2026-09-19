@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx12x, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -336,7 +336,70 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     ref_out = torch.matmul(A, B.t())
     out = ops.LLMM1(B, A, rows_per_block)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("rows_per_block", [4, 8, 16])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx12x(), reason="only for RDNA4 (gfx12)")
+@torch.inference_mode()
+def test_rocm_llmm1_rdna4_row_write_regression(rows_per_block, dtype):
+    # All output rows are correctly written when M spans multiple half2-packed
+    # groups (rows_per_block >= 4, m = rows_per_block * 4). k is small to keep
+    # num_warps within THREADS_PER_ROW_GROUP.
+    torch.manual_seed(0)
+    m = rows_per_block * 4
+    k = 128
+    A = torch.rand(1, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
+
+    ref_out = torch.matmul(A, B.t())
+    out = ops.LLMM1(B, A, rows_per_block)
+
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("k", [4096, 8192])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx12x(), reason="only for RDNA4 (gfx12)")
+@torch.inference_mode()
+def test_rocm_llmm1_rdna4_reduction_regression(k, dtype):
+    # Cross-warp reduction accumulates all partial sums when num_warps exceeds
+    # THREADS_PER_ROW_GROUP. rows_per_block=2 keeps THREADS_PER_ROW_GROUP small
+    # so the threshold is reached at the tested K values.
+    torch.manual_seed(0)
+    rows_per_block = 2
+    m = rows_per_block * 4
+    A = torch.rand(1, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
+
+    ref_out = torch.matmul(A, B.t())
+    out = ops.LLMM1(B, A, rows_per_block)
+
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_llmm1_checks_n_equals_1():
+    A = torch.rand(2, 64, dtype=torch.float16, device="cuda")
+    B = torch.rand(128, 64, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="Row number of activation tensor must be 1"):
+        ops.LLMM1(B, A, 4)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_llmm1_checks_k_mismatch():
+    A = torch.rand(1, 64, dtype=torch.float16, device="cuda")
+    B = torch.rand(128, 32, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="K dimension mismatch"):
+        ops.LLMM1(B, A, 4)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
