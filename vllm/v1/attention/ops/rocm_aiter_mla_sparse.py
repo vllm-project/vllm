@@ -1567,6 +1567,73 @@ def _inverse_rope_gptj_kernel(
     tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
 
 
+@triton.jit
+def _inverse_rope_gptj_tiled_kernel(
+    x,
+    out,
+    positions,
+    cache,
+    stride_t,
+    stride_h,
+    out_stride_t,
+    out_stride_h,
+    cache_stride,
+    TOKENS: tl.constexpr,
+    HEADS: tl.constexpr,
+):
+    row = tl.program_id(0) * 8 + tl.arange(0, 8)
+    token = row // HEADS
+    head = row % HEADS
+    valid = token < TOKENS
+    src = token * stride_t + head * stride_h
+    dst = token * out_stride_t + head * out_stride_h
+
+    cols = tl.arange(0, 512)
+    nope_mask = valid[:, None] & (cols[None, :] < 448)
+    values = tl.load(x + src[:, None] + cols[None, :], nope_mask, other=0)
+    tl.store(
+        out + dst[:, None] + cols[None, :],
+        values.to(tl.bfloat16),
+        nope_mask,
+    )
+
+    pos = tl.load(positions + token, valid, other=0).to(tl.int64)
+    pair = tl.arange(0, 32)
+    rope_mask = valid[:, None] & (pair[None, :] < 32)
+    even = tl.load(
+        x + src[:, None] + 448 + 2 * pair[None, :],
+        rope_mask,
+        other=0,
+    ).to(tl.float32)
+    odd = tl.load(
+        x + src[:, None] + 448 + 2 * pair[None, :] + 1,
+        rope_mask,
+        other=0,
+    ).to(tl.float32)
+    cos = tl.load(
+        cache + pos[:, None] * cache_stride + pair[None, :],
+        rope_mask,
+        other=0,
+    )
+    sin = tl.load(
+        cache + pos[:, None] * cache_stride + 32 + pair[None, :],
+        rope_mask,
+        other=0,
+    )
+    out_even = even * cos + odd * sin
+    out_odd = odd * cos - even * sin
+    tl.store(
+        out + dst[:, None] + 448 + 2 * pair[None, :],
+        out_even.to(tl.bfloat16),
+        rope_mask,
+    )
+    tl.store(
+        out + dst[:, None] + 448 + 2 * pair[None, :] + 1,
+        out_odd.to(tl.bfloat16),
+        rope_mask,
+    )
+
+
 def _fused_inverse_rope_gptj(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -1589,6 +1656,30 @@ def _fused_inverse_rope_gptj(
         (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
     )
     if num_tokens == 0:
+        return out
+    if (
+        _ON_GFX950
+        and num_tokens >= 256
+        and num_heads == 64
+        and head_dim == 512
+        and rope_head_dim == 64
+        and o.dtype == torch.bfloat16
+        and cos_sin_cache.dtype == torch.float32
+    ):
+        _inverse_rope_gptj_tiled_kernel[(triton.cdiv(num_tokens * num_heads, 8),)](
+            o,
+            out,
+            positions,
+            cos_sin_cache,
+            o.stride(0),
+            o.stride(1),
+            out.stride(0),
+            out.stride(1),
+            cos_sin_cache.stride(0),
+            TOKENS=num_tokens,
+            HEADS=num_heads,
+            num_warps=4,
+        )
         return out
     _inverse_rope_gptj_kernel[(num_tokens, num_heads)](
         o,
