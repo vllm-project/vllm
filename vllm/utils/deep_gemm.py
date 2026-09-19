@@ -64,7 +64,7 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def init_oracle_cache(cls) -> None:
-        """Initialize the oracle decision and store it in the class cache"""
+        """Initialize the oracle decision and store it in the class cache."""
         cached = getattr(cls, "_oracle_cache", None)
         if cached is not None:
             return
@@ -164,6 +164,7 @@ _get_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_paged_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _mega_mhc_impl: Callable[..., Any] | None = None
+_bf16_mega_gate_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
@@ -240,6 +241,7 @@ def _lazy_init() -> None:
     global _get_sparse_mqa_logits_metadata_impl
     global _get_paged_sparse_mqa_logits_metadata_impl
     global _tf32_hc_prenorm_gemm_impl, _mega_mhc_impl
+    global _bf16_mega_gate_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
@@ -260,6 +262,7 @@ def _lazy_init() -> None:
         or _get_paged_mqa_logits_metadata_impl is not None
         or _tf32_hc_prenorm_gemm_impl is not None
         or _mega_mhc_impl is not None
+        or _bf16_mega_gate_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _pack_ue8m0_to_int_impl is not None
@@ -315,6 +318,7 @@ def _lazy_init() -> None:
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
     _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
+    _bf16_mega_gate_impl = getattr(_dg, "bf16_mega_gate", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
@@ -426,7 +430,7 @@ def mk_alignment_scope(value: int):
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor."""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()
@@ -480,6 +484,55 @@ def cublaslt_gemm_nt(*args, **kwargs):
     if _cublaslt_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
     return _cublaslt_gemm_nt_impl(*args, **kwargs)
+
+
+def bf16_mega_gate(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    num_topk: int,
+    *,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    ep_rank: int,
+    bias: torch.Tensor | None = None,
+    image_bias: torch.Tensor | None = None,
+    image_token_mask: torch.Tensor | None = None,
+    fix_routing_mask: torch.Tensor | None = None,
+    unmapped_topk_idx: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run DeepGEMM Mega Gate.
+
+    The output order follows vLLM's router contract: weights, then indices.
+    Passing PyTorch-owned outputs to DeepGEMM makes their storage part of CUDA
+    graph capture.
+    """
+    _lazy_init()
+    if _bf16_mega_gate_impl is None:
+        raise RuntimeError(
+            "DeepGEMM MegaMoE requires a DeepGEMM build with bf16_mega_gate."
+        )
+
+    topk_idx = torch.empty((x.shape[0], num_topk), dtype=torch.int64, device=x.device)
+    topk_weights = torch.empty(
+        (x.shape[0], num_topk), dtype=torch.float32, device=x.device
+    )
+    _bf16_mega_gate_impl(
+        x,
+        weight,
+        num_topk,
+        use_shared_as_routed=False,
+        num_shared_experts=0,
+        routed_scaling_factor=routed_scaling_factor,
+        ep_rank=ep_rank,
+        scoring_func=scoring_func,
+        bias=bias,
+        image_bias=image_bias,
+        image_token_mask=image_token_mask,
+        fix_routing_mask=fix_routing_mask,
+        unmapped_topk_idx=unmapped_topk_idx,
+        out=(topk_idx, topk_weights),
+    )
+    return topk_weights, topk_idx
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -568,6 +621,7 @@ def fp8_fp4_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
@@ -623,6 +677,7 @@ def get_paged_mqa_logits_metadata(
     Returns:
         Tensor of shape [slots + 1, 2] consumed by `fp8_fp4_paged_mqa_logits`
         to schedule work across SMs.
+
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
@@ -674,6 +729,7 @@ def fp8_fp4_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
@@ -726,8 +782,10 @@ def get_sparse_mqa_logits_metadata(
     need a host-side sync to pick one.
 
     Args:
-        cu_seqlen_ks/cu_seqlen_ke: Per-row K range bounds in the packed KV
+        cu_seqlen_ks: Per-row K range start bounds in the packed KV
             workspace, shape [num_q_tokens], dtype int32.
+        cu_seqlen_ke: Per-row K range end bounds in the packed KV workspace,
+            shape [num_q_tokens], dtype int32.
         num_kv_tokens: Total KV tokens in the packed workspace.
         sparse_kv_block_indices: Per-row candidate block ids, shape
             [num_q_tokens, num_max_sparse_blocks], dtype int32. Each row's
@@ -738,6 +796,7 @@ def get_sparse_mqa_logits_metadata(
         qk_dtype: dtype of the packed Q values (``torch.int8`` for MXFP4,
             ``torch.float8_e4m3fn`` for FP8).
         sparse_block_kv: Tokens per sparse block, 8 or 16.
+
     """
     _lazy_init()
     if _get_sparse_mqa_logits_metadata_impl is None:
@@ -775,6 +834,7 @@ def get_paged_sparse_mqa_logits_metadata(
             block ids, [num_q_tokens, num_max_sparse_blocks], int32.
         qk_dtype: dtype of the packed Q values.
         sparse_block_kv: Tokens per sparse block, 8 or 16.
+
     """
     _lazy_init()
     if _get_paged_sparse_mqa_logits_metadata_impl is None:
@@ -815,6 +875,7 @@ def fp8_fp4_sparse_mqa_logits(
         bf16 logits of shape [M, num_max_sparse_blocks * sparse_block_kv];
         column ``j * sparse_block_kv + o`` scores the token at
         ``sparse_kv_block_indices[row, j] * sparse_block_kv + ks % sbk + o``.
+
     """
     _lazy_init()
     if _fp8_fp4_sparse_mqa_logits_impl is None:
@@ -846,10 +907,13 @@ def fp8_fp4_paged_sparse_mqa_logits(
             page stride 512B-aligned.
         weights: [num_q_tokens, H] ``torch.bfloat16``.
         metadata: From `get_paged_sparse_mqa_logits_metadata`.
+        num_max_sparse_blocks: Candidate blocks per row.
+        sparse_block_kv: Tokens per sparse block, 8 or 16.
 
     Returns:
         bf16 logits of shape
         [num_q_tokens, num_max_sparse_blocks * sparse_block_kv].
+
     """
     _lazy_init()
     if _fp8_fp4_paged_sparse_mqa_logits_impl is None:
@@ -871,8 +935,7 @@ def tf32_hc_prenorm_gemm(
     sqrsum: torch.Tensor,
     num_split: int,
 ) -> torch.Tensor:
-    """
-    Perform the following computation:
+    """Perform the following computation:
         out = x.float() @ fn.T
         sqrsum = x.float().square().sum(-1)
 
@@ -948,7 +1011,6 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     and report `1 - sim`.  Once kernel accuracy improves this helper can be
     removed.
     """
-
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
@@ -979,6 +1041,7 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
+    "bf16_mega_gate",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",

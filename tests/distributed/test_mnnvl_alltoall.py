@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for MNNVL AllToAll operations.
+"""Tests for MNNVL AllToAll operations.
 
 Requires: docker run ... --cap-add=SYS_PTRACE ...
 Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
@@ -87,6 +86,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
+
     """
     try:
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -115,6 +115,7 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
     Args:
         port: Port for torch.distributed init.
         dp_port: Separate port for the DP master group init.
+
     """
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.parallel import ParallelConfig

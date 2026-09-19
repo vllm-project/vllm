@@ -271,7 +271,7 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
-    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -288,7 +288,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
-    """n == token_num_per_dp: topk is already local to this DP rank."""
+    """N == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(

@@ -114,8 +114,8 @@ class RoutedExpertsCapturer:
         Args:
             layer_id: The layer index.
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
-        """
 
+        """
         ctx = get_forward_context()
         if ctx.dp_metadata is None:
             local_topk_ids = topk_ids
