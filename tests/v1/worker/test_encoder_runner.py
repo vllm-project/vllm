@@ -378,3 +378,44 @@ def test_encoder_timing_stats_registry():
     assert stats["r1"]["num_encoder_calls"] == 2
     assert stats["r1"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}
+
+
+def test_consumed_cpu_input_is_request_local_and_replayable():
+    """Release pixels, preserving metadata, duplicate occurrences and replay data."""
+    from dataclasses import replace
+
+    pixels = torch.ones(8, HIDDEN)
+    feature = replace(_feature("same", 0, 8), data=_embeds_item(pixels))
+    later = replace(feature, mm_position=PlaceholderRange(offset=16, length=8))
+    source = [feature, later]
+    cache = EncoderCache()
+    cache.add_request("a", source)
+    cache.add_request("b", source)
+    cache.encoder_outputs["same"] = torch.ones(8, HIDDEN)
+    cache.free_encoder_inputs("a", [0])
+    assert cache.mm_features["a"][0].data is None
+    assert cache.mm_features["a"][0].mm_position == feature.mm_position
+    assert cache.mm_features["a"][1].data is feature.data
+    assert cache.mm_features["b"][0].data is feature.data
+    assert source[0].data is not None
+    assert "same" in cache.encoder_outputs
+    cache.remove_request("a")
+    cache.add_request("a", source)
+    assert cache.mm_features["a"][0].data is feature.data
+    cache.free_encoder_inputs("cancelled", [0])
+
+
+def test_consumed_cpu_input_releases_storage_before_request_finishes():
+    """A live decoding request must not keep its consumed pixel tensor alive."""
+    import weakref
+    from dataclasses import replace
+
+    cache = EncoderCache()
+    pixels = torch.ones(8, HIDDEN)
+    ref = weakref.ref(pixels)
+    cache.add_request("a", [replace(_feature("h", 0, 8), data=_embeds_item(pixels))])
+    del pixels
+    assert ref() is not None
+    cache.free_encoder_inputs("a", [0])
+    assert ref() is None
+    assert "a" in cache.mm_features
