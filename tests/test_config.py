@@ -3623,3 +3623,15 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+def test_flashinfer_mla_decode_backend_changes_config_hash():
+    auto = AttentionConfig()
+    cute = AttentionConfig(flashinfer_mla_decode_backend="cute-dsl")
+    assert auto.flashinfer_mla_decode_backend == "auto"
+    assert auto.compute_hash() != cute.compute_hash()
+
+
+def test_flashinfer_mla_decode_backend_rejects_unknown_kernel():
+    with pytest.raises(ValidationError, match="flashinfer_mla_decode_backend"):
+        AttentionConfig(flashinfer_mla_decode_backend="unknown")

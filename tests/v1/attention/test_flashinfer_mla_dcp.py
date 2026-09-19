@@ -38,10 +38,22 @@ def test_flashinfer_mla_selects_backend_for_gathered_heads():
 
 
 @requires_flashinfer_mla
-def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
+@pytest.mark.parametrize(
+    "backend, num_heads, expected",
+    [
+        ("auto", 16, None),
+        ("auto", 24, "cute-dsl"),
+        ("cute-dsl", 16, "cute-dsl"),
+        ("cute-dsl", 24, "cute-dsl"),
+    ],
+)
+def test_flashinfer_mla_forward_uses_configured_or_required_backend(
+    monkeypatch, backend, num_heads, expected
+):
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
+    impl._mla_decode_backend = backend
     impl.bmm1_scale = 1.0
     impl.bmm2_scale = 1.0
     impl.need_to_return_lse_for_decode = True
@@ -62,12 +74,12 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
     attn_metadata.decode.block_table = torch.zeros(2, 1, dtype=torch.int32)
     attn_metadata.decode.seq_lens = torch.ones(2, dtype=torch.int32)
 
-    query = torch.ones(2, 24, 576, dtype=torch.bfloat16)
+    query = torch.ones(2, num_heads, 576, dtype=torch.bfloat16)
     kv_cache = torch.ones(1, 128, 576, dtype=torch.bfloat16)
     kernel = MagicMock(
         return_value=(
-            torch.ones(2, 1, 24, 512, dtype=torch.bfloat16),
-            torch.ones(2, 24, dtype=torch.float32),
+            torch.ones(2, 1, num_heads, 512, dtype=torch.bfloat16),
+            torch.ones(2, num_heads, dtype=torch.float32),
         )
     )
     monkeypatch.setattr(flashinfer_mla, "_get_workspace_buffer", MagicMock())
@@ -78,17 +90,19 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
         impl, query, kv_cache, attn_metadata, layer
     )
 
-    assert kernel.call_args.kwargs["backend"] == "cute-dsl"
-    assert output.shape == (2, 24, 512)
-    assert lse is not None and lse.shape == (2, 24)
+    assert kernel.call_args.kwargs.get("backend") == expected
+    assert output.shape == (2, num_heads, 512)
+    assert lse is not None and lse.shape == (2, num_heads)
 
 
 @requires_flashinfer_mla
+@pytest.mark.parametrize("backend", ["auto", "cute-dsl"])
 @pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
-def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
+def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal, backend):
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
+    impl._mla_decode_backend = backend
     impl.bmm1_scale = 1.0
     impl.bmm2_scale = 1.0
     impl.need_to_return_lse_for_decode = True
