@@ -1646,7 +1646,12 @@ def graph_capture(device: torch.device):
     from other kernels possibly launched on background in the default stream.
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    from vllm.distributed.device_communicators.expandable_segments import (
+        non_expandable_allocations,
+    )
+
     with (
+        non_expandable_allocations(envs.VLLM_NON_EXPANDABLE_CUDAGRAPH_POOL),
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
         get_dp_group().graph_capture(context),
