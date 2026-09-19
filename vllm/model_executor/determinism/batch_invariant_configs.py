@@ -100,6 +100,83 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
             ),
         ),
     },
+    "hopper_nvl": {
+        (12288, 2048): _MatmulShapeConfig(
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 256, 4, 3)),
+                (4, _MatmulMConfig(16, 256, 4, 3)),
+                (8, _MatmulMConfig(16, 256, 4, 3)),
+                (16, _MatmulMConfig(16, 256, 4, 3)),
+                (32, _MatmulMConfig(32, 64, 8, 5)),
+                (64, _MatmulMConfig(32, 256, 4, 3)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (2048, 6144): _MatmulShapeConfig(
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 32, 4, 4)),
+                (4, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 64, 4, 4)),
+                (16, _MatmulMConfig(16, 32, 4, 3)),
+                (32, _MatmulMConfig(32, 32, 8, 3)),
+                (64, _MatmulMConfig(32, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 3)),
+                (512, _MatmulMConfig(128, 64, 8, 3)),
+                (1024, _MatmulMConfig(128, 64, 8, 3)),
+                (2048, _MatmulMConfig(128, 64, 8, 3)),
+            ),
+        ),
+        (4096, 2048): _MatmulShapeConfig(
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 64, 8, 5)),
+                (4, _MatmulMConfig(16, 64, 4, 5)),
+                (8, _MatmulMConfig(16, 128, 4, 4)),
+                (16, _MatmulMConfig(16, 64, 4, 5)),
+                (32, _MatmulMConfig(16, 64, 4, 4)),
+                (64, _MatmulMConfig(64, 32, 4, 3)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (151936, 2048): _MatmulShapeConfig(
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 256, 4, 3)),
+                (4, _MatmulMConfig(16, 256, 4, 3)),
+                (8, _MatmulMConfig(16, 256, 4, 3)),
+                (16, _MatmulMConfig(16, 256, 4, 3)),
+                (32, _MatmulMConfig(32, 256, 8, 3)),
+                (64, _MatmulMConfig(32, 256, 4, 3)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (2048, 2048): _MatmulShapeConfig(
+            block_k=128,
+            m_buckets=(
+                (1, _MatmulMConfig(16, 64, 4, 5)),
+                (4, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 64, 4, 4)),
+                (16, _MatmulMConfig(32, 64, 8, 5)),
+                (32, _MatmulMConfig(16, 64, 4, 4)),
+                (64, _MatmulMConfig(32, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 4, 4)),
+                (512, _MatmulMConfig(128, 64, 8, 3)),
+                (1024, _MatmulMConfig(128, 64, 8, 3)),
+                (2048, _MatmulMConfig(128, 64, 8, 3)),
+            ),
+        ),
+    },
     "hopper": {
         (12288, 2048): _MatmulShapeConfig(
             block_k=128,
@@ -268,7 +345,9 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     if capability.major == 10:
         return "blackwell"
     if capability.major == 9:
-        return "hopper"
+        # hopper_nvl configs were tuned on H100 NVL; use hopper for other SM90 variants.
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+        return "hopper_nvl" if "NVL" in device_name else "hopper"
     if capability.major == 8 and capability.minor == 9:
         return "ada"
     return None
