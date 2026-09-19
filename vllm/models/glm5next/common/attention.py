@@ -13,6 +13,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -321,7 +322,11 @@ class Indexer(nn.Module):
 
         # Compute the head gate in fp32; bf16 error can change near-tie pool
         # rankings on long-context tasks. Cache it after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
+        proj = self.wk_weights_proj
+        base_proj = (
+            proj.base_layer if isinstance(proj, BaseLinearLayerWithLoRA) else proj
+        )
+        kw, _ = base_proj(hidden_states)
         k = kw[:, : self.head_dim]
         if self._wp_fp32 is None:
             self._wp_fp32 = (
@@ -331,6 +336,10 @@ class Indexer(nn.Module):
                 .float()
             )
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
+        if isinstance(proj, BaseLinearLayerWithLoRA):
+            delta = proj._apply_lora_to_output(hidden_states, torch.zeros_like(kw))
+            k = k + delta[:, : self.head_dim]
+            weights = weights + delta[:, self.head_dim :].float()
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
