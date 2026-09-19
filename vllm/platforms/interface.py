@@ -6,6 +6,7 @@ import functools
 import os
 import platform
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -1037,6 +1038,23 @@ class Platform:
     def get_device_communicator_cls(cls) -> str:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def get_fused_moe_router_constructor(
+        cls, selected_cls: type[Any]
+    ) -> Callable[..., Any]:
+        """Choose a compatible constructor for a selected fused MoE router."""
+        return selected_cls
+
+    @classmethod
+    def get_fused_moe_routed_experts_cls(cls, selected_cls: type[Any]) -> type[Any]:
+        """Choose the class used to construct fused MoE routed experts."""
+        return selected_cls
+
+    @classmethod
+    def get_fused_moe_runner_cls(cls, selected_cls: type[Any]) -> type[Any]:
+        """Choose the class used to construct a fused MoE runner."""
+        return selected_cls
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
