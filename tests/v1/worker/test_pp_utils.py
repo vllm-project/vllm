@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which rows the PP sampled-token broadcast must carry."""
 
-from unittest.mock import Mock
+from collections import deque
+from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import cast
+from unittest.mock import Mock, call
 
 import numpy as np
+import pytest
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu.pp_utils import PendingRecv, PPHandler
 
 
 def _batch(num_computed, prefill_len, num_scheduled):
@@ -81,3 +88,96 @@ def test_decode_row_ahead_of_a_prefill_chunk():
 
     assert mask is not None
     assert mask.tolist() == [True, False]
+
+
+@dataclass
+class _FakeSlot:
+    sequence: int
+    event: object | None = None
+
+
+def _make_handler(pp_size: int, delay: int, post_model: bool = False):
+    handler = PPHandler.__new__(PPHandler)
+    handler.queue = deque([None] * pp_size)
+    handler.recv_launch_delay = delay
+    handler.post_model_recv_launch = post_model
+    handler.pending_post_model_receive = None
+    handler.is_last_rank = False
+    handler.step = -1
+    launches = []
+
+    def launch(slot: PendingRecv) -> None:
+        fake_slot = cast(_FakeSlot, slot)
+        if fake_slot.event is None:
+            launches.append((fake_slot.sequence, handler.step))
+            fake_slot.event = object()
+
+    handler._launch_receive = launch
+    return handler, launches
+
+
+@pytest.mark.parametrize(
+    ("pp_size", "delay", "post_model"),
+    [(4, 0, False), (2, 1, False), (4, 2, False), (4, 3, True)],
+)
+def test_receive_launch_and_consume_cadence(pp_size, delay, post_model):
+    handler, launches = _make_handler(pp_size, delay, post_model)
+    consumed = []
+
+    for step in range(8 + pp_size):
+        handler.step = step
+        if (slot := handler._advance_receive_queue()) is not None:
+            consumed.append((cast(_FakeSlot, slot).sequence, step))
+        if post_model:
+            handler.launch_post_model_receive()
+        if step < 8:
+            handler._queue_receive(cast(PendingRecv, _FakeSlot(step)))
+
+    assert launches == [(origin, origin + delay) for origin in range(8)]
+    assert consumed == [(origin, origin + pp_size) for origin in range(8)]
+
+
+def test_flush_posts_each_pending_receive_once():
+    handler, launches = _make_handler(pp_size=4, delay=3, post_model=True)
+    slots = [_FakeSlot(0), _FakeSlot(1)]
+    handler.pending_post_model_receive = cast(PendingRecv, slots[0])
+    handler.queue[0] = cast(PendingRecv, slots[0])
+    handler.queue[2] = cast(PendingRecv, slots[1])
+
+    handler.flush_pending_collectives()
+    handler.flush_pending_collectives()
+
+    assert [sequence for sequence, _ in launches] == [0, 1]
+
+
+def test_deferred_receive_includes_speculative_drafts(monkeypatch):
+    handler = PPHandler.__new__(PPHandler)
+    handler.main_stream = Mock()
+    handler.broadcast_stream = Mock()
+    handler.broadcast_stream.record_event.return_value = Mock()
+    handler.last_rank = 3
+    handler.broadcast_group = Mock()
+    sampled_tokens, combined, draft_tokens = Mock(), Mock(), Mock()
+    slot = PendingRecv(
+        None,
+        sampled_tokens,
+        combined,
+        Mock(),
+        Mock(),
+        Mock(),
+        np.array([0]),
+        np.array([True]),
+        np.array([0]),
+        draft_tokens,
+    )
+    broadcast = Mock()
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+
+    handler._launch_receive(slot)
+
+    assert broadcast.call_args_list == [
+        call(sampled_tokens, src=3, group=handler.broadcast_group),
+        call(combined, src=3, group=handler.broadcast_group),
+        call(draft_tokens, src=3, group=handler.broadcast_group),
+    ]
