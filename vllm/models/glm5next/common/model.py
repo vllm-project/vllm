@@ -752,9 +752,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self._active_layers, start=self.start_layer):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    self._aux_hidden_state(hidden_states, residual, post, comb)
+                aux_hidden_state = self._aux_hidden_state(
+                    hidden_states, residual, post, comb
                 )
+                if self.is_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
@@ -769,13 +772,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if self.end_layer in self.aux_hidden_state_layers:
+            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
+            if self.is_sequence_parallel:
+                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+            aux_hidden_states.append(final_aux)
+
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-
-        if self.end_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(
-                self._aux_hidden_state(hidden_states, residual, post, comb)
-            )
 
         hidden_states = self.norm(hidden_states)
         if aux_hidden_states:
