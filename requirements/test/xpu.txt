@@ -13,7 +13,6 @@ aiohttp==3.14.3
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   fsspec
-    #   gpt-oss
     #   lm-eval
 aiosignal==1.4.0
     # via aiohttp
@@ -100,8 +99,6 @@ chardet==6.0.0.post1
     # via mbstrdecoder
 charset-normalizer==3.5.1
     # via requests
-chz==0.4.0
-    # via gpt-oss
 click==8.4.2
     # via
     #   huggingface-hub
@@ -169,8 +166,6 @@ distro==1.9.0
     #   openai
 dnspython==2.8.0
     # via email-validator
-docker==7.2.0
-    # via gpt-oss
 docopt==0.6.2
     # via num2words
 docstring-parser==0.18.0
@@ -195,7 +190,6 @@ fastapi==0.136.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   gpt-oss
     #   model-hosting-container-standards
 fastapi-cli==0.0.32
     # via fastapi
@@ -257,8 +251,6 @@ googleapis-common-protos==1.75.1
     #   google-api-core
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-gpt-oss==0.0.8
-    # via -r requirements/test/xpu.in
 graphql-core==3.2.11
     # via hypothesis-graphql
 grpcio==1.83.0
@@ -274,8 +266,6 @@ hf-xet==1.6.0
     # via huggingface-hub
 hiredis==3.4.1
     # via tensorizer
-html2text==2025.4.15
-    # via gpt-oss
 httpcore==1.0.9
     # via httpx
 httpcore2==2.10.0
@@ -435,7 +425,6 @@ loguru==0.7.3
 lxml==6.1.1
     # via
     #   blobfile
-    #   gpt-oss
     #   sacrebleu
 markdown-it-py==4.2.0
     # via rich
@@ -576,11 +565,6 @@ openai==3.2.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-openai-harmony==0.0.8
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
-    #   gpt-oss
 opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
@@ -633,6 +617,10 @@ opentelemetry-semantic-conventions-ai==0.5.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+oss-harmony==0.0.11
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
 outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
@@ -740,7 +728,6 @@ pydantic==2.13.4
     #   compressed-tensors
     #   fastapi
     #   fastapi-cloud-cli
-    #   gpt-oss
     #   lm-format-enforcer
     #   mcp
     #   mcp-types
@@ -748,7 +735,7 @@ pydantic==2.13.4
     #   model-hosting-container-standards
     #   mteb
     #   openai
-    #   openai-harmony
+    #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings
     #   xgrammar
@@ -867,11 +854,9 @@ requests==2.34.2
     #   azure-core
     #   cohere
     #   datasets
-    #   docker
     #   evaluate
     #   google-api-core
     #   google-cloud-storage
-    #   gpt-oss
     #   lm-eval
     #   mistral-common
     #   modelscope
@@ -997,8 +982,6 @@ starlette-testclient==0.4.1
     # via schemathesis
 stringzilla==5.1.2
     # via albucore
-structlog==26.1.0
-    # via gpt-oss
 supervisor==4.3.0
     # via model-hosting-container-standards
 sympy==1.14.0
@@ -1022,20 +1005,15 @@ tcmlib==1.5.0
 tcolorpy==0.1.7
     # via pytablewriter
 tenacity==9.1.4
-    # via
-    #   gpt-oss
-    #   lm-eval
+    # via lm-eval
 tensorizer==2.10.1
     # via -r requirements/test/xpu.in
-termcolor==3.3.0
-    # via gpt-oss
 threadpoolctl==3.6.0
     # via scikit-learn
 tiktoken==0.14.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   gpt-oss
     #   lm-eval
     #   mistral-common
 timm==1.0.28
@@ -1126,7 +1104,6 @@ typing-extensions==4.16.0
     #   azure-core
     #   azure-identity
     #   azure-storage-blob
-    #   chz
     #   cohere
     #   fastapi
     #   grpcio
@@ -1171,7 +1148,6 @@ urllib3==2.7.0
     # via
     #   blobfile
     #   botocore
-    #   docker
     #   modelscope
     #   requests
     #   sentry-sdk
@@ -1181,7 +1157,6 @@ uvicorn==0.52.3
     #   fastapi
     #   fastapi-cli
     #   fastapi-cloud-cli
-    #   gpt-oss
     #   mcp
 uvloop==0.22.1
     # via uvicorn

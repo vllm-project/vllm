@@ -1,0 +1,7 @@
+# gpt-oss on PyPI depends on openai-harmony. vLLM uses oss-harmony instead
+# (same import name: openai_harmony), so installing both overwrites the module.
+#
+# gpt-oss is only needed by the GPQA eval jobs, which install it themselves.
+# Pass this file there so the install does not pull openai-harmony back in:
+#   uv pip install --system 'gpt-oss[eval]==0.0.5' --excludes ../requirements/harmony-excludes.txt
+openai-harmony

@@ -32,7 +32,6 @@ soundfile
 # --- Tool Parsing & Evaluation ---
 blobfile
 rapidfuzz
-gpt-oss >= 0.0.7; python_version > '3.11'
 schemathesis>=4.0.0 # Required for openai schema test.
 jiwer
 bm25s
