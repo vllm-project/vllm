@@ -1294,9 +1294,6 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         if triton_kernels_version == "3.8":
             # Activation and topk-reduce kept unfused from the matmuls (3.8 has
             # no in-kernel scatter+reduce); combine via external index_add.
-            assert self._lora_context is None, (
-                "tk38 unfused MoE path does not support LoRA yet"
-            )
             act_out_dim = self.adjust_N_for_activation(w1.shape[2], activation)
             M, K = hidden_states.shape[-2:]
             a_ragged = routing_data.ragged
@@ -1313,6 +1310,23 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 quant_config.w1_precision,
                 gammas=gammas if apply_router_weight_on_input else None,
             )
+
+            lora_context = self._lora_context
+            if lora_context is not None:
+                s_ids = e_ids = n_pad = t_map = None
+                s_ids, e_ids, n_pad, t_map = self.apply_w13_lora(
+                    lora_context,
+                    y=inter,
+                    x=hidden_states,
+                    topk_ids=global_topk_ids,
+                    topk_weights=topk_weights,
+                    expert_map=expert_map,
+                    w1=w1,
+                    w2=w2,
+                    num_tokens=M,
+                    top_k_num=topk,
+                )
+
             act_out = torch.empty(
                 (routing_data.n_valid, act_out_dim),
                 dtype=hidden_states.dtype,
@@ -1330,6 +1344,32 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 quant_config.w2_precision,
                 gammas=None if apply_router_weight_on_input else gammas,
             )
+
+            if lora_context is not None:
+                # w2 LoRA works in (num_tokens, topk, K) token-topk order. Scatter
+                # the ragged rows there via the same expert-sort permutation
+                # (flat idx = token*topk + slot = argsort(flat_e)), apply, then
+                # gather the LoRA-updated rows back to ragged order for the combine.
+                flat_e = topk_ids.reshape(-1).to(torch.int64).clamp(min=0)
+                order = torch.argsort(flat_e, stable=True)
+                down_tt = down.new_zeros((M * topk, K))
+                down_tt[order] = down
+                self.apply_w2_lora(
+                    lora_context,
+                    y=down_tt.view(M, topk, K),
+                    x=act_out,
+                    topk_weights=topk_weights,
+                    sorted_token_ids_lora=s_ids,
+                    expert_ids_lora=e_ids,
+                    num_tokens_post_padded_lora=n_pad,
+                    token_lora_mapping=t_map,
+                    num_tokens=M,
+                    w1=w1,
+                    w2=w2,
+                    top_k_num=topk,
+                )
+                down = down_tt[order]
+
             acc = torch.zeros((M, K), dtype=torch.float32, device=hidden_states.device)
             acc.index_add_(0, gather_tok.to(torch.int64), down.to(torch.float32))
             output.view(M, K).copy_(acc.to(output.dtype))

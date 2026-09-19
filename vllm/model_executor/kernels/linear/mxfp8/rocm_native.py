@@ -119,12 +119,10 @@ def _mxfp8_dot_scaled_linear(
     return out
 
 
-# Triton 3.8 enables TRITON_HIP_USE_ASYNC_COPY by default on gfx950; its extra LDS
-# buffer leaves no room for num_stages=3 at BLOCK_K=256.
-# TODO(rasmith)(Rohan138): Remove the 3.8 check once
-# https://github.com/vllm-project/vllm/pull/50605 merges.
+# gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
+# room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
-if triton.__version__.startswith("3.8") and current_platform.is_rocm():
+if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
 
     if on_gfx950():
