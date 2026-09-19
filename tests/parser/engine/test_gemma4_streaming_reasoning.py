@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.parser.gemma4 import Gemma4Parser
+from vllm.parser.parser_manager import ParserManager
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
 CHANNEL_START_ID = 50  # <|channel>
@@ -160,6 +161,48 @@ def _collect_fields(results):
     return reasoning, content, tool_calls
 
 
+def _stream_tokens_individually(
+    parser,
+    tokenizer,
+    request,
+    sequence: list[tuple[int, str]],
+    skip_special_tokens: bool,
+) -> list[DeltaMessage | None]:
+    """Feed one decoded token per streaming delta."""
+    results: list[DeltaMessage | None] = []
+    previous_text = ""
+    previous_token_ids: list[int] = []
+
+    for token_id, _ in sequence:
+        delta_token_ids = [token_id]
+        delta_text = tokenizer.decode(
+            delta_token_ids,
+            skip_special_tokens=skip_special_tokens,
+        )
+        current_text = previous_text + delta_text
+        current_token_ids = [*previous_token_ids, token_id]
+        results.append(
+            parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+                request,
+            )
+        )
+        previous_text = current_text
+        previous_token_ids = current_token_ids
+
+    results.append(parser.finish_streaming())
+    return results
+
+
+def _collect_content(results: list[DeltaMessage | None]) -> str:
+    return "".join(item.content for item in results if item and item.content)
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -182,6 +225,164 @@ def request_obj():
 
 
 # ── Tests ────────────────────────────────────────────────────────────
+
+
+_SKIP_REASONING_CASES = [
+    pytest.param(
+        [
+            (6000, "thought"),
+            (6001, "\n"),
+            (6002, "The answer is 391"),
+            (CHANNEL_END_ID, "<channel|>"),
+        ],
+        False,
+        "thought\nThe answer is 391<channel|>",
+        id="plain-markup",
+    ),
+    pytest.param(
+        [
+            (CHANNEL_START_ID, "<|channel>"),
+            (6000, "thought"),
+            (6001, "\n"),
+            (6002, "The answer is 391"),
+            (CHANNEL_END_ID, "<channel|>"),
+        ],
+        True,
+        "thought\nThe answer is 391",
+        id="stripped-markup",
+    ),
+]
+
+
+class TestGemma4SkipReasoningParsing:
+    """Reasoning markup must respect a missing reasoning-parser setup."""
+
+    @pytest.mark.parametrize(
+        ("sequence", "skip_special_tokens", "expected_content"),
+        _SKIP_REASONING_CASES,
+    )
+    def test_channel_markers_are_not_synthesized_or_restored(
+        self,
+        sequence,
+        skip_special_tokens,
+        expected_content,
+        request_obj,
+    ):
+        tokenizer = _make_tokenizer(sequence)
+        parser = Gemma4Parser(tokenizer)
+        parser.skip_reasoning_parsing = True
+
+        token_ids = [token_id for token_id, _ in sequence]
+        delta_text = tokenizer.decode(
+            token_ids, skip_special_tokens=skip_special_tokens
+        )
+        delta = parser.extract_tool_calls_streaming(
+            "",
+            delta_text,
+            delta_text,
+            [],
+            token_ids,
+            token_ids,
+            request_obj,
+        )
+        finish = parser.finish_streaming()
+
+        content = "".join(
+            item.content for item in (delta, finish) if item and item.content
+        )
+        reasoning = "".join(
+            item.reasoning for item in (delta, finish) if item and item.reasoning
+        )
+
+        assert content == expected_content
+        assert reasoning == ""
+
+    @pytest.mark.parametrize(
+        ("sequence", "skip_special_tokens", "expected_content"),
+        _SKIP_REASONING_CASES,
+    )
+    def test_channel_markers_are_handled_per_token(
+        self,
+        sequence,
+        skip_special_tokens,
+        expected_content,
+        request_obj,
+    ):
+        """One-token deltas must not synthesize or restore markers."""
+        tokenizer = _make_tokenizer(sequence)
+        parser = Gemma4Parser(tokenizer)
+        parser.skip_reasoning_parsing = True
+
+        results = _stream_tokens_individually(
+            parser,
+            tokenizer,
+            request_obj,
+            sequence,
+            skip_special_tokens,
+        )
+
+        assert _collect_content(results) == expected_content
+        assert all(not item or not item.reasoning for item in results)
+
+    @pytest.mark.parametrize(
+        ("sequence", "skip_special_tokens", "expected_content"),
+        [
+            pytest.param(
+                [
+                    (6000, "thought"),
+                    (6001, "\n"),
+                    (6002, "The answer is 391"),
+                    (CHANNEL_END_ID, "<channel|>"),
+                ],
+                False,
+                "thought\nThe answer is 391<channel|>",
+                id="plain-markup",
+            ),
+            pytest.param(
+                [
+                    (CHANNEL_START_ID, "<|channel>"),
+                    (6000, "thought"),
+                    (6001, "\n"),
+                    (6002, "The answer is 391"),
+                    (CHANNEL_END_ID, "<channel|>"),
+                ],
+                True,
+                "thought\nThe answer is 391",
+                id="stripped-markup",
+            ),
+        ],
+    )
+    def test_parser_manager_preserves_content_without_reasoning_parser(
+        self,
+        sequence,
+        skip_special_tokens,
+        expected_content,
+        request_obj,
+    ):
+        """Serving parser construction must preserve plain Gemma4 output."""
+        tokenizer = _make_tokenizer(sequence)
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="gemma4",
+            enable_auto_tools=True,
+        )
+        assert parser_cls is not None
+        parser = parser_cls(tokenizer)
+
+        token_ids = [token_id for token_id, _ in sequence]
+        model_output = tokenizer.decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+        )
+        reasoning, content, tool_calls = parser.parse(
+            model_output,
+            request_obj,
+            enable_auto_tools=True,
+            model_output_token_ids=token_ids,
+        )
+
+        assert reasoning is None
+        assert content == expected_content
+        assert tool_calls == []
 
 
 class TestGemma4StreamingReasoningThenToolCall:
