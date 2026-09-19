@@ -222,19 +222,25 @@ class MoRIIOWriter:
         defer_timeout = self._defer_timeout
         now = time.perf_counter()
         still_deferred: list[WriteTask] = []
+        warned: set[TransferId] = set()
 
         for task in self._deferred_tasks:
             if self._is_transfer_terminal(task.transfer_id):
                 continue
             if now - task.enqueue_time > defer_timeout:
-                logger.error(
-                    "Deferred write task for request %s expired after %.1fs "
-                    "(remote blocks never arrived), marking done",
-                    task.request_id,
-                    now - task.enqueue_time,
-                )
-                self._mark_request_done(task.transfer_id)
-                continue
+                # The consumer has not allocated destination blocks yet, which
+                # is expected while it is at KV capacity. Marking the transfer
+                # done here would free the producer blocks without notifying
+                # the consumer, hanging it in WAITING_FOR_REMOTE_KVS.
+                if task.transfer_id not in warned:
+                    warned.add(task.transfer_id)
+                    logger.warning(
+                        "Deferred write task for request %s still waiting for "
+                        "remote blocks after %.1fs",
+                        task.request_id,
+                        now - task.enqueue_time,
+                    )
+                task.enqueue_time = now
             if self._is_remote_ready(task):
                 try:
                     self._execute_write_task(task)

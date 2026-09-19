@@ -720,10 +720,17 @@ class MoRIIOConnectorScheduler:
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
         if self.mode == MoRIIOMode.WRITE:
-            # MoriiO in write mode, no remote prefill. Hybrid models never get
-            # here: register_kv_caches refuses WRITE mode for them, so there is
-            # no recurrent-state accounting to do.
-            return num_external_tokens, True
+            # Only report an incoming load while the request is still waiting
+            # for its remote prefill. update_state_after_alloc clears the flag
+            # once the transfer is triggered; asking again after that would put
+            # a request whose KV already landed back into WAITING_FOR_REMOTE_KVS
+            # to wait for a second push that never comes. Hybrid models never
+            # get here: register_kv_caches refuses WRITE mode for them.
+            params = request.kv_transfer_params
+            if params is not None and params.get("do_remote_prefill"):
+                if num_external_tokens > 0:
+                    return num_external_tokens, True
+            return 0, False
 
         # READ mode always recomputes the last token locally on the decoder.
         #
@@ -1102,12 +1109,6 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
-
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
@@ -1126,18 +1127,26 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
+                    transfer_id = request.kv_transfer_params["transfer_id"]
                     for tp_index in range(self.tp_size):
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
-
-                        self.send_notify_block(
-                            req_id=request.request_id,
-                            transfer_id=request.kv_transfer_params["transfer_id"],
-                            block_notify_list=block_notify_list,
-                            host=_notify_host,
-                            port=target_port,
-                        )
+                        if num_external_tokens > 0:
+                            self.send_notify_block(
+                                req_id=request.request_id,
+                                transfer_id=transfer_id,
+                                block_notify_list=blocks.get_block_ids()[0],
+                                host=_notify_host,
+                                port=target_port,
+                            )
+                        else:
+                            # Nothing left to fetch (full local prefix hit), so
+                            # release the producer's blocks instead of sending
+                            # an empty allocation, which it rejects.
+                            self._send_transfer_release(
+                                transfer_id, _notify_host, target_port
+                            )
 
             # Only trigger 1 KV transfer per request.
 
