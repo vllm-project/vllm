@@ -1194,9 +1194,16 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
-        layer._k_scale = layer.k_scale
-        layer._v_scale = layer.v_scale
-        layer._q_scale = layer.q_scale
+        # Keep these as BUFFERS, the form every other KV-cache quantization method
+        # leaves them in (they ``copy_()`` instead of rebinding). Assigning the
+        # ``nn.Parameter`` placeholders moves the names out of ``_buffers``, hiding
+        # them from the level-2 sleep snapshot in ``Worker.sleep()``, which only
+        # walks ``named_buffers()``: they came back reading 0.0 (NaN logprobs).
+        # register_buffer() not ``.copy_()`` because ATTN_HEAD resizes the buffer,
+        # and persistent=True because ``sharded_state_loader`` needs the keys.
+        layer.register_buffer("_k_scale", layer.k_scale.detach())
+        layer.register_buffer("_v_scale", layer.v_scale.detach())
+        layer.register_buffer("_q_scale", layer.q_scale.detach())
 
         # Set the _float variants that the attention backend uses.
         def _to_scalar(tensor: torch.Tensor) -> float:
