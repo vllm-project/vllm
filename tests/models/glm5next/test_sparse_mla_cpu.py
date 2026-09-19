@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -118,9 +120,7 @@ def test_cpu_indexer_metadata_expands_requests_without_triton():
             "seq_lens": torch.tensor([6, 2], dtype=torch.int32),
             "max_seq_len": 6,
             "slot_mapping": torch.arange(5),
-            "block_table_tensor": torch.tensor(
-                [[0, 1], [2, 3]], dtype=torch.int32
-            ),
+            "block_table_tensor": torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
         },
     )()
 
@@ -175,7 +175,7 @@ def test_cpu_indexer_forward_writes_pool_and_expands_decode_topk(monkeypatch):
     )
     monkeypatch.setattr(
         "vllm.models.glm5next.cpu.sparse_indexer.get_forward_context",
-        lambda: context,
+        lambda context=context: context,
     )
 
     result = indexer(
@@ -192,6 +192,77 @@ def test_cpu_indexer_forward_writes_pool_and_expands_decode_topk(monkeypatch):
     assert result.data_ptr() == topk.data_ptr()
     assert result[0, 0].item() == 0
     assert torch.any(cache.kv_cache != 0)
+
+
+@pytest.mark.parametrize("steps", [(7,), (3, 1, 3), (1, 1, 1, 1, 1, 1, 1)])
+def test_forward_preserves_pool_and_tail_across_steps(monkeypatch, steps):
+    cache = SimpleNamespace(
+        prefix="index", kv_cache=torch.zeros(3, 32, 132, dtype=torch.uint8)
+    )
+    tail = SimpleNamespace(
+        prefix="tail", kv_cache=torch.zeros(3, 2, 4, 128, dtype=torch.bfloat16)
+    )
+    output = torch.full((7, 7), -1, dtype=torch.int32)
+    op = SparseAttnIndexerKpool(
+        cache, 128, "ue8m0", 4, 128, 128, 128, output, tail_cache=tail
+    )
+    keys = torch.arange(1, 8).float()[:, None].expand(7, 128).bfloat16()
+    start = 0
+    for count in steps:
+        positions = torch.arange(start, start + count)
+        lengths = (positions + 1) // 4
+        slots = torch.where((positions + 1) % 4 == 0, 64 + positions // 4, -1)
+        metadata = DeepseekV32IndexerMetadata(
+            seq_lens=lengths[-1:],
+            max_seq_len=int(lengths[-1]),
+            slot_mapping=slots,
+            num_decodes=1,
+            num_decode_tokens=count,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            decode=DeepSeekV32IndexerDecodeMetadata(
+                block_table=torch.full((count, 1), 2, dtype=torch.int32),
+                seq_lens=lengths,
+                decode_lens=torch.ones(count, dtype=torch.int32),
+                requires_padding=False,
+                schedule_metadata=torch.empty(0, 2, dtype=torch.int32),
+            ),
+        )
+        context = ForwardContext(
+            no_compile_layers={},
+            slot_mapping={},
+            attn_metadata={
+                "index": metadata,
+                "tail": SimpleNamespace(slot_mapping=4 + positions % 4),
+            },
+        )
+        monkeypatch.setattr(
+            "vllm.models.glm5next.cpu.sparse_indexer.get_forward_context",
+            lambda context=context: context,
+        )
+        result = op(
+            torch.zeros(count, 4),
+            torch.zeros(count, 1, 128),
+            keys[start : start + count],
+            torch.ones(count, 1),
+            gate_score=torch.zeros(count, 128),
+            compress_ape=torch.zeros(4, 128),
+            index_kpool=4,
+            positions=positions,
+        )
+        for row, position in enumerate(positions.tolist()):
+            expected_ids = list(range(position + 1)) + [-1] * (6 - position)
+            assert result[row].tolist() == expected_ids
+        start += count
+    expected = _reference_fwht(keys[:4].float().mean(0)[None])[0]
+    torch.testing.assert_close(
+        _dequantize_cache_vector(cache.kv_cache[2, 0]),
+        expected,
+        atol=0.3,
+        rtol=0.08,
+    )
+    assert not cache.kv_cache[:2].any()
+    assert not tail.kv_cache[0].any()
 
 
 def test_cpu_indexer_completes_pool_from_tail_and_expands_tokens():
@@ -220,6 +291,7 @@ def test_cpu_indexer_completes_pool_from_tail_and_expands_tokens():
         topk_indices_buffer=torch.full((1, 8), -1, dtype=torch.int32),
         tail_cache=tail,
     )
+    indexer.index_kpool = 4
     positions = torch.arange(4, dtype=torch.int32)
     keys = torch.arange(4, dtype=torch.float32).unsqueeze(1).expand(4, 128)
     gates = torch.zeros(4, 128)
@@ -240,8 +312,13 @@ def test_cpu_indexer_completes_pool_from_tail_and_expands_tokens():
         {cache.prefix: metadata, tail.prefix: tail_metadata},
     )
 
-    assert torch.isfinite(_dequantize_cache_vector(cache.kv_cache[0, 0])).all()
-    assert torch.any(cache.kv_cache[0, 0] != 0)
+    expected = _reference_fwht(keys.mean(dim=0).reshape(1, 128))[0]
+    torch.testing.assert_close(
+        _dequantize_cache_vector(cache.kv_cache[0, 0]),
+        expected,
+        atol=0.2,
+        rtol=0.08,
+    )
     torch.testing.assert_close(tail.kv_cache[0, 0, :, 0], keys[:, 0].to(torch.bfloat16))
 
     decode = type(
@@ -276,9 +353,7 @@ def test_cpu_indexer_completes_pool_from_tail_and_expands_tokens():
         ([[0]], 5, [[0, 1, 2, 3, 4, -1, -1, -1]]),
     ],
 )
-def test_pool_to_token_expansion_appends_only_valid_tail(
-    pool_ids, seq_len, expected
-):
+def test_pool_to_token_expansion_appends_only_valid_tail(pool_ids, seq_len, expected):
     ids = torch.tensor(pool_ids, dtype=torch.int32)
     actual = _expand_pool_ids(ids, torch.tensor([seq_len]), 3, max_tokens=8)
     torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.int32))

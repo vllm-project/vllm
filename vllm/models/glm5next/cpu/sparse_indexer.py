@@ -399,7 +399,7 @@ class SparseAttnIndexerKpool(nn.Module):
                 pool_ids,
                 positions[start:end] + 1,
                 pool_size,
-                self.topk_tokens,
+                self.topk_indices_buffer.shape[1],
             )
             self.topk_indices_buffer[start:end, : expanded.shape[1]].copy_(expanded)
 
@@ -453,6 +453,6 @@ class SparseAttnIndexerKpool(nn.Module):
                 pool_ids,
                 positions[row : row + 1] + 1,
                 pool_size,
-                self.topk_tokens,
+                self.topk_indices_buffer.shape[1],
             )
             out[row, : expanded.shape[1]].copy_(expanded[0])
