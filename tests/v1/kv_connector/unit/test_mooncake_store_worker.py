@@ -290,6 +290,8 @@ class _FakeKVTransferConfig:
 class _FakeModelConfig:
     model = "test-model"
     use_mla = False
+    dtype = torch.bfloat16
+    quantization = None
 
     def get_num_layers(self, parallel_config) -> int:
         return 1
@@ -308,7 +310,13 @@ def _make_vllm_config(
     kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
     disable_hybrid_kv_cache_manager: bool = True,
 ) -> SimpleNamespace:
-    cache_config = SimpleNamespace(block_size=16, num_gpu_blocks=10)
+    cache_config = SimpleNamespace(
+        block_size=16,
+        num_gpu_blocks=10,
+        cache_dtype="auto",
+        mamba_cache_dtype="auto",
+        mamba_ssm_cache_dtype="auto",
+    )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -571,6 +579,78 @@ def test_tp_shared_receiving_reads_each_local_store_shard():
         f"{_tp_shared_prefix(1)}@6831",
     ]
     assert len(addrs) == len(sizes) == 4
+
+
+def test_pool_key_config_fingerprint_is_part_of_the_key():
+    md = KeyMetadata("test-model", 0, 0, 0, 0, config_fingerprint="abc123def456")
+    assert (
+        PoolKey(md, "deadbeef").to_string()
+        == "test-model@cfg:abc123def456@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def _fingerprint(
+    *,
+    kv_cache_dtype: str = "auto",
+    model_dtype: torch.dtype = torch.bfloat16,
+    quantization: str | None = None,
+    mamba_ssm_cache_dtype: str = "auto",
+    block_size: int = 16,
+    scheduler_block_size: int = 16,
+    hash_block_size: int = 16,
+    topology: tuple[int, ...] = (1, 1, 1, 1),
+) -> str:
+    cfg = _make_vllm_config()
+    cfg.cache_config.cache_dtype = kv_cache_dtype
+    cfg.cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+    cfg.model_config.dtype = model_dtype
+    cfg.model_config.quantization = quantization
+    return worker.build_store_config_fingerprint(
+        cfg,
+        _make_kv_cache_config(block_size=block_size),
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        topology=topology,
+    )
+
+
+def test_store_config_fingerprint_separates_incompatible_layouts():
+    # Same model directory, different block bytes: nothing here may share a key
+    # with the baseline, while a repeat of the baseline must.
+    base = _fingerprint()
+    assert base == _fingerprint()
+    assert len(base) == 12
+    assert _fingerprint(kv_cache_dtype="fp8") != base
+    assert _fingerprint(model_dtype=torch.float16) != base
+    assert _fingerprint(quantization="fp8") != base
+    assert _fingerprint(mamba_ssm_cache_dtype="float32") != base
+    assert _fingerprint(block_size=32, scheduler_block_size=32) != base
+    assert _fingerprint(hash_block_size=32) != base
+    assert _fingerprint(topology=(2, 1, 1, 1)) != base
+
+
+def _worker_key(cache_dtype: str) -> str:
+    cfg = _make_vllm_config()
+    cfg.cache_config.cache_dtype = cache_dtype
+    store_worker = worker.MooncakeStoreWorker(cfg, _make_kv_cache_config())
+    return store_worker.token_dbs[0].key_for(BlockHash(b"hash"))
+
+
+def test_workers_with_different_settings_never_share_keys(monkeypatch):
+    """One model directory, different block bytes: the two instances must not
+    address each other's blocks."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+
+    assert _worker_key("auto") == _worker_key("auto")
+    assert _worker_key("auto") != _worker_key("fp8")
 
 
 def test_pool_key_cache_prefix_namespaces_and_disambiguates():
@@ -2854,12 +2934,17 @@ def test_mqa_p4_to_d2_uses_shared_rank_zero_namespace(tmp_path, monkeypatch):
             else:
                 target.add(key)
 
+    # The fingerprint must not depend on the local TP size here, or the P4
+    # producer and D2 consumer would never share a key.
+    fingerprint = w.token_dbs[0].metadata.config_fingerprint
+    assert fingerprint
     assert (
         put_keys
         == get_keys
         == {
             (
                 "test-model@store_pp:1@store_format:tp_shared_mqa"
+                f"@cfg:{fingerprint}"
                 "@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@68617368"
             )
         }

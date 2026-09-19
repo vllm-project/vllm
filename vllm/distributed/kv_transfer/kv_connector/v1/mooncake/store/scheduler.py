@@ -98,6 +98,18 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+        if (
+            mamba_groups
+            and self.save_decode_cache
+            and vllm_config.cache_config.prefix_cache_retention_interval == 0
+        ):
+            logger.warning(
+                "save_decode_cache is on for a hybrid model, but "
+                "prefix_cache_retention_interval=0 retains no Mamba boundary, "
+                "so an external prefix hit can never complete. Set "
+                "--prefix-cache-retention-interval=%d to save decode boundaries.",
+                self._block_size,
+            )
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -209,12 +221,15 @@ class MooncakeStoreScheduler:
 
         self.load_specs[request.request_id].can_load = True
 
+    @property
+    def _can_process_cached(self) -> bool:
+        return self.kv_role != "kv_consumer" or self.save_decode_cache
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build connector metadata for this scheduler step."""
         is_consumer = self.kv_role == "kv_consumer"
-        can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.client.discard(finished_req_id)
@@ -279,7 +294,7 @@ class MooncakeStoreScheduler:
 
         # Handle cached (running, or MRV1 resumed-from-preemption) requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        if can_process_cached:
+        if self._can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids:
@@ -406,7 +421,7 @@ class MooncakeStoreScheduler:
         if (
             block_state is not None
             and block_state.boundary_state_offloads
-            and not is_consumer
+            and self._can_process_cached
         ):
             self._handle_boundary_state_offloads(
                 block_state.boundary_state_offloads, meta
@@ -501,7 +516,7 @@ class MooncakeStoreScheduler:
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
         """Queue and pin a finish-time tail for the next connector step."""
-        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
+        if not partial_tail_offloads or not self._can_process_cached:
             return False
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
@@ -512,7 +527,7 @@ class MooncakeStoreScheduler:
                 "Partial-tail offloads for one request must share a boundary"
             )
         boundary_tokens = next(iter(boundaries))
-        if boundary_tokens > tracker.prefill_end_tokens:
+        if not self._claims_boundary(tracker, boundary_tokens):
             return False
 
         pinned_block_ids: list[int] = []
@@ -553,6 +568,17 @@ class MooncakeStoreScheduler:
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
 
+    def _claims_boundary(self, tracker: RequestTracker, boundary_tokens: int) -> bool:
+        """Whether a mamba boundary hand-off can complete a joint hybrid hit.
+
+        Without decode saves every other group stops saving at
+        ``prefill_end_tokens``, so a mamba-only key past it is dead weight; a
+        resumed request re-prefills its generated tokens, which is why that
+        window is not the prompt length. With ``save_decode_cache`` every group
+        saves each block as it fills, so every retained boundary is claimed.
+        """
+        return self.save_decode_cache or boundary_tokens <= tracker.prefill_end_tokens
+
     def _handle_boundary_state_offloads(
         self,
         offloads: dict[str, list[tuple[int, int, int]]],
@@ -577,12 +603,7 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[tuple[int, int, int]] = []
             for group_id, block_id, boundary_tokens in entries:
-                # Every other group stops saving at the end of this prefill, so
-                # a mamba-only key past it can never complete a joint hybrid
-                # hit. `prefill_end_tokens` — not the original prompt length —
-                # is the boundary: a resumed request re-prefills and re-saves
-                # its previously generated tokens for every group.
-                if boundary_tokens > tracker.prefill_end_tokens:
+                if not self._claims_boundary(tracker, boundary_tokens):
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue

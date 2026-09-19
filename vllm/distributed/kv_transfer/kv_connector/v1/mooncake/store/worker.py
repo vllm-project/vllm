@@ -66,6 +66,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
@@ -129,10 +130,51 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
     prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    fingerprint = (
+        f"@cfg:{metadata.config_fingerprint}" if metadata.config_fingerprint else ""
+    )
     return (
         f"vllm-mooncake-store:{prefix}{metadata.model_name}"
-        f"{metadata.store_namespace}@{chunk_hash}"
+        f"{metadata.store_namespace}{fingerprint}@{chunk_hash}"
     )
+
+
+def build_store_config_fingerprint(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    *,
+    scheduler_block_size: int,
+    hash_block_size: int,
+    topology: tuple[int, ...],
+) -> str:
+    """Return the 12-hex-digit digest of the settings a stored block depends on.
+
+    ``topology`` is the parallel layout the caller's key namespace does not
+    already pin, so a shared store namespace contributes only PCP and DCP.
+    """
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    factors = {
+        "kv_cache_dtype": cache_config.cache_dtype,
+        "model_dtype": str(model_config.dtype),
+        "quantization": model_config.quantization,
+        "mamba_cache_dtype": cache_config.mamba_cache_dtype,
+        "mamba_ssm_cache_dtype": cache_config.mamba_ssm_cache_dtype,
+        "scheduler_block_size": scheduler_block_size,
+        "hash_block_size": hash_block_size,
+        "groups": [
+            (
+                type(group.kv_cache_spec).__name__,
+                group.kv_cache_spec.block_size,
+                group.kv_cache_spec.page_size_bytes,
+            )
+            for group in kv_cache_config.prefix_cacheable_groups
+        ],
+        "topology": topology,
+    }
+    return safe_hash(
+        json.dumps(factors, sort_keys=True).encode(), usedforsecurity=False
+    ).hexdigest()[:12]
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -1597,6 +1639,21 @@ class MooncakeStoreWorker:
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
+        # The shared and compatibility namespaces carry store TP and PP, so a
+        # key with one only needs the sizes those namespaces leave out.
+        topology = (
+            (self.pcp_size, self.dcp_size)
+            if store_namespace
+            else (self.tp_size, self.pp_size, self.pcp_size, self.dcp_size)
+        )
+        config_fingerprint = build_store_config_fingerprint(
+            vllm_config,
+            kv_cache_config,
+            scheduler_block_size=self.block_size,
+            hash_block_size=self.hash_block_size,
+            topology=topology,
+        )
+        logger.info("Mooncake store key fingerprint: %s", config_fingerprint)
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1609,6 +1666,7 @@ class MooncakeStoreWorker:
                 )
             ),
             store_namespace=store_namespace,
+            config_fingerprint=config_fingerprint,
         )
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
