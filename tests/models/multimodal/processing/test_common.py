@@ -13,6 +13,7 @@ from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
+    MultiModalDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -33,9 +34,7 @@ from ...registry import (
 
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Add metadata to video mm_data
-    """
+    """Add metadata to video mm_data."""
 
     def create_metadata(frames: np.ndarray):
         num_frames = len(frames)
@@ -61,8 +60,7 @@ def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """
-    Patch the multimodal data for GLM-ASR model.
+    """Patch the multimodal data for GLM-ASR model.
     GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
     """
     if "audio" in mm_data:
@@ -177,7 +175,7 @@ def get_token_prompt(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
-            mm_options={},
+            mm_options=MultiModalDummyOptions(),
             # Assume all Mistral models define this extra argument
             mm_data=mm_data,  # type: ignore[call-arg]
         )
@@ -185,7 +183,7 @@ def get_token_prompt(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
-            mm_options={},
+            mm_options=MultiModalDummyOptions(),
         )
 
     if not isinstance(inputs.prompt, list):
@@ -281,10 +279,12 @@ def _test_processing_correctness(
         return BaseDummyOptions(count=count)
 
     # Assign normalized DummyOptions to the model config
-    model_config.get_multimodal_config().limit_per_prompt = {
-        modality: _to_dummy_options(modality, count)
-        for modality, count in limit_mm_per_prompt_ints.items()
-    }
+    model_config.get_multimodal_config().limit_per_prompt = MultiModalDummyOptions(
+        {
+            modality: _to_dummy_options(modality, count)
+            for modality, count in limit_mm_per_prompt_ints.items()
+        }
+    )
 
     baseline_processor = factories.build_processor(ctx, cache=None)
     cached_processor = factories.build_processor(ctx, cache=cache)

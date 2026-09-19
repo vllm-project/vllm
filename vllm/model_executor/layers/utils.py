@@ -48,8 +48,7 @@ def apply_penalties(
     frequency_penalties: torch.Tensor,
     repetition_penalties: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Applies penalties in place to the logits tensor
+    """Applies penalties in place to the logits tensor
     logits : The input logits tensor of shape [num_seqs, vocab_size]
     prompt_tokens_tensor: A tensor containing the prompt tokens. The prompts
         are padded to the maximum prompt length within the batch using
@@ -259,6 +258,7 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     Returns:
         The CHUNKK the kernel will dispatch with, and whether the CU budget and
         split-K workspace admit the shape at all.
+
     """
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
