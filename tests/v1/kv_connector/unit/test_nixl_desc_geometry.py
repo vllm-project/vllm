@@ -1332,7 +1332,9 @@ def _make_ring_worker():
         return KVCacheGroupSpec(list(specs), uniform)
 
     # Both rings overlay the second paged region, so the scratch group must
-    # address only that region while the paged group spans both.
+    # address only that region while the paged group spans both. The rings'
+    # distinct page geometry keeps them in their own transfer region rather
+    # than folding into the paged region they alias.
     tensor_regions = (("paged.0",), ("paged.1", "ring.0", "ring.1"))
     region_size, page_size = 512, 256
     kv_cache_config = KVCacheConfig(
@@ -1387,7 +1389,7 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     worker = _make_ring_worker()
 
     assert worker._ple_group_index is None
-    assert worker._scratch_region_indices == [1]
+    assert worker._scratch_region_indices == [2]
 
     desc_ids = worker._compute_desc_ids(
         block_ids=([1], [0]),
@@ -1395,5 +1397,119 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
         block_size_ratio=None,
         physical_blocks_per_logical=1,
     )
-    # Paged block 1 in both regions; ring block 0 only in its scratch region.
-    assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
+    # Paged block 1 in both paged regions; ring block 0 only in its own
+    # scratch region, which no longer folds into the overlaid paged region.
+    assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 2 * 2 + 0])
+
+
+def _make_shared_base_ring_worker():
+    """MLA swa group plus a compressor ring group aliasing the same
+    block-major allocation with a smaller page: the DeepSeek-V4.1-Flash
+    HMA shape where a compressor state cache shares its storage base with
+    the swa cache it serves."""
+    from unittest.mock import MagicMock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import (
+        CircularBufferSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+        UniformTypeKVCacheSpecs,
+    )
+
+    num_blocks = 2
+    # Every 256-byte block holds one 256-byte MLA swa page (4 tokens x 64B)
+    # and a 128-byte compressor ring page (8 tokens x 16B) aliased at the
+    # same base address.
+    block_stride, swa_page, ring_page = 256, 256, 128
+    raw = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+
+    swa_spec = MLAAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=64, dtype=torch.uint8
+    )
+    ring_spec = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=16,
+        head_size_v=0,
+        dtype=torch.uint8,
+    )
+
+    def group(specs):
+        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
+        assert uniform is not None
+        return KVCacheGroupSpec(list(specs), uniform)
+
+    swa_name, ring_name = "layers.0.swa", "layers.2.compressor"
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=[name],
+                layer_stride=raw.nbytes,
+                block_stride=block_stride,
+            )
+            for name in (swa_name, ring_name)
+        ],
+        kv_cache_groups=[
+            group({swa_name: swa_spec}),
+            group({ring_name: ring_spec}),
+        ],
+    )
+
+    vllm_config = create_vllm_config(block_size=4)
+    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "TEST_ATTN"
+    fake_backend.full_cls_name.return_value = "test.AttentionBackend"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        swa_cache = raw.view(num_blocks, swa_page)
+        ring_cache = raw.as_strided(
+            (num_blocks, 1, ring_page), (block_stride, block_stride, 1)
+        )
+        worker.register_kv_caches({swa_name: swa_cache, ring_name: ring_cache})
+    return worker
+
+
+@pytest.mark.cpu_test
+def test_shared_base_regions_with_distinct_block_lens_stay_separate():
+    """A compressor ring aliasing an MLA region's base address must register
+    its own region instead of collapsing into the MLA region and inheriting
+    its block length, which truncated and misaligned its transferred state."""
+    worker = _make_shared_base_ring_worker()
+
+    base = worker.kv_caches_base_addr[worker.engine_id][0]
+    assert base[0] == base[1]
+    assert worker.num_regions == 2
+    assert worker.block_len_per_layer == [256, 128]
+    assert worker.block_stride_per_layer == [256, 256]
+    assert worker._region_is_mla == [True, False]
+    assert worker._scratch_region_indices == [1]
+    assert worker.region_group_ids == [0, 1]
+    assert worker.num_descs == 4
+    descs = worker.src_blocks_data
+    assert descs[:, 1].tolist() == [256, 256, 128, 128]
+    np.testing.assert_array_equal(
+        descs[:, 0], [base[0], base[0] + 256, base[0], base[0] + 256]
+    )
