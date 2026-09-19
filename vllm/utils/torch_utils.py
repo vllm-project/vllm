@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+import regex as re
 import torch
 from packaging import version
 from packaging.version import Version
@@ -73,6 +74,36 @@ T = TypeVar("T")
 
 
 PIN_MEMORY = is_pin_memory_available()
+
+
+_PYTORCH_ALLOCATOR_ENV_VARS = (
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "PYTORCH_HIP_ALLOC_CONF",
+    "PYTORCH_ALLOC_CONF",
+)
+_EXPANDABLE_SEGMENTS_PATTERN = re.compile(
+    r"(?:^|,)\s*expandable_segments\s*:\s*(True|False)\s*(?=,|$)"
+)
+
+
+def get_torch_allocator_settings() -> str:
+    """Return allocator settings, falling back to PyTorch's env precedence."""
+    get_settings = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+    if get_settings is not None:
+        return get_settings()
+
+    # The getter is unavailable in PyTorch 2.11, which is used by ROCm.
+    # Match PyTorch's first-present-variable precedence, including empty values.
+    for env_var in _PYTORCH_ALLOCATOR_ENV_VARS:
+        if env_var in os.environ:
+            return os.environ[env_var]
+    return ""
+
+
+def torch_allocator_uses_expandable_segments(settings: str) -> bool:
+    """Return whether the settings enable expandable segments."""
+    values = _EXPANDABLE_SEGMENTS_PATTERN.findall(settings)
+    return bool(values) and values[-1] == "True"
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
