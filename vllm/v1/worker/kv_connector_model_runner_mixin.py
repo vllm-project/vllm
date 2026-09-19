@@ -4,7 +4,7 @@
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -40,10 +40,13 @@ class KVConnectorModelRunnerMixin:
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
         defer_finalize: bool = False,
+        model_runner: Any = None,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
             KVConnectorModelRunnerMixin._get_kv_connector_output(
-                scheduler_output, defer_finalize=defer_finalize
+                scheduler_output,
+                defer_finalize=defer_finalize,
+                model_runner=model_runner,
             )
             if has_kv_transfer_group()
             else nullcontext()
@@ -68,6 +71,7 @@ class KVConnectorModelRunnerMixin:
         scheduler_output: "SchedulerOutput",
         wait_for_save: bool = True,
         defer_finalize: bool = False,
+        model_runner: Any = None,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -106,3 +110,10 @@ class KVConnectorModelRunnerMixin:
 
             if not defer_finalize:
                 kv_connector.clear_connector_metadata()
+
+            # Stash so the collected state survives a forward failure and can
+            # be extracted for fault tolerance.
+            if model_runner is not None and hasattr(
+                model_runner, "kv_connector_output"
+            ):
+                model_runner.kv_connector_output = output
