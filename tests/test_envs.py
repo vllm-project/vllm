@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -164,6 +165,41 @@ def test_rust_bench_auto_path_missing_fails_fast() -> None:
         pytest.raises(FileNotFoundError, match="vllm-rs binary was not found"),
     ):
         environment_variables["VLLM_RUST_FRONTEND_PATH"]()
+
+
+@pytest.mark.parametrize("source_build", [False, True])
+def test_rust_auto_path_uses_matching_installation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source_build: bool
+) -> None:
+    """Use this installation's binary, preferring an in-place source build."""
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "vllm"
+    package.mkdir(parents=True)
+    metadata = site_packages / "vllm-0.0.0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Name: vllm\nVersion: 0.0.0\n")
+    (metadata / "RECORD").write_text("../bin/vllm-rs,,\n")
+    binary = tmp_path / "bin" / "vllm-rs"
+    binary.parent.mkdir()
+    binary.touch(mode=0o755)
+    monkeypatch.syspath_prepend(str(site_packages))
+    source = tmp_path / "source"
+    egg_info = source / "vllm.egg-info"
+    egg_info.mkdir(parents=True)
+    (egg_info / "PKG-INFO").write_text("Name: vllm\nVersion: 0.0.0\n")
+    (egg_info / "SOURCES.txt").write_text("vllm/envs.py\n")
+    monkeypatch.syspath_prepend(str(source))
+    monkeypatch.setattr(envs, "__file__", str(package / "envs.py"))
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.delenv("VLLM_RUST_FRONTEND_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+
+    if source_build:
+        binary = package / "vllm-rs"
+        binary.touch(mode=0o755)
+
+    resolved = environment_variables["VLLM_RUST_FRONTEND_PATH"]()
+    assert Path(resolved).samefile(binary)
 
 
 class TestEnvWithChoices:
