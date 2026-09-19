@@ -366,11 +366,15 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        self.engine_core.gather_worker_notifications()
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
-        return outputs and outputs.get(0) or EngineCoreOutputs()
+        # post_step may have gathered notifications
+        outputs = outputs or {}
+        self.engine_core._flush_notifications(outputs)
+        return outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
@@ -1187,7 +1191,11 @@ class AsyncMPClient(MPClient):
                             return
                         await output_handler(_self, outputs)
 
-                    if outputs.outputs or outputs.scheduler_stats:
+                    if (
+                        outputs.outputs
+                        or outputs.scheduler_stats
+                        or outputs.engine_notifications
+                    ):
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
                 outputs_queue.put_nowait(e)
