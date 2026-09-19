@@ -18,6 +18,7 @@ from vllm.models.qwen4_exp.config import (
     Qwen4ExpTextConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
@@ -141,10 +142,10 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
 
 
 @pytest.mark.parametrize("ple_layer_ids", [[1], []])
-def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> None:
-    """PLE needs raw input_ids, which non-first pipeline ranks never see. The
-    rest of the architecture is PP-capable, so the refusal must be conditional
-    -- and must land before the engine spends time loading weights."""
+def test_qwen4_exp_allows_pipeline_parallel_with_or_without_ple(
+    ple_layer_ids,
+) -> None:
+    """Qwen4Exp PP supports both the PLE and non-PLE configurations."""
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
@@ -158,13 +159,87 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
     with patch.object(
         Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
     ):
-        if ple_layer_ids:
-            with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
-                    vllm_config
-                )
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
+def test_qwen4_exp_pp_intermediate_tensors_carry_input_ids(backend: str) -> None:
+    """PLE token IDs are transported alongside hidden states across PP."""
+    model_module = import_module(f"vllm.models.qwen4_exp.{backend}.model")
+    model = object.__new__(model_module.Qwen4ExpModel)
+    torch.nn.Module.__init__(model)
+    model.config = _text_config()
+
+    tensors = model.make_empty_intermediate_tensors(
+        batch_size=8,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+
+    assert set(tensors.tensors) == {"hidden_states", "input_ids"}
+    assert tensors["hidden_states"].shape == (8, 32)
+    assert tensors["input_ids"].shape == (8,)
+    assert tensors["input_ids"].dtype == torch.int32
+
+
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
+def test_qwen4_exp_pp_forward_preserves_input_ids(backend: str) -> None:
+    """Non-first PP ranks pass transported token IDs to their decoder layers."""
+    model_module = import_module(f"vllm.models.qwen4_exp.{backend}.model")
+    model = object.__new__(model_module.Qwen4ExpModel)
+    torch.nn.Module.__init__(model)
+    model.config = _text_config()
+    model.start_layer = 0
+    model.end_layer = 1
+    model.hyper_connection_mixer = None
+
+    seen_input_ids: list[torch.Tensor | None] = []
+
+    class CaptureLayer:
+        def __call__(self, **kwargs):
+            seen_input_ids.append(kwargs["input_ids"])
+            return kwargs["hidden_states"], None, None
+
+    model.layers = [CaptureLayer()]
+    input_ids = torch.tensor([11, 13], dtype=torch.int32)
+    intermediate_tensors = IntermediateTensors(
+        {
+            "hidden_states": torch.zeros(2, 32),
+            "input_ids": input_ids,
+        }
+    )
+    pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
+
+    with patch.object(model_module, "get_pp_group", return_value=pp_group):
+        output = model.forward(
+            input_ids=None,
+            positions=torch.arange(2),
+            intermediate_tensors=intermediate_tensors,
+        )
+
+    assert len(seen_input_ids) == 1
+    assert seen_input_ids[0] is input_ids
+    assert isinstance(output, IntermediateTensors)
+    torch.testing.assert_close(output["input_ids"], input_ids)
+
+
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
+def test_qwen4_exp_pp_intermediate_tensors_omit_input_ids_without_ple(
+    backend: str,
+) -> None:
+    """Non-PLE models retain the original intermediate tensor contract."""
+    model_module = import_module(f"vllm.models.qwen4_exp.{backend}.model")
+    model = object.__new__(model_module.Qwen4ExpModel)
+    torch.nn.Module.__init__(model)
+    model.config = _text_config(ple_layer_ids=[])
+
+    tensors = model.make_empty_intermediate_tensors(
+        batch_size=8,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+
+    assert set(tensors.tensors) == {"hidden_states"}
 
 
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
