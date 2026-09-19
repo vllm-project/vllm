@@ -117,6 +117,21 @@ class LoadConfig:
     the original doc for `map_location` parameter in [`torch.load`][] parameter.
     """
 
+    @property
+    def weights_held_by_ipc_daemon(self) -> bool:
+        """Whether the weights stay resident in a weight cache daemon.
+
+        True for the ``ipc_cache`` load format in its default zero-copy mode:
+        the engine maps the daemon's GPU allocations instead of allocating
+        the weights itself, so they never show up in this process's usage.
+        """
+        if self.load_format != "ipc_cache":
+            return False
+        extra_config = self.model_loader_extra_config
+        if not isinstance(extra_config, dict):
+            return True
+        return extra_config.get("mode", "zero_copy") == "zero_copy"
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
