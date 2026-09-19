@@ -572,6 +572,23 @@ def test_mixed_prefill_decode_matches_isolated_requests():
     torch.testing.assert_close(output, torch.cat([bo, ao]))
 
 
+def test_mixed_batch_pool_boundary_is_request_local():
+    mixed, new_request, continuing = (
+        _SparseRuntime(),
+        _SparseRuntime(),
+        _SparseRuntime(),
+    )
+    mixed.run([(9, 0, 3, [1, 7], 3)])
+    continuing.run([(9, 0, 3, [2, 5], 4)])
+    # Flattened positions [0, 1, 2, 3] look like one complete pool, but the
+    # first three tokens and the final token belong to different requests.
+    ids, output = mixed.run([(1, 0, 3, [5, 2], 6), (9, 3, 1, [1, 7], 3)])
+    ni, no = new_request.run([(1, 0, 3, [3, 4], 1)])
+    ci, co = continuing.run([(9, 3, 1, [2, 5], 4)])
+    torch.testing.assert_close(ids, torch.cat([ni, ci]))
+    torch.testing.assert_close(output, torch.cat([no, co]))
+
+
 def test_slot_reuse_does_not_read_previous_request():
     reused, fresh = _SparseRuntime(), _SparseRuntime()
     reused.run([(11, 0, 135, [5, 2], 6)])
