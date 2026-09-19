@@ -42,11 +42,11 @@ When new data is passed in, we first check which items are in the cache, and whi
 
 ### Fused Normalisation on the Device
 
-To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we move the **normalisation and rescaling** steps from the CPU to the device and optimises data movement.
+To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we offload the **normalisation and rescaling** steps from the CPU to the device and optimises data movement.
 
 #### Fusing Normalisation and Rescaling on the GPU
 
-Traditionally, the CPU divides pixel values by 255, then subtracts the mean and divides by the standard deviation. we fuse these steps into a single per-channel affine transform on the device.
+Traditionally, the CPU would divide pixel values by 255, then subtracts the mean and divides by the standard deviation. We fuse these steps into a single per-channel affine transform on the device.
 
 `FusedMMInputNorm` dispatches to `fused_mm_input_norm_triton` on CUDA, which applies:
 
