@@ -17,7 +17,7 @@ from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
 )
-from vllm.distributed.parallel_state import _node_count, get_node_count
+from vllm.distributed.parallel_state import _node_count
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -132,14 +132,13 @@ def _create_workspace(
     return workspace
 
 
-def _resolve_fi_ar_backend() -> tuple[str, bool]:
+def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``allow_trtllm_fallback``
-        is True only when ``auto`` selects mnnvl for a single node, so that
-        workspace creation can fall back to trtllm on single-node topologies
-        without NVSwitch multicast support (where mnnvl is unavailable).
+        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        when automatic selection has no supported backend for the process
+        group.
 
     """
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
@@ -147,15 +146,23 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
         logger.debug_once("Using flashinfer allreduce backend: %s", backend)
         return backend, False
 
-    # Default to mnnvl for both single- and multi-node setups. The mnnvl
-    # cudagraph hang that previously forced single-node to trtllm
-    # (https://github.com/vllm-project/vllm/issues/35772) was fixed upstream in
-    # FlashInfer (>= 0.6.12, vLLM pins 0.6.15), so mnnvl is safe here. trtllm
-    # does not support multi-node allreduce, so mnnvl is required there anyway.
-    # mnnvl needs NVSwitch multicast; on single-node topologies without it,
-    # fall back to trtllm so fused allreduce stays enabled.
-    backend = "mnnvl"
-    allow_trtllm_fallback = get_node_count() == 1
+    node_count = _node_count(group)
+    if node_count == 1:
+        # TRTLLM supports single-node allreduce on Hopper and Blackwell. Do not
+        # create an MNNVL workspace when the process group is node-local.
+        backend = "trtllm"
+        allow_trtllm_fallback = False
+    elif current_platform.has_device_capability(100):
+        # MNNVL requires Blackwell-class GPUs and is the only supported
+        # FlashInfer backend for a multi-node allreduce process group.
+        backend = "mnnvl"
+        allow_trtllm_fallback = False
+    else:
+        logger.debug_once(
+            "FlashInfer allreduce fusion is disabled: multi-node process groups "
+            "require an MNNVL-capable Blackwell system."
+        )
+        return None, False
 
     logger.debug_once("Auto-selected flashinfer allreduce backend: %s", backend)
     return backend, allow_trtllm_fallback
@@ -179,9 +186,12 @@ def get_fi_ar_workspace(
     if _fi_ar_workspace is not None:
         return _fi_ar_workspace
 
-    backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
-    if get_node_count() > 1 and backend == "trtllm":
+    if backend is None:
+        return None
+
+    if _node_count(group) > 1 and backend == "trtllm":
         raise ValueError(
             "Flashinfer allreduce is not supported for multi-node allreduce with "
             "'trtllm' backend. Please use 'mnnvl' backend instead."
@@ -244,9 +254,12 @@ def get_fi_ar_quant_workspace(
     if _fi_ar_quant_workspace is not None:
         return _fi_ar_quant_workspace
 
-    backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
 
-    if get_node_count() > 1 and backend == "trtllm":
+    if backend is None:
+        return None
+
+    if _node_count(group) > 1 and backend == "trtllm":
         raise ValueError(
             "Flashinfer allreduce quantization fusion is not supported for "
             "multi-node allreduce with 'trtllm' backend. Please use 'mnnvl' "
@@ -385,7 +398,13 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        backend, _ = _resolve_fi_ar_backend()
+        backend, _ = _resolve_fi_ar_backend(self.group)
+        if backend is None:
+            logger.info(
+                "FlashInfer All Reduce is disabled because no supported backend "
+                "is available for this process group."
+            )
+            return
         tuned_max_size = _get_tuned_standalone_max_size(
             self.world_size,
             backend,

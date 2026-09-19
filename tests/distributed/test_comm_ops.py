@@ -376,7 +376,7 @@ def test_flashinfer_standalone_workspace_size(
         "_resolve_fi_ar_backend",
         Mock(return_value=("mnnvl", False)),
     )
-    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: 2)
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: 2)
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
@@ -387,6 +387,34 @@ def test_flashinfer_standalone_workspace_size(
     flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
 
     assert create_workspace.call_args.args[3] == expected
+
+
+@pytest.mark.parametrize(
+    ("node_count", "is_blackwell", "expected"),
+    [
+        (1, False, ("trtllm", False)),
+        (1, True, ("trtllm", False)),
+        (2, False, (None, False)),
+        (2, True, ("mnnvl", False)),
+    ],
+)
+def test_flashinfer_auto_backend_uses_group_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    node_count: int,
+    is_blackwell: bool,
+    expected: tuple[str | None, bool],
+) -> None:
+    monkeypatch.setattr(
+        flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
+    monkeypatch.setattr(
+        flashinfer_all_reduce.current_platform,
+        "has_device_capability",
+        lambda capability: is_blackwell,
+    )
+
+    assert flashinfer_all_reduce._resolve_fi_ar_backend(Mock()) == expected
 
 
 def test_flashinfer_all_reduce_precedes_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
