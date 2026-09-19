@@ -9,6 +9,9 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - gfx950-only AITER MXFP4 W4A16 MoE support, accuracy, and determinism
 - MoE-facing FP8 group-quant activation quality
 - deterministic routing and representative gfx942 / gfx950 coverage
+- ``AiterExperts.apply()`` trimming an oversized EP-dispatch-shaped buffer
+  down to the valid token prefix before calling AITER (regression coverage
+  for the buffer-size correctness defect fixed by that trim)
 
 Generic fused-MoE backend selection and non-ROCm kernel coverage live in the
 generic MoE test files under ``tests/kernels/moe``.
@@ -1016,6 +1019,151 @@ def test_aiter_fused_moe_end_to_end(
         out.float(),
         ref_out,
         label=f"end_to_end tokens={num_tokens} experts={num_experts} topk={topk}",
+        atol=0.05,
+        rtol=0.0,
+    )
+
+
+# Oversized dispatch-buffer regression tests -------------------------------
+
+
+@pytest.mark.parametrize(
+    "buffer_rows,valid_tokens",
+    [
+        pytest.param(65536, 8, id="buffer_at_aiter_corruption_threshold"),
+        pytest.param(128, 8, id="small_buffer_control"),
+    ],
+)
+def test_aiter_experts_apply_trims_oversized_dispatch_buffer(
+    buffer_rows: int,
+    valid_tokens: int,
+):
+    """AiterExperts.apply() must trim an oversized EP-dispatch-shaped buffer
+    down to the valid token prefix before calling AITER, which silently
+    corrupts its output once the row count crosses large thresholds
+    (e.g. 65536), regardless of how many rows hold real data.
+    """
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.config import VllmConfig
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+
+    from .utils import make_dummy_moe_config
+
+    _assert_aiter_supported()
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    hidden_dim = 128
+    intermediate_dim = 256
+    num_experts = 4
+    topk = 2
+    activation = MoEActivation.SILU
+
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_dim,
+        intermediate_size=intermediate_dim,
+        in_dtype=torch.bfloat16,
+        max_num_tokens=buffer_rows,
+    )
+    experts = AiterExperts(
+        moe_config=moe_config,
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+
+    w1 = torch.randn(
+        num_experts, intermediate_dim * 2, hidden_dim, dtype=torch.bfloat16
+    ) / math.sqrt(hidden_dim)
+    w2 = torch.randn(
+        num_experts, hidden_dim, intermediate_dim, dtype=torch.bfloat16
+    ) / math.sqrt(intermediate_dim)
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(w1, w2)
+
+    # Only the first `valid_tokens` rows carry real data; the rest mimics
+    # the unreceived tail of a real EP dispatch buffer.
+    hidden_states = torch.zeros(buffer_rows, hidden_dim, dtype=torch.bfloat16)
+    topk_weights = torch.zeros(buffer_rows, topk, dtype=torch.float32)
+    topk_ids = torch.zeros(buffer_rows, topk, dtype=torch.int32)
+
+    hidden_states[:valid_tokens] = torch.randn(
+        valid_tokens, hidden_dim, dtype=torch.bfloat16
+    )
+    valid_weights = torch.rand(valid_tokens, topk, dtype=torch.float32)
+    topk_weights[:valid_tokens] = valid_weights / valid_weights.sum(
+        dim=-1, keepdim=True
+    )
+    topk_ids[:valid_tokens] = _make_topk_ids(valid_tokens, num_experts, topk)
+
+    expert_tokens_meta = mk.ExpertTokensMetadata(
+        expert_num_tokens=torch.tensor([valid_tokens], dtype=torch.int32),
+        expert_num_tokens_cpu=None,
+    )
+
+    workspace13_shape, workspace2_shape, output_shape = experts.workspace_shapes(
+        M=buffer_rows,
+        N=intermediate_dim,
+        K=hidden_dim,
+        topk=topk,
+        global_num_experts=num_experts,
+        local_num_experts=num_experts,
+        expert_tokens_meta=expert_tokens_meta,
+        activation=activation,
+    )
+    workspace13 = torch.empty(workspace13_shape, dtype=torch.bfloat16)
+    workspace2 = torch.empty(workspace2_shape, dtype=torch.bfloat16)
+    output = torch.full(output_shape, torch.nan, dtype=torch.bfloat16)
+
+    vllm_config = VllmConfig()
+    with set_forward_context(None, vllm_config, num_tokens=buffer_rows):
+        experts.apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w1_shuffled,
+            w2=w2_shuffled,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=False,
+        )
+
+    assert torch.isfinite(output).all()
+
+    valid_out = output[:valid_tokens]
+    assert valid_out.abs().sum() > 0, (
+        "AiterExperts.apply() returned all-zero output for valid tokens -- "
+        "the oversized-buffer trim appears to be missing or broken"
+    )
+
+    ref_out = ref_moe_forward(
+        hidden_states[:valid_tokens],
+        w1,
+        w2,
+        topk_weights[:valid_tokens],
+        topk_ids[:valid_tokens],
+        activation="silu",
+    )
+    _assert_close_budget(
+        valid_out.float(),
+        ref_out,
+        label=(
+            f"oversized_dispatch_buffer buffer_rows={buffer_rows} "
+            f"valid_tokens={valid_tokens}"
+        ),
         atol=0.05,
         rtol=0.0,
     )
