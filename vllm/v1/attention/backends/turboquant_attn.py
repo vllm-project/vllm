@@ -211,18 +211,41 @@ class TurboQuantMetadata(AttentionMetadata):
     # without per-step D2H syncs.
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
+    # Per-token expansion of (seq_lens, block_table) for multi-token decode
+    # batches (spec-as-decode verify steps): row t is the synthetic
+    # single-token decode view of token t, so the decode kernel needs no
+    # multi-query support. Built once per step in the builder with GPU ops
+    # into persistent buffers, so FULL cudagraph replays read fresh contents
+    # through addresses baked at capture. None for single-token decode.
+    spec_seq_lens: torch.Tensor | None = None
+    spec_block_table: torch.Tensor | None = None
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
     kv_cache_spec: AttentionSpec
+    # UNIFORM_BATCH is safe because spec-decode verify batches run as
+    # decodes (supports_spec_as_decode=True): each token of a multi-token
+    # decode request becomes a synthetic single-token decode row via
+    # spec_seq_lens/spec_block_table, and the decode kernel consumes only
+    # GPU tensors, so FULL capture of uniform verify batches is sound.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self._reserve_workspace()
+        # Persistent buffers for the per-token decode views (lazily sized on
+        # first use so the block-table width always matches the runner's).
+        self._spec_seq_lens_buf: torch.Tensor | None = None
+        self._spec_block_table_buf: torch.Tensor | None = None
+        self._spec_pos: torch.Tensor | None = None
+        q_max = self.reorder_batch_threshold or 1
+        self._max_decode_tokens = self.vllm_config.scheduler_config.max_num_seqs * q_max
+        capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+        if capture_sizes:
+            self._max_decode_tokens = max(self._max_decode_tokens, max(capture_sizes))
 
     def _reserve_workspace(self) -> None:
         if not is_workspace_manager_initialized():
@@ -232,7 +255,11 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
 
-        max_num_reqs = scheduler_config.max_num_seqs
+        # Decode scratch is sized per TOKEN: with spec-as-decode a verify
+        # batch has max_num_seqs * (1 + num_speculative_tokens) decode rows.
+        max_decode_tokens = scheduler_config.max_num_seqs * (
+            self.reorder_batch_threshold or 1
+        )
         num_heads = model_config.get_num_attention_heads(parallel_config)
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_size = self.kv_cache_spec.head_size
@@ -241,9 +268,12 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         )
 
         current_workspace_manager().get_simultaneous(
-            ((max_num_reqs, num_heads, max_num_splits, head_size + 1), torch.float32),
-            ((max_num_reqs, num_heads, head_size), model_config.dtype),
-            ((max_num_reqs, num_heads), torch.float32),
+            (
+                (max_decode_tokens, num_heads, max_num_splits, head_size + 1),
+                torch.float32,
+            ),
+            ((max_decode_tokens, num_heads, head_size), model_config.dtype),
+            ((max_decode_tokens, num_heads), torch.float32),
         )
 
         reserve_continuation_prefill = (
@@ -268,19 +298,83 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         # Set seq_lens to 1 so CUDA graph capture is fast
         # (real seq_lens are filled at replay time).
         attn_metadata.seq_lens.fill_(1)
+        if attn_metadata.spec_seq_lens is not None:
+            # Keep the captured content sane too: each synthetic decode row
+            # attends to a single token. Replay reads the values written by
+            # _build_spec_decode_views for the real batch.
+            attn_metadata.spec_seq_lens.fill_(1)
         return attn_metadata
+
+    def _build_spec_decode_views(
+        self,
+        cam: CommonAttentionMetadata,
+        num_decodes: int,
+        num_decode_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expand per-request decode metadata to per-token decode rows.
+
+        For token t of decode request r with query length q_r, the synthetic
+        view is a single-token decode with
+        ``seq_len = seq_lens[r] - q_r + 1 + (t - query_start_loc[r])`` over
+        request r's block table, which reproduces causal masking inside the
+        chunk (the chunk's K/V are already stored to the TQ cache by
+        do_kv_cache_update). All ops run on GPU tensors into persistent
+        buffers: no CPU sync, and FULL cudagraph replays observe the fresh
+        values through capture-time addresses. The tail of the seq_lens
+        buffer is zeroed so padded rows of a captured batch are no-ops.
+        """
+        n = num_decode_tokens
+        block_table = cam.block_table_tensor
+        if (
+            self._spec_block_table_buf is None
+            or self._spec_block_table_buf.shape[1] != block_table.shape[1]
+        ):
+            max_tokens = max(self._max_decode_tokens, n)
+            device = block_table.device
+            self._spec_seq_lens_buf = torch.zeros(
+                max_tokens, dtype=cam.seq_lens.dtype, device=device
+            )
+            self._spec_block_table_buf = torch.zeros(
+                (max_tokens, block_table.shape[1]),
+                dtype=block_table.dtype,
+                device=device,
+            )
+            self._spec_pos = torch.arange(
+                max_tokens, dtype=cam.query_start_loc.dtype, device=device
+            )
+        assert self._spec_seq_lens_buf is not None and self._spec_pos is not None
+
+        qsl = cam.query_start_loc[: num_decodes + 1]
+        pos = self._spec_pos[:n]
+        req = torch.searchsorted(qsl, pos, right=True) - 1
+        req.clamp_(min=0, max=num_decodes - 1)
+        q_start = qsl[req]
+        q_len = qsl[req + 1] - q_start
+        synth = cam.seq_lens[:num_decodes][req] - q_len + 1 + (pos - q_start)
+        seq_out = self._spec_seq_lens_buf
+        seq_out[:n].copy_(synth.clamp_(min=0))
+        seq_out[n:].zero_()
+        torch.index_select(block_table, 0, req, out=self._spec_block_table_buf[:n])
+        return seq_out[:n], self._spec_block_table_buf[:n]
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         """Build TurboQuantMetadata from common attention metadata."""
         cam = common_attn_metadata
 
-        # With reorder_batch_threshold=1, the model runner guarantees
-        # decodes come first in the batch. split_decodes_and_prefills
-        # finds the boundary (operates on CPU tensors — no GPU sync).
+        # The model runner guarantees decodes come first in the batch.
+        # split_decodes_and_prefills finds the boundary (operates on CPU
+        # tensors — no GPU sync). With spec decode the threshold is
+        # 1 + num_speculative_tokens, so verify batches classify as decodes.
         assert self.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
+
+        spec_seq_lens = spec_block_table = None
+        if num_decode_tokens > num_decodes:
+            spec_seq_lens, spec_block_table = self._build_spec_decode_views(
+                cam, num_decodes, num_decode_tokens
+            )
 
         return TurboQuantMetadata(
             seq_lens=cam.seq_lens,
@@ -290,11 +384,13 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
             num_actual_tokens=cam.num_actual_tokens,
             max_query_len=cam.max_query_len,
             max_seq_len=cam.max_seq_len,
-            is_prefill=(cam.max_query_len > 1),
+            is_prefill=(num_prefills > 0),
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc_cpu=cam.query_start_loc_cpu,
             seq_lens_cpu=cam.seq_lens_cpu_upper_bound,
+            spec_seq_lens=spec_seq_lens,
+            spec_block_table=spec_block_table,
         )
 
 
@@ -488,7 +584,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 candidates.append(int(max(sizes)))
             sched = getattr(cfg, "scheduler_config", None)
             if sched is not None and getattr(sched, "max_num_seqs", None):
-                candidates.append(int(sched.max_num_seqs))
+                # Decode batches are sized in tokens: with spec-as-decode a
+                # verify batch is max_num_seqs * (1 + num_speculative_tokens).
+                tokens_per_req = 1
+                spec = getattr(cfg, "speculative_config", None)
+                if spec is not None and spec.num_speculative_tokens:
+                    tokens_per_req += int(spec.num_speculative_tokens) * (
+                        2 if spec.parallel_drafting else 1
+                    )
+                candidates.append(int(sched.max_num_seqs) * tokens_per_req)
             if candidates:
                 return max(candidates)
         except Exception:  # noqa: BLE001
@@ -600,6 +704,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             # --- Decode portion (first num_decodes requests) ---
             # Use full-batch max_seq_len as safe upper bound (no GPU sync).
+            # spec_seq_lens/spec_block_table already cover exactly the
+            # decode tokens (built from the decode split in the builder).
             decode_meta = TurboQuantMetadata(
                 seq_lens=attn_metadata.seq_lens[:num_decodes],
                 slot_mapping=attn_metadata.slot_mapping[:num_decode_tokens],
@@ -609,6 +715,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_query_len=1,
                 max_seq_len=attn_metadata.max_seq_len,
                 is_prefill=False,
+                spec_seq_lens=attn_metadata.spec_seq_lens,
+                spec_block_table=attn_metadata.spec_block_table,
             )
             attn_out[:num_decode_tokens] = self._decode_attention(
                 q[:num_decode_tokens], kv_cache, decode_meta, Pi, centroids, PiT, layer
@@ -1115,6 +1223,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         D = self.head_size
         S = self.max_num_kv_splits
         Hq = self.num_heads
+        # Multi-token decode (spec-as-decode): every token is its own
+        # synthetic single-token decode row, so the kernels below run
+        # unchanged with B = num_decode_tokens.
+        seq_lens = attn_metadata.seq_lens
+        block_table = attn_metadata.block_table
+        if attn_metadata.spec_seq_lens is not None:
+            seq_lens = attn_metadata.spec_seq_lens
+            assert attn_metadata.spec_block_table is not None
+            block_table = attn_metadata.spec_block_table
         mid_o_buf = output_buf = lse_buf = None
         if is_workspace_manager_initialized():
             # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
@@ -1147,8 +1264,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 return flydsl_turboquant_decode_attention(
                     query=query,
                     kv_cache=kv_cache,
-                    block_table=attn_metadata.block_table,
-                    seq_lens=attn_metadata.seq_lens,
+                    block_table=block_table,
+                    seq_lens=seq_lens,
                     Pi=Pi,
                     centroids=centroids,
                     scale=self.scale,
@@ -1180,8 +1297,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             return self._dispatch_decode_soa(
                 query=query,
                 kv_cache=kv_cache,
-                block_table=attn_metadata.block_table,
-                seq_lens=attn_metadata.seq_lens,
+                block_table=block_table,
+                seq_lens=seq_lens,
                 Pi=Pi,
                 centroids=centroids,
                 scale=self.scale,
@@ -1205,8 +1322,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         result = triton_turboquant_decode_attention(
             query=query,
             kv_cache=kv_cache,
-            block_table=attn_metadata.block_table,
-            seq_lens=attn_metadata.seq_lens,
+            block_table=block_table,
+            seq_lens=seq_lens,
             Pi=Pi,
             centroids=centroids,
             scale=self.scale,
