@@ -365,6 +365,16 @@ def select_unquantized_moe_backend(
     )
 
 
+def aiter_moe_intermediate_alignment(intermediate: int) -> int:
+    """Intermediate-size alignment required by AITER's CK 2stages MoE kernel.
+
+    AITER dispatches on ``inter_dim <= 192``: below the threshold both stages
+    use 64-wide tiles, above it at least one stage uses a 128-wide tile, and
+    CK's ``IsSupportedArgument`` rejects a size not divisible by that width.
+    """
+    return 64 if intermediate <= 192 else 128
+
+
 def unquantized_round_up_hidden_size_and_intermediate_size(
     backend: UnquantizedMoeBackend,
     hidden_size: int,
@@ -373,6 +383,13 @@ def unquantized_round_up_hidden_size_and_intermediate_size(
     """Round up dimensions before allocation to satisfy the selected kernel."""
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         intermediate_size = round_up(intermediate_size, 128)
+    elif backend == UnquantizedMoeBackend.AITER:
+        # Some model + TP splits give an unaligned per-partition intermediate
+        # size (e.g. 1792 / TP=8 = 224), which AITER rejects with
+        # "device_gemm ... does not support this GEMM problem".
+        intermediate_size = round_up(
+            intermediate_size, aiter_moe_intermediate_alignment(intermediate_size)
+        )
     return hidden_size, intermediate_size
 
 
