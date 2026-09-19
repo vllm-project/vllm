@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
+    make_fp8_moe_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
@@ -139,3 +147,49 @@ def select_mxfp8_moe_backend(
 
     # TODO: add debug log with reason.
     raise ValueError("No MXFP8 MoE backends available.")
+
+
+class MxFp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
+    """Class-based view of the MXFP8 MoE kernel oracle."""
+
+    def backend_enum_cls(self) -> type[Fp8MoeBackend]:
+        return Fp8MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[Fp8MoeBackend]:
+        return list(_SUPPORTED_BACKENDS)
+
+    def backend_to_kernel_cls(
+        self, backend: Fp8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return _mxfp8_backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> Fp8MoeBackend:
+        backend = _BACKEND_NAME_MAP.get(runner_backend)
+        if backend is None:
+            raise ValueError(
+                f"moe_backend='{runner_backend}' is not supported for MXFP8 MoE."
+            )
+        return backend
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_mxfp8_moe_backend(moe_config)
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: Fp8MoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_fp8_moe_kernel(
+            quant_config, moe_config, experts_cls, backend, routing_tables
+        )
+
