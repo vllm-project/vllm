@@ -42,7 +42,8 @@ TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 # Override backends for MLA models (MLA only supported on CUDA).
 if os.getenv("VLLM_TEST_MODEL"):
     config = get_config(TEST_MODEL, trust_remote_code=False)
-    if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
+    text_config = config.get_text_config()
+    if ModelArchConfigConvertorBase(config, text_config).is_deepseek_mla():
         DEVICE_BACKENDS["cuda"] = DeviceConfig(
             available=DEVICE_BACKENDS["cuda"].available,
             backends=["TRITON_MLA"]
@@ -51,6 +52,17 @@ if os.getenv("VLLM_TEST_MODEL"):
         DEVICE_BACKENDS["xpu"] = DeviceConfig(
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
+        )
+    elif getattr(text_config, "model_type", None) in (
+        "qwen3_5", "qwen3_5_text", "qwen3_5_moe_text", "qwen3_next"
+    ):
+        # GDN_ATTN is for Qwen3.5/Qwen3.6 models only (auto-selected by arch).
+        # GDN_ATTN is excluded from the default list: it is only valid for
+        # models that use GDN layers (Qwen3.5/Qwen3.6), so we add it only
+        # when the test model is of that type.
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["GDN_ATTN"],
         )
 
 # Only include backends for devices that are actually available.
@@ -133,3 +145,18 @@ def _extract_step_logprobs(request_output):
 
 def is_device_capability_below_90() -> bool:
     return not current_platform.has_device_capability(90)
+
+
+def get_attention_config(backend: str) -> dict:
+    """Return attention_config dict for the given backend.
+
+    GDN_ATTN is a Mamba-specific backend that is auto-selected by model
+    architecture (Qwen3.5/Qwen3.6 GDN layers). It cannot be set via
+    attention_config["backend"] since it is not a standard AttentionBackendEnum
+    value. For GDN_ATTN, return an empty dict so the engine uses its default
+    attention backend for transformer layers while GDN layers use GDN_ATTN
+    automatically.
+    """
+    if backend == "GDN_ATTN":
+        return {}
+    return {"backend": backend}
