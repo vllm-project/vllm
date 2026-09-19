@@ -384,3 +384,69 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+# ------------------------------------------------------- reasoning token count
+
+
+class _PieceTokenizer:
+    """Tokenizer stand-in: each id decodes to one fixed text piece.
+
+    Markers are deliberately split across several ids so the count cannot
+    rely on single-token framing.
+    """
+
+    def __init__(self, pieces):
+        self.pieces = list(pieces)
+
+    def decode(self, ids):
+        return "".join(self.pieces[i] for i in ids)
+
+
+def _count(pieces):
+    parser = MuseGlimmerReasoningParser(_PieceTokenizer(pieces))
+    return parser.count_reasoning_tokens(list(range(len(pieces))))
+
+
+def test_count_reasoning_tokens_excludes_framing():
+    pieces = [
+        "<|start|>",
+        "assistant",
+        " to=",
+        "self",
+        "<|message|>",
+        "think",
+        " one",
+        " two",
+        "<|eom|>",
+        "<|start|>",
+        "assistant",
+        " to=user",
+        "<|message|>",
+        "answer",
+        " here",
+        "<|eot|>",
+    ]
+    assert _count(pieces) == 3
+
+
+def test_count_reasoning_tokens_multiple_blocks_and_open_tail():
+    pieces = [
+        " to=self<|message|>",
+        "a",
+        "b",
+        "<|eom|>",
+        " to=read.read<|message|>",
+        "<atem:invoke",
+        ">",
+        " to=self<|message|>",
+        "c",
+        "d",
+        "e",
+    ]
+    assert _count(pieces) == 5
+
+
+def test_count_reasoning_tokens_none_without_reasoning():
+    assert _count(["to=user<|message|>", "hi", "<|eot|>"]) == 0
+    assert _count([]) == 0
