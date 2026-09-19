@@ -61,6 +61,26 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
 
 
 @pytest.mark.parametrize(
+    "model_output",
+    [
+        # The start token shows up in ordinary prose.
+        "I could call <tool_call> here but let me answer directly instead.",
+        # Generation was cut off part way through the block.
+        'Checking now.\n<tool_call>{"name": "get_weather", "argum',
+    ],
+)
+def test_extract_tool_calls_unparsable_block(ernie45_tool_parser, model_output: str):
+    """A start token with no parsable call must not be reported as a tool call,
+    and must not truncate the content."""
+    extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    assert not extracted_tool_calls.tools_called
+    assert extracted_tool_calls.tool_calls == []
+    assert extracted_tool_calls.content == model_output
+
+
+@pytest.mark.parametrize(
     ids=[
         "single_tool_call",
         "multiple_tool_calls",
