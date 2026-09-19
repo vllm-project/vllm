@@ -3,11 +3,13 @@
 
 import inspect
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -15,6 +17,12 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+        MoEPermuteScratch,
+    )
+    from vllm.model_executor.layers.fused_moe.moe_workspace import MoEWorkspacePool
 
 logger = init_logger(__name__)
 
@@ -66,6 +74,8 @@ class WorkspaceManager:
         self._current_workspaces: list[torch.Tensor | None] = [None] * (
             self._num_ubatches * self._num_lanes
         )
+        self._moe_workspace_pools: list[MoEWorkspacePool] | None = None
+        self._moe_workspace_pool_init_lock = threading.Lock()
         self._locked: bool = False
 
     @staticmethod
@@ -112,6 +122,48 @@ class WorkspaceManager:
     def is_locked(self) -> bool:
         """Check if workspace is locked."""
         return self._locked
+
+    def get_moe_permute_scratch(
+        self,
+        *,
+        max_num_tokens: int,
+        topk: int,
+        num_experts: int,
+        num_local_experts: int,
+        device: torch.device,
+        hidden_size: int | None = None,
+        hidden_dtype: torch.dtype | None = None,
+    ) -> "MoEPermuteScratch":
+        pools = self._moe_workspace_pools
+        if pools is None:
+            with self._moe_workspace_pool_init_lock:
+                pools = self._moe_workspace_pools
+                if pools is None:
+                    from vllm.model_executor.layers.fused_moe.moe_workspace import (
+                        MoEWorkspacePool,
+                    )
+
+                    pools = self._moe_workspace_pools = [
+                        MoEWorkspacePool()
+                        for _ in range(self._num_ubatches * self._num_lanes)
+                    ]
+        ubatch_id = dbo_current_ubatch_id()
+        lane = _workspace_lane.get()
+        if lane >= self._num_lanes:
+            raise RuntimeError(
+                f"Workspace lane {lane} is not configured; manager has "
+                f"{self._num_lanes} lane(s)."
+            )
+        return pools[ubatch_id * self._num_lanes + lane].get_permute_scratch(
+            max_num_tokens=max_num_tokens,
+            topk=topk,
+            num_experts=num_experts,
+            num_local_experts=num_local_experts,
+            device=device,
+            hidden_size=hidden_size,
+            hidden_dtype=hidden_dtype,
+            allow_create=not self._locked,
+        )
 
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
