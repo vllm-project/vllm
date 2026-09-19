@@ -215,6 +215,8 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+LMHeadBackend = Literal["torch", "lossless_packed"]
+
 
 @config
 class KernelConfig:
@@ -326,6 +328,17 @@ class KernelConfig:
     precedence over ``linear_backend``; for example,
     ``{"nvfp4_w4a16": "humming"}``."""
 
+    lm_head_backend: LMHeadBackend = "torch"
+    """Backend for unquantized language-model output heads.
+
+    ``lossless_packed`` stores an exact auxiliary encoding of eligible BF16
+    weights and accelerates single-token projection. Unsupported heads and
+    input shapes use the existing quantization method.
+    """
+
+    lm_head_max_packed_fraction: float = Field(default=0.90, gt=0.0, le=1.0)
+    """Maximum packed-to-dense storage ratio accepted by the lm-head backend."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -333,7 +346,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    @field_validator("linear_backend", mode="before")
+    @field_validator("linear_backend", "lm_head_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
