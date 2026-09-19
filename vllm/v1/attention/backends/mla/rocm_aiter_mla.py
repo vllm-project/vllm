@@ -433,6 +433,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Served by passing the mask to the kernel; _build_decode turns away the
     # shapes AITER has no non-causal kernel for.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    # DSpark non-causal draft block is served at qseqlen>1 through the
+    # persistent mask0 decode + per-row LSE cross-rank merge, so it works
+    # under a DCP-sharded MLA cache (not just single-rank).
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
     # Set from the common metadata every build; a batch is causal unless the
     # drafter says otherwise.
     _decode_causal: bool = True
@@ -1064,7 +1068,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             causal,
         )
         use_segmented_dcp_verify = (
-            self._supports_segmented_dcp_verify and max_qo_len > 1
+            self._supports_segmented_dcp_verify and max_qo_len > 1 and causal
         )
 
         # Segmented DCP verify carries its own per-row subpage table, so the
@@ -2032,7 +2036,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.attn_out_dtype,
             )
 
-        if self.dcp_world_size > 1 and int(decode.max_qo_len) > 1:
+        if (
+            attn_metadata.causal
+            and self.dcp_world_size > 1
+            and int(decode.max_qo_len) > 1
+        ):
             raise RuntimeError(
                 "ROCM_AITER_MLA DCP multi-token verify requires segmented MLA."
             )
@@ -2098,6 +2106,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 decode.max_qo_len,
                 sm_scale=self.scale,
                 return_lse=True,
+                causal=attn_metadata.causal,
                 **mla_kwargs,
             )
             assert lse is not None, (
