@@ -246,9 +246,11 @@ class Qwen2VisionMLP(nn.Module):
         act_layer: type[nn.Module] = QuickGELU,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        if use_data_parallel is None:
+            use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -280,10 +282,12 @@ class Qwen2VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = is_vit_use_data_parallel()
+        if use_data_parallel is None:
+            use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.tp_size = (
             1
             if use_data_parallel
@@ -402,6 +406,7 @@ class Qwen2VisionBlock(nn.Module):
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -412,6 +417,7 @@ class Qwen2VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel,
         )
         self.mlp = Qwen2VisionMLP(
             dim,
@@ -419,6 +425,7 @@ class Qwen2VisionBlock(nn.Module):
             act_layer=act_layer,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -479,9 +486,11 @@ class Qwen2VisionPatchMerger(nn.Module):
         spatial_merge_size: int = 2,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ) -> None:
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        if use_data_parallel is None:
+            use_data_parallel = is_vit_use_data_parallel()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -549,7 +558,7 @@ class Qwen2VisionTransformer(nn.Module):
         num_heads = vision_config.num_heads
         mlp_ratio = vision_config.mlp_ratio
 
-        self.use_data_parallel = is_vit_use_data_parallel()
+        self.use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.out_hidden_size = vision_config.hidden_size
 
         self.spatial_merge_size = spatial_merge_size
@@ -594,6 +603,7 @@ class Qwen2VisionTransformer(nn.Module):
             norm_layer=norm_layer,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            use_data_parallel=self.use_data_parallel,
         )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
