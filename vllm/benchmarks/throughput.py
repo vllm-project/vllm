@@ -22,6 +22,7 @@ from vllm.benchmarks.datasets import (
     add_random_multimodal_dataset_args,
     get_samples,
 )
+from vllm.benchmarks.lib.profiling import profile, profile_async
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
@@ -127,27 +128,24 @@ def _run_vllm_requests(
             llm.sleep(level=0, mode="abort")
 
         start = time.perf_counter()
-        if do_profile:
-            llm.start_profile()
-
-        if prequeue_requests:
-            try:
-                llm.enqueue(
-                    prompts,
-                    sampling_params,
-                    lora_request=lora_requests,
-                    use_tqdm=True,
+        with profile(llm, do_profile):
+            if prequeue_requests:
+                try:
+                    llm.enqueue(
+                        prompts,
+                        sampling_params,
+                        lora_request=lora_requests,
+                        use_tqdm=True,
+                    )
+                finally:
+                    llm.wake_up(tags=["scheduling"])
+                outputs = llm.wait_for_completion(
+                    output_type=RequestOutput, use_tqdm=True
                 )
-            finally:
-                llm.wake_up(tags=["scheduling"])
-            outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
-        else:
-            outputs = llm.generate(
-                prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
-            )
-
-        if do_profile:
-            llm.stop_profile()
+            else:
+                outputs = llm.generate(
+                    prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
+                )
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
@@ -170,18 +168,15 @@ def _run_vllm_requests(
         for request in requests:
             assert request.expected_output_len == output_len
         start = time.perf_counter()
-        if do_profile:
-            llm.start_profile()
-        llm.beam_search(
-            beam_prompts,
-            BeamSearchParams(
-                beam_width=n,
-                max_tokens=output_len,
-                ignore_eos=True,
-            ),
-        )
-        if do_profile:
-            llm.stop_profile()
+        with profile(llm, do_profile):
+            llm.beam_search(
+                beam_prompts,
+                BeamSearchParams(
+                    beam_width=n,
+                    max_tokens=output_len,
+                    ignore_eos=True,
+                ),
+            )
         end = time.perf_counter()
     return end - start, outputs
 
@@ -277,20 +272,15 @@ def _run_vllm_chat_requests(
         llm.sleep(level=0, mode="abort")
 
     start = time.perf_counter()
-    if do_profile:
-        llm.start_profile()
-
-    if prequeue_requests:
-        try:
-            llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
-        finally:
-            llm.wake_up(tags=["scheduling"])
-        outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
-    else:
-        outputs = llm.chat(prompts, sampling_params, use_tqdm=True)  # type: ignore[arg-type]
-
-    if do_profile:
-        llm.stop_profile()
+    with profile(llm, do_profile):
+        if prequeue_requests:
+            try:
+                llm.enqueue_chat(prompts, sampling_params, use_tqdm=True)
+            finally:
+                llm.wake_up(tags=["scheduling"])
+            outputs = llm.wait_for_completion(output_type=RequestOutput, use_tqdm=True)
+        else:
+            outputs = llm.chat(prompts, sampling_params, use_tqdm=True)  # type: ignore[arg-type]
 
     end = time.perf_counter()
     return end - start, outputs
@@ -385,20 +375,17 @@ async def _run_vllm_async_requests(
 
     generators = []
     start = time.perf_counter()
-    if do_profile:
-        await llm.start_profile()
-    for i, (prompt_item, sp, lr) in enumerate(
-        zip(prompts, sampling_params, lora_requests)
-    ):
-        generator = llm.generate(
-            prompt_item, sp, lora_request=lr, request_id=f"{request_id_prefix}{i}"
-        )
-        generators.append(generator)
-    all_gens = merge_async_iterators(*generators)
-    async for _i, _res in all_gens:
-        pass
-    if do_profile:
-        await llm.stop_profile()
+    async with profile_async(llm, do_profile):
+        for i, (prompt_item, sp, lr) in enumerate(
+            zip(prompts, sampling_params, lora_requests)
+        ):
+            generator = llm.generate(
+                prompt_item, sp, lora_request=lr, request_id=f"{request_id_prefix}{i}"
+            )
+            generators.append(generator)
+        all_gens = merge_async_iterators(*generators)
+        async for _i, _res in all_gens:
+            pass
     end = time.perf_counter()
     return end - start, None
 
@@ -965,7 +952,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--profile",
         action="store_true",
         default=False,
-        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
+        help="Profile benchmark requests after warmup using --profiler-config "
+        "(torch, cuda, or proton).",
     )
 
     # prefix repetition dataset
