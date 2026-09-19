@@ -89,6 +89,13 @@ void cutlass_gemm_caller(torch::stable::Tensor& out,
       cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, L));
   StrideD d_stride =
       cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, L));
+
+  // Preserve the runtime leading strides of valid padded tensor views. L is
+  // fixed to 1 by get_problem_shape(), so there is no batch stride to forward.
+  cute::get<0>(a_stride) = a.stride(0);
+  cute::get<0>(b_stride) = b.stride(1);
+  cute::get<0>(c_stride) = out.stride(0);
+  cute::get<0>(d_stride) = out.stride(0);
   StrideAux aux_stride = d_stride;
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());

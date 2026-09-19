@@ -262,6 +262,17 @@ void cutlass_gemm_caller_sm90_fp8(torch::stable::Tensor& out,
       StrideC{},
       swap_ab ? cute::make_shape(n, m, 1) : cute::make_shape(m, n, 1));
 
+  // Preserve the runtime leading strides of valid padded tensor views. The
+  // swapped epilogue treats the row-major output as its column-major
+  // transpose, whose leading stride is the second stride component.
+  cute::get<0>(a_stride) = a.stride(0);
+  cute::get<0>(b_stride) = b.stride(1);
+  if constexpr (swap_ab) {
+    cute::get<1>(c_stride) = out.stride(0);
+  } else {
+    cute::get<0>(c_stride) = out.stride(0);
+  }
+
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
