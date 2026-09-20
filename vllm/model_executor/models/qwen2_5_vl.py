@@ -1191,6 +1191,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 
@@ -1207,24 +1208,20 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 
     def _call_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Override to use the text path instead of token path to use the
-        # video-specific logic in processing_qwen2_5_vl.py
-        if videos := mm_data.get("videos"):
+        if videos := hf_data.get("videos"):
             # HF expects video metadata as a separate argument.
-            mm_data = dict(mm_data)
-            mm_data["videos"] = [video for video, _ in videos]
-            mm_data["video_metadata"] = [
+            hf_data = dict(hf_data)
+            hf_data["videos"] = [video for video, _ in videos]
+            hf_data["video_metadata"] = [
                 VideoMetadata(
                     **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
                 )
                 for _, metadata in videos
             ]
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        return super()._call_hf_processor(hf_data, hf_kwargs)
 
     def _get_prompt_updates(
         self,
