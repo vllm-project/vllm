@@ -60,15 +60,16 @@ def collect_ec_item_metadata(
 
     Keyed by mm_hash, each entry carries a `metadata` dict with whatever
     placeholder fields `resolver` says this model needs published for its
-    modality, so a consumer can skip the image transform. `data` is None for
-    items served from the processor cache, in which case the metadata is
+    modality, so a consumer can skip the image transform. `item_indices`
+    identifies every occurrence in `mm_features`, including repeated hashes.
+    `data` is None for items served from the processor cache, so the metadata is
     unavailable here and the consumer has to fall back to processing the
     media itself. A connector that also has transfer coordinates to report
     (e.g. NIXL peer_host/peer_port/size_bytes) merges those in alongside
     `metadata`, not into it.
     """
     items: dict[str, dict[str, Any]] = {}
-    for feature in mm_features:
+    for index, feature in enumerate(mm_features):
         metadata: dict[str, Any] = {}
         if feature.data is not None:
             wanted = resolver.fields_for(feature.modality)
@@ -81,7 +82,9 @@ def collect_ec_item_metadata(
                     # Some metadata (e.g. Qwen3-VL video timestamps) is
                     # produced as a plain list rather than a tensor.
                     metadata[key] = value
-        items[feature.identifier] = {"metadata": metadata}
+        entry = items.setdefault(feature.identifier, {"item_indices": []})
+        entry["metadata"] = metadata
+        entry["item_indices"].append(index)
     return items
 
 

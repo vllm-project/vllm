@@ -3,9 +3,7 @@
 
 import pytest
 import torch
-from packaging.version import Version
 from PIL import Image
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -28,7 +26,6 @@ def test_jina_vl_processing_order() -> None:
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
         tokenizer=ctx.tokenizer,
-        cache=cache,
     )
 
     placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -39,6 +36,7 @@ def test_jina_vl_processing_order() -> None:
         return processor(
             placeholder * len(images),
             mm_items=processor.info.parse_mm_data({"image": images}),
+            cache=cache,
         )
 
     query = process([query_image])
@@ -133,12 +131,6 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
@@ -184,12 +176,6 @@ def test_get_image_size_with_most_features(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
 ):
-    if (
-        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
-        and "size" in mm_processor_kwargs
-    ):
-        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
-
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,

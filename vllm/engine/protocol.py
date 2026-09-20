@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -61,6 +62,10 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
+
+    def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+        """KV-event publisher config of each engine, keyed by DP rank."""
+        return {}
 
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
@@ -184,6 +189,11 @@ class EngineClient(ABC):
     @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
         """Sleep the engine."""
+        ...
+
+    @abstractmethod
+    async def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical GPU memory. Requires a completed pause."""
         ...
 
     @abstractmethod
