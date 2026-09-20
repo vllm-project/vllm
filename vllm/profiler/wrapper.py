@@ -261,7 +261,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
-        self.profiler: torch.profiler.profile | None = None
+        self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
         self._uses_schedule = profiler_schedule is not None
@@ -281,7 +281,6 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
-        assert self.profiler is not None
         group_by_input_shape = (
             current_platform.is_cpu()
             and self.profiler_config.torch_profiler_record_shapes
@@ -310,7 +309,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         add_metadata_json is a no-op until Kineto is initialized, which with a
         schedule only happens after the WAIT phase, so stamp once it's live.
         """
-        if self._version_metadata_added or self.profiler is None:
+        if self._version_metadata_added:
             return
         # None while the schedule is still in the WAIT phase.
         if self.profiler.profiler is None:
@@ -340,7 +339,6 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _stop(self) -> None:
-        assert self.profiler is not None
         self.profiler.stop()
 
         rank = self.local_rank
@@ -372,7 +370,6 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         """
         if self._uses_schedule:
-            assert self.profiler is not None
             self.profiler.step()
             # Stamp once the schedule leaves WAIT and Kineto is live.
             self._maybe_add_version_metadata()
