@@ -57,8 +57,7 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
-    def get_num_reqs_for_dummy_run(self, num_reqs: int) -> int:
-        return num_reqs
+    num_query_per_req: int = 1
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
