@@ -152,7 +152,10 @@ def main() -> int:
             print(f"    {name} -> {group}", file=sys.stderr)
         return 1
     if ok < args.expect_min:
-        print(f"FAIL: only {ok} fp8 layers, expected >= {args.expect_min}", file=sys.stderr)
+        print(
+            f"FAIL: only {ok} fp8 layers, expected >= {args.expect_min}",
+            file=sys.stderr,
+        )
         return 1
 
     for group in sorted(expected_groups):

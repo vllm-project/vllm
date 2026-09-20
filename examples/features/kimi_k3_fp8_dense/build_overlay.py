@@ -455,12 +455,15 @@ def build(src: Path, dst: Path, target: str = DEFAULT_TARGET) -> int:
             shutil.copy2(extra, dst / extra.name)
 
     print(f"\noverlay written to {dst}")
-    print(f"  new bytes: {sum(f.stat().st_size for f in dst.glob('model-fp8-*'))/1e9:.1f} GB")
+    new_bytes = sum(f.stat().st_size for f in dst.glob("model-fp8-*"))
+    print(f"  new bytes: {new_bytes / 1e9:.1f} GB")
     print("  originals untouched; delete the output directory to revert")
     return 0
 
 
-def check_unreferenced(dst: Path, src: Path, target: str = DEFAULT_TARGET, samples: int = 3) -> int:
+def check_unreferenced(
+    dst: Path, src: Path, target: str = DEFAULT_TARGET, samples: int = 3
+) -> int:
     """Assert the properties the overlay depends on.
 
     Two independent failures would each make a run against this overlay
@@ -533,7 +536,9 @@ def check_unreferenced(dst: Path, src: Path, target: str = DEFAULT_TARGET, sampl
         # The offline estimate on these tensors was 0.0265; anything far above
         # means the scale is not being applied the way the weights were built.
         if relative > 0.05:
-            problems.append(f"{name} dequantizes at relRMS {relative:.4f}, expected ~0.027")
+            problems.append(
+                f"{name} dequantizes at relRMS {relative:.4f}, expected ~0.027"
+            )
 
     for problem in problems:
         print(f"  FAIL {problem}", file=sys.stderr)
