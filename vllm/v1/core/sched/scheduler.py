@@ -1366,8 +1366,8 @@ class Scheduler(SchedulerInterface):
                 self.prefill_capacity_bound = bool(self.waiting)
 
         if self._pause_state == PauseState.UNPAUSED:
-            if not preempted_reqs:
-                self.srpf_starvation_clock += 1
+
+            self.srpf_starvation_clock += 1
             scheduled_reqs = scheduled_running_reqs + scheduled_new_reqs + scheduled_resumed_reqs
             for req in scheduled_reqs:
                 req.last_scheduled_clock = self.srpf_starvation_clock
