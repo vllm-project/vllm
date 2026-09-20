@@ -179,11 +179,25 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        offset = getattr(ctx, "additional_kwargs", {}).get(
+            "routed_experts_token_offset", 0
+        )
+        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
+            local_topk_ids
+        )
 
-    def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
+    def snapshot_routing_data(
+        self,
+        num_tokens: int,
+        token_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Return a stable snapshot of the current routing data."""
-        return self.device_buffer[:num_tokens].to(self.output_dtype)
+        routing_data = (
+            self.device_buffer[:num_tokens]
+            if token_indices is None
+            else self.device_buffer[token_indices]
+        )
+        return routing_data.to(self.output_dtype)
 
 
 def bind_routed_experts_capturer(

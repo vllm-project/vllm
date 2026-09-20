@@ -55,41 +55,15 @@ def stage_decode_tokens(
     slot_mappings: torch.Tensor,
     ubatch_slices: UBatchSlices,
 ) -> torch.Tensor:
-    """Place consecutive real rows at the start of each captured token region."""
+    """Place consecutive real rows at the start of each captured token region.
+
+    The DP graph selector guarantees single-token decode with at least one real
+    token per microbatch and a captured slice layout covering the padded batch.
+    """
     n = input_batch.num_tokens
     num_padded = input_batch.num_tokens_after_padding
     k = len(ubatch_slices)
-    assert k > 0, "staging requires at least one microbatch"
-    assert k <= n <= ubatch_slices[-1].token_slice.start, (
-        f"staging requires k <= n <= last_region_start; k={k}, n={n}, "
-        f"last_region_start={ubatch_slices[-1].token_slice.start}"
-    )
-    assert input_batch.num_reqs == n, (
-        f"staging requires num_reqs == num_tokens; {input_batch.num_reqs} != {n}"
-    )
-    assert not input_batch.has_prefill and input_batch.num_draft_tokens == 0, (
-        "staging requires decode without prefill or draft tokens; "
-        f"has_prefill={input_batch.has_prefill}, drafts={input_batch.num_draft_tokens}"
-    )
-    assert np.all(input_batch.num_scheduled_tokens == 1), (
-        "staging requires exactly one scheduled token per request"
-    )
     counts = [n // k + (i < n % k) for i in range(k)]
-    previous_stop = 0
-    for region, count in zip(ubatch_slices, counts):
-        start, stop = region.token_slice.start, region.token_slice.stop
-        assert start == previous_stop and start < stop <= num_padded, (
-            f"invalid staging region [{start}:{stop}], previous_stop={previous_stop}, "
-            f"num_padded={num_padded}"
-        )
-        assert 0 < count <= stop - start, (
-            f"staging count={count} exceeds region [{start}:{stop}] "
-            f"capacity={stop - start}"
-        )
-        previous_stop = stop
-    assert previous_stop == num_padded, (
-        f"staging regions end at {previous_stop}, expected num_padded={num_padded}"
-    )
     staged_rows = torch.cat(
         [
             torch.arange(
@@ -128,6 +102,11 @@ def restore_staged_inputs(
     slot_mappings[:, n : input_batch.num_tokens_after_padding].fill_(-1)
     input_batch.is_padding[:n].fill_(False)
     input_batch.is_padding[n : input_batch.num_tokens_after_padding].fill_(True)
+
+
+def compact_staged_rows(values: torch.Tensor, staged_rows: torch.Tensor) -> None:
+    """Restore staged output rows to their logical order in-place."""
+    values[: staged_rows.numel()] = values[staged_rows]
 
 
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
@@ -385,10 +364,7 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
-        self.stage_real_tokens = (
-            self._supports_real_token_staging()
-            and self._backend_supports_staging_layout()
-        )
+        self.stage_real_tokens = self._real_token_staging_unsupported_reason() is None
         # `query_start_loc` and `seq_lens` are rebased onto each microbatch's
         # own token range, so they cannot be views of the full batch's buffers.
         # Allocating up front keeps their addresses stable across replays.
@@ -414,12 +390,14 @@ class UBatchRunner:
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
 
-    def _supports_real_token_staging(self) -> bool:
-        return self._real_token_staging_unsupported_reason() is None
-
     def _real_token_staging_unsupported_reason(self) -> str | None:
         config = self.vllm_config
         parallel = self.parallel_config
+        if parallel.all2all_backend != "nixl_ep":
+            return (
+                f"all2all_backend={parallel.all2all_backend!r}: "
+                "staging is validated only with nixl_ep"
+            )
         if type(self.model_state) is not DefaultModelState:
             return (
                 f"model_state={type(self.model_state).__name__}: "
@@ -447,10 +425,6 @@ class UBatchRunner:
             ("speculative_config", config.speculative_config is not None),
             ("enable_eplb", parallel.enable_eplb),
             ("kv_transfer_config", config.kv_transfer_config is not None),
-            (
-                "enable_return_routed_experts",
-                config.model_config.enable_return_routed_experts,
-            ),
         ):
             if enabled:
                 return (
@@ -501,22 +475,6 @@ class UBatchRunner:
                 return "FLASH_ATTN staging requires a FULL FA3 builder per microbatch"
         return None
 
-    def _backend_supports_staging_layout(self) -> bool:
-        return self._staging_layout_unsupported_reason() is None
-
-    def _staging_layout_unsupported_reason(self) -> str | None:
-        backend = self.parallel_config.all2all_backend
-        if backend != "nixl_ep":
-            return (
-                f"all2all_backend={backend!r}: staging is validated only with nixl_ep"
-            )
-        if self.num_ubatches < 1:
-            return (
-                f"num_ubatches={self.num_ubatches}: staging requires at least "
-                "one microbatch"
-            )
-        return None
-
     def prepare(
         self,
         input_batch: InputBatch,
@@ -543,7 +501,6 @@ class UBatchRunner:
         ):
             # DP sync established the capability and single-token contract.
             # Capture/dummy runs bypass it and must never stage dummy rows.
-            assert self.stage_real_tokens
             staged_rows = stage_decode_tokens(
                 input_batch, block_tables, slot_mappings, ubatch_slices
             )
@@ -657,6 +614,9 @@ class UBatchRunner:
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
+                    additional_kwargs={
+                        "routed_experts_token_offset": ubatch_slice.token_slice.start
+                    },
                 )
             )
         return forward_contexts

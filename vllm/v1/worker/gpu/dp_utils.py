@@ -15,7 +15,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    get_num_ubatches,
+    is_last_ubatch_empty,
+)
 
 
 @dataclass(frozen=True)
@@ -127,8 +131,8 @@ def sync_cudagraph_and_dp_padding(
                     num_ubatches=num_ubatches,
                 )
                 min_tokens = int(num_tokens_across_dp.min())
-                if min_tokens <= (
-                    ubatch_desc.num_tokens // num_ubatches * (num_ubatches - 1)
+                if is_last_ubatch_empty(
+                    min_tokens, ubatch_desc.num_tokens, num_ubatches
                 ):
                     # Stage only when a rank would leave its last region empty.
                     runner = cudagraph_manager.ubatch_runner

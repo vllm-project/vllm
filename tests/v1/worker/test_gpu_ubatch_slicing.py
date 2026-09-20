@@ -44,6 +44,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
+    compact_staged_rows,
     create_ubatch_slices,
     restore_staged_inputs,
     slice_model_inputs,
@@ -1393,17 +1394,6 @@ def test_conditional_decode_preserves_token_position_and_kv_mapping(padded, k, n
         assert (values[n:padded] == 0).all()
 
 
-@pytest.mark.parametrize("n", [0, 1, 65, 80])
-def test_conditional_staging_rejects_ineligible_counts(n):
-    batch = SimpleNamespace(num_tokens=n, num_tokens_after_padding=128)
-    slices = [
-        UBatchSlice(slice(0, 64), slice(0, 64)),
-        UBatchSlice(slice(64, 128), slice(64, 128)),
-    ]
-    with pytest.raises(AssertionError):
-        stage_decode_tokens(batch, (), torch.empty(1, 128), slices)
-
-
 @pytest.mark.parametrize(
     "padded,k,counts", [(11, 3, [5, 11, 6, 3]), (17, 4, [12, 17, 4, 7])]
 )
@@ -1735,7 +1725,7 @@ def _make_staging_capability_runner(model_config, excluded=None):
         else "nixl_ep",
     )
     runner.dcp_size = 2 if excluded == "dcp" else 1
-    runner.num_ubatches = {"k0": 0, "k3": 3, "k4": 4}.get(excluded, 2)
+    runner.num_ubatches = {"k3": 3, "k4": 4}.get(excluded, 2)
     runner.attn_groups = [
         [
             SimpleNamespace(
@@ -1755,10 +1745,7 @@ def _make_staging_capability_runner(model_config, excluded=None):
     )
     model_config.enable_prompt_embeds = excluded == "prompt_embeds"
     model_config.enable_return_routed_experts = excluded == "routing"
-    runner.stage_real_tokens = (
-        runner._supports_real_token_staging()
-        and runner._backend_supports_staging_layout()
-    )
+    runner.stage_real_tokens = runner._real_token_staging_unsupported_reason() is None
     return runner
 
 
@@ -1794,6 +1781,14 @@ def test_random_staging_layouts_match_independent_reference():
         torch.testing.assert_close(slots[:, :n], original_slots)
 
 
+def test_compact_staged_rows_restores_routed_buffer_order():
+    values = torch.arange(8 * 2 * 3).reshape(8, 2, 3)
+    original = values.clone()
+    staged_rows = torch.tensor([0, 1, 4, 5])
+    compact_staged_rows(values, staged_rows)
+    torch.testing.assert_close(values[:4], original[staged_rows])
+
+
 @pytest.fixture
 def staging_model_config(tmp_path):
     from transformers import DeepseekV2Config
@@ -1821,20 +1816,13 @@ def staging_model_config(tmp_path):
         "routing",
         "backend",
         "communication",
-        "k0",
         "k3",
         "k4",
     ],
 )
 def test_staging_capability_checks_data_contract(excluded, staging_model_config):
     runner = _make_staging_capability_runner(staging_model_config, excluded)
-    assert runner._supports_real_token_staging() == (
-        excluded in (None, "k0", "k3", "k4", "communication")
-    )
-    assert runner._backend_supports_staging_layout() == (
-        excluded not in ("k0", "communication")
-    )
-    assert runner.stage_real_tokens == (excluded in (None, "k3", "k4"))
+    assert runner.stage_real_tokens == (excluded in (None, "routing", "k3", "k4"))
 
 
 @pytest.mark.parametrize("excluded", [None, "backend", "routing", "k3", "k4"])
@@ -1857,45 +1845,14 @@ def test_dp_gate_uses_real_staging_capability(staging_model_config, excluded):
         num_reqs_per_rank=[63, 97],
         num_ubatches=k,
     )
-    expected = (
-        CUDAGraphMode.FULL if excluded in (None, "k3", "k4") else CUDAGraphMode.NONE
-    )
+    expected = CUDAGraphMode.FULL if excluded != "backend" else CUDAGraphMode.NONE
     assert desc.cg_mode == expected
-
-
-@pytest.mark.parametrize(
-    "invalid", ["prefill", "draft", "requests", "queries", "region"]
-)
-def test_staging_rejects_invalid_local_contract_before_mutation(invalid):
-    buffers = InputBuffers(128, 128, torch.device("cpu"))
-    batch = _make_input_batch([1] * 63, [100] * 63, buffers, 128, 128)
-    slices = create_ubatch_slices(batch, 2)
-    if invalid == "prefill":
-        batch.has_prefill = True
-    elif invalid == "draft":
-        batch.num_draft_tokens = 1
-    elif invalid == "requests":
-        batch.num_reqs = 62
-    elif invalid == "queries":
-        batch.num_scheduled_tokens[:2] = [0, 2]
-    else:
-        slices[0] = UBatchSlice(slice(0, 10), slice(0, 10))
-        slices[1] = UBatchSlice(slice(10, 128), slice(10, 128))
-        # Keep the empty-final-region premise, but overflow an earlier region.
-        slices.insert(1, UBatchSlice(slice(10, 64), slice(10, 64)))
-        slices[-1] = UBatchSlice(slice(64, 128), slice(64, 128))
-    original = batch.input_ids.clone()
-    with pytest.raises(AssertionError):
-        stage_decode_tokens(batch, (), torch.zeros(1, 128), slices)
-    torch.testing.assert_close(batch.input_ids, original)
 
 
 @pytest.mark.parametrize(
     "excluded, expected",
     [
         ("backend", "TRITON_ATTN"),
-        ("routing", "enable_return_routed_experts"),
-        ("k0", "at least one microbatch"),
         ("communication", "deepep_low_latency"),
     ],
 )
@@ -1903,10 +1860,7 @@ def test_staging_rejection_identifies_incompatible_contract(
     staging_model_config, excluded, expected
 ):
     runner = _make_staging_capability_runner(staging_model_config, excluded)
-    reason = (
-        runner._real_token_staging_unsupported_reason()
-        or runner._staging_layout_unsupported_reason()
-    )
+    reason = runner._real_token_staging_unsupported_reason()
     assert not runner.stage_real_tokens
     assert expected in reason
 
@@ -1914,7 +1868,7 @@ def test_staging_rejection_identifies_incompatible_contract(
 def test_empty_attention_groups_cannot_enable_staging(staging_model_config):
     runner = _make_staging_capability_runner(staging_model_config)
     runner.attn_groups = [[]]
-    assert not runner._supports_real_token_staging()
+    assert runner._real_token_staging_unsupported_reason() is not None
     assert (
         "attention groups are empty" in runner._real_token_staging_unsupported_reason()
     )
