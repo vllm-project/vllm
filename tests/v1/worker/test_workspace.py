@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -124,3 +125,101 @@ def test_workspace_lane_validation(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="at least one"):
         workspace.WorkspaceManager(torch.device("cpu"), num_lanes=0)
+
+
+def test_persistent_resources_are_lazy_and_isolated(monkeypatch) -> None:
+    """Only the requesting slot allocates; each ubatch/lane owns its resource."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+    factory = Mock(side_effect=lambda: {"buffer": torch.zeros(8)})
+    resources = []
+    for ubatch in range(2):
+        active_ubatch = ubatch
+        for lane in range(2):
+            with workspace.use_workspace_lane(lane):
+                resource = manager.get_persistent_resource("scratch", factory)
+                resources.append(resource)
+                resource["buffer"].fill_(len(resources))
+                assert manager.get_persistent_resource("scratch", factory) is resource
+                assert factory.call_count == len(resources)
+
+    assert len({r["buffer"].data_ptr() for r in resources}) == 4
+    for i, resource in enumerate(resources, 1):
+        assert torch.all(resource["buffer"] == i)
+
+
+def test_persistent_resource_lock_applies_to_each_slot(monkeypatch) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    factory = Mock(side_effect=object)
+    first = manager.get_persistent_resource("scratch", factory)
+    manager.lock()
+    assert manager.get_persistent_resource("scratch", factory) is first
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        manager.get_persistent_resource("new", factory)
+    with workspace.use_workspace_lane(1):
+        with pytest.raises(AssertionError, match="was not allocated during warmup"):
+            manager.get_persistent_resource("scratch", factory)
+        assert factory.call_count == 1
+        manager.unlock()
+        assert manager.get_persistent_resource("scratch", factory) is not first
+    assert manager.get_persistent_resource("scratch", factory) is first
+
+
+def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
+    """Initialization happens once and transient scratch cannot overwrite locks."""
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    first = manager.get_persistent("locks", (8,), torch.int32, zero_init=True)
+    assert torch.count_nonzero(first) == 0
+    first.fill_(1)
+    (scratch,) = manager.get_simultaneous(((1024,), torch.uint8))
+    scratch.zero_()
+    assert manager.get_persistent("locks", (8,), torch.int32, zero_init=True) is first
+    assert torch.all(first == 1)
+    with pytest.raises(ValueError, match="requested shape"):
+        manager.get_persistent("locks", (16,), torch.int32)
+    with pytest.raises(ValueError, match="requested shape"):
+        manager.get_persistent("locks", (8,), torch.int64)
+    manager.lock()
+    assert manager.get_persistent("locks", (8,), torch.int32) is first
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        manager.get_persistent("new", (8,), torch.int32)
+
+
+def test_persistent_resources_follow_the_ubatch_override():
+    """The scratch and the persistent cache have to land in the same slot.
+
+    Reservation runs under ``use_workspace_ubatch_id`` rather than inside a real
+    ubatch, so a persistent resource created there must be cached where the run
+    will look for it. Resolving the ubatch from ``dbo_current_ubatch_id()``
+    alone puts it in slot 0, and the lookup then misses once the manager is
+    locked.
+    """
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, num_lanes=2
+    )
+
+    for ubatch in range(2):
+        for lane in range(2):
+            with (
+                workspace.use_workspace_ubatch_id(ubatch),
+                workspace.use_workspace_lane(lane),
+            ):
+                assert manager._get_workspace_id() == manager._resolve_workspace_id()
+
+    with workspace.use_workspace_ubatch_id(1):
+        manager.get_persistent_resource("k", lambda: "made-for-ubatch-1")
+    manager.lock()
+
+    # The run reaches the same slot through the override the reservation used.
+    with workspace.use_workspace_ubatch_id(1):
+        assert manager.get_persistent_resource("k", lambda: "rebuilt") == (
+            "made-for-ubatch-1"
+        )
+
+    # And ubatch 0 never saw it, so a locked lookup there still fails.
+    with workspace.use_workspace_ubatch_id(0), pytest.raises(AssertionError):
+        manager.get_persistent_resource("k", lambda: "rebuilt")

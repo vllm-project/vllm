@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     MoEPermuteScratch,
+    get_moe_permute_scratch,
     moe_permute,
     moe_permute_unpermute_supported,
     moe_unpermute,
@@ -176,7 +177,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch: dict[int, MoEPermuteScratch] = {}
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
@@ -259,24 +259,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if not moe_permute_unpermute_supported():
             return None
 
-        scratch = self._permute_scratch.get(topk)
-        if scratch is None:
-            max_expanded_rows = (
-                self.moe_config.max_num_tokens
-                * self.moe_config.dp_size
-                * self.moe_config.experts_per_token
-            )
-            scratch = MoEPermuteScratch(
-                max_num_tokens=math.ceil(max_expanded_rows / topk),
-                topk=topk,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts,
-                device=torch.device(self.moe_config.device),
-                hidden_size=self.moe_config.hidden_dim,
-                hidden_dtype=self.moe_config.in_dtype,
-            )
-            self._permute_scratch[topk] = scratch
-        return scratch
+        max_expanded_rows = (
+            self.moe_config.max_num_tokens
+            * self.moe_config.dp_size
+            * self.moe_config.experts_per_token
+        )
+        return get_moe_permute_scratch(
+            max_num_tokens=math.ceil(max_expanded_rows / topk),
+            topk=topk,
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts,
+            device=torch.device(self.moe_config.device),
+            hidden_size=self.moe_config.hidden_dim,
+            hidden_dtype=self.moe_config.in_dtype,
+        )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
         ctx = get_forward_context()
@@ -352,8 +348,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
 
     def _prequantizes_dispatch_activation(self) -> bool:
-        """
-        Whether the prepare/finalize step should quantize activations before
+        """Whether the prepare/finalize step should quantize activations before
         the (EP all-to-all) dispatch instead of leaving it to Humming.
 
         This is enabled only for block-FP8 (group-128) activations: quantizing
@@ -373,8 +368,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        """
-        Whether the prepare/finalize step should defer input quantization to
+        """Whether the prepare/finalize step should defer input quantization to
         the experts (by setting defer_input_quant=True and passing unquantized
         inputs).
 
@@ -832,8 +826,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming indexed experts.
+        """Standard apply implementation for Humming indexed experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
@@ -967,8 +960,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming grouped experts.
+        """Standard apply implementation for Humming grouped experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
@@ -1090,8 +1082,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        """
-        Standard apply implementation for Humming batched grouped experts.
+        """Standard apply implementation for Humming batched grouped experts.
 
         Note: Humming kernels handle weights internally through the layer
         object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual

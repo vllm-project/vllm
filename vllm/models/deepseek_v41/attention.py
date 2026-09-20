@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepseekV4 MLA Attention Layer
-"""
+"""DeepseekV4 MLA Attention Layer"""
 
 import math
 from abc import ABC, abstractmethod
@@ -290,13 +288,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # Vision variant: image spans are visible bidirectionally, widening
-        # prefill SWA index rows by up to max_image_tokens columns.
-        self.max_image_tokens = (
-            getattr(config, "vision_max_n_token", 0)
-            if getattr(config, "vision_n_layers", 0) > 0
-            else 0
-        )
         # ---- v4.1 sparse-attention topology ----
         # compress_ratios has one entry per layer (MTP layers included):
         # 0 = pure sliding window, 1 = full-length compressed cache,
@@ -521,6 +512,25 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "decodes only on SM100."
             )
 
+        swa_bounded_replay = cache_config.swa_bounded_replay
+        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
+            logger.warning_once(
+                "SWA bounded replay needs model runner V2 (only it skips the "
+                "paged-KV writes of replayed tokens); the sliding-window cache "
+                "takes part in prefix caching instead."
+            )
+            swa_bounded_replay = False
+        if (
+            swa_bounded_replay
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            logger.warning_once(
+                "SWA bounded replay is off under prefill context parallelism "
+                "(the replayed tokens' slot padding knows the rank-local batch "
+                "only); the sliding-window cache takes part in prefix caching "
+                "instead."
+            )
+            swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -531,6 +541,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             block_size=32,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
+            bounded_replay=swa_bounded_replay,
         )
 
         # The attention layer itself was already registered with the
@@ -578,7 +589,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
-                max_image_tokens=self.max_image_tokens,
             )
 
             if self.compress_ratio > 1:

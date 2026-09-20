@@ -119,8 +119,7 @@ def iterative_moe(
     expert_map: torch.Tensor = None,
     renormalize: bool = False,
 ) -> torch.Tensor:
-    """
-    Baseline implementation of fused moe.
+    """Baseline implementation of fused moe.
 
     Args:
         hidden_states: [*, hidden_size]
@@ -128,6 +127,7 @@ def iterative_moe(
         w2: [num_experts, hidden_size, intermediate_size]
         gating_output: [*, num_experts]
         expert_map: [num_experts]
+
     """
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
@@ -1384,24 +1384,33 @@ def test_humming_global_valid_shape_m(
     assert result == expected
 
 
-def test_humming_permute_scratch_is_keyed_by_runtime_topk(
+def test_humming_permute_scratch_is_shared_by_config(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
     import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+    import vllm.model_executor.layers.fused_moe.moe_permute_unpermute as permute
+    import vllm.v1.worker.workspace as workspace
+
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    monkeypatch.setattr(workspace, "_manager", manager)
 
     scratch_topk6 = Mock()
     scratch_topk1 = Mock()
     scratch_type = Mock(side_effect=[scratch_topk6, scratch_topk1])
     monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
-    monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
+    monkeypatch.setattr(permute, "MoEPermuteScratch", scratch_type)
     moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
     moe_config.moe_parallel_config.dp_size = 2
-    experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
+    experts = SimpleNamespace(moe_config=moe_config)
+    other_layer = SimpleNamespace(moe_config=moe_config)
 
     assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
+    assert (
+        humming.HummingExpertsBase._get_permute_scratch(other_layer, 6) is scratch_topk6
+    )
     assert humming.HummingExpertsBase._get_permute_scratch(experts, 1) is scratch_topk1
     assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
 
@@ -1411,6 +1420,11 @@ def test_humming_permute_scratch_is_keyed_by_runtime_topk(
     assert first_call.kwargs["topk"] == 6
     assert second_call.kwargs["max_num_tokens"] == 6144
     assert second_call.kwargs["topk"] == 1
+
+    manager.lock()
+    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        humming.HummingExpertsBase._get_permute_scratch(experts, 2)
 
 
 def test_humming_delegates_to_instance_activation():
@@ -1956,8 +1970,7 @@ def test_batched_fused_marlin_moe(
             )
 
         def is_valid(self):
-            """
-            Return True only if the input can be represented in a Batched
+            """Return True only if the input can be represented in a Batched
             format.
             """
             return torch.all(self.expert_num_tokens_cpu <= self.max_tokens_per_batch)
@@ -2078,9 +2091,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     dtype: torch.dtype,
     workspace_init,
 ):
-    """
-    Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
-    """
+    """Test BF16 unquantized MoE with FlashInfer TRTLLM backend."""
     set_random_seed(7)
 
     from vllm.model_executor.layers.fused_moe.config import (
