@@ -116,9 +116,7 @@ activations are a different scheme from the one validated here.
 
 ## Build the overlay
 
-One command, no chaining:
-
-Run from the repository root:
+One command, no chaining. Run from the repository root:
 
 ```bash
 python examples/features/kimi_k3_fp8_dense/build_overlay.py \
