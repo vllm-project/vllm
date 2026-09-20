@@ -1947,10 +1947,9 @@ class EngineCoreProc(EngineCore):
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
                 engine._finish_pause(clear_cache)
+                future.set_result(None)
             except Exception as e:
                 future.set_exception(e)
-            else:
-                future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
