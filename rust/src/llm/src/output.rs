@@ -11,7 +11,9 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
@@ -47,6 +49,8 @@ pub struct CollectedGenerateOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned one-to-one with generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics from the terminal output.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -160,6 +164,8 @@ pub struct GenerateOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned one-to-one with `token_ids`.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics, present on terminal outputs.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 impl GenerateOutput {
@@ -208,6 +214,7 @@ impl GenerateOutput {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
         }
     }
 }
@@ -308,6 +315,7 @@ impl Stream for GenerateOutputStream {
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
+            spec_decode_metrics: raw.spec_decode_metrics,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -396,6 +404,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask,
+                        spec_decode_metrics: None,
                     });
                 }
 
@@ -409,6 +418,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.spec_decode_metrics = output.spec_decode_metrics;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

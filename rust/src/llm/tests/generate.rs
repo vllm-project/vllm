@@ -413,6 +413,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         sampling_mask: Some(SamplingMask {
             rows: vec![vec![1, 33, 99]],
         }),
+        spec_decode_metrics: None,
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();

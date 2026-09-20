@@ -27,6 +27,8 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    PerRequestMetrics,
+    SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
@@ -164,6 +166,7 @@ def _make_stream_chunk(
     finish_reason: str | None = None,
     request_id: str = "test-req",
     usage: dict | None = None,
+    metrics: PerRequestMetrics | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
     return GenerateStreamResponse(
@@ -176,6 +179,7 @@ def _make_stream_chunk(
             )
         ],
         usage=UsageInfo(**usage) if usage else None,
+        metrics=metrics,
     )
 
 
@@ -511,6 +515,26 @@ class TestDerenderChatStream:
 
         assert chunk1.choices[0].delta.role == "assistant"
         assert chunk2.choices[0].delta.role is None
+
+    @pytest.mark.asyncio
+    async def test_metrics_passthrough(self, derenderer):
+        metrics = PerRequestMetrics(
+            speculative_decoding=SpeculativeDecodingMetrics(
+                mean_acceptance_length=2.0,
+                draft_acceptance_rate=0.5,
+                acceptance_histogram=[0, 1],
+                num_spec_steps=1,
+                num_accepted_draft_tokens=1,
+                num_draft_tokens=2,
+                num_spec_tokens=1,
+            )
+        )
+        chunk, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([], metrics=metrics),
+            state=DerenderStreamState(),
+        )
+        assert chunk.metrics == metrics
 
     @pytest.mark.asyncio
     async def test_chunked_equals_oneshot(self, derenderer, tokenizer):
