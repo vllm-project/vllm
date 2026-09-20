@@ -1289,10 +1289,8 @@ class AsyncMPClient(MPClient):
     async def compute_weight_checksums_all_async(self) -> list[dict[str, str]]:
         """Return checksums from every engine this client manages.
 
-        Each engine owns its own workers, so a client that manages more than
-        one engine (data parallelism) must ask all of them: covering only
-        core_engines[0] would let a weight update that never reached the other
-        engines pass verification. For a plain client the list has one entry.
+        Each engine owns its own workers, so querying only core_engines[0]
+        would let an update that missed the other engines pass verification.
         """
         return await asyncio.gather(
             *[

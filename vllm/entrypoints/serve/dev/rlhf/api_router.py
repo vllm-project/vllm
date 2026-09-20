@@ -252,12 +252,8 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
     * **reset**:    ``{"status": "reset"}``
     * **compare**:  ``{"match": bool, "mismatches": [str]}``
 
-    A paused or sleeping engine returns HTTP 409: sleep level 2 discards the
-    weight storage, so the check requires an awake, unpaused engine.
-
-    Use case in RL: checksum the current weights, reset them, transfer the
-    original weights, checksum again, and compare that against the saved
-    first result. A successful transfer is expected to match the baseline.
+    Sleep level 2 drops the weight storage, so a paused or sleeping engine
+    returns HTTP 409. The RL workflow is in docs/features/weight_checker.md.
     """
     try:
         body = await raw_request.json()

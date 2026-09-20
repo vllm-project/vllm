@@ -9,9 +9,9 @@ def compare_weight_checksums(
 ) -> tuple[bool, list[str]]:
     """Return whether every tensor matches, and the keys that differ.
 
-    The caller owns the baseline: a multi-API-process deployment routes
-    requests to arbitrary processes, so no baseline can be kept server-side.
-    Keys present in only one of the two maps count as mismatches.
+    Keys present in only one of the two maps count as mismatches. The caller
+    owns the baseline: with several API processes, any of them may serve any
+    request, so no baseline can live server-side.
     """
     mismatches = sorted(
         key
