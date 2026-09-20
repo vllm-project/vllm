@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -156,14 +157,16 @@ class MiMoV2MoE(nn.Module):
 
         dtype = getattr(config, "moe_router_dtype", "float32")
         self.gate_dtype = str_dtype_to_torch_dtype(dtype)
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
-            dtype=self.gate_dtype,
+            params_dtype=self.gate_dtype,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
+            torch.empty(config.n_routed_experts, dtype=self.gate.out_dtype)
         )
 
         self.experts = FusedMoEFactory(
@@ -182,7 +185,7 @@ class MiMoV2MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             scoring_func="sigmoid",
-            router_logits_dtype=self.gate_dtype,
+            router_logits_dtype=self.gate.out_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -198,7 +201,7 @@ class MiMoV2MoE(nn.Module):
             gate_input = hidden_states.to(self.gate_dtype)
         else:
             gate_input = hidden_states
-        router_logits = self.gate(gate_input)
+        router_logits, _ = self.gate(gate_input)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
