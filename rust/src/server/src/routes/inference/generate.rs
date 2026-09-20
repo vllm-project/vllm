@@ -29,7 +29,8 @@ use vllm_llm::{
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
     GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse, MultiModalPlaceholders, PlaceholderRangeInfo, SpecDecodeMetrics,
+    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
@@ -160,12 +161,14 @@ async fn generate_chunk_stream(
     let mut prompt_tokens = None;
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
-    let mut request_spec_decode_stats = None;
+    let mut spec_decode_metrics = None;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
-                request_spec_decode_stats = output.spec_decode_metrics.map(SpecDecodeMetrics::from);
+                if let Some(metrics) = output.spec_decode_metrics {
+                    spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(metrics));
+                }
                 if prompt_tokens.is_none()
                     && let Some(info) = output.prompt_info.as_ref()
                 {
@@ -225,7 +228,7 @@ async fn generate_chunk_stream(
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
-                    request_spec_decode_stats: None,
+                    metrics: None,
                 })
                 .await;
             }
@@ -246,7 +249,11 @@ async fn generate_chunk_stream(
             usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
             prompt_token_ids: None,
             mm_placeholders: None,
-            request_spec_decode_stats,
+            metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
+                speculative_decoding: StreamingSpeculativeDecodingMetrics::from(
+                    speculative_decoding,
+                ),
+            }),
         })
         .await;
     }
@@ -322,7 +329,9 @@ fn collect_generate(
         mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
-        request_spec_decode_stats: collected.spec_decode_metrics.map(SpecDecodeMetrics::from),
+        metrics: collected.spec_decode_metrics.map(|metrics| PerRequestMetrics {
+            speculative_decoding: SpeculativeDecodingMetrics::from(metrics),
+        }),
     })
 }
 
@@ -679,16 +688,21 @@ mod tests {
             .try_collect()
             .await
             .expect("collect chunks");
-            assert!(chunks[0].request_spec_decode_stats.is_none());
             assert_eq!(chunks.len(), 1 + usize::from(include_usage));
+            assert!(chunks[0].metrics.is_none());
             if include_usage {
                 assert!(chunks[1].choices.is_empty());
                 assert_eq!(
-                    chunks[1].request_spec_decode_stats,
-                    Some(SpecDecodeMetrics::from(metrics.clone()))
+                    chunks[1].metrics,
+                    Some(PerRequestMetrics {
+                        speculative_decoding: StreamingSpeculativeDecodingMetrics::from(
+                            SpeculativeDecodingMetrics::from(metrics.clone())
+                        )
+                    })
                 );
                 let json = serde_json::to_value(&chunks[1]).expect("serialize chunk");
-                let stats = &json["request_spec_decode_stats"];
+                let stats = &json["metrics"]["speculative_decoding"];
+                assert_eq!(stats.as_object().expect("metrics object").len(), 7);
                 assert_eq!(stats["num_draft_tokens"], 6);
                 assert_eq!(stats["num_accepted_draft_tokens"], 3);
                 assert_eq!(stats["mean_acceptance_length"], 2.5);
@@ -703,7 +717,7 @@ mod tests {
 
     #[test]
     fn spec_decode_metrics_zero_steps_and_detailed() {
-        let empty = SpecDecodeMetrics::from(RequestSpecDecodeMetrics {
+        let empty = SpeculativeDecodingMetrics::from(RequestSpecDecodeMetrics {
             num_spec_tokens: 2,
             histogram: vec![0, 0, 0],
             ..Default::default()
@@ -712,7 +726,7 @@ mod tests {
         assert_eq!(empty.draft_acceptance_rate, 0.0);
         assert_eq!(empty.per_step_accepted, None);
 
-        let detailed = SpecDecodeMetrics::from(RequestSpecDecodeMetrics {
+        let detailed = SpeculativeDecodingMetrics::from(RequestSpecDecodeMetrics {
             num_spec_tokens: 2,
             histogram: vec![0, 1, 1],
             num_draft_tokens: 4,
@@ -760,6 +774,50 @@ mod tests {
 
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
+    }
+
+    #[test]
+    fn collect_generate_returns_spec_decode_metrics() {
+        let metrics = RequestSpecDecodeMetrics {
+            num_spec_tokens: 3,
+            histogram: vec![0, 1, 1, 0],
+            num_draft_tokens: 6,
+            ..Default::default()
+        };
+        let output = CollectedGenerateOutput {
+            request_id: "raw-metrics".to_string(),
+            prompt_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: TokenUsage::default(),
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10],
+            sampling_mask: None,
+            spec_decode_metrics: Some(metrics.clone()),
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-metrics".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+
+        assert_eq!(
+            response.metrics,
+            Some(PerRequestMetrics {
+                speculative_decoding: SpeculativeDecodingMetrics::from(metrics)
+            })
+        );
+        let json = serde_json::to_value(&response).expect("serialize response");
+        let stats = &json["metrics"]["speculative_decoding"];
+        assert_eq!(stats.as_object().expect("metrics object").len(), 9);
+        assert!(stats["per_step_accepted"].is_null());
+        assert!(stats["per_step_drafted"].is_null());
     }
 
     #[test]

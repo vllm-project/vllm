@@ -146,10 +146,13 @@ pub struct EngineCoreOutput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestSpecDecodeMetrics {
     /// Configured `num_speculative_tokens`.
+    #[serde(default)]
     pub num_spec_tokens: u64,
     /// Verify-step counts indexed by accepted draft-token count.
+    #[serde(default)]
     pub histogram: Vec<u64>,
     /// Total proposed draft tokens.
+    #[serde(default)]
     pub num_draft_tokens: u64,
     /// Accepted draft count per verify step; empty unless `detailed`.
     #[serde(default)]

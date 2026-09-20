@@ -85,7 +85,7 @@ pub(super) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
-    pub request_spec_decode_stats: Option<SpecDecodeMetrics>,
+    pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -98,16 +98,20 @@ pub(super) struct GenerateResponse {
     pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
-    pub request_spec_decode_stats: Option<SpecDecodeMetrics>,
+    pub metrics: Option<PerRequestMetrics<SpeculativeDecodingMetrics>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct PerRequestMetrics<T> {
+    pub speculative_decoding: T,
 }
 
 /// Mirrors the Python vLLM `SpeculativeDecodingMetrics` class.
 ///
 /// Derived from the raw engine accumulator the same way as Python
 /// `RequestSpecDecodeMetrics.to_dict`.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct SpecDecodeMetrics {
+pub(super) struct SpeculativeDecodingMetrics {
     pub mean_acceptance_length: f64,
     pub draft_acceptance_rate: f64,
     pub acceptance_histogram: Vec<u64>,
@@ -119,7 +123,7 @@ pub(super) struct SpecDecodeMetrics {
     pub per_step_drafted: Option<Vec<u64>>,
 }
 
-impl From<RequestSpecDecodeMetrics> for SpecDecodeMetrics {
+impl From<RequestSpecDecodeMetrics> for SpeculativeDecodingMetrics {
     fn from(raw: RequestSpecDecodeMetrics) -> Self {
         let num_spec_steps: u64 = raw.histogram.iter().sum();
         let num_accepted_draft_tokens: u64 =
@@ -146,6 +150,37 @@ impl From<RequestSpecDecodeMetrics> for SpecDecodeMetrics {
             num_spec_tokens: raw.num_spec_tokens,
             per_step_accepted: detailed.then_some(raw.per_step_accepted),
             per_step_drafted: detailed.then_some(raw.per_step_drafted),
+        }
+    }
+}
+
+/// Streaming form omits detailed fields when summary metrics are requested.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct StreamingSpeculativeDecodingMetrics {
+    pub mean_acceptance_length: f64,
+    pub draft_acceptance_rate: f64,
+    pub acceptance_histogram: Vec<u64>,
+    pub num_spec_steps: u64,
+    pub num_accepted_draft_tokens: u64,
+    pub num_draft_tokens: u64,
+    pub num_spec_tokens: u64,
+    pub per_step_accepted: Option<Vec<u64>>,
+    pub per_step_drafted: Option<Vec<u64>>,
+}
+
+impl From<SpeculativeDecodingMetrics> for StreamingSpeculativeDecodingMetrics {
+    fn from(metrics: SpeculativeDecodingMetrics) -> Self {
+        Self {
+            mean_acceptance_length: metrics.mean_acceptance_length,
+            draft_acceptance_rate: metrics.draft_acceptance_rate,
+            acceptance_histogram: metrics.acceptance_histogram,
+            num_spec_steps: metrics.num_spec_steps,
+            num_accepted_draft_tokens: metrics.num_accepted_draft_tokens,
+            num_draft_tokens: metrics.num_draft_tokens,
+            num_spec_tokens: metrics.num_spec_tokens,
+            per_step_accepted: metrics.per_step_accepted,
+            per_step_drafted: metrics.per_step_drafted,
         }
     }
 }

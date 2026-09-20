@@ -12,7 +12,7 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
-    SpeculativeDecodingMetrics,
+    PerRequestMetrics,
     StreamOptions,
     validate_cache_salt,
 )
@@ -364,7 +364,7 @@ class GenerateStreamResponse(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
-    request_spec_decode_stats: SpeculativeDecodingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -383,7 +383,7 @@ class GenerateResponse(BaseModel):
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
-    request_spec_decode_stats: SpeculativeDecodingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,

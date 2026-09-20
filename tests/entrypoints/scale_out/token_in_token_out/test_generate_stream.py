@@ -356,12 +356,13 @@ async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
         payload = next(
             chunk
             for chunk in _parse_sse_chunks(chunks)
-            if isinstance(chunk, dict) and chunk.get("request_spec_decode_stats")
-        )["request_spec_decode_stats"]
+            if isinstance(chunk, dict) and chunk.get("metrics")
+        )["metrics"]["speculative_decoding"]
     else:
         assert isinstance(response, GenerateResponse)
-        assert response.request_spec_decode_stats is not None
-        payload = response.request_spec_decode_stats.model_dump()
+        assert response.metrics is not None
+        assert response.metrics.speculative_decoding is not None
+        payload = response.metrics.speculative_decoding.model_dump()
 
     assert payload["num_draft_tokens"] == 3
     assert payload["num_accepted_draft_tokens"] == 2
@@ -400,11 +401,13 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
     chunks = [chunk async for chunk in await serving.serve_tokens(request)]
     data_chunks = [chunk for chunk in _parse_sse_chunks(chunks) if chunk != "[DONE]"]
 
-    assert data_chunks[0].get("request_spec_decode_stats") is None
+    assert "metrics" not in data_chunks[0]
     assert len(data_chunks) == 1 + int(include_usage)
     if include_usage:
         assert data_chunks[1]["choices"] == []
-        assert data_chunks[1]["request_spec_decode_stats"]["num_draft_tokens"] == 3
+        assert (
+            data_chunks[1]["metrics"]["speculative_decoding"]["num_draft_tokens"] == 3
+        )
 
 
 @pytest.mark.asyncio
@@ -451,13 +454,13 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
     if stream:
         chunks = [chunk async for chunk in response]
         assert all(
-            chunk.get("request_spec_decode_stats") is None
+            "metrics" not in chunk
             for chunk in _parse_sse_chunks(chunks)
             if isinstance(chunk, dict)
         )
     else:
         assert isinstance(response, GenerateResponse)
-        assert response.request_spec_decode_stats is None
+        assert response.metrics is None
 
 
 @pytest.mark.asyncio
