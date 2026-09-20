@@ -343,6 +343,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
+            if self.extra_config.get("pin_in_flight_chunks", False):
+                raise ValueError(
+                    "pin_in_flight_chunks is not supported for TieringOffloadingSpec"
+                )
 
             scheduler_mmap: SharedOffloadRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None

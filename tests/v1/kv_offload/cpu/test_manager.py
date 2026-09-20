@@ -43,6 +43,7 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    pin_in_flight_chunks: bool = False,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
@@ -51,6 +52,7 @@ def make_cpu_manager(
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
+        pin_in_flight_chunks=pin_in_flight_chunks,
     )
 
 
@@ -211,6 +213,141 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
 
     # chunk 2 must still be present in the cache
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+
+
+def test_unfinished_request_chunks_survive_eviction():
+    """An unfinished request keeps the prefix it will resume from.
+
+    Without pinning, the frozen request's chunk is simply the least recently
+    used one and unrelated traffic evicts it, so the resume has to recompute
+    it. Chunks of a request that already finished stay evictable.
+    """
+    manager = make_cpu_manager(num_chunks=2, pin_in_flight_chunks=True)
+    in_flight = make_req_context(req_id="rollout")
+    finished = make_req_context(req_id="done")
+
+    manager.prepare_store(to_keys([1]), in_flight)
+    manager.complete_store(to_keys([1]), in_flight)
+    manager.prepare_store(to_keys([2]), finished)
+    manager.complete_store(to_keys([2]), finished)
+    manager.on_request_finished(finished)
+
+    output = manager.prepare_store(to_keys([3]), make_req_context(req_id="other"))
+    assert output is not None
+    assert output.evicted_keys == to_keys([2])
+
+    manager.on_request_finished(in_flight)
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+
+
+@pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
+def test_finished_chunks_are_evicted_before_in_flight_ones(eviction_policy):
+    """A mixed batch spends finished chunks first, then in-flight ones.
+
+    Falling straight back to unrestricted eviction would take both in-flight
+    chunks and leave the finished one resident, which is backwards.
+    """
+    manager = make_cpu_manager(
+        num_chunks=3, cache_policy=eviction_policy, pin_in_flight_chunks=True
+    )
+    in_flight = make_req_context(req_id="rollout")
+    finished = make_req_context(req_id="done")
+
+    manager.prepare_store(to_keys([1, 2]), in_flight)
+    manager.complete_store(to_keys([1, 2]), in_flight)
+    manager.prepare_store(to_keys([3]), finished)
+    manager.complete_store(to_keys([3]), finished)
+    manager.on_request_finished(finished)
+
+    output = manager.prepare_store(to_keys([4, 5]), make_req_context(req_id="other"))
+    assert output is not None
+    assert to_key(3) in output.evicted_keys
+    assert len(output.evicted_keys) == 2
+
+
+@pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
+def test_a_chunk_still_being_stored_is_pinned_by_its_second_reader(eviction_policy):
+    """Two rollouts sharing a prefix are the case this exists for.
+
+    The second request offers the chunk while the first is still storing it,
+    so it is neither a store candidate nor a completed reuse. Counting only
+    the writer lets the chunk go as soon as the writer finishes, although the
+    reader is still unfinished.
+    """
+    manager = make_cpu_manager(
+        num_chunks=2, cache_policy=eviction_policy, pin_in_flight_chunks=True
+    )
+    writer = make_req_context(req_id="writer")
+    reader = make_req_context(req_id="reader")
+
+    manager.prepare_store(to_keys([1]), writer)
+    manager.prepare_store(to_keys([1]), reader)
+    manager.complete_store(to_keys([1]), writer)
+    manager.on_request_finished(writer)
+
+    filler = make_req_context(req_id="filler")
+    manager.prepare_store(to_keys([2]), filler)
+    manager.complete_store(to_keys([2]), filler)
+    manager.on_request_finished(filler)
+
+    output = manager.prepare_store(to_keys([3]), make_req_context(req_id="other"))
+    assert output is not None
+    assert output.evicted_keys == to_keys([2])
+
+    manager.on_request_finished(reader)
+    assert to_key(1) not in manager._in_flight_keys
+
+
+def test_in_flight_pins_are_released_on_reset():
+    """reset_cache() drops the pins along with the chunks they protected."""
+    manager = make_cpu_manager(num_chunks=1, pin_in_flight_chunks=True)
+    in_flight = make_req_context(req_id="rollout")
+
+    manager.prepare_store(to_keys([1]), in_flight)
+    manager.complete_store(to_keys([1]), in_flight)
+    manager.reset_cache()
+
+    assert not manager._in_flight_keys
+
+    other = make_req_context(req_id="other")
+    manager.prepare_store(to_keys([2]), other)
+    manager.complete_store(to_keys([2]), other)
+    manager.on_request_finished(other)
+    assert not manager._in_flight_keys
+
+
+def test_shared_chunk_stays_pinned_until_every_request_finishes():
+    """Two requests over one prefix: the pin outlives the first to finish."""
+    manager = make_cpu_manager(num_chunks=2, pin_in_flight_chunks=True)
+    first = make_req_context(req_id="first")
+    second = make_req_context(req_id="second")
+
+    manager.prepare_store(to_keys([1]), first)
+    manager.complete_store(to_keys([1]), first)
+    manager.prepare_load(to_keys([1]), second)
+    manager.complete_load(to_keys([1]), second)
+
+    manager.on_request_finished(first)
+    assert manager._in_flight_keys[to_key(1)] == 1
+    manager.on_request_finished(second)
+    assert to_key(1) not in manager._in_flight_keys
+
+    # A repeated finalization must not decrement below zero.
+    manager.on_request_finished(second)
+    assert to_key(1) not in manager._in_flight_keys
+
+
+def test_pinning_falls_back_when_every_chunk_is_in_flight():
+    """Pinning is a preference: a fully pinned cache still admits new stores."""
+    manager = make_cpu_manager(num_chunks=1, pin_in_flight_chunks=True)
+    in_flight = make_req_context(req_id="rollout")
+
+    manager.prepare_store(to_keys([1]), in_flight)
+    manager.complete_store(to_keys([1]), in_flight)
+
+    output = manager.prepare_store(to_keys([2]), make_req_context(req_id="other"))
+    assert output is not None
+    assert output.evicted_keys == to_keys([1])
 
 
 def test_filter_reused_manager_reports_stores_skipped_counter():
