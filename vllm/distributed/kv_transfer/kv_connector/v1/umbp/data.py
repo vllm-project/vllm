@@ -58,8 +58,10 @@ class RankTopology:
         tp_size = getattr(parallel, "tensor_parallel_size", 1)
         pp_size = getattr(parallel, "pipeline_parallel_size", 1)
         rank = getattr(parallel, "rank", 0)
+        tp_rank = getattr(parallel, "tensor_parallel_rank", rank % tp_size)
+        dcp_size = getattr(parallel, "decode_context_parallel_size", 1)
         return cls(
-            tp_rank=getattr(parallel, "tensor_parallel_rank", rank % tp_size),
+            tp_rank=tp_rank,
             tp_size=tp_size,
             pp_rank=getattr(
                 parallel,
@@ -69,8 +71,11 @@ class RankTopology:
             pp_size=pp_size,
             pcp_rank=getattr(parallel, "prefill_context_parallel_rank", 0),
             pcp_size=getattr(parallel, "prefill_context_parallel_size", 1),
-            dcp_rank=getattr(parallel, "decode_context_parallel_rank", 0),
-            dcp_size=getattr(parallel, "decode_context_parallel_size", 1),
+            # DCP partitions the TP workers; it does not create a second
+            # Cartesian worker dimension. ParallelConfig is constructed before
+            # process groups, so derive this stable identity from TP rank.
+            dcp_rank=tp_rank % dcp_size,
+            dcp_size=dcp_size,
         )
 
     @property
@@ -79,9 +84,18 @@ class RankTopology:
 
     @property
     def rank_count(self) -> int:
-        return self.tp_size * self.pp_size * self.pcp_size * self.dcp_size
+        return len(self.all_namespaces())
 
     def all_namespaces(self) -> tuple[tuple[int, int, int, int], ...]:
+        if self.dcp_size > 1:
+            if self.tp_size % self.dcp_size:
+                raise ValueError("dcp_size must divide tp_size")
+            return tuple(
+                (tp, pcp, tp % self.dcp_size, pp)
+                for pp in range(self.pp_size)
+                for pcp in range(self.pcp_size)
+                for tp in range(self.tp_size)
+            )
         return tuple(
             (tp, pcp, dcp, pp)
             for pp in range(self.pp_size)

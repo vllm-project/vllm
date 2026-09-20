@@ -8,11 +8,18 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_block_hash, get_group_id
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    dcp_world_size_for_kv_cache_spec,
+    get_block_hash,
+    get_group_id,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -34,6 +41,8 @@ from .data import (
 )
 from .runtime import UMBPSchedulerHandle
 
+logger = init_logger(__name__)
+
 
 class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport."""
@@ -46,10 +55,14 @@ class UMBPStoreConnectorScheduler:
         codec: BlockIdentityCodec,
         topology: RankTopology | None = None,
     ) -> None:
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size, resolved_hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
         self.kv_cache_config = kv_cache_config
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.group_block_sizes = {
             group_id: group.kv_cache_spec.block_size
+            * dcp_world_size_for_kv_cache_spec(group.kv_cache_spec, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
         self.runtime = runtime
@@ -73,7 +86,9 @@ class UMBPStoreConnectorScheduler:
         self.enable_partial_hash_hits = bool(
             extra.get("enable_partial_hash_hits", False)
         )
-        self.hash_block_size = int(extra.get("hash_block_size", self.block_size))
+        self.hash_block_size = int(
+            extra.get("hash_block_size", resolved_hash_block_size)
+        )
         if self.hash_block_size <= 0 or self.block_size % self.hash_block_size:
             raise ValueError(
                 "UMBP hash_block_size must be a positive divisor of block_size"
@@ -137,24 +152,30 @@ class UMBPStoreConnectorScheduler:
         if num_computed_tokens % self.block_size != 0:
             return 0, False
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
-        scale = self.block_size // self.hash_block_size
-        num_skipped_hashes = num_computed_tokens // self.hash_block_size
-        remaining_hashes = hashes[num_skipped_hashes:]
-        lookup_hashes = (
-            remaining_hashes
-            if self.enable_partial_hash_hits
-            else [
-                remaining_hashes[index * scale + scale - 1]
-                for index in range(len(remaining_hashes) // scale)
-            ]
-        )
-        keys = [
-            key
-            for block_hash in lookup_hashes
-            for key in self.codec.keys_for_topology(
-                block_hash, self.topology, group_ids
+        # vLLM must execute at least the final prompt token. Returning a hit
+        # for the entire prompt leaves the scheduler with no new token to run.
+        max_external_token = request.num_tokens - 1
+        endpoints_by_group = {
+            group_id: range(
+                num_computed_tokens + self.group_block_sizes[group_id],
+                max_external_token + 1,
+                self.group_block_sizes[group_id],
             )
-        ]
+            for group_id in group_ids
+        }
+        keys_by_group = {
+            group_id: [
+                key
+                for token_end in endpoints
+                for key in self.codec.keys_for_topology(
+                    self._object_hash_at_token_end(hashes, token_end),
+                    self.topology,
+                    (group_id,),
+                )
+            ]
+            for group_id, endpoints in endpoints_by_group.items()
+        }
+        keys = [key for group_keys in keys_by_group.values() for key in group_keys]
         if self.lookup_async:
             future = self._lookup_futures.get(request.request_id)
             if future is None:
@@ -180,21 +201,39 @@ class UMBPStoreConnectorScheduler:
         if len(hits) != len(keys):
             lookup_state.fail("lookup returned an invalid result length")
             return 0, False
-        per_block = self.completeness.required_rank_count * len(group_ids)
-        if per_block == 0 or len(hits) != len(keys):
+        logger.debug(
+            "UMBP lookup request=%s groups=%s keys=%d hits=%d lookup_keys=%s",
+            request.request_id,
+            tuple((group_id, len(keys_by_group[group_id])) for group_id in group_ids),
+            len(keys),
+            sum(hits),
+            tuple(keys),
+        )
+        per_rank = self.completeness.required_rank_count
+        if per_rank == 0 or len(hits) != len(keys):
             lookup_state.fail("lookup returned an invalid result length")
             return 0, False
-        matched_units = 0
-        for offset in range(0, len(hits), per_block):
-            if not all(hits[offset : offset + per_block]):
-                break
-            matched_units += 1
-        unit_size = (
-            self.hash_block_size if self.enable_partial_hash_hits else self.block_size
-        )
-        need_to_load = min(
-            matched_units * unit_size,
-            max(request.num_tokens - num_computed_tokens, 0),
+        offset = 0
+        matched_tokens_by_group: list[int] = []
+        for group_id in group_ids:
+            group_hits = hits[offset : offset + len(keys_by_group[group_id])]
+            offset += len(group_hits)
+            group_units = 0
+            for index in range(0, len(group_hits), per_rank):
+                if not all(group_hits[index : index + per_rank]):
+                    break
+                group_units += 1
+            matched_tokens_by_group.append(
+                group_units * self.group_block_sizes[group_id]
+            )
+        need_to_load = min(matched_tokens_by_group, default=0)
+        need_to_load = need_to_load // self.block_size * self.block_size
+        need_to_load = min(need_to_load, max_external_token - num_computed_tokens)
+        logger.info(
+            "UMBP lookup result request=%s group_tokens=%s load_tokens=%d",
+            request.request_id,
+            tuple(matched_tokens_by_group),
+            need_to_load,
         )
         matched_tokens = num_computed_tokens + need_to_load
         lookup_state.complete(matched_tokens)
@@ -285,6 +324,13 @@ class UMBPStoreConnectorScheduler:
                         total_tokens,
                         block_ids_override=selected_block_ids,
                     )
+                )
+                logger.debug(
+                    "UMBP store planning request=%s tokens=%d plans=%d keys=%s",
+                    request.req_id,
+                    total_tokens,
+                    len(store_plans),
+                    tuple(plan.key for plan in store_plans),
                 )
                 meta.store_plans.extend(store_plans)
                 if store_plans:
@@ -512,18 +558,20 @@ class UMBPStoreConnectorScheduler:
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         spec = tracker.load_spec
         local_tokens = spec.local_tokens if spec is not None else 0
-        start_block = local_tokens // self.block_size
         end_tokens = local_tokens + num_external_tokens
-        num_full_blocks = end_tokens // self.block_size - start_block
-        partial_tokens = end_tokens % self.block_size
         plans: list[BlockTransferPlan] = []
-        for index in range(num_full_blocks):
-            block_index = start_block + index
-            for group_index, group_id in enumerate(group_ids):
+        for group_index, group_id in enumerate(group_ids):
+            group_block_size = self.group_block_sizes[group_id]
+            start_block = local_tokens // group_block_size
+            num_full_blocks = end_tokens // group_block_size
+            for block_index in range(start_block, num_full_blocks):
+                token_end = (block_index + 1) * group_block_size
                 plans.append(
                     BlockTransferPlan(
                         key=self.codec.key(
-                            self._object_hash(request.block_hashes, block_index),
+                            self._object_hash_at_token_end(
+                                request.block_hashes, token_end
+                            ),
                             group_id=group_id,
                         ),
                         block_id=block_groups[group_index][block_index],
@@ -532,6 +580,7 @@ class UMBPStoreConnectorScheduler:
                         group_id=group_id,
                     )
                 )
+        partial_tokens = end_tokens % self.block_size
         if partial_tokens and self.enable_partial_hash_hits:
             block_index = start_block + num_full_blocks
             hash_index = end_tokens // self.hash_block_size - 1
@@ -566,6 +615,12 @@ class UMBPStoreConnectorScheduler:
             )
         return hashes[hash_index]
 
+    def _object_hash_at_token_end(self, hashes: list[bytes], token_end: int) -> bytes:
+        hash_index = token_end // self.hash_block_size - 1
+        if hash_index < 0 or hash_index >= len(hashes):
+            raise ValueError(f"request has {len(hashes)} hashes, needs index {hash_index}")
+        return hashes[hash_index]
+
     def _store_plans(
         self,
         request: Any,
@@ -582,8 +637,6 @@ class UMBPStoreConnectorScheduler:
             else tracker.saved_tokens
         )
         save_to = tracker.mark_saved(token_count, self.block_size)
-        start_block = previous_saved_tokens // self.block_size
-        num_blocks = save_to // self.block_size
         plans: list[BlockTransferPlan] = []
         block_groups = (
             block_ids_override
@@ -593,31 +646,33 @@ class UMBPStoreConnectorScheduler:
         for group_id in group_ids:
             block_index = group_ids.index(group_id)
             block_ids = block_groups[block_index]
-            for index, block_id in enumerate(
-                block_ids[start_block:num_blocks], start=start_block
-            ):
-                if index >= len(request.block_hashes):
-                    break
+            group_block_size = self.group_block_sizes[group_id]
+            start_block = previous_saved_tokens // group_block_size
+            num_blocks = save_to // group_block_size
+            for index, block_id in enumerate(block_ids[start_block:num_blocks], start=start_block):
+                token_end = (index + 1) * group_block_size
+                block_hash = self._object_hash_at_token_end(
+                    request.block_hashes, token_end
+                )
                 plans.append(
                     BlockTransferPlan(
-                        key=self.codec.key(
-                            self._object_hash(request.block_hashes, index),
-                            group_id=group_id,
-                        ),
+                        key=self.codec.key(block_hash, group_id=group_id),
                         block_id=block_id,
                         request_id=request_id,
                         generation=tracker.generation,
                         group_id=group_id,
-                        block_hash=self._object_hash(request.block_hashes, index),
+                        block_hash=block_hash,
                         parent_block_hash=(
-                            self._object_hash(request.block_hashes, index - 1)
-                            if index > 0
+                            self._object_hash_at_token_end(
+                                request.block_hashes, token_end - group_block_size
+                            )
+                            if index > 0 and token_end > group_block_size
                             else None
                         ),
                         token_ids=tuple(getattr(request, "prompt_token_ids", []))[
-                            index * self.block_size : (index + 1) * self.block_size
+                            index * group_block_size : token_end
                         ],
-                        block_size=self.block_size,
+                        block_size=group_block_size,
                     )
                 )
         return plans
@@ -708,6 +763,11 @@ class UMBPStoreConnectorScheduler:
             for token in tokens:
                 block_ids = self._pinned_store_blocks.pop(token, None)
                 if pool is not None and block_ids is not None:
+                    if (
+                        self._lazy_cursor is not None
+                        and self._lazy_cursor.block_id in block_ids
+                    ):
+                        self._lazy_cursor = None
                     pool.free_blocks(
                         pool.blocks[block_id] for block_id in reversed(block_ids)
                     )
