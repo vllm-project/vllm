@@ -78,6 +78,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
 
+        is_rdna = current_platform.is_rocm() and current_platform.is_navi()
+
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
@@ -91,6 +93,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
+        )
+        from vllm.distributed.device_communicators.rdna_custom_all_reduce import (
+            RdnaCustomAllreduce,
         )
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
@@ -110,6 +115,33 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
+        self.rdna_ar_comm: RdnaCustomAllreduce | None = None
+        if (
+            current_platform.is_rocm()
+            and unique_name.split(":")[0] == "tp"
+            and self.world_size > 1
+            and self.cpu_group in torch.distributed.distributed_c10d._world.pg_map
+        ):
+            from vllm.config import get_current_vllm_config_or_none
+
+            config = get_current_vllm_config_or_none()
+            self.rdna_ar_comm = RdnaCustomAllreduce(
+                self.cpu_group,
+                self.device,
+                enabled=(
+                    use_custom_allreduce
+                    and envs.VLLM_ROCM_USE_RDNA_ALL_REDUCE
+                    and not envs.VLLM_BATCH_INVARIANT
+                    and (config is None or not config.parallel_config.use_ubatching)
+                ),
+            )
+
+        skip_legacy_rdna = is_rdna and (
+            envs.VLLM_ROCM_USE_RDNA_ALL_REDUCE
+            or (self.rdna_ar_comm is not None and self.rdna_ar_comm.requested)
+        )
+        if skip_legacy_rdna:
+            self.use_aiter_allreduce = False
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -140,7 +172,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
+        if (
+            use_custom_allreduce
+            and not skip_legacy_rdna
+            and self.aiter_ar_comm is None
+            and self.world_size > 1
+        ):
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -166,7 +203,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 self.use_aiter_ag_rs = True
 
-        if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
+        if (
+            use_custom_allreduce
+            and not skip_legacy_rdna
+            and self.world_size > 1
+            and current_platform.is_rocm()
+        ):
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
             # (vLLM's or AITER's), so it is initialized for either backend.
@@ -267,6 +309,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "RDNA_HIP",
             "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
             "NCCL_SYMM_MEM",
@@ -277,6 +320,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if self.rdna_ar_comm is not None and not self.rdna_ar_comm.disabled:
+            enabled_ar_backends.append("RDNA_HIP")
         if (
             self.fi_pcie_ipc_ar_comm is not None
             and not self.fi_pcie_ipc_ar_comm.disabled
@@ -333,6 +378,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        rdna_ar_comm = self.rdna_ar_comm
+        if rdna_ar_comm is not None:
+            out = rdna_ar_comm.custom_all_reduce(input_)
+            if out is not None:
+                return out
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
             fi_ar_comm is not None
@@ -659,6 +709,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise ValueError("No PyNCCL communicator found")
 
     def destroy(self):
+        if self.rdna_ar_comm is not None:
+            self.rdna_ar_comm.close()
+            self.rdna_ar_comm = None
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
