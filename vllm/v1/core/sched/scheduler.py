@@ -76,6 +76,12 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _srpf_key(req: Request) -> tuple:
+    is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
+    remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
+    return (not is_starved, remaining_prefill, req.arrival_time)
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -610,11 +616,6 @@ class Scheduler(SchedulerInterface):
         # SRPF + Aging Queue Sorting Prototype
         import os
         if self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1":
-            def _srpf_key(req):
-                is_starved = getattr(req, "consecutive_starvation_ticks", 0) > 5
-                remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
-                return (not is_starved, remaining_prefill, req.arrival_time)
-
             self.running.sort(key=_srpf_key)
 
             for q in (self.waiting, self.skipped_waiting):
@@ -766,45 +767,44 @@ class Scheduler(SchedulerInterface):
                     import os
                     is_srpf = self.policy == SchedulingPolicy.FCFS and os.environ.get("VLLM_ENABLE_SRPF") == "1"
 
-                    if self.policy == SchedulingPolicy.PRIORITY or is_srpf:
-                        if self.policy == SchedulingPolicy.PRIORITY:
-                            preempted_req = max(
-                                self.running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
-                        else:
-                            preempted_req = max(self.running, key=lambda r: r.arrival_time)
-
-                        # A deferred free will not help with immediate allocation.
-                        if not self._request_blocks_can_be_freed(preempted_req):
-                            break
-
-                        victim_index = self.running.index(preempted_req)
-                        del self.running[victim_index]
-                        if victim_index < req_index:
-                            req_index -= 1
-
-                        if preempted_req in scheduled_running_reqs:
-                            preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
-                            restored = num_scheduled_tokens.pop(preempted_req_id)
-                            token_budget += restored
-                            input_budget += restored + draft_slots
-                            req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
-                            if preempted_encoder_inputs:
-                                # Restore encoder compute budget if the preempted
-                                # request had encoder inputs scheduled in this step.
-                                num_embeds_to_restore = sum(
-                                    preempted_req.get_num_encoder_embeds(i)
-                                    for i in preempted_encoder_inputs
-                                )
-                                encoder_compute_budget += num_embeds_to_restore
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                    elif is_srpf:
+                        preempted_req = max(self.running, key=lambda r: r.arrival_time)
                     else:
-                        preempted_req = self.running.pop()
+                        preempted_req = self.running[-1]
+
+                    # A deferred free will not help with immediate allocation.
+                    if not self._request_blocks_can_be_freed(preempted_req):
+                        break
+
+                    victim_index = self.running.index(preempted_req)
+                    del self.running[victim_index]
+                    if victim_index < req_index:
+                        req_index -= 1
+
+                    if preempted_req in scheduled_running_reqs:
+                        preempted_req_id = preempted_req.request_id
+                        scheduled_running_reqs.remove(preempted_req)
+                        restored = num_scheduled_tokens.pop(preempted_req_id)
+                        token_budget += restored
+                        input_budget += restored + draft_slots
+                        req_to_new_blocks.pop(preempted_req_id)
+                        scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                        preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                            preempted_req_id, None
+                        )
+                        if preempted_encoder_inputs:
+                            # Restore encoder compute budget if the preempted
+                            # request had encoder inputs scheduled in this step.
+                            num_embeds_to_restore = sum(
+                                preempted_req.get_num_encoder_embeds(i)
+                                for i in preempted_encoder_inputs
+                            )
+                            encoder_compute_budget += num_embeds_to_restore
 
                     self._preempt_request(
                         preempted_req,
@@ -1361,8 +1361,9 @@ class Scheduler(SchedulerInterface):
                 self.prefill_capacity_bound = bool(self.waiting)
 
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+            scheduled_reqs = set(scheduled_running_reqs + scheduled_new_reqs + scheduled_resumed_reqs)
             for req in self.running:
-                if req not in scheduled_running_reqs and req not in scheduled_new_reqs and req not in scheduled_resumed_reqs:
+                if req not in scheduled_reqs:
                     if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
                         req.consecutive_starvation_ticks = getattr(req, "consecutive_starvation_ticks", 0) + 1
                 else:
