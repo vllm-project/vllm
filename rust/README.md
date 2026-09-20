@@ -131,7 +131,10 @@ The render and inference paths use the same `vllm-chat` and `vllm-text`
 request-preparation logic; render mode stops before engine submission.
 Tool-call and reasoning parsers use model-based auto-detection by default. Use
 `--tool-call-parser` and `--reasoning-parser` to override either selection;
-unified parsers require the same selection for both options.
+unified parsers require the same selection for both options. Two enabled
+parsers that split a unified parser fail at startup; setting one side to
+`none` only logs a warning, and every `/v1/chat/completions` request is then
+rejected with a server error until the selections agree.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions/render \

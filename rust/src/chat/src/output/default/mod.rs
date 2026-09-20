@@ -132,8 +132,9 @@ impl DefaultChatOutputProcessor {
         tool_name: Option<&str>,
         reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
-        // Startup validation already rejects a split selection; this is the
-        // per-request backstop.
+        // Startup fails only a split of two enabled parsers; a split with one
+        // side disabled is rejected here, on every chat completion (tools or
+        // not), so the other routes keep serving.
         validate_unified_selection(tool_name, reasoning_name)?;
         let factory = UnifiedParserFactory::global();
         let Some(parser_name) =
@@ -334,5 +335,43 @@ mod tests {
         )
         .expect("matching Muse Glimmer selections should build");
         assert!(!request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn one_side_disabled_split_passes_startup_and_fails_every_chat_completion() {
+        // Startup only warns when one side is `none`, so this per-request check
+        // is the primary rejection, and it fires before tools are consulted.
+        use crate::parser::validate_parser_overrides;
+        let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
+        for (model, tool, reasoning) in [
+            (
+                "/data/ckpt",
+                ParserSelection::Auto,
+                explicit("muse_glimmer"),
+            ),
+            (
+                "meta-models/Muse-Glimmer-30B",
+                ParserSelection::Auto,
+                ParserSelection::None,
+            ),
+        ] {
+            validate_parser_overrides(&tool, &reasoning, model).unwrap();
+            let mut request = ChatRequest::for_test();
+            assert!(request.tools().is_empty());
+            let error = DefaultChatOutputProcessor::new(
+                &mut request,
+                model,
+                muse_glimmer_tokenizer(),
+                &tool,
+                &reasoning,
+                ToolStrictLevel::Auto,
+            )
+            .err()
+            .expect("a one-side-disabled split must fail per request");
+            assert!(
+                matches!(error, crate::Error::IncompatibleParserSelections { .. }),
+                "{error}"
+            );
+        }
     }
 }

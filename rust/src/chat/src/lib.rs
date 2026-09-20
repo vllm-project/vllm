@@ -396,9 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_parser_overrides_rejects_a_split_unified_parser() {
-        // A unified parser owns both streams, so pairing it with any other
-        // parser fails at startup rather than on every request.
+    fn validate_parser_overrides_rejects_two_enabled_parsers_splitting_a_unified_parser() {
+        // A unified parser owns both streams, so pairing it with another
+        // enabled parser fails at startup rather than on every request.
         let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
         for (tool, reasoning, model, expected) in [
             (
@@ -412,12 +412,6 @@ mod tests {
                 explicit(names::QWEN3),
                 "/data/ckpt",
                 "resolved tool=muse_glimmer, reasoning=qwen3",
-            ),
-            (
-                ParserSelection::Auto,
-                ParserSelection::None,
-                "meta-models/Muse-Glimmer-30B",
-                "resolved tool=muse_glimmer, reasoning=none",
             ),
         ] {
             let error = validate_parser_overrides(&tool, &reasoning, model).unwrap_err();
@@ -434,6 +428,27 @@ mod tests {
             "meta-models/Muse-Glimmer-30B",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn validate_parser_overrides_only_warns_for_a_split_with_one_side_disabled() {
+        // Disabling one side keeps completions, tokenize, and gRPC serving;
+        // every chat completion is then rejected by the per-request check
+        // (see `DefaultChatOutputProcessor::resolve_optional_unified_parser`).
+        for (tool, reasoning, model) in [
+            (
+                ParserSelection::Auto,
+                ParserSelection::None,
+                "meta-models/Muse-Glimmer-30B",
+            ),
+            (
+                ParserSelection::Auto,
+                ParserSelection::Explicit("muse_glimmer".to_string()),
+                "/data/ckpt",
+            ),
+        ] {
+            validate_parser_overrides(&tool, &reasoning, model).unwrap();
+        }
     }
 
     #[test]

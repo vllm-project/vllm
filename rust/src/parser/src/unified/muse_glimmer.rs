@@ -140,9 +140,14 @@ fn capped_run<'i>(
 enum ChannelKind {
     /// `to=self`: reasoning.
     Reasoning,
-    /// `to=user` or an untagged `<|message|>`: visible content. Only an
-    /// untagged body may be reclassified into a tool channel: a `to=user`
-    /// final answer must never yield a real tool call (Python contract).
+    /// `to=user` or an untagged `<|message|>`: visible content. `reclassify`
+    /// (untagged only) selects the defect-recovery rules: an untagged body
+    /// hands off on a bare `self`/`user` header exactly as reasoning does and
+    /// a complete ATEM block inside it is reclassified into a tool channel.
+    /// The `to=user` final answer keeps a bare `self`/`user` header as literal
+    /// text and never reclassifies (Python contract: it must not yield a real
+    /// tool call from its body); only a bare tool header that its ATEM block
+    /// follows switches it, like every other channel.
     /// Note the untagged reclassification deliberately differs from the
     /// Python fallback, which scans unframed output only when NO channel
     /// header exists at all; the Rust parser instead reclassifies an ATEM
@@ -255,6 +260,17 @@ enum BareHeaderAnchor {
     /// After body text ending in a non-whitespace byte: a bare `to=…` or
     /// `<|message|>` here is literal body text.
     None,
+}
+
+/// Where a bare `to=` may start in the text a scanner commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderAnchoring {
+    /// Only directly after whitespace: a quoted `to=` inside body text must
+    /// not truncate the body.
+    Whitespace,
+    /// Anywhere: tool-channel noise has no text a false header could
+    /// truncate (Python `_MSG_HEADER_RE` parity).
+    Anywhere,
 }
 
 impl BareHeaderAnchor {
@@ -538,9 +554,15 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
             | MuseGlimmerMode::Content { .. }
             | MuseGlimmerMode::Reasoning => {
                 // The stream ended: a trailing ` to=…` fragment can no longer
-                // grow into a header, so it is flushed; a trailing COMPLETE
-                // anchored bare header (a channel that never got a body) and
-                // trailing truncated framing stay dropped.
+                // grow into a header, so it is flushed; trailing truncated
+                // framing stays dropped, as does a trailing COMPLETE anchored
+                // bare header (a channel that never got a body). Reasoning and
+                // untagged bodies hold any such header; the `to=user` answer
+                // holds only a tool header, while the ATEM peek that would make
+                // it a channel switch waits on more input — at end of output it
+                // is a cut-off switch and is dropped (Python `_classify_bodies`
+                // bounds the body there), whereas one that `<|eot|>` or text
+                // followed was already committed as literal answer text.
                 let len = strip_complete_bare_header(
                     strip_trailing_truncated_framing(&self.buffer.text),
                     self.bare_header_anchor,
@@ -559,7 +581,8 @@ impl UnifiedParser for MuseGlimmerUnifiedParser {
             MuseGlimmerMode::Tool { strict: true } => {
                 let text = strip_trailing_truncated_framing(&self.buffer.text);
                 let held = max_partial_prefix_len(text, TOOL_NOISE_MARKERS)
-                    .max(partial_prefix_len(text, INVOKE_CLOSE));
+                    .max(partial_prefix_len(text, INVOKE_CLOSE))
+                    .max(held_bare_header_fragment_len(text));
                 if !text[..text.len() - held].trim().is_empty() {
                     return Err(parsing_failed!("incomplete Muse Glimmer tool call"));
                 }
@@ -631,12 +654,21 @@ fn parse_idle_event(
         // A `<|start|>` that does not begin a valid framed header is literal text.
         literal(START).value(MuseGlimmerEvent::Text),
         // Whitespace directly before a complete framed header is structural
-        // noise, not body text (Python parity).
-        terminated(
-            capped_run(1, is_ascii_multispace),
-            peek(framed_header_event),
-        )
-        .value(MuseGlimmerEvent::Skip),
+        // noise, not body text (Python parity) — only at a structural position:
+        // after fall-through body text the whitespace belongs to that text (the
+        // whole-input scan commits it with the text), so a delta boundary
+        // between the two must not change what is emitted.
+        |input: &mut MuseGlimmerInput<'_>| {
+            if bare_header_anchor != BareHeaderAnchor::Structural {
+                return Err(ErrMode::Backtrack(ContextError::new()));
+            }
+            terminated(
+                capped_run(1, is_ascii_multispace),
+                peek(framed_header_event),
+            )
+            .value(MuseGlimmerEvent::Skip)
+            .parse_next(input)
+        },
         safe_idle_text_event,
     ))
     .parse_next(input)
@@ -645,10 +677,11 @@ fn parse_idle_event(
 /// Parse an event inside a reasoning (`to=self`) or `to=user` content
 /// channel, committing body text as `text_event`. Neither reclassifies ATEM
 /// markup: quoted markup stays body text. A bare header mid-body switches
-/// channels only out of reasoning (the model's dropped-`<|eom|>` defect leaves
-/// the analysis channel); inside the final answer every bare header is literal
-/// text, so header-like text never truncates the answer — under the
-/// structural tag it is only generable inside a folded JSON string anyway.
+/// channels out of reasoning (the model's dropped-`<|eom|>` defect); inside
+/// the final answer only a tool header that its ATEM block follows switches,
+/// and every other bare header is literal text, so header-like text never
+/// truncates the answer (Python `_classify_bodies` bounds the body the same
+/// way).
 fn parse_plain_body_event(
     input: &mut MuseGlimmerInput<'_>,
     bare_header_anchor: BareHeaderAnchor,
@@ -658,7 +691,7 @@ fn parse_plain_body_event(
         if text_event == MuseGlimmerEvent::Reasoning {
             (bare_channel_switch_event, failed_bare_header_text)
         } else {
-            (no_bare_header_switch, bare_header_text)
+            (bare_tool_switch_event, bare_header_text)
         };
     alt((
         framed_header_event,
@@ -668,8 +701,13 @@ fn parse_plain_body_event(
         at_bare_header_position(bare_header_anchor, literal_header).value(text_event.clone()),
         literal(START).value(text_event.clone()),
         |input: &mut MuseGlimmerInput<'_>| {
-            safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS)
-                .map(|_| text_event.clone())
+            safe_body_text_len(
+                input,
+                BODY_STOP_MARKERS,
+                FRAMING_MARKERS,
+                HeaderAnchoring::Whitespace,
+            )
+            .map(|_| text_event.clone())
         },
     ))
     .parse_next(input)
@@ -678,9 +716,18 @@ fn parse_plain_body_event(
 /// A bare-header alternative of [`parse_plain_body_event`].
 type BareHeaderParser<O> = for<'i> fn(&mut MuseGlimmerInput<'i>) -> ModalResult<O>;
 
-/// Parse nothing: the final answer never hands off on a bare header.
-fn no_bare_header_switch(_input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    Err(ErrMode::Backtrack(ContextError::new()))
+/// Parse a bare tool header that its ATEM block follows (after optional
+/// whitespace, as the system prompt's own example renders it): the model
+/// defect of leaving a body without `<|eom|>`. A false tool switch would
+/// strand the parser in a strict tool channel, so a quoted tool header stays
+/// text.
+fn bare_tool_switch_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
+    terminated(
+        bare_recipient_header.verify(is_tool_recipient),
+        peek(atem_block_ahead),
+    )
+    .value(MuseGlimmerEvent::ChannelOpen(ChannelKind::Tool))
+    .parse_next(input)
 }
 
 /// Consume a bare `to=RECIPIENT<|message|>` header inside the final answer as
@@ -689,9 +736,10 @@ fn bare_header_text(input: &mut MuseGlimmerInput<'_>) -> ModalResult<()> {
     bare_recipient_header.void().parse_next(input)
 }
 
-/// Parse an event inside an untagged content channel, which additionally
-/// reclassifies a complete ATEM block into a tool channel (see
-/// [`ChannelKind::Content`]).
+/// Parse an event inside an untagged content channel. Unlike the `to=user`
+/// answer it hands off on a bare `self`/`user` header exactly as reasoning
+/// does, and it additionally reclassifies a complete ATEM block into a tool
+/// channel (see [`ChannelKind::Content`]).
 fn parse_untagged_content_event(
     input: &mut MuseGlimmerInput<'_>,
     invoke_scan: &mut MarkerScanState,
@@ -715,10 +763,11 @@ fn parse_untagged_content_event(
 
 /// Parse an event inside a tool channel: wrapper markers and stray text are
 /// skipped (Python scans with regex findall), complete invokes become calls.
-/// Every committed tool-channel span is structural, so the bare-header
-/// position is always legal here: a bare header between invokes closes a
-/// tool channel the model left unterminated (Python's header regex bounds
-/// tool bodies the same way).
+/// A bare header between invokes closes a tool channel the model left
+/// unterminated. Skipped noise has no text a false header could truncate, so
+/// the header needs no anchor here (Python `_MSG_HEADER_RE` parity) and the
+/// noise scanner stops ahead of every `to=`, so chunked and whole-input
+/// parses agree on what is a header.
 fn parse_tool_event(
     input: &mut MuseGlimmerInput<'_>,
     invoke_scan: &mut MarkerScanState,
@@ -737,8 +786,7 @@ fn parse_tool_event(
         // is no header) must still be consumed: the noise scanner cannot skip
         // past a marker sitting at offset 0, and zero consumption would stall
         // the parser for the rest of the stream.
-        literal(INVOKE_OPEN).value(MuseGlimmerEvent::Skip),
-        literal(START).value(MuseGlimmerEvent::Skip),
+        alt((literal(INVOKE_OPEN), literal(START))).value(MuseGlimmerEvent::Skip),
         skip_tool_noise_event,
     ))
     .parse_next(input)
@@ -810,17 +858,13 @@ fn bare_recipient_header(input: &mut MuseGlimmerInput<'_>) -> ModalResult<String
 /// Parse a bare `to=RECIPIENT<|message|>` header appearing mid-body: the
 /// model defect of an unterminated body closed by a bare header without
 /// `<|eom|><|start|>assistant` (deterministic for empty-argument tool calls).
-/// A `self`/`user` header always switches. A tool header switches only when
-/// its ATEM block follows (after optional whitespace, as the system prompt's
-/// own example renders it): a false tool switch would strand the parser in a
-/// strict tool channel, so a quoted tool header stays text.
+/// A `self`/`user` header always switches (reasoning and untagged content
+/// only; the `to=user` answer keeps one as text, see
+/// [`parse_plain_body_event`]). A tool header switches only when its ATEM
+/// block follows (see [`bare_tool_switch_event`]).
 fn bare_channel_switch_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
     alt((
-        terminated(
-            bare_recipient_header.verify(is_tool_recipient),
-            peek(atem_block_ahead),
-        )
-        .value(MuseGlimmerEvent::ChannelOpen(ChannelKind::Tool)),
+        bare_tool_switch_event,
         bare_recipient_header.verify_map(|recipient| match classify_recipient(Some(&recipient)) {
             ChannelKind::Tool => None,
             kind => Some(MuseGlimmerEvent::ChannelOpen(kind)),
@@ -918,43 +962,61 @@ fn atem_tag_attrs<'i>(input: &mut MuseGlimmerInput<'i>) -> ModalResult<&'i str> 
 
 /// Parse safe text while waiting for the next channel header.
 fn safe_idle_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, FRAMING_MARKERS, FRAMING_MARKERS).map(|_| MuseGlimmerEvent::Text)
+    safe_body_text_len(
+        input,
+        FRAMING_MARKERS,
+        FRAMING_MARKERS,
+        HeaderAnchoring::Whitespace,
+    )
+    .map(|_| MuseGlimmerEvent::Text)
 }
 
 /// Parse safe content text, additionally stopping at ATEM openers so they can
 /// be reclassified into a tool channel.
 fn safe_content_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, CONTENT_STOP_MARKERS, CONTENT_HOLD_BACK_MARKERS)
-        .map(|_| MuseGlimmerEvent::Text)
+    safe_body_text_len(
+        input,
+        CONTENT_STOP_MARKERS,
+        CONTENT_HOLD_BACK_MARKERS,
+        HeaderAnchoring::Whitespace,
+    )
+    .map(|_| MuseGlimmerEvent::Text)
 }
 
 /// Skip non-content noise between invokes in a tool channel, stopping ahead
-/// of a bare-header candidate so the header alternative gets first chance.
+/// of a bare-header candidate (any `to=`: headers are unanchored here) so the
+/// header alternative gets first chance.
 fn skip_tool_noise_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, TOOL_NOISE_MARKERS, TOOL_NOISE_MARKERS)
-        .map(|_| MuseGlimmerEvent::Skip)
+    safe_body_text_len(
+        input,
+        TOOL_NOISE_MARKERS,
+        TOOL_NOISE_MARKERS,
+        HeaderAnchoring::Anywhere,
+    )
+    .map(|_| MuseGlimmerEvent::Skip)
 }
 
 /// Parse safe body text before the next structural candidate, returning its
 /// length in bytes and advancing the input.
 ///
 /// The scan stops at the earliest `stop_markers` match or bare-header
-/// candidate (whitespace directly followed by `to=`, the same anchor the tail
-/// holdback uses — chunked and whole-input parses must agree on what is a
-/// header), so the header alternatives get first chance at it. With no
-/// candidate in sight, the tail holdback keeps a partial of `hold_markers`,
-/// else a trailing ` to=…` fragment that could still grow into a header.
+/// candidate (a `to=` at the `anchoring`, the same anchor the tail holdback
+/// uses — chunked and whole-input parses must agree on what is a header), so
+/// the header alternatives get first chance at it. With no candidate in
+/// sight, the tail holdback keeps a partial of `hold_markers`, else a
+/// trailing `t` / `to` fragment that could still grow into a candidate.
 fn safe_body_text_len(
     input: &mut MuseGlimmerInput<'_>,
     stop_markers: &[&str],
     hold_markers: &[&str],
+    anchoring: HeaderAnchoring,
 ) -> ModalResult<usize> {
     let text = **input;
     if text.is_empty() {
         return incomplete();
     }
 
-    if let Some(stop) = earliest_structural_candidate(text, stop_markers) {
+    if let Some(stop) = earliest_structural_candidate(text, stop_markers, anchoring) {
         if stop == 0 {
             // A structural alternative ahead of this scanner must consume it.
             return incomplete();
@@ -973,7 +1035,7 @@ fn safe_body_text_len(
     let hold = if marker_hold > 0 {
         marker_hold
     } else {
-        open_tail_to_fragment_len(text)
+        open_tail_to_fragment_len(text, anchoring)
     };
     let emit_len = text.len() - hold;
     if emit_len == 0 {
@@ -984,9 +1046,14 @@ fn safe_body_text_len(
 }
 
 /// Byte offset of the earliest structural candidate in `text`: a stop marker
-/// (all start with `<`) or a whitespace-anchored bare-header `to=`. One pass
-/// over the candidate bytes, so a body of many pieces stays linear.
-fn earliest_structural_candidate(text: &str, stop_markers: &[&str]) -> Option<usize> {
+/// (all start with `<`) or a bare-header `to=` at the `anchoring` (never at
+/// offset 0: a header the alternatives already rejected there is noise). One
+/// pass over the candidate bytes, so a body of many pieces stays linear.
+fn earliest_structural_candidate(
+    text: &str,
+    stop_markers: &[&str],
+    anchoring: HeaderAnchoring,
+) -> Option<usize> {
     debug_assert!(stop_markers.iter().all(|marker| marker.starts_with('<')));
     let bytes = text.as_bytes();
     let mut from = 0;
@@ -998,7 +1065,8 @@ fn earliest_structural_candidate(text: &str, stop_markers: &[&str]) -> Option<us
         } else {
             rest.starts_with("to=")
                 && index > 0
-                && text[..index].chars().next_back().is_some_and(char::is_whitespace)
+                && (anchoring == HeaderAnchoring::Anywhere
+                    || text[..index].chars().next_back().is_some_and(char::is_whitespace))
         };
         if hit {
             return Some(index);
@@ -1008,21 +1076,41 @@ fn earliest_structural_candidate(text: &str, stop_markers: &[&str]) -> Option<us
     None
 }
 
-/// Length of a trailing ` to=`-in-progress fragment (` t`, ` to`, ` to=NAME*`)
-/// that could still grow into a bare channel header (Python `_OPEN_TAIL_HEADER_RE`).
-fn open_tail_to_fragment_len(text: &str) -> usize {
-    // Only the last whitespace can anchor such a fragment: the recipient
-    // charset excludes whitespace, so an earlier anchor's suffix cannot match.
+/// Length of a trailing `t` / `to` fragment (at the `anchoring`) that could
+/// still grow into a bare-header `to=`. Nothing longer needs holding here:
+/// once the `=` arrives the fragment is a structural candidate, so
+/// [`earliest_structural_candidate`] stops ahead of it and the header
+/// alternatives hold it (Python `_OPEN_TAIL_HEADER_RE` covers `to=NAME*` too
+/// because it has no candidate scan).
+fn open_tail_to_fragment_len(text: &str, anchoring: HeaderAnchoring) -> usize {
+    if anchoring == HeaderAnchoring::Anywhere {
+        return ["to", "t"]
+            .into_iter()
+            .find(|fragment| text.ends_with(fragment))
+            .map_or(0, str::len);
+    }
+    // Only the last whitespace can anchor such a fragment.
     let Some((ws_index, ws_char)) = text.char_indices().rev().find(|(_, c)| c.is_whitespace())
     else {
         return 0;
     };
     let suffix = &text[ws_index + ws_char.len_utf8()..];
-    let holds = matches!(suffix, "t" | "to")
-        || suffix
-            .strip_prefix("to=")
-            .is_some_and(|name| name.chars().all(|c| !c.is_whitespace() && c != '<'));
-    if holds { text.len() - ws_index } else { 0 }
+    if matches!(suffix, "t" | "to") {
+        text.len() - ws_index
+    } else {
+        0
+    }
+}
+
+/// Length of the bare-header-in-progress fragment a finished tool channel
+/// still holds: the whole buffer while the header parser waits on it
+/// (`to=NA`, `  to=`, or the `t` / `to` tail the noise scanner held back).
+fn held_bare_header_fragment_len(text: &str) -> usize {
+    let mut input = MuseGlimmerInput::new(text);
+    match bare_header_event(&mut input) {
+        Err(ErrMode::Incomplete(_)) => text.len(),
+        _ => 0,
+    }
 }
 
 /// Strip a trailing COMPLETE bare header (`to=RECIPIENT<|message|>`), plus
@@ -1664,17 +1752,39 @@ mod tests {
     }
 
     #[test]
+    fn muse_glimmer_answer_bare_tool_header_with_atem_switches_channels() {
+        // The dropped-`<|eom|>` defect from the answer channel: a bare tool
+        // header that its ATEM block follows is the real channel switch, not
+        // answer text (Python `_classify_bodies` / `_iter_messages` parity).
+        let text = format!(
+            " to=user<|message|>Let me check. to=weather.get<|message|>\
+             <atem:function_calls>\n{}</atem:function_calls><|eot|>",
+            invoke("weather.get", "")
+        );
+        let whole = collect_stream(&mut test_parser_with_tools(&["weather.get"]), &[&text]);
+        for size in [1, 3, 7] {
+            let streamed = collect_stream(
+                &mut test_parser_with_tools(&["weather.get"]),
+                &split_by_chars(&text, size),
+            );
+            assert_eq!(streamed, whole, "chunk size {size}");
+        }
+        assert_eq!(whole.normal_text(), "Let me check. ");
+        assert!(whole.reasoning_text().is_empty());
+        let call = first_call(&whole);
+        assert_eq!(call.name.as_deref(), Some("weather.get"));
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
     fn muse_glimmer_header_like_text_inside_answer_stays_intact() {
         // A structured answer quoting a header must not be cut into invalid
-        // JSON, whatever the recipient, even when ATEM follows the header.
+        // JSON, whatever the recipient, unless a tool header's ATEM follows.
         let bodies = [
             r#"{"value":"literal to=x<|message|> t"}"#.to_string(),
             r#"{"value":"literal to=self<|message|> t"}"#.to_string(),
             r#"{"value":"literal to=user<|message|> t"}"#.to_string(),
-            format!(
-                r#"{{"value":"literal to=weather.get<|message|><atem:function_calls>\n{}</atem:function_calls> t"}}"#,
-                invoke("weather.get", &param("city", "Paris"))
-            ),
+            r#"{"value":"literal to=weather.get<|message|> t"}"#.to_string(),
         ];
         for body in bodies {
             let text = format!(" to=user<|message|>{body}<|eot|>");
@@ -2569,5 +2679,157 @@ mod tests {
             collect_stream(&mut test_parser(), &split_by_chars(&text, 1)),
             whole
         );
+    }
+
+    #[test]
+    fn muse_glimmer_tool_channel_noise_glued_header_fragment_is_chunking_invariant() {
+        // Noise after the last call running into a `to=` prefix: a chunk
+        // boundary right before the prefix must parse exactly like the whole
+        // input, and a cut-off fragment must not fail finish().
+        let calls = tool_channel("calc", "", "\n");
+        for (tail, reasoning) in [
+            ("Done but", ""),
+            ("xto=calc", ""),
+            ("Done buto=self<|message|>hi<|eot|>", "hi"),
+        ] {
+            let text = format!("{calls}{tail}");
+            let output = assert_chunking_invariant(&text);
+            assert_eq!(
+                first_call(&output).name.as_deref(),
+                Some("calc"),
+                "{tail:?}"
+            );
+            assert_eq!(output.reasoning_text(), reasoning, "{tail:?}");
+        }
+        assert_chunking_invariant("to=calc<|message|>to=selfto=t");
+    }
+
+    #[test]
+    fn muse_glimmer_glued_bare_header_after_tool_noise_keeps_its_body() {
+        // A bare header glued to stray tool-channel text is still a header
+        // (Python `_MSG_HEADER_RE` has no anchor): the channel body that
+        // follows is recoverable output, not tool noise, however the deltas
+        // fall.
+        let calls = tool_channel("calc", "", "\n");
+        for (tail, normal, reasoning) in [
+            ("Done.to=user<|message|>answer<|eot|>", "answer", ""),
+            ("Done.<|message|>answer<|eot|>", "answer", ""),
+            ("Done.to=self<|message|>thoughts<|eot|>", "", "thoughts"),
+        ] {
+            let output = assert_chunking_invariant(&format!("{calls}{tail}"));
+            assert_eq!(
+                first_call(&output).name.as_deref(),
+                Some("calc"),
+                "{tail:?}"
+            );
+            assert_eq!(output.normal_text(), normal, "{tail:?}");
+            assert_eq!(output.reasoning_text(), reasoning, "{tail:?}");
+        }
+    }
+
+    #[test]
+    fn muse_glimmer_finish_drops_bare_header_cut_off_after_tool_calls() {
+        // A bare header cut mid-way after a complete call is lost framing,
+        // like a truncated `<|start|>assist`, not an incomplete call.
+        for tail in [" to", "\nto=ca", "to=calc", "  to=calc<|mess"] {
+            let text = format!("{}{tail}", tool_channel("calc", "", "\n"));
+            let output = assert_chunking_invariant(&text);
+            assert_eq!(first_call(&output).arguments, "{}", "{tail:?}");
+        }
+    }
+
+    /// The tail holdback and the candidate scan must agree on the bare-header
+    /// anchor: the holdback only covers ` t` / ` to`, so a whitespace-anchored
+    /// `to=` must already be a candidate (held by the header alternatives) or
+    /// a header could stream out as body text.
+    #[test]
+    fn muse_glimmer_tail_holdback_hands_off_to_candidate_scan_at_to_eq() {
+        use super::{
+            BODY_STOP_MARKERS, HeaderAnchoring, earliest_structural_candidate,
+            open_tail_to_fragment_len,
+        };
+
+        for (text, hold) in [
+            ("x t", 2),
+            ("x to", 3),
+            ("x\nto", 3),
+            ("x\u{a0}to", 4),
+            ("x to<", 0),
+        ] {
+            assert_eq!(
+                earliest_structural_candidate(text, BODY_STOP_MARKERS, HeaderAnchoring::Whitespace),
+                None,
+                "{text:?}"
+            );
+            assert_eq!(
+                open_tail_to_fragment_len(text, HeaderAnchoring::Whitespace),
+                hold,
+                "{text:?}"
+            );
+        }
+        for text in ["x to=", "x to=abc", "x\nto=a<", " to=", "x\u{a0}to=self"] {
+            let candidate =
+                earliest_structural_candidate(text, BODY_STOP_MARKERS, HeaderAnchoring::Whitespace);
+            assert_eq!(candidate, text.find("to="), "{text:?}");
+            assert_eq!(
+                open_tail_to_fragment_len(text, HeaderAnchoring::Whitespace),
+                0,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_glimmer_idle_whitespace_after_fall_through_text_is_content() {
+        // Whitespace before the turn's first framed header is structural noise
+        // only at a structural position; after fall-through body text it is
+        // content, however the deltas fall.
+        let header = "<|start|>assistant to=user<|message|>x<|eot|>";
+        for (lead, ws) in [("hello", " "), ("hello", "\n"), ("hello ", " ")] {
+            let text = format!("{lead}{ws}{header}");
+            let whole = assert_chunking_invariant(&text);
+            assert_eq!(whole.normal_text(), format!("{lead}{ws}x"));
+            let deltas = [lead, ws, header];
+            assert_eq!(collect_stream(&mut test_parser(), &deltas), whole);
+        }
+        // At a structural position the whitespace is framing noise.
+        let whole = assert_chunking_invariant(&format!("  {header}"));
+        assert_eq!(whole.normal_text(), "x");
+    }
+
+    #[test]
+    fn muse_glimmer_untagged_content_still_switches_on_bare_self_header() {
+        // Unlike the `to=user` answer (see
+        // muse_glimmer_header_like_text_inside_answer_stays_intact), untagged
+        // content keeps the Python `_iter_messages` rule: a bare `self`/`user`
+        // header ends the body and hands off.
+        let output = assert_chunking_invariant("<|message|>Answer to=self<|message|>hidden<|eot|>");
+        assert_eq!(output.normal_text(), "Answer ");
+        assert_eq!(output.reasoning_text(), "hidden");
+
+        let output = assert_chunking_invariant("<|message|>Answer to=user<|message|>tail<|eot|>");
+        assert_eq!(output.normal_text(), "Answer tail");
+        assert!(output.reasoning_text().is_empty());
+    }
+
+    #[test]
+    fn muse_glimmer_answer_trailing_bare_tool_header_is_dropped_at_end_of_output() {
+        // A bare tool header at the very end of the answer is held for the
+        // ATEM peek; at end of output it is a cut-off channel switch and is
+        // dropped, unlike one that `<|eot|>` or text follows (literal answer).
+        for tail in ["", "  ", "\n", "<at"] {
+            let text = format!(" to=user<|message|>Let me check. to=weather.get<|message|>{tail}");
+            let output = assert_chunking_invariant(&text);
+            assert_eq!(output.normal_text(), "Let me check. ", "{tail:?}");
+            assert!(output.calls().is_empty(), "{tail:?}");
+        }
+        let output = assert_chunking_invariant(
+            " to=user<|message|>Let me check. to=weather.get<|message|><|eot|>",
+        );
+        assert_eq!(
+            output.normal_text(),
+            "Let me check. to=weather.get<|message|>"
+        );
+        assert!(output.calls().is_empty());
     }
 }

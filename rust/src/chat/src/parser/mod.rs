@@ -15,6 +15,7 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 use self::reasoning::ReasoningParserFactory;
 use self::tool::ToolParserFactory;
 use self::unified::UnifiedParserFactory;
+use thiserror_ext::AsReport as _;
 
 /// Specify which reasoning or tool-call parser implementation to use.
 #[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
@@ -118,8 +119,10 @@ impl fmt::Display for ToolStrictLevel {
 }
 
 /// Validate parser overrides without starting request processing: explicit
-/// names must be registered, and the selections resolved for `model_id` must
-/// not split a unified parser between the tool and reasoning sides.
+/// names must be registered, and two enabled parsers resolved for `model_id`
+/// must not split a unified parser between the tool and reasoning sides. A
+/// split with one side disabled only affects chat completions (every other
+/// route keeps serving), so it is logged and left to the per-request check.
 pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
@@ -131,10 +134,19 @@ pub fn validate_parser_overrides(
         "reasoning",
         ReasoningParserFactory::global(),
     )?;
-    validate_unified_selection(
-        tool_call_parser.resolve_tool_name(model_id),
-        reasoning_parser.resolve_reasoning_name(model_id),
-    )
+    let tool_name = tool_call_parser.resolve_tool_name(model_id);
+    let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
+    match validate_unified_selection(tool_name, reasoning_name) {
+        Err(error) if tool_name.is_some() && reasoning_name.is_some() => Err(error),
+        Err(error) => {
+            tracing::warn!(
+                error = %error.as_report(),
+                "chat completions will reject requests until the tool and reasoning parser selections agree"
+            );
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
 }
 
 /// A unified parser owns the whole stream, so when either resolved selection

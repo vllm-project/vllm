@@ -306,4 +306,19 @@ mod tests {
         let response = api_error.to_error_response();
         assert!(response.error.message.starts_with("failed to submit completion request:"));
     }
+
+    #[test]
+    fn incompatible_parser_selections_maps_to_server_error() {
+        // An operator misconfiguration, like `ParserDisabled`, stays a 500.
+        let error = vllm_chat::Error::IncompatibleParserSelections {
+            tool: "none".to_string(),
+            reasoning: "muse_glimmer".to_string(),
+        };
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            api_error.to_error_response().error.error_type,
+            "server_error"
+        );
+    }
 }
