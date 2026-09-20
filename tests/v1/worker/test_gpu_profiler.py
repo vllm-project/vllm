@@ -119,6 +119,34 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "activities", [["CPU", "CUDA"], ["CUDA"], ["CPU", "XPU"], ["XPU"]]
+)
+@pytest.mark.parametrize("dump_device_time", [True, False])
+def test_torch_profiler_device_summary(tmp_path, capsys, activities, dump_device_time):
+    """Device summaries honor the dump option on both CUDA and XPU."""
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_dump_cuda_time_total=dump_device_time,
+    )
+    with patch("vllm.profiler.wrapper.torch.profiler.profile") as profile:
+        profile.return_value.key_averages.return_value.table.return_value = (
+            "device times"
+        )
+        wrapper = TorchProfilerWrapper(
+            config, worker_name="worker", local_rank=0, activities=activities
+        )
+        wrapper.start()
+        wrapper.stop()
+
+    summary = tmp_path / "profiler_out_0.txt"
+    assert summary.exists() == dump_device_time
+    assert ("device times" in capsys.readouterr().out) == dump_device_time
+    if dump_device_time:
+        assert summary.read_text() == "device times\n"
+
+
+@pytest.mark.parametrize(
     "activities",
     [[], ["CPU", "CPU"], ["INVALID"]],
 )

@@ -228,8 +228,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
 
         self._records_cpu_activity = "CPU" in activities
-        self.dump_cuda_time_total = (
-            "CUDA" in activities and profiler_config.torch_profiler_dump_cuda_time_total
+        self.dump_device_time_total = (
+            any(activity != "CPU" for activity in activities)
+            and profiler_config.torch_profiler_dump_cuda_time_total
         )
         self.dump_cpu_time_total = self._records_cpu_activity and len(activities) == 1
 
@@ -343,8 +344,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         self.profiler.stop()
 
         rank = self.local_rank
-        if self.dump_cuda_time_total:
-            table = self._build_profiler_table(sort_key="self_cuda_time_total")
+        if self.dump_device_time_total:
+            table = self._build_profiler_table(sort_key="self_device_time_total")
             self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
