@@ -420,6 +420,19 @@ def _run_fused_moe_lora_one_shot(
         npid = min(npid_occ, max_npid_by_budget)
     npid = max(1, min(npid, max(1, N_per_slice // 128)))
 
+    # NPID_FACTOR > 1 splits the N-axis across extra programs sharing the
+    # same (pid_m, slice, lora) so each redundantly recomputes the shrink
+    # step. On XPU, the Intel Triton backend has been observed to silently
+    # drop the final expand store for a subset of programs in this path
+    # (the shrink/expand math and masks are correct, but the store to
+    # `out_ptr` for some pid_n_outer values never lands) once the kernel
+    # is launched with NPID_FACTOR > 1, producing partially-zero output.
+    # Force the single-program-per-row path on XPU until the miscompile
+    # is root-caused; CUDA/ROCm keep the NPID_FACTOR > 1 optimization.
+    # see issue: https://github.com/intel/intel-xpu-backend-for-triton/issues/8121
+    if current_platform.is_xpu():
+        npid = 1
+
     # Robust defaults across the prefill regime (H100/H200/B200, bf16/fp16).
     # NPID > 1 is the small-M / under-saturated path -- more warps help
     # amortise the inner-N expand loop. ns=3 instead of 4: GB200 ncu showed
