@@ -134,6 +134,16 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        if self.force_no_detokenize and sampling_params.stop:
+            # SamplingParams rejects stop with detokenize=False at request
+            # validation, but this server forces detokenize=False afterwards,
+            # so the combination must be rejected here or stop strings are
+            # silently never applied.
+            return self.create_error_response(
+                "stop strings are not supported on a --tokens-only server "
+                "because detokenization is disabled. Check stop strings on "
+                "the coordinator, or use stop_token_ids."
+            )
         try:
             msgspec.msgpack.encode(
                 (
@@ -486,9 +496,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    # Omit absent fields, like the Rust frontend and the
-                    # final usage chunk below.
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    # Omit absent prompt metadata (Rust skips None fields).
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -39,6 +40,7 @@ class UnquantizedMoeBackend(Enum):
     AITER = "ROCm AITER"
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
+    MOONEP = "MOONEP"
     CPU = "CPU"
     XPU = "XPU"
     TPU = "TPU"
@@ -136,6 +138,13 @@ def backend_to_kernel_cls(
         )
 
         return [BatchedTritonExperts]
+
+    elif backend == UnquantizedMoeBackend.MOONEP:
+        from vllm.model_executor.layers.fused_moe.experts.moonep_experts import (
+            MoonEPExperts,
+        )
+
+        return [MoonEPExperts]
 
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
@@ -280,6 +289,13 @@ def select_unquantized_moe_backend(
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
+    # MoonEP owns the expert layout (expert-grouped [NvS, H] + cu_seqlens),
+    # so it is not interchangeable with the token-major experts backends.
+    if moe_config.moe_parallel_config.use_moonep_kernels:
+        return _return_or_raise(
+            UnquantizedMoeBackend.MOONEP, moe_config, activation_format
+        )
+
     runner_backend = moe_config.moe_backend
     # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
     # modules_to_not_convert) falls through to auto instead of erroring.
@@ -305,7 +321,33 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            return _return_or_raise(backend, moe_config, activation_format)
+            reason = None
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, moe_config, None, None, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+            # AITER was explicitly requested but does not support this
+            # deployment configuration (e.g. a non-gated MoE activation,
+            # which AiterExperts._supports_no_act_and_mul() rejects
+            # unconditionally). Rather than hard-crashing at engine init,
+            # warn — explicitly stating that this is falling back, and
+            # which backends will be tried next — and fall back to the
+            # remaining backends in priority order below.
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
+                "Falling back to try the remaining available MoE backends: %s.",
+                _make_log_unsupported(backend, reason),
+                ", ".join(
+                    b.value
+                    for b in AVAILABLE_BACKENDS
+                    if b != UnquantizedMoeBackend.AITER
+                ),
+            )
+            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
@@ -323,12 +365,58 @@ def select_unquantized_moe_backend(
     )
 
 
+def unquantized_round_up_hidden_size_and_intermediate_size(
+    backend: UnquantizedMoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round up dimensions before allocation to satisfy the selected kernel."""
+    if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        intermediate_size = round_up(intermediate_size, 128)
+    return hidden_size, intermediate_size
+
+
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    layer: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if unquantized_backend == UnquantizedMoeBackend.MOONEP:
+        if layer is None:
+            raise ValueError(
+                "MoonEP weight conversion requires the layer module to stash "
+                "the [E+B] weight layout on"
+            )
+        # MoonEP addresses expert weights by global [E+B] row and needs one
+        # contiguous tensor per projection (gate / up / down). The layer's
+        # w13_weight becomes the gate tensor and w2_weight the down tensor;
+        # the up tensor and the full layout are stashed on the layer for
+        # the kernel wiring in _setup_kernel.
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+            gather_moonep_weight_layout,
+        )
+
+        if getattr(layer, "_moonep_weight_layout", None) is not None:
+            # On a reload the layer parameters were already replaced by the
+            # converted [E+B] gate/down tensors, so the source-format weights
+            # this conversion needs are gone (and the unregistered up
+            # projection cannot be recovered from them at all). Tracked in
+            # RFC #52095.
+            raise NotImplementedError(
+                "MoonEP does not support in-place weight reloads yet"
+            )
+        layout = gather_moonep_weight_layout(
+            w13_weight,
+            w2_weight,
+            num_global_experts=moe_config.num_experts,
+            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+        )
+        layer._moonep_weight_layout = layout
+        return layout.full_gate_weight, layout.full_down_weight
+
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
         w13_weight.is_shuffled = True
@@ -351,13 +439,26 @@ def convert_to_unquantized_kernel_format(
         )
         moe_config.intermediate_size_per_partition = padded_intermediate
 
+        # Reloads only overwrite checkpoint slices. An earlier in-place
+        # permutation can leave nonzero values in the raw padding slots.
+        unpadded = moe_config.intermediate_size_per_partition_unpadded
+        assert unpadded is not None
+        if padded_intermediate > unpadded:
+            w13_weight[:, unpadded:padded_intermediate].zero_()
+            if is_act_and_mul:
+                w13_weight[:, padded_intermediate + unpadded :].zero_()
+            w2_weight[:, :, unpadded:].zero_()
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
             is_gated_act_gemm=is_act_and_mul,
         )
+        # Keep checkpoint-shaped parameters for reload/IPC. The experts create
+        # BlockMajorK views at dispatch without changing the underlying storage.
+        return w13_weight, w2_weight
 
     if (
         unquantized_backend == UnquantizedMoeBackend.TRITON
@@ -471,9 +572,10 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         moe_config: FusedMoEConfig,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
+        layer: torch.nn.Module | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return convert_to_unquantized_kernel_format(
-            backend, moe_config, w13_weight, w2_weight
+            backend, moe_config, w13_weight, w2_weight, layer=layer
         )
 
     def make_kernel(
