@@ -326,8 +326,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
     MoE only: wave coordination is enabled iff the model is MoE, so a dense
     model never reaches the coordinator state this exercises.
 
-    Uses `keep`: the only mode that still admits a late request now that
-    boundary modes reject it at the client.
+    Uses `keep`: the only mode that still admits a late request.
     """
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel=True)

@@ -726,9 +726,9 @@ async def collect_outputs(
     return final_output
 
 
-# ======================================================================
+# =============================================================================
 # Pause/Resume Tests
-# ======================================================================
+# =============================================================================
 
 
 @pytest.mark.asyncio
@@ -1151,8 +1151,7 @@ async def test_pause_rejection_races_with_concurrent_adds():
         await engine.pause_generation(mode="abort")
         collectors = await asyncio.gather(*adds)
 
-        # Whatever was admitted before the pause landed was aborted by it;
-        # everything else was rejected. Neither outcome may hang.
+        # Admitted-then-aborted or rejected; neither outcome may hang.
         await engine.resume_generation()
         for collector in collectors:
             if collector is None:
@@ -1268,8 +1267,7 @@ async def test_resume_while_asleep_keeps_rejecting():
         with pytest.raises(EnginePausedError):
             await _add(engine, "after-resume-while-asleep")
 
-        # A partial wake after that resume must not reopen admission either:
-        # the scheduler is already unpaused, but KV cache is still absent.
+        # A partial wake leaves KV cache absent, so admission stays closed.
         await engine.wake_up(tags=["weights"])
         with pytest.raises(EnginePausedError):
             await _add(engine, "after-partial-wake-while-resumed")

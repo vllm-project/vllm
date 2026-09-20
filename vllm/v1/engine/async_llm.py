@@ -83,10 +83,7 @@ class InputStreamError(Exception):
 class AsyncLLM(EngineClient):
     """An asynchronous wrapper for the vLLM engine."""
 
-    # Pause mode whose contract is to hand requests back to the caller,
-    # so new ones are rejected rather than silently queued. None when
-    # unpaused or paused in "keep" mode. Class-level default so partially
-    # constructed instances (tests build them via __new__) admit requests.
+    # Pause mode that rejects new requests; None while admitting.
     _reject_while_paused: PauseMode | None = None
 
     def __init__(
@@ -146,8 +143,7 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
 
-        # Serializes pause/resume/sleep/wake so concurrent control calls
-        # cannot leave admission open on a paused engine.
+        # Serializes pause/resume/sleep/wake state transitions.
         self._pause_state_lock = asyncio.Lock()
 
         custom_stat_loggers = list(stat_loggers or [])
@@ -548,13 +544,10 @@ class AsyncLLM(EngineClient):
         ):
             self.check_admission(request_id=request.request_id)
 
-        # Admission gate, past every await in the submission path: a pause
-        # landing while inputs were being processed is still caught here.
+        # Past every await in the submission path, so a late pause is caught.
         if self._reject_while_paused is not None:
             if parent_req is not None:
-                # Reject atomically: aborting the parent reclaims any
-                # children admitted before the pause landed mid fan-out,
-                # so the request id is immediately reusable.
+                # Reclaim children admitted before the pause landed mid fan-out.
                 await self.abort(parent_req.request_id, internal=True)
             raise EnginePausedError(
                 f"Generation is paused (mode={self._reject_while_paused!r}); "
@@ -770,7 +763,7 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Generation is paused; the caller owns the retry.
+        # Paused; the caller owns the retry.
         except EnginePausedError:
             raise
 
@@ -940,10 +933,8 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. While paused in ``abort`` or ``wait`` mode, new
-        generation/encoding requests are rejected with a retryable
-        ``EnginePausedError`` until resume; ``keep`` continues to accept
-        and queue them.
+        in the engine. ``abort`` and ``wait`` reject new requests with a
+        retryable ``EnginePausedError``; ``keep`` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
@@ -983,12 +974,7 @@ class AsyncLLM(EngineClient):
         await asyncio.sleep(0.02)
 
     async def _reopen_admission_if_servable(self) -> None:
-        """Reopen admission iff the engine can actually serve.
-
-        The engine's ``is_sleeping`` is "scheduler paused OR executor memory
-        not resident", so its negation is exactly "fully servable" -- a
-        partial wake or a resume while asleep leaves admission closed.
-        """
+        """Reopen admission only if the engine is fully servable."""
         if not await self.engine_core.is_sleeping_async():
             self._reject_while_paused = None
 
@@ -1066,7 +1052,7 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Generation is paused; the caller owns the retry.
+        # Paused; the caller owns the retry.
         except EnginePausedError:
             raise
 

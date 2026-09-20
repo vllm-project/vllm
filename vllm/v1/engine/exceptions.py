@@ -10,8 +10,7 @@ class EngineGenerateError(VLLMServerError):
 
 
 class EnginePausedError(VLLMServerError):
-    """Raised when a request arrives while generation is paused in a mode
-    that treats the pause as a generation boundary. Retryable."""
+    """Raised when a request arrives while generation is paused. Retryable."""
 
     pass
 
