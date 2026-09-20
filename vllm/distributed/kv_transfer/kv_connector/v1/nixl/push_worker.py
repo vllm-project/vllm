@@ -172,7 +172,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         # D-side: track reqs waiting for P to push.
-        for req_id, meta in metadata.reqs_to_recv.items():
+        for req_id, meta in metadata.iter_reqs_by_priority(metadata.reqs_to_recv):
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )

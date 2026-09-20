@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
+    TransferPriority,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
@@ -216,6 +217,8 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
+    _default_transfer_priority = TransferPriority.CRITICAL
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         # The READ path always transfers the recurrent-state slot, including

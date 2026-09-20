@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
     SupportsHMA,
+    TransferPriority,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -76,6 +77,8 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    _default_transfer_priority = TransferPriority.CRITICAL
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:

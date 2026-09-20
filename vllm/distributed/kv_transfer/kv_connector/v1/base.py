@@ -82,6 +82,88 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
+class TransferPriority(enum.IntEnum):
+    """QoS class for KV-transfer work that shares a NIC.
+
+    MultiConnector fans out worker-side save/load in this order so P→D
+    (CRITICAL) runs before Store offload (BACKGROUND). Per-request
+    ``Request.priority`` is a separate signal, plumbed through connector
+    metadata rather than ``save_kv_layer`` kwargs.
+    """
+
+    IDLE = 0
+    BACKGROUND = 1  # Store offload / eviction
+    CRITICAL = 2  # P→D transfer / prefix pull
+
+
+_TRANSFER_ROLE_ALIASES = {
+    "idle": TransferPriority.IDLE,
+    "background": TransferPriority.BACKGROUND,
+    "store": TransferPriority.BACKGROUND,
+    "offload": TransferPriority.BACKGROUND,
+    "critical": TransferPriority.CRITICAL,
+    "p2d": TransferPriority.CRITICAL,
+    "pd": TransferPriority.CRITICAL,
+}
+
+
+def parse_transfer_priority(value: Any) -> TransferPriority | None:
+    """Parse a transfer-priority value from config or extra_config."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, TransferPriority):
+        return value
+    if isinstance(value, int):
+        try:
+            return TransferPriority(value)
+        except ValueError:
+            return None
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _TRANSFER_ROLE_ALIASES:
+            return _TRANSFER_ROLE_ALIASES[key]
+        try:
+            return TransferPriority[value.strip().upper()]
+        except KeyError:
+            return None
+    return None
+
+
+def transfer_priority_from_extra_config(
+    extra_config: dict[str, Any] | None,
+) -> TransferPriority | None:
+    """Read an optional override from ``kv_connector_extra_config``.
+
+    Accepted keys:
+    - ``default_transfer_priority``: int or name (``CRITICAL`` / ``BACKGROUND``)
+    - ``role``: ``critical`` / ``p2d`` vs ``background`` / ``store``
+    """
+    if not extra_config:
+        return None
+    if "default_transfer_priority" in extra_config:
+        parsed = parse_transfer_priority(extra_config["default_transfer_priority"])
+        if parsed is not None:
+            return parsed
+    return parse_transfer_priority(extra_config.get("role"))
+
+
+def connector_transfer_priority(connector: Any) -> TransferPriority:
+    """Resolve a connector's transfer priority, defaulting to BACKGROUND."""
+    value = getattr(connector, "default_transfer_priority", TransferPriority.BACKGROUND)
+    try:
+        return TransferPriority(int(value))
+    except (TypeError, ValueError):
+        return TransferPriority.BACKGROUND
+
+
+def transfer_ordered(connectors: list[Any]) -> list[Any]:
+    """Order connectors by transfer priority, highest first.
+
+    The sort is stable, so connectors sharing a priority keep config order.
+    """
+    return sorted(connectors, key=connector_transfer_priority, reverse=True)
+
+
 @dataclass
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
@@ -178,6 +260,9 @@ class KVConnectorWorkerMetadata(ABC):
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
 
+    # Store offload / eviction by default. P→D connectors override to CRITICAL.
+    _default_transfer_priority: TransferPriority = TransferPriority.BACKGROUND
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
@@ -222,6 +307,22 @@ class KVConnectorBase_V1(ABC):
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    @property
+    def default_transfer_priority(self) -> TransferPriority:
+        """Default QoS for this connector's transfers.
+
+        Override via ``kv_connector_extra_config["default_transfer_priority"]``
+        or ``kv_connector_extra_config["role"]`` (``critical`` / ``p2d`` vs
+        ``background`` / ``store``). P→D connector subclasses set
+        ``_default_transfer_priority = TransferPriority.CRITICAL``.
+        """
+        parsed = transfer_priority_from_extra_config(
+            self._kv_transfer_config.kv_connector_extra_config
+        )
+        if parsed is not None:
+            return parsed
+        return TransferPriority(self._default_transfer_priority)
 
     # ==============================
     # Worker-side methods
