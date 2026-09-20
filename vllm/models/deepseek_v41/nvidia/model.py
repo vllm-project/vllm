@@ -195,21 +195,6 @@ def _supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     )
 
 
-def _use_mhc_overlap(vllm_config: VllmConfig) -> bool:
-    """Select the topology/backend where the 16-token cutoff was measured."""
-    if not _supports_mhc_overlap(vllm_config):
-        return False
-    parallel = vllm_config.parallel_config
-    # Performance coverage, not additional kernel restrictions.
-    return (
-        parallel.tensor_parallel_size == 4
-        and parallel.data_parallel_size == parallel.pipeline_parallel_size == 1
-        and not parallel.enable_expert_parallel
-        and vllm_config.lora_config is None
-        and _select_dsv4_attn_cls(vllm_config) is DeepseekV4FlashInferMLAAttention
-    )
-
-
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -561,7 +546,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
         # Keep mHC independent of the streams used inside attention.
-        mhc_stream = torch.cuda.Stream() if _use_mhc_overlap(vllm_config) else None
+        mhc_stream = torch.cuda.Stream() if _supports_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
