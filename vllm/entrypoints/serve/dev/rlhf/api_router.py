@@ -290,16 +290,10 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
             )
 
     if action == "reset":
-        # Overwrite every weight-bearing tensor with random values on the GPU
         await client.reset_weights()
         return JSONResponse(content={"status": "reset"})
 
     per_engine: list[dict[str, str]] = await client.compute_weight_checksums_all()
-    if not per_engine:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            detail="No engine returned weight checksums",
-        )
     try:
         checksums = combine_weight_checksums(per_engine)
     except RuntimeError as exc:
