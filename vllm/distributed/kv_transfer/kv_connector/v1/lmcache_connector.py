@@ -196,7 +196,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             layer_name, kv_layer, attn_metadata, **kwargs
         )
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         """Block until all the save operations is done. This is called
         as the forward context exits to ensure that the async saving
         from save_kv_layer is complete before finishing the forward.

@@ -134,7 +134,7 @@ class DecodeBenchTestRunner:
         self.worker_connector.start_load_kv(self._dummy_ctx)
 
         if scheduler_output.total_num_scheduled_tokens > 0:
-            self.worker_connector.wait_for_save()
+            self.worker_connector.finalize_saves()
 
         self.worker_connector.clear_connector_metadata()
 

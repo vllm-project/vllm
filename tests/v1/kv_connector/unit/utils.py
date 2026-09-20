@@ -453,7 +453,7 @@ class MockKVConnector(KVConnectorBase_V1):
     def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
         pass
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         pass
 
 

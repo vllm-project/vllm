@@ -139,7 +139,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             layer_name, kv_layer, attn_metadata, **kwargs
         )
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         """No-op for FlexKV (currently).
 
         KV offload tasks are tracked asynchronously by the scheduler

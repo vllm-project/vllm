@@ -805,12 +805,12 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
     metadata = KVConnectorMetadata()
     connector.bind_connector_metadata(metadata)
     connector.save_kv_layer("layer", MagicMock(), MagicMock())
-    connector.wait_for_save()
+    connector.finalize_saves()
     connector.clear_connector_metadata()
 
     for _ in range(2):
         connector.bind_connector_metadata(metadata)
-        connector.wait_for_save()
+        connector.finalize_saves()
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []

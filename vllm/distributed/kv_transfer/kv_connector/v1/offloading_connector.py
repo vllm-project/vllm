@@ -130,7 +130,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         pass
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         # Store deferral is handled in get_finished().
         pass
 

@@ -313,7 +313,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         return
 
-    def wait_for_save(self) -> None:
+    def finalize_saves(self) -> None:
         return
 
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:

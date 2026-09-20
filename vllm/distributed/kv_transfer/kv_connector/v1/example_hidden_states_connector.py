@@ -235,7 +235,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             "use_synchronization_lock", True
         )
         # req_id → open fd on the .lock file with LOCK_EX held.
-        # Pre-created in wait_for_save when a request first arrives,
+        # Pre-created in finalize_saves when a request first arrives,
         # consumed by _submit_async_write which passes the fd to the
         # thread pool worker for release after writing.
         self._lock_fds: dict[str, int] = {}
@@ -265,7 +265,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass  # Store-only connector — nothing to load
 
-    def wait_for_save(self) -> None:
+    def finalize_saves(self) -> None:
         """Pre-create lock files for newly arrived requests.
 
         This runs on the worker BEFORE the scheduler returns the output
@@ -423,7 +423,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         os.makedirs(os.path.dirname(pending.filename), exist_ok=True)
 
-        # Use the pre-created lock fd from wait_for_save (already holds
+        # Use the pre-created lock fd from finalize_saves (already holds
         # LOCK_EX). Falls back to creating one here if use_lock is True
         # but no pre-created fd exists (shouldn't happen in normal flow).
         lock_fd = self._lock_fds.pop(pending.req_id, None)

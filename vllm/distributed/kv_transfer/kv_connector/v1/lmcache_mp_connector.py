@@ -625,13 +625,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         """
         return
 
-    def wait_for_save(self):
-        """Block until all the save operations is done. This is called
-        as the forward context exits to ensure that the async saving
-        from save_kv_layer is complete before finishing the forward.
-
-        This prevents overwrites of paged KV buffer before saving done.
-        """
+    def finalize_saves(self):
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
         if (

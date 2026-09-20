@@ -257,7 +257,7 @@ class SimpleCPUOffloadWorker:
         # Invoked after the forward launch on steps without sync loads
         # (SchedulerOutput.has_sync_kv_loads), so the CPU-side block copy
         # op overhead (~5ms) stays hidden behind GPU compute. Stores are
-        # issued in wait_for_save().
+        # issued in finalize_saves().
         metadata = self._connector_metadata
         if metadata is not None and metadata.load_cpu_blocks:
             backend = self._backend
@@ -270,7 +270,7 @@ class SimpleCPUOffloadWorker:
                 events_list=self._load_events,
             )
 
-    def wait_for_save(self) -> None:
+    def finalize_saves(self) -> None:
         """Submit async stores.
 
         Stores (GPU->CPU) read the live KV cache, which the compute stream may
@@ -299,7 +299,7 @@ class SimpleCPUOffloadWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         """Report completed transfer events to the scheduler.
 
-        Loads are submitted in start_load_kv() and stores in wait_for_save().
+        Loads are submitted in start_load_kv() and stores in finalize_saves().
 
         Returns:
             tuple of (finished_sending, finished_recving).

@@ -917,6 +917,14 @@ class TestMultiConnectorStats:
         assert not stats.is_empty()
 
 
+@pytest.mark.parametrize("method", ["finalize_saves", "wait_for_save"])
+def test_multi_connector_finalizes_each_child_once(mc, method):
+    getattr(mc, method)()
+
+    for connector in mc._connectors:
+        connector.finalize_saves.assert_called_once_with()
+
+
 def test_multi_connector_overrides_all_base_methods():
     """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
@@ -926,6 +934,7 @@ def test_multi_connector_overrides_all_base_methods():
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",
+        "wait_for_save",  # Legacy alias dispatches to finalize_saves.
     }
 
     base_members = {

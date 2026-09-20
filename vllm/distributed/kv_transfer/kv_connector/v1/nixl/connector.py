@@ -299,7 +299,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """NixlConnector does not save explicitly."""
         pass
 
-    def wait_for_save(self):
+    def finalize_saves(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:

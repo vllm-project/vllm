@@ -3,6 +3,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
     ExampleConnectorMetadata,
 )
@@ -16,7 +17,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 # Importing utils registers TestExampleConnector with the factory
-from .utils import create_vllm_config
+from .utils import MockKVConnector, create_vllm_config
 
 
 def _make_empty_scheduler_output():
@@ -71,8 +72,29 @@ def test_kv_connector_mixin_clears_metadata():
         assert connector._connector_metadata is None
         # Test connector wrapper records method calls
         assert connector.call_record.get("bind_connector_metadata", 0) == 1
-        assert connector.call_record.get("wait_for_save", 0) == 1
+        assert connector.call_record.get("finalize_saves", 0) == 1
         assert connector.call_record.get("clear_connector_metadata", 0) == 1
     finally:
         # Ensure we clean up the global connector between tests
         ensure_kv_transfer_shutdown()
+
+
+def test_finalize_saves_supports_legacy_connectors():
+    class LegacyConnector(MockKVConnector):
+        finalize_saves = KVConnectorBase_V1.finalize_saves
+        wait_for_save = MagicMock()
+
+    connector = LegacyConnector.__new__(LegacyConnector)
+    connector.finalize_saves()
+
+    connector.wait_for_save.assert_called_once_with()
+
+
+def test_legacy_save_call_supports_migrated_connectors():
+    class Connector(MockKVConnector):
+        finalize_saves = MagicMock()
+
+    connector = Connector.__new__(Connector)
+    connector.wait_for_save()
+
+    connector.finalize_saves.assert_called_once_with()
