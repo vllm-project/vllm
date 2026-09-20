@@ -521,6 +521,7 @@ class AsyncLLM(EngineClient):
                 )
 
             for child_request in child_requests:
+                self._reject_if_paused()
                 await self.engine_core.add_request_async(child_request)
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
@@ -528,6 +529,13 @@ class AsyncLLM(EngineClient):
             await self.abort(parent_request.request_id, internal=True)
             raise
         return queue
+
+    def _reject_if_paused(self) -> None:
+        if self._reject_while_paused is not None:
+            raise EnginePausedError(
+                f"Generation is paused (mode={self._reject_while_paused!r}); "
+                "retry after resume."
+            )
 
     async def _add_request(
         self,
@@ -543,14 +551,7 @@ class AsyncLLM(EngineClient):
             self.check_admission(request_id=request.request_id)
 
         # Past every await in the submission path, so a late pause is caught.
-        if self._reject_while_paused is not None:
-            if parent_req is not None:
-                # Reclaim children admitted before the pause landed mid fan-out.
-                await self.abort(parent_req.request_id, internal=True)
-            raise EnginePausedError(
-                f"Generation is paused (mode={self._reject_while_paused!r}); "
-                "retry after resume."
-            )
+        self._reject_if_paused()
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
