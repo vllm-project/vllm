@@ -201,6 +201,55 @@ mod tests {
         assert!(factory.forwards_engine_reasoning_parser(names::KIMI_K3));
     }
 
+    /// A whole-generation grammar must apply from token 0, so a parser that
+    /// provides a scoped builder must not forward an engine reasoning parser,
+    /// which would withhold the grammar until it reports a reasoning end.
+    #[test]
+    fn factory_scoped_builder_forbids_engine_reasoning_parser() {
+        let factory = UnifiedParserFactory::new();
+        let tokens = [
+            "<|channel>",
+            "<channel|>",
+            "<|message_model|>",
+            "<|content_text|>",
+            "<|content_thinking|>",
+            "<|open|>",
+            "<|close|>",
+            "<|sep|>",
+            "<|start|>",
+            "<|message|>",
+            "<|eom|>",
+            "<|eot|>",
+            "<think>",
+            "</think>",
+            "<tool_calls>",
+            "</tool_calls>",
+            "<tool_call>",
+            "</tool_call>",
+            "<tool_sep>",
+            "<arg_key>",
+            "</arg_key>",
+            "<arg_value>",
+            "</arg_value>",
+        ];
+        let tokenizer: vllm_tokenizer::DynTokenizer =
+            Arc::new(tokens.into_iter().enumerate().fold(
+                TestTokenizer::new(),
+                |tokenizer, (index, token)| {
+                    tokenizer.with_regular_token(token, 1000 + index as u32)
+                },
+            ));
+
+        for name in factory.list() {
+            let parser = factory.create(&name, &[], tokenizer.clone()).unwrap();
+            assert!(
+                !(parser.scoped_structural_tag_builder().is_some()
+                    && factory.forwards_engine_reasoning_parser(&name)),
+                "{name}: a scoped structural tag cannot coexist with an engine reasoning parser"
+            );
+        }
+    }
+
     #[test]
     fn factory_registers_hy_v4() {
         let factory = UnifiedParserFactory::new();

@@ -51,6 +51,10 @@ pub struct GenerateRequest {
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Engine-side structured-output gate: `Some(true)` applies the grammar
+    /// from the first generated token (it already covers any reasoning span);
+    /// `None` leaves the engine's reasoning parser to decide.
+    pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
 }
@@ -80,6 +84,7 @@ impl GenerateRequest {
             data_parallel_rank,
             session_id,
             reasoning_parser_kwargs,
+            reasoning_ended,
             lora_request,
         } = self;
 
@@ -110,9 +115,7 @@ impl GenerateRequest {
                 resumable: false,
                 session_id,
                 external_req_id: Some(external_request_id),
-                // Rust parser doesn't expose this information, leave it unset and let the
-                // reasoning logic in engine-sided structured output manager handle it.
-                reasoning_ended: None,
+                reasoning_ended,
                 reasoning_parser_kwargs,
                 abort_immediately: false,
             },
@@ -155,6 +158,7 @@ mod tests {
             priority: 3,
             data_parallel_rank: Some(2),
             session_id: Some("session-1".to_string()),
+            reasoning_ended: Some(true),
             reasoning_parser_kwargs: Some(ReasoningParserKwargs {
                 chat_template_kwargs: [(
                     "chat_template_kwargs".to_string(),
@@ -190,7 +194,7 @@ mod tests {
                 "abc".to_string(),
             )]))
         );
-        assert_eq!(request.reasoning_ended, None);
+        assert_eq!(request.reasoning_ended, Some(true));
         assert_eq!(
             request
                 .reasoning_parser_kwargs

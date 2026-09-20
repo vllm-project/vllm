@@ -61,6 +61,7 @@ pub fn lower_text_request(
         data_parallel_rank: request.data_parallel_rank,
         session_id: request.session_id.clone(),
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
+        reasoning_ended: request.reasoning_ended,
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,

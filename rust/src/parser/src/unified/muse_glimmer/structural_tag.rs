@@ -5,9 +5,9 @@
 //!
 //! The tag covers the channel framing itself (the generation prompt ends with
 //! `<|start|>assistant`, so the grammar starts at the first bare
-//! ` to=<recipient><|message|>` header) and scopes any caller-provided JSON
-//! schema to the `to=user` answer channel, so it can neither suppress the
-//! framing nor leak into an ATEM tool channel.
+//! ` to=<recipient><|message|>` header) and scopes any caller-provided
+//! constraint to the `to=user` answer channel, so it can neither suppress
+//! the framing nor leak into an ATEM tool channel.
 //!
 //! The turn grammar and the invoke repetition inside a typed tool channel
 //! rely on `TagsWithSeparator` semantics verified against
@@ -22,10 +22,12 @@
 
 use serde_json::{Map, Value};
 use xgrammar_structural_tag::builders::StructuralTagOptions;
-use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, TagFormat};
+use xgrammar_structural_tag::format::{
+    Format, GrammarFormat, JsonSchemaFormat, StructuralTag, TagFormat,
+};
 use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
-use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
+use super::super::{ScopedCallerConstraint, ScopedStructuralTagBuilder, ScopedToolChoice};
 use super::{
     ChannelKind, EOM, EOT, FRAMING_MARKERS, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN,
     INVOKE_CLOSE, INVOKE_OPEN, MAX_CANDIDATE_LEN, MESSAGE, PARAMETER_CLOSE, PARAMETER_OPEN, START,
@@ -49,14 +51,14 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
         &self,
         tools: &[Tool],
         tool_choice: Option<ScopedToolChoice>,
-        caller_schema: Option<&serde_json::Value>,
+        caller: Option<ScopedCallerConstraint<'_>>,
         options: &StructuralTagOptions,
     ) -> XgrammarResult<StructuralTag> {
         match tool_choice {
             // Tools absent or disabled (`"none"`): the grammar must not
             // sanction tool channels the request forbade.
-            None => auto_turn(&[], caller_schema, options),
-            Some(ScopedToolChoice::Auto) => auto_turn(tools, caller_schema, options),
+            None => auto_turn(&[], caller, options),
+            Some(ScopedToolChoice::Auto) => auto_turn(tools, caller, options),
             Some(ScopedToolChoice::Required) => required_turn(tools, options),
             Some(ScopedToolChoice::Function(name)) => {
                 let tool = tools
@@ -70,12 +72,13 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
 }
 
 /// Reasoning and tool channels in any order, with the answer channel last
-/// when present. Without a caller schema an empty generation stays valid;
-/// with one, the turn must end in the schema answer or (with tools) a tool
-/// call, so a reasoning-only turn cannot slip past `response_format`.
+/// when present. Without a caller constraint an empty generation stays
+/// valid; with one, the turn must end in the constrained answer or (with
+/// tools) a tool call, so a reasoning-only turn cannot slip past
+/// `response_format`.
 fn auto_turn(
     tools: &[Tool],
-    caller_schema: Option<&Value>,
+    caller: Option<ScopedCallerConstraint<'_>>,
     options: &StructuralTagOptions,
 ) -> XgrammarResult<StructuralTag> {
     validate_tool_names(tools)?;
@@ -86,8 +89,8 @@ fn auto_turn(
     // emit it right after `<|eom|>` — if the answer could be followed by more
     // channels, the model keeps re-opening answer channels forever instead of
     // stopping.
-    let answer = Format::Tag(answer_tag(caller_schema, options));
-    let format = if caller_schema.is_none() {
+    let answer = Format::Tag(answer_tag(caller, options));
+    let format = if caller.is_none() {
         let mut tags = vec![reasoning_tag()];
         tags.extend(tool_tags);
         Format::sequence(vec![
@@ -189,7 +192,8 @@ fn reasoning_tag() -> TagFormat {
     )
 }
 
-/// ` to=user<|message|>...<|eom|>`. A caller schema constrains this body only.
+/// ` to=user<|message|>...<|eom|>`. A caller constraint constrains this body
+/// only.
 ///
 /// ALL channels end with `<|eom|>` in the grammar, never `<|eot|>`: vLLM runs
 /// the matcher with `override_stop_tokens`, so a stop token is masked (and
@@ -202,10 +206,20 @@ fn reasoning_tag() -> TagFormat {
 /// A JSON schema body cannot exclude the framing markers (xgrammar's JSON
 /// string grammar admits them), so the streaming parser, which treats
 /// framing as authoritative anywhere, stays the last line of defense there.
-fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> TagFormat {
-    let content = match caller_schema {
-        Some(schema) => json_schema(schema.clone(), options),
+fn answer_tag(
+    caller: Option<ScopedCallerConstraint<'_>>,
+    options: &StructuralTagOptions,
+) -> TagFormat {
+    let content = match caller {
         None => Format::any_text_excluding(FRAMING_MARKERS),
+        Some(ScopedCallerConstraint::JsonSchema(schema)) => json_schema(schema.clone(), options),
+        Some(ScopedCallerConstraint::Regex(pattern)) => Format::regex(pattern),
+        Some(ScopedCallerConstraint::Choice(choices)) => {
+            one_of(choices.iter().map(Format::const_string).collect())
+        }
+        Some(ScopedCallerConstraint::Grammar(grammar)) => Format::Grammar(GrammarFormat {
+            grammar: grammar.to_string(),
+        }),
     };
     TagFormat::new(ANSWER_BEGIN, content, EOM)
 }
@@ -228,11 +242,11 @@ fn tool_tags(tool: &Tool, options: &StructuralTagOptions) -> Vec<TagFormat> {
 }
 
 /// The ATEM body of a tool channel, whitespace-exact as the chat template
-/// renders it. A tool with no declared parameters, `strict: false`, or a
-/// schema the fixed-order typed encoding cannot express faithfully keeps the
-/// channel and invoke framing but leaves the invoke body free-form.
+/// renders it. A tool that is not `strict: true`, has no declared
+/// parameters, or has a schema the typed encoding cannot express faithfully
+/// keeps the channel and invoke framing but leaves the invoke body free-form.
 fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
-    if tool.strict != Some(false)
+    if tool.strict == Some(true)
         && let Some(properties) = tool.parameters.get("properties").and_then(Value::as_object)
         && !properties.is_empty()
         && typed_encoding_is_faithful(&tool.parameters, properties)
@@ -492,15 +506,16 @@ mod tests {
     use super::super::{ASSISTANT, FRAMING_MARKERS, MAX_CANDIDATE_LEN};
     use super::{
         ANSWER_BEGIN, CHANNEL_SEPARATOR, MESSAGE, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
-        START, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
+        START, ScopedCallerConstraint, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
     };
 
+    /// A strict tool: its arguments are grammar-pinned.
     fn tool(name: &str, parameters: serde_json::Value) -> Tool {
         Tool {
             name: name.to_string(),
             description: None,
             parameters,
-            strict: None,
+            strict: Some(true),
         }
     }
 
@@ -524,11 +539,11 @@ mod tests {
             .build_scoped(
                 &[],
                 None,
-                Some(&json!({
+                Some(ScopedCallerConstraint::JsonSchema(&json!({
                     "type": "object",
                     "properties": { "answer": { "type": "string" } },
                     "required": ["answer"]
-                })),
+                }))),
                 &StructuralTagOptions::default(),
             )
             .unwrap();
@@ -699,7 +714,9 @@ mod tests {
             .build_scoped(
                 &tools,
                 None,
-                Some(&json!({"type": "object"})),
+                Some(ScopedCallerConstraint::JsonSchema(
+                    &json!({"type": "object"}),
+                )),
                 &StructuralTagOptions::default(),
             )
             .unwrap()
@@ -969,7 +986,7 @@ mod tests {
             .build_scoped(
                 &tools,
                 Some(ScopedToolChoice::Auto),
-                Some(&schema),
+                Some(ScopedCallerConstraint::JsonSchema(&schema)),
                 &StructuralTagOptions::default(),
             )
             .unwrap();
@@ -1064,5 +1081,59 @@ mod tests {
             serde_json::to_value(format).unwrap(),
             json!({"type": "const_string", "value": "only"})
         );
+    }
+
+    #[test]
+    fn absent_strict_keeps_invoke_body_free_form() {
+        // Only `strict: true` pins arguments; the caller resolves the server
+        // strictness floor into that flag.
+        let tools = vec![Tool {
+            strict: None,
+            ..tool(
+                "search",
+                json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+            )
+        }];
+        let json = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap()
+            .to_json_string()
+            .unwrap();
+
+        assert!(!json.contains("<atem:parameter"));
+        assert!(json.contains(r#""type":"any_text""#));
+    }
+
+    #[test]
+    fn regex_choice_and_grammar_constraints_scope_to_answer_channel() {
+        let cases = [
+            (
+                ScopedCallerConstraint::Regex("^[a-z]+$"),
+                r#"{"type":"regex","pattern":"^[a-z]+$"}"#,
+            ),
+            (
+                ScopedCallerConstraint::Choice(&["yes".to_string(), "no".to_string()]),
+                r#"{"type":"or","elements":[{"type":"const_string","value":"yes"},{"type":"const_string","value":"no"}]}"#,
+            ),
+            (
+                ScopedCallerConstraint::Grammar("root ::= \"ok\""),
+                r#"{"type":"grammar","grammar":"root ::= \"ok\""}"#,
+            ),
+        ];
+        for (caller, content) in cases {
+            let json = MuseGlimmerStructuralTagBuilder
+                .build_scoped(&[], None, Some(caller), &StructuralTagOptions::default())
+                .unwrap()
+                .to_json_string()
+                .unwrap();
+            let answer = format!(r#""begin":" to=user<|message|>","content":{content}"#);
+            assert!(json.contains(&answer), "{caller:?}: {json}");
+            assert!(json.ends_with(r#""end":"<|eom|>"}]}}"#), "{caller:?}");
+        }
     }
 }

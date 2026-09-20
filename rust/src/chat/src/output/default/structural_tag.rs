@@ -3,31 +3,29 @@
 
 //! Applies xgrammar structural-tag constraints for strict tool calling.
 
-use std::borrow::Cow;
-
 use serde_json::{Value, json};
 use thiserror_ext::AsReport;
 use vllm_engine_core_client::protocol::structured_outputs::{
     StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputsParams,
 };
 use vllm_parser::tool::StructuralTagBuilder;
-use vllm_parser::unified::{ScopedStructuralTagBuilder, ScopedToolChoice};
+use vllm_parser::unified::{ScopedCallerConstraint, ScopedStructuralTagBuilder, ScopedToolChoice};
 use xgrammar_structural_tag::builders::StructuralTagOptions;
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice as StructuralTagToolChoice, ToolParam,
     build_structural_tag,
 };
 
-use crate::error::bail_unsupported_structured_outputs;
+use crate::error::{bail_unsupported_structured_outputs, unsupported_structured_outputs};
 use crate::parser::ToolStrictLevel;
-use crate::request::{ChatRequest, ChatToolChoice};
+use crate::request::{ChatRequest, ChatTool, ChatToolChoice};
 use crate::{Error, Result as ChatResult};
 
 /// Apply structural tag constraints to the request based on the tool parser's structural tag
 /// support, the request's tool choice, and the server-side strictness floor.
 ///
 /// A [`ScopedStructuralTagBuilder`] covers the whole generation and folds the
-/// caller's response schema into the answer channel, while a legacy
+/// caller's constraint into the answer channel, while a legacy
 /// [`StructuralTagBuilder`] constrains tool channels only and, as it always
 /// has, overwrites any caller constraint once the tool choice triggers a tag.
 pub(super) fn apply_structural_tag_constraint(
@@ -37,7 +35,7 @@ pub(super) fn apply_structural_tag_constraint(
     strict_level: ToolStrictLevel,
 ) -> ChatResult<()> {
     if let Some(scoped_builder) = scoped_builder {
-        return apply_scoped_structural_tag_constraint(request, scoped_builder);
+        return apply_scoped_structural_tag_constraint(request, scoped_builder, strict_level);
     }
 
     let Some(builder) = builder else {
@@ -84,86 +82,108 @@ pub(super) fn apply_structural_tag_constraint(
 }
 
 /// Apply a whole-generation structural tag from the parser's scoped builder,
-/// folding any caller-provided response schema into the answer channel.
+/// folding any caller-provided constraint into the answer channel.
 fn apply_scoped_structural_tag_constraint(
     request: &mut ChatRequest,
     builder: &dyn ScopedStructuralTagBuilder,
+    strict_level: ToolStrictLevel,
 ) -> ChatResult<()> {
-    // A whole-generation grammar is anchored at a fresh turn's first channel
-    // header; with `continue_final_message` generation resumes mid-channel,
-    // where the grammar would force a spurious header. Leave the request
-    // unconstrained (the parser still handles the prefilled channel).
-    if request.chat_options.continue_final_message() {
-        return Ok(());
-    }
-    // A caller-supplied structural tag is never wrapped in a parser-built one.
-    if let Some(params) = &request.sampling_params.structured_outputs
-        && params.constraint.is_structural_tag()
-    {
-        return Ok(());
-    }
-
-    let tool_choice = scoped_tool_choice(request);
-    // `required` and named choices always generate tool channels; `auto` does
-    // only with at least one strict tool (the same gating as the legacy path).
-    let forces_tool_channels = match &tool_choice {
-        Some(ScopedToolChoice::Required | ScopedToolChoice::Function(_)) => true,
-        Some(ScopedToolChoice::Auto) => {
-            request.tools().iter().any(|tool| tool.strict == Some(true))
-        }
-        None => false,
-    };
-
-    // The caller's response schema, if the constraint can be scoped into the
-    // answer channel. Borrowed where possible: the builder only reads it.
     let constraint = request
         .sampling_params
         .structured_outputs
         .as_ref()
         .map(|params| &params.constraint);
-    let caller_schema = match constraint {
-        // The Json constraint also carries JSON-encoded schema *strings*
-        // (validated upstream); the tag needs the schema value itself.
-        Some(StructuredOutputConstraint::Json(Value::String(raw))) => {
-            serde_json::from_str(raw).ok().map(Cow::Owned)
+    // A caller-supplied structural tag is never wrapped in a parser-built one;
+    // unlike with the legacy builders, it also wins over the tool choice.
+    if constraint.is_some_and(StructuredOutputConstraint::is_structural_tag) {
+        return Ok(());
+    }
+
+    let tool_choice = scoped_tool_choice(request);
+    let forced_tool_choice = matches!(
+        tool_choice,
+        Some(ScopedToolChoice::Required | ScopedToolChoice::Function(_))
+    );
+    // A forced tool-call turn has no answer channel for the constraint to
+    // constrain; reject the combination instead of silently dropping it.
+    if forced_tool_choice && constraint.is_some() {
+        bail_unsupported_structured_outputs!(
+            "the constraint cannot be combined with tool_choice \"required\" or a named tool choice for this parser"
+        );
+    }
+    // The whole-generation grammar is anchored at a fresh turn's bare first
+    // channel header, which only exists when the prompt ends with the
+    // generation prompt `<|start|>assistant`. Without one
+    // (`continue_final_message`, `add_generation_prompt: false`) the grammar
+    // would force a spurious header, so no parser tag is built: a forced tool
+    // choice cannot be honored, and a caller constraint is left as sent,
+    // applying from the continuation point.
+    if !request.chat_options.add_generation_prompt() {
+        if forced_tool_choice {
+            bail_unsupported_structured_outputs!(
+                "tool_choice \"required\" or a named tool choice cannot be enforced without a generation prompt for this parser"
+            );
         }
-        Some(StructuredOutputConstraint::Json(schema)) => Some(Cow::Borrowed(schema)),
-        Some(StructuredOutputConstraint::JsonObject) => Some(Cow::Owned(json!({"type": "object"}))),
-        // Regex, grammar, and choice constraints cannot fold into a
-        // structural tag.
+        return Ok(());
+    }
+    // `required` and named choices always generate tool channels; `auto` does
+    // when the server raises the strictness floor or a tool opts in with
+    // `strict: true` (the same gating as the legacy path).
+    let forces_tool_channels =
+        forced_tool_choice || (tool_choice.is_some() && strict_tool_floor(request, strict_level));
+    if constraint.is_none() && !forces_tool_channels {
+        return Ok(());
+    }
+
+    // The Json constraint also carries JSON-encoded schema *strings*
+    // (validated upstream); the tag needs the schema value itself.
+    let string_schema = match constraint {
+        Some(StructuredOutputConstraint::Json(Value::String(raw))) => {
+            Some(serde_json::from_str::<Value>(raw).map_err(|error| {
+                unsupported_structured_outputs!("invalid JSON schema: {}", error.as_report())
+            })?)
+        }
         _ => None,
     };
-
-    match &caller_schema {
-        // A non-scopable constraint cannot fold into the answer channel, so it
-        // cannot be combined with tool calls; reject it honestly instead of
-        // silently dropping the caller's constraint.
-        None if constraint.is_some() && forces_tool_channels => {
-            bail_unsupported_structured_outputs!(
-                "the constraint cannot be combined with tool calls for this parser"
-            );
+    let generic_object = json!({"type": "object"});
+    let caller = match constraint {
+        None | Some(StructuredOutputConstraint::StructuralTag(_)) => None,
+        Some(StructuredOutputConstraint::Json(Value::String(_))) => {
+            string_schema.as_ref().map(ScopedCallerConstraint::JsonSchema)
         }
-        None if !forces_tool_channels => return Ok(()),
-        // A forced tool-call turn has no answer channel for the schema to
-        // constrain; reject the combination instead of silently dropping it.
-        Some(_)
-            if matches!(
-                tool_choice,
-                Some(ScopedToolChoice::Required | ScopedToolChoice::Function(_))
-            ) =>
-        {
-            bail_unsupported_structured_outputs!(
-                "the constraint cannot be combined with tool_choice \"required\" or a named tool choice for this parser"
-            );
+        Some(StructuredOutputConstraint::Json(schema)) => {
+            Some(ScopedCallerConstraint::JsonSchema(schema))
         }
-        _ => {}
-    }
+        Some(StructuredOutputConstraint::JsonObject) => {
+            Some(ScopedCallerConstraint::JsonSchema(&generic_object))
+        }
+        Some(StructuredOutputConstraint::Regex(pattern)) => {
+            Some(ScopedCallerConstraint::Regex(pattern))
+        }
+        Some(StructuredOutputConstraint::Choice(choices)) => {
+            Some(ScopedCallerConstraint::Choice(choices))
+        }
+        Some(StructuredOutputConstraint::Grammar(grammar)) => {
+            Some(ScopedCallerConstraint::Grammar(grammar))
+        }
+    };
+    // A tool without an explicit `strict` is non-strict: its call envelope is
+    // constrained, but its arguments stay free unless the server level is
+    // `parameter` (the legacy path's rule).
+    let tools: Vec<ChatTool> = request
+        .tools()
+        .iter()
+        .map(|tool| ChatTool {
+            strict: Some(strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true)),
+            ..tool.clone()
+        })
+        .collect();
 
     let structural_tag = builder
         .build_scoped(
-            request.tools(),
+            &tools,
             tool_choice,
-            caller_schema.as_deref(),
+            caller,
             &StructuralTagOptions::default().with_reasoning(false),
         )
         .and_then(|tag| tag.to_json_string())
@@ -181,14 +201,26 @@ fn apply_scoped_structural_tag_constraint(
     // Overwrite any existing structured output settings with the structural tag
     // constraint. The caller's `StructuredOutputOptions` are not carried over:
     // the v1 engine reads those knobs only from the server-level
-    // structured_outputs_config, and a structural tag has no whitespace or
-    // additionalProperties switch to map them onto anyway.
+    // structured_outputs_config, which the frontend does not see, so the
+    // folded JSON schema keeps xgrammar's default whitespace handling.
     request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
         backend: StructuredOutputBackend::Xgrammar,
         ..StructuredOutputsParams::structural_tag(structural_tag)
     });
+    // The grammar covers the reasoning span itself, so the engine applies it
+    // from the first generated token instead of waiting for an engine-side
+    // reasoning parser to report a reasoning end (which the legacy Muse
+    // Glimmer reasoner never does for a plain answer).
+    request.reasoning_ended = Some(true);
 
     Ok(())
+}
+
+/// Whether `auto` tool choice constrains tool calls: the server raised the
+/// strictness floor, or at least one tool opted in with `strict: true`.
+fn strict_tool_floor(request: &ChatRequest, strict_level: ToolStrictLevel) -> bool {
+    strict_level >= ToolStrictLevel::Function
+        || request.tools().iter().any(|tool| tool.strict == Some(true))
 }
 
 /// Resolve the tool choice used for a whole-generation structural tag based on
@@ -222,11 +254,9 @@ fn structural_tag_tool_choice(
 
     match request.tool_choice() {
         ChatToolChoice::None => None,
-        // For `Auto`, apply the structural tag only when the server raises the floor or at
-        // least one tool opts in with `strict: true`.
-        ChatToolChoice::Auto => (strict_level >= ToolStrictLevel::Function
-            || request.tools().iter().any(|tool| tool.strict == Some(true)))
-        .then(StructuralTagToolChoice::auto),
+        ChatToolChoice::Auto => {
+            strict_tool_floor(request, strict_level).then(StructuralTagToolChoice::auto)
+        }
 
         ChatToolChoice::Required => Some(StructuralTagToolChoice::required()),
         ChatToolChoice::Function { name } => Some(StructuralTagToolChoice::function(name.clone())),
@@ -284,11 +314,20 @@ mod tests {
         calls: Mutex<Vec<ScopedBuilderCall>>,
     }
 
+    #[derive(Debug, PartialEq)]
+    enum RecordedConstraint {
+        JsonSchema(Value),
+        Regex(String),
+        Choice(Vec<String>),
+        Grammar(String),
+    }
+
     #[derive(Debug)]
     struct ScopedBuilderCall {
         tool_names: Vec<String>,
+        tool_stricts: Vec<Option<bool>>,
         tool_choice: Option<ScopedToolChoice>,
-        caller_schema: Option<Value>,
+        caller: Option<RecordedConstraint>,
     }
 
     impl MockScopedBuilder {
@@ -302,13 +341,27 @@ mod tests {
             &self,
             tools: &[Tool],
             tool_choice: Option<ScopedToolChoice>,
-            caller_schema: Option<&Value>,
+            caller: Option<ScopedCallerConstraint<'_>>,
             _options: &StructuralTagOptions,
         ) -> xgrammar_structural_tag::Result<StructuralTag> {
             self.calls.lock().unwrap().push(ScopedBuilderCall {
                 tool_names: tools.iter().map(|tool| tool.name.clone()).collect(),
+                tool_stricts: tools.iter().map(|tool| tool.strict).collect(),
                 tool_choice,
-                caller_schema: caller_schema.cloned(),
+                caller: caller.map(|caller| match caller {
+                    ScopedCallerConstraint::JsonSchema(schema) => {
+                        RecordedConstraint::JsonSchema(schema.clone())
+                    }
+                    ScopedCallerConstraint::Regex(pattern) => {
+                        RecordedConstraint::Regex(pattern.to_string())
+                    }
+                    ScopedCallerConstraint::Choice(choices) => {
+                        RecordedConstraint::Choice(choices.to_vec())
+                    }
+                    ScopedCallerConstraint::Grammar(grammar) => {
+                        RecordedConstraint::Grammar(grammar.to_string())
+                    }
+                }),
             });
             Ok(StructuralTag::new(Format::any_text()))
         }
@@ -584,11 +637,17 @@ mod tests {
 
         let tag = structural_tag_value(&request);
         assert_eq!(tag["type"], "structural_tag");
+        // The grammar covers the reasoning span, so the engine applies it from
+        // the first generated token.
+        assert_eq!(request.reasoning_ended, Some(true));
         let calls = builder.calls();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].tool_names.is_empty());
         assert_eq!(calls[0].tool_choice, None);
-        assert_eq!(calls[0].caller_schema, Some(schema));
+        assert_eq!(
+            calls[0].caller,
+            Some(RecordedConstraint::JsonSchema(schema))
+        );
     }
 
     #[test]
@@ -605,7 +664,10 @@ mod tests {
 
         let calls = builder.calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].caller_schema, Some(json!({"type": "object"})));
+        assert_eq!(
+            calls[0].caller,
+            Some(RecordedConstraint::JsonSchema(json!({"type": "object"})))
+        );
     }
 
     #[test]
@@ -627,7 +689,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_names, vec!["search".to_string()]);
         assert_eq!(calls[0].tool_choice, None);
-        assert_eq!(calls[0].caller_schema, Some(schema));
+        assert_eq!(
+            calls[0].caller,
+            Some(RecordedConstraint::JsonSchema(schema))
+        );
     }
 
     #[test]
@@ -646,7 +711,10 @@ mod tests {
         let calls = builder.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_choice, Some(ScopedToolChoice::Auto));
-        assert_eq!(calls[0].caller_schema, Some(schema));
+        assert_eq!(
+            calls[0].caller,
+            Some(RecordedConstraint::JsonSchema(schema))
+        );
     }
 
     #[test]
@@ -662,7 +730,7 @@ mod tests {
         let calls = builder.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_choice, Some(ScopedToolChoice::Auto));
-        assert_eq!(calls[0].caller_schema, None);
+        assert_eq!(calls[0].caller, None);
     }
 
     #[test]
@@ -678,7 +746,7 @@ mod tests {
         let calls = builder.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_choice, Some(ScopedToolChoice::Required));
-        assert_eq!(calls[0].caller_schema, None);
+        assert_eq!(calls[0].caller, None);
     }
 
     #[test]
@@ -690,11 +758,12 @@ mod tests {
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
+        assert_eq!(request.reasoning_ended, None);
         assert!(builder.calls().is_empty());
     }
 
     #[test]
-    fn scoped_builder_rejects_non_scopable_constraint_with_forced_tool_choice() {
+    fn scoped_builder_rejects_regex_constraint_with_forced_tool_choice() {
         let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
         request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
             backend: StructuredOutputBackend::Xgrammar,
@@ -708,11 +777,11 @@ mod tests {
             Some(&builder),
             ToolStrictLevel::Auto,
         )
-        .expect_err("non-scopable constraint with forced tool choice should fail");
+        .expect_err("regex constraint with forced tool choice should fail");
 
         assert!(matches!(error, Error::UnsupportedStructuredOutputs { .. }));
         assert!(error.is_request_validation_error());
-        assert!(error.to_report_string().contains("cannot be combined with tool calls"));
+        assert!(error.to_report_string().contains("tool_choice \"required\""));
         // The caller's constraint is left untouched.
         assert!(structured_outputs(&request).constraint.is_regex());
         assert!(builder.calls().is_empty());
@@ -747,19 +816,92 @@ mod tests {
     }
 
     #[test]
-    fn scoped_builder_preserves_non_scopable_constraint_without_forced_tool_choice() {
-        let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
-        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-            backend: StructuredOutputBackend::Xgrammar,
-            ..StructuredOutputsParams::regex("^[a-z]+$")
-        });
-        let builder = MockScopedBuilder::default();
+    fn scoped_builder_folds_regex_choice_and_grammar_into_answer_channel() {
+        // Left raw, these would apply from token 0 over the channel framing
+        // (the engine has no reasoning parser to withhold them).
+        let cases = [
+            (
+                StructuredOutputsParams::regex("^[a-z]+$"),
+                RecordedConstraint::Regex("^[a-z]+$".to_string()),
+            ),
+            (
+                StructuredOutputsParams::choice(vec!["yes".to_string(), "no".to_string()]),
+                RecordedConstraint::Choice(vec!["yes".to_string(), "no".to_string()]),
+            ),
+            (
+                StructuredOutputsParams::grammar("root ::= \"ok\""),
+                RecordedConstraint::Grammar("root ::= \"ok\"".to_string()),
+            ),
+        ];
+        for (params, recorded) in cases {
+            let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
+            request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
+                backend: StructuredOutputBackend::Xgrammar,
+                ..params
+            });
+            let builder = MockScopedBuilder::default();
 
-        apply_structural_tag_constraint(&mut request, None, Some(&builder), ToolStrictLevel::Auto)
-            .expect("structural tag decision should succeed");
+            apply_structural_tag_constraint(
+                &mut request,
+                None,
+                Some(&builder),
+                ToolStrictLevel::Auto,
+            )
+            .expect("scoped structural tag should build");
 
-        assert!(structured_outputs(&request).constraint.is_regex());
-        assert!(builder.calls().is_empty());
+            assert!(structured_outputs(&request).constraint.is_structural_tag());
+            assert_eq!(request.reasoning_ended, Some(true));
+            let calls = builder.calls();
+            assert_eq!(calls[0].tool_choice, Some(ScopedToolChoice::Auto));
+            assert_eq!(calls[0].caller, Some(recorded));
+        }
+    }
+
+    #[test]
+    fn scoped_builder_resolves_the_server_strict_floor_per_tool() {
+        // `auto` with non-strict tools constrains only from the `function`
+        // floor; arguments are pinned only from `parameter` or `strict: true`.
+        let cases = [
+            (ChatToolChoice::Auto, None, ToolStrictLevel::Auto, None),
+            (
+                ChatToolChoice::Auto,
+                None,
+                ToolStrictLevel::Function,
+                Some(Some(false)),
+            ),
+            (
+                ChatToolChoice::Auto,
+                None,
+                ToolStrictLevel::Parameter,
+                Some(Some(true)),
+            ),
+            (
+                ChatToolChoice::Required,
+                None,
+                ToolStrictLevel::Auto,
+                Some(Some(false)),
+            ),
+            (
+                ChatToolChoice::Required,
+                Some(true),
+                ToolStrictLevel::Auto,
+                Some(Some(true)),
+            ),
+        ];
+        for (tool_choice, strict, level, expected) in cases {
+            let mut request = request(tool_choice.clone(), vec![chat_tool("search", strict)]);
+            let builder = MockScopedBuilder::default();
+
+            apply_structural_tag_constraint(&mut request, None, Some(&builder), level)
+                .expect("structural tag decision should succeed");
+
+            let calls = builder.calls();
+            assert_eq!(
+                calls.first().map(|call| call.tool_stricts[0]),
+                expected,
+                "{tool_choice:?} strict={strict:?} at {level:?}"
+            );
+        }
     }
 
     #[test]
@@ -841,22 +983,70 @@ mod tests {
             .expect("scoped structural tag should build");
 
         assert_eq!(
-            builder.calls()[0].caller_schema,
-            Some(json!({"type": "object"}))
+            builder.calls()[0].caller,
+            Some(RecordedConstraint::JsonSchema(json!({"type": "object"})))
         );
     }
 
     #[test]
-    fn scoped_builder_leaves_continued_final_message_unconstrained() {
-        let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
-        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
-        let builder = MockScopedBuilder::default();
+    fn scoped_builder_builds_no_tag_without_generation_prompt() {
+        // The whole-generation grammar needs the prompt to end with
+        // `<|start|>assistant`; a caller constraint is left as sent.
+        for mode in [
+            GenerationPromptMode::ContinueFinalAssistant,
+            GenerationPromptMode::NoGenerationPrompt,
+        ] {
+            let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", Some(true))]);
+            request.chat_options.generation_prompt_mode = mode;
+            request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
+                backend: StructuredOutputBackend::Xgrammar,
+                ..StructuredOutputsParams::json(json!({"type": "object"}))
+            });
+            let builder = MockScopedBuilder::default();
 
-        apply_structural_tag_constraint(&mut request, None, Some(&builder), ToolStrictLevel::Auto)
+            apply_structural_tag_constraint(
+                &mut request,
+                None,
+                Some(&builder),
+                ToolStrictLevel::Auto,
+            )
             .expect("structural tag decision should succeed");
 
-        assert!(request.sampling_params.structured_outputs.is_none());
-        assert!(builder.calls().is_empty());
+            assert!(
+                structured_outputs(&request).constraint.is_json(),
+                "{mode:?}"
+            );
+            assert_eq!(request.reasoning_ended, None, "{mode:?}");
+            assert!(builder.calls().is_empty(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn scoped_builder_rejects_forced_tool_choice_without_generation_prompt() {
+        for mode in [
+            GenerationPromptMode::ContinueFinalAssistant,
+            GenerationPromptMode::NoGenerationPrompt,
+        ] {
+            let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
+            request.chat_options.generation_prompt_mode = mode;
+            let builder = MockScopedBuilder::default();
+
+            let error = apply_structural_tag_constraint(
+                &mut request,
+                None,
+                Some(&builder),
+                ToolStrictLevel::Auto,
+            )
+            .expect_err("required tool choice without a generation prompt should fail");
+
+            assert!(
+                matches!(error, Error::UnsupportedStructuredOutputs { .. }),
+                "{mode:?}"
+            );
+            assert!(error.is_request_validation_error());
+            assert!(error.to_report_string().contains("without a generation prompt"));
+            assert!(builder.calls().is_empty(), "{mode:?}");
+        }
     }
 
     #[test]

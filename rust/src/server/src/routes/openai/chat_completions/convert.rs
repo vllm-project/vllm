@@ -200,6 +200,7 @@ pub(super) fn prepare_chat_request(
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
+        reasoning_ended: None,
     };
 
     Ok(PreparedRequest {

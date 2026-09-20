@@ -239,16 +239,38 @@ pub enum ScopedToolChoice {
     Function(String),
 }
 
+/// A caller-provided structured-output constraint that a
+/// [`ScopedStructuralTagBuilder`] scopes into the answer channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedCallerConstraint<'a> {
+    /// A JSON schema the answer must satisfy (`response_format: json_schema`,
+    /// or `{"type": "object"}` for `json_object`).
+    JsonSchema(&'a serde_json::Value),
+    /// A regular expression the answer must match.
+    Regex(&'a str),
+    /// One of a fixed set of literal answers.
+    Choice(&'a [String]),
+    /// An EBNF grammar the answer must follow.
+    Grammar(&'a str),
+}
+
 /// Builds a whole-generation xgrammar structural tag: the model's channel
-/// framing plus its tool channels, with an optional caller-provided JSON
-/// schema (from `response_format`) scoped to the answer channel.
+/// framing plus its tool channels, with an optional caller-provided
+/// constraint (from `response_format` / `structured_outputs`) scoped to the
+/// answer channel.
 ///
 /// Unlike [`StructuralTagBuilder`], which constrains tool channels only, this
 /// covers the entire generation from the first channel header, so a caller
 /// constraint can neither suppress the framing nor leak into a tool channel.
+/// Because the grammar covers the model's reasoning span itself,
+/// `StructuralTagOptions::reasoning` carries no meaning for it and a parser
+/// providing one must not forward an engine-side reasoning parser (see
+/// [`UnifiedParser::forwards_engine_reasoning_parser`]).
 pub trait ScopedStructuralTagBuilder: Send + Sync {
     /// Build the structural tag. `tool_choice` is `None` when tools are absent
     /// or disabled (`"none"`), in which case no tool channels are generated.
+    /// A tool's `strict` is `Some(true)` exactly when its arguments must be
+    /// grammar-pinned; the caller resolves the server strictness floor.
     ///
     /// Every error but [`Serialize`](xgrammar_structural_tag::Error::Serialize)
     /// rejects request data the grammar cannot express (a tool name the channel
@@ -258,7 +280,7 @@ pub trait ScopedStructuralTagBuilder: Send + Sync {
         &self,
         tools: &[Tool],
         tool_choice: Option<ScopedToolChoice>,
-        caller_schema: Option<&serde_json::Value>,
+        caller: Option<ScopedCallerConstraint<'_>>,
         options: &xgrammar_structural_tag::builders::StructuralTagOptions,
     ) -> xgrammar_structural_tag::Result<xgrammar_structural_tag::format::StructuralTag>;
 }

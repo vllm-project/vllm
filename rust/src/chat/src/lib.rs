@@ -197,6 +197,7 @@ impl ChatRequestProcessor {
             session_id: request.session_id,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
+            reasoning_ended: request.reasoning_ended,
             arrival_time: Some(arrival_time),
         })
     }

@@ -218,6 +218,10 @@ pub struct TextRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Engine-side structured-output gate override; see
+    /// `EngineCoreRequest::reasoning_ended`.
+    #[serde(default)]
+    pub reasoning_ended: Option<bool>,
     /// Wall-clock unix timestamp (seconds) when this request arrived at the
     /// frontend, stamped before render/tokenize to match Python's
     /// renderer-entry arrival_time. When unset, it is stamped before
@@ -244,6 +248,7 @@ impl TextRequest {
             session_id: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
+            reasoning_ended: None,
             arrival_time: None,
         }
     }

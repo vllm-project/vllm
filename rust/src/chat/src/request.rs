@@ -565,6 +565,11 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Engine-side structured-output gate: `Some(true)` tells the engine the
+    /// grammar already covers the reasoning span and applies from the first
+    /// generated token; `None` leaves the engine's reasoning parser to decide.
+    #[serde(default)]
+    pub reasoning_ended: Option<bool>,
 }
 
 impl ChatRequest {
@@ -586,6 +591,7 @@ impl ChatRequest {
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
+            reasoning_ended: None,
         }
     }
 
