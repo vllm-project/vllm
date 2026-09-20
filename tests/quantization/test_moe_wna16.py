@@ -229,14 +229,14 @@ def test_moe_wna16_humming_adapter_repacks_uint8_tensors():
 
 
 def test_moe_wna16_uses_humming_quant_config(monkeypatch):
-    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.model_executor.layers.fused_moe.oracle import humming as humming_oracle
 
     method = object.__new__(MoeWNA16Method)
     method.wna16_backend = WNA16MoEBackend.HUMMING
     layer = object()
     quant_config = object()
     monkeypatch.setattr(
-        humming_utils,
+        humming_oracle,
         "get_humming_moe_quant_config",
         lambda actual_layer, *args, **kwargs: (
             quant_config if actual_layer is layer else None

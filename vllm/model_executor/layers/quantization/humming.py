@@ -15,6 +15,12 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    convert_to_humming_moe_kernel_format,
+    get_humming_moe_quant_config,
+    make_humming_moe_kernel,
+    select_humming_moe_experts,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -29,13 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
-    convert_to_humming_moe_kernel_format,
     get_humming_linear_compute_config,
-    get_humming_moe_quant_config,
-    input_schema_to_quant_key,
-    make_humming_moe_kernel,
-    select_humming_moe_experts,
-    weight_schema_to_quant_key,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
@@ -603,20 +603,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
 
-        # Derive QuantKeys from humming schemas.
-        # Prefer force schemas (the final format after requant) over base.
-        weight_key = weight_schema_to_quant_key(
-            self.force_weight_schema or self.weight_schema
-        )
-        activation_key = input_schema_to_quant_key(
-            self.force_input_schema or self.input_schema
-        )
-
-        # Select Humming MoE experts
         self.experts_cls = select_humming_moe_experts(
             config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
+            weight_schema=self.weight_schema,
+            input_schema=self.input_schema,
+            force_weight_schema=self.force_weight_schema,
+            force_input_schema=self.force_input_schema,
         )
 
     def prepare_weight_loader(self, layer, weight_loader):
