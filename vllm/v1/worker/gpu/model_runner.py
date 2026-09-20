@@ -49,6 +49,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
+    NoopOffloader,
     create_offloader,
     get_offloader,
     set_offloader,
@@ -2244,6 +2245,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        set_offloader(NoopOffloader())
         self.cudagraph_manager = None
         self.fast_prefill = None
         if hasattr(self, "kv_caches"):
