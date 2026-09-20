@@ -60,10 +60,10 @@ class RealtimeConnection:
         logger.debug("WebSocket connection accepted: %s", self.connection_id)
         self._is_connected = True
 
-        # Send session created event
-        await self.send(SessionCreated())
-
         try:
+            # Send session created event
+            await self.send(SessionCreated())
+
             while True:
                 message = await self.websocket.receive_text()
                 try:
@@ -76,10 +76,10 @@ class RealtimeConnection:
                     await self.send_error(sanitize_message(str(e)), "processing_error")
         except WebSocketDisconnect:
             logger.debug("WebSocket disconnected: %s", self.connection_id)
-            self._is_connected = False
         except Exception as e:
             logger.exception("Unexpected error in connection: %s", e)
         finally:
+            self._is_connected = False
             await self.cleanup()
 
     def _check_model(self, model: str | None) -> None | ErrorResponse:
