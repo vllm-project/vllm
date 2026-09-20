@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_workspace,
     marlin_make_empty,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -43,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     pytest.skip(
@@ -475,6 +477,62 @@ def test_marlin_gemm(
 
     max_diff = compute_max_diff(output, output_ref)
     assert max_diff < 0.04
+
+
+def test_marlin_persistent_locks_cuda_graph_streams(workspace_init):
+    """Compiled GEMMs select stream-local locks at runtime and survive replay."""
+    size_m, size_k, size_n = 32, 1024, 2048
+    inputs = [rand_data((size_m, size_k)) for _ in range(2)]
+    weight = rand_data((size_k, size_n))
+    quant_type = scalar_types.uint4b8
+    w_ref, qweight, scales = marlin_quantize(weight, quant_type, 128)
+    zeros = marlin_make_empty(scales.device)
+    streams = [torch.cuda.Stream() for _ in inputs]
+    graphs = [torch.cuda.CUDAGraph() for _ in inputs]
+    locks = []
+    outputs = []
+
+    @torch.compile(backend="eager", fullgraph=True)
+    def run(x):
+        return torch.ops.vllm.marlin_gemm(
+            x,
+            qweight,
+            None,
+            scales,
+            None,
+            None,
+            zeros,
+            None,
+            quant_type.id,
+            size_m,
+            size_n,
+            size_k,
+            use_atomic_add=False,
+            use_fp32_reduce=True,
+        )
+
+    for stream, graph, x in zip(streams, graphs, inputs):
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            locks.append(get_marlin_workspace(x.device))
+            run(x)
+            with torch.cuda.graph(graph, stream=stream):
+                outputs.append(run(x))
+        torch.cuda.current_stream().wait_stream(stream)
+
+    assert locks[0].data_ptr() != locks[1].data_ptr()
+    current_workspace_manager().lock()
+    for _ in range(3):
+        for stream, graph, x, lock in zip(streams, graphs, inputs, locks):
+            with torch.cuda.stream(stream):
+                assert get_marlin_workspace(x.device) is lock
+                x.add_(0.1)
+                graph.replay()
+        for stream in streams:
+            torch.cuda.current_stream().wait_stream(stream)
+        for x, output, lock in zip(inputs, outputs, locks):
+            assert compute_max_diff(output, x @ w_ref) < 0.04
+            assert torch.count_nonzero(lock) == 0
 
 
 def test_marlin_gemm_subset_input():
