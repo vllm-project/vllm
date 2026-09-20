@@ -715,6 +715,7 @@ def mhc_pre_broadcast_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
@@ -755,13 +756,27 @@ def mhc_pre_broadcast_tilelang(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
-    gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
-        residual_flat,
-        fn_broadcast,
-        hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_tilelang_fallback=False,
-    )
+    if is_deep_gemm_supported():
+        gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
+            residual_flat,
+            fn_broadcast,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_tilelang_fallback=False,
+        )
+    else:
+        # The TileLang prenorm GEMM only accepts (T, hc_mult * H) inputs, so the
+        # (T, H) broadcast residual uses the torch reference instead. It is a
+        # single split with a full FP32 matmul: correct, but not free.
+        gemm_out_mul = torch.empty(
+            1, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
+        )
+        gemm_out_sqrsum = torch.empty(
+            1, num_tokens, dtype=torch.float32, device=residual.device
+        )
+        _torch_hc_prenorm_gemm(
+            residual_flat, fn_broadcast, gemm_out_mul, gemm_out_sqrsum
+        )
     _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,
         gemm_out_sqrsum,
