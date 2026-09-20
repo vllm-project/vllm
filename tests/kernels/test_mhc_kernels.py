@@ -497,7 +497,7 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
 @pytest.mark.parametrize(
-    "mhc_mode", ["disabled", "overlap", "piecewise", "large_batch", "breakable"]
+    "mhc_mode", ["disabled", "overlap", "piecewise", "large_batch"]
 )
 def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
@@ -506,11 +506,6 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
 
     num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
-    if mhc_mode == "breakable":
-        monkeypatch.setattr(
-            "vllm.models.deepseek_v41.nvidia.model.BreakableCUDAGraphCapture.is_active",
-            lambda: True,
-        )
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -530,7 +525,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         ):
             pytest.skip("SM100 DeepGEMM required for overlap")
         decoder.mhc_stream = torch.cuda.Stream()
-    if mhc_mode in ("piecewise", "large_batch", "breakable"):
+    if mhc_mode in ("piecewise", "large_batch"):
 
         def unexpected_overlap(*args, **kwargs):
             pytest.fail("unsupported execution must retain native mHC")

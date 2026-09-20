@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
@@ -19,7 +18,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import (
+    get_forward_context,
+    in_piecewise_cudagraph,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
@@ -373,8 +376,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         previous_aux: torch.Tensor | None = None
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
-            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-            or BreakableCUDAGraphCapture.is_active()
+            in_piecewise_cudagraph()
             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
         ):
             # A side stream cannot remain unjoined across breakable graph segments.
