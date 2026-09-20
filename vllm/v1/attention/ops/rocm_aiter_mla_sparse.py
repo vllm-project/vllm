@@ -2591,7 +2591,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
     extra_indices_ptr,
     extra_indptr_ptr,
     extra_token_to_req_ptr,
-    extra_valid_token_ptr,
+    extra_lengths_ptr,
     extra_block_table_ptr,
     part_m_ptr,
     part_l_ptr,
@@ -2644,8 +2644,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         if HAS_EXTRA:
             if DIRECT_EXTRA:
                 extra_start = 0
-                is_valid_token = tl.load(extra_valid_token_ptr + query_idx)
-                extra_len = tl.where(is_valid_token, extra_width, 0)
+                extra_len = tl.load(extra_lengths_ptr + query_idx)
             else:
                 extra_start = tl.load(extra_indptr_ptr + query_idx)
                 extra_end = tl.load(extra_indptr_ptr + query_idx + 1)
@@ -2750,8 +2749,7 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         if not ADAPTIVE_SPLITS:
             if DIRECT_EXTRA:
                 extra_start = 0
-                is_valid_token = tl.load(extra_valid_token_ptr + query_idx)
-                extra_len = tl.where(is_valid_token, extra_width, 0)
+                extra_len = tl.load(extra_lengths_ptr + query_idx)
             else:
                 extra_start = tl.load(extra_indptr_ptr + query_idx)
                 extra_end = tl.load(extra_indptr_ptr + query_idx + 1)
@@ -3362,7 +3360,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
     extra_token_to_req: torch.Tensor | None = None,
-    extra_valid_token: torch.Tensor | None = None,
+    extra_lengths: torch.Tensor | None = None,
     extra_block_table: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
     extra_cache_nan_free: bool = False,
@@ -3407,7 +3405,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         and extra_cache is not None
         and extra_indices is not None
         and extra_token_to_req is not None
-        and extra_valid_token is not None
+        and extra_lengths is not None
         and extra_block_table is not None
     )
     has_extra = direct_extra or (
@@ -3424,7 +3422,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         if direct_extra:
             assert extra_indices.ndim == 2
             assert extra_token_to_req is not None
-            assert extra_valid_token is not None
+            assert extra_lengths is not None
             assert extra_block_table is not None
             extra_indptr = torch.empty(1, device=q.device, dtype=torch.int32)
         else:
@@ -3551,7 +3549,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
             extra_indices,
             extra_indptr,
             extra_token_to_req if direct_extra else extra_indptr,
-            extra_valid_token if direct_extra else extra_indptr,
+            extra_lengths if direct_extra else extra_indptr,
             extra_block_table if direct_extra else extra_indptr,
             part_m,
             part_l,
@@ -3671,7 +3669,6 @@ def _rocm_sparse_attn_decode_triton(
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
     extra_token_to_req: torch.Tensor | None = None,
-    extra_valid_token: torch.Tensor | None = None,
     extra_block_table: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
     extra_cache_nan_free: bool = False,
@@ -3688,7 +3685,7 @@ def _rocm_sparse_attn_decode_triton(
 
     direct_extra = (
         extra_token_to_req is not None
-        and extra_valid_token is not None
+        and extra_lengths is not None
         and extra_block_table is not None
     )
     if (
@@ -3718,7 +3715,6 @@ def _rocm_sparse_attn_decode_triton(
         extra_indices=extra_indices if direct_extra else extra_ragged_indices,
         extra_indptr=None if direct_extra else extra_ragged_indptr,
         extra_token_to_req=extra_token_to_req,
-        extra_valid_token=extra_valid_token,
         extra_block_table=extra_block_table,
         out=out,
         extra_cache_nan_free=extra_cache_nan_free,
@@ -3825,7 +3821,6 @@ def rocm_sparse_attn_decode(
     extra_cache_nan_free: bool = False,
     adaptive_splits: bool = False,
     topk_token_to_req_indices: torch.Tensor | None = None,
-    topk_is_valid_token: torch.Tensor | None = None,
     topk_block_table: torch.Tensor | None = None,
 ) -> None:
     assert swa_k_cache.dtype == torch.uint8, (
@@ -3874,7 +3869,6 @@ def rocm_sparse_attn_decode(
         extra_ragged_indices=topk_ragged_indices,
         extra_ragged_indptr=topk_ragged_indptr,
         extra_token_to_req=topk_token_to_req_indices,
-        extra_valid_token=topk_is_valid_token,
         extra_block_table=topk_block_table,
         out=direct_out,
         extra_cache_nan_free=extra_cache_nan_free,

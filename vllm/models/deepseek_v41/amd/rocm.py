@@ -291,8 +291,6 @@ def _build_global_topk_ragged_kernel(
         tl.store(topk_indptr_ptr + token_idx + 1, running)
 
 
-
-
 @triton.jit
 def _compute_topk_lens_kernel(
     topk_lens_ptr,
@@ -429,9 +427,7 @@ def compute_global_topk_ragged_indices_and_indptr(
         )
         if global_topk_ragged.numel() > 0:
             block = 128
-            _pack_global_topk_ragged_kernel[
-                (num_tokens, triton.cdiv(topk, block))
-            ](
+            _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
                 global_topk_ragged,
                 topk_indptr,
                 topk_indices,
@@ -889,10 +885,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         topk_lens = None
         topk_ragged_indices = None
         topk_ragged_indptr = None
+        use_direct_topk = _ON_GFX950 and 5 <= num_decode_tokens <= 32
         if not swa_only:
             assert self.topk_indices_buffer is not None
-            if _ON_GFX950:
+            if use_direct_topk:
                 topk_indices = self.topk_indices_buffer[:num_decode_tokens]
+                assert swa_metadata.is_valid_token is not None
+                topk_lens = torch.empty(
+                    num_decode_tokens, dtype=torch.int32, device=topk_indices.device
+                )
+                _compute_topk_lens_kernel[(num_decode_tokens,)](
+                    topk_lens,
+                    topk_indices,
+                    topk_indices.stride(0),
+                    topk_indices.shape[1],
+                    swa_metadata.is_valid_token[:num_decode_tokens],
+                    TRITON_BLOCK_SIZE=1024,
+                )
             else:
                 (
                     topk_ragged_indices,
@@ -919,16 +928,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             topk_ragged_indices=topk_ragged_indices,
             topk_ragged_indptr=topk_ragged_indptr,
             topk_token_to_req_indices=(
-                swa_metadata.token_to_req_indices if _ON_GFX950 else None
-            ),
-            topk_is_valid_token=(
-                swa_metadata.is_valid_token[:num_decode_tokens]
-                if _ON_GFX950 and swa_metadata.is_valid_token is not None
-                else None
+                swa_metadata.token_to_req_indices if use_direct_topk else None
             ),
             topk_block_table=(
                 attn_metadata.block_table[:num_decodes]
-                if _ON_GFX950 and attn_metadata is not None
+                if use_direct_topk and attn_metadata is not None
                 else None
             ),
             attn_sink=self.attn_sink,

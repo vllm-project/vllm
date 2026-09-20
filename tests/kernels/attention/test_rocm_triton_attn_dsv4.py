@@ -1125,11 +1125,11 @@ def test_sparse_attn_decode_gfx950_direct_dense_topk(monkeypatch) -> None:
         rope_head_dim=ROPE_HEAD_DIM,
         extra_cache=extra_cache,
         extra_indices=logical,
+        extra_lengths=torch.tensor([3, 0, 2], dtype=torch.int32, device=device),
         extra_token_to_req=token_to_req,
-        extra_valid_token=valid_token,
         extra_block_table=block_table,
     )
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @requires_gfx950
