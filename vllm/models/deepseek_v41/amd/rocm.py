@@ -248,31 +248,49 @@ def combine_topk_swa_indices(
 
 
 @triton.jit
-def _compute_topk_lens_and_indptr_kernel(
+def _build_global_topk_ragged_kernel(
+    global_topk_ragged_ptr,
     topk_lens_ptr,
     topk_indptr_ptr,
     topk_indices_ptr,
     topk_indices_stride,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
     topk,
     is_valid_token_ptr,
     num_tokens,
     BLOCK_TOPK: tl.constexpr,
 ):
+    offsets = tl.arange(0, BLOCK_TOPK)
+    topk_mask = offsets < topk
     running = tl.zeros((), dtype=tl.int32)
     tl.store(topk_indptr_ptr, running)
     for token_idx in tl.range(0, num_tokens):
-        offsets = tl.arange(0, BLOCK_TOPK)
         local_idx = tl.load(
             topk_indices_ptr + token_idx * topk_indices_stride + offsets,
-            mask=offsets < topk,
+            mask=topk_mask,
             other=-1,
         )
-        count = tl.sum((local_idx >= 0).to(tl.int32), axis=0)
         is_valid_token = tl.load(is_valid_token_ptr + token_idx)
-        count = tl.where(is_valid_token, count, 0)
+        valid = topk_mask & (local_idx >= 0) & is_valid_token
+        count = tl.sum(valid.to(tl.int32), axis=0)
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        block_indices = local_idx // block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=valid,
+            other=0,
+        )
+        block_offsets = local_idx % block_size
+        slot_ids = block_numbers * block_size + block_offsets
+        tl.store(global_topk_ragged_ptr + running + offsets, slot_ids, mask=valid)
         running += count
         tl.store(topk_lens_ptr + token_idx, count)
         tl.store(topk_indptr_ptr + token_idx + 1, running)
+
+
 
 
 @triton.jit
@@ -373,12 +391,22 @@ def compute_global_topk_ragged_indices_and_indptr(
     topk_indptr = torch.empty(
         num_tokens + 1, dtype=torch.int32, device=topk_indices.device
     )
-    if num_tokens <= 8:
-        _compute_topk_lens_and_indptr_kernel[(1,)](
+    global_topk_ragged = torch.empty(
+        num_tokens * topk,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    if num_tokens <= 4:
+        _build_global_topk_ragged_kernel[(1,)](
+            global_topk_ragged,
             topk_lens,
             topk_indptr,
             topk_indices,
             topk_indices.stride(0),
+            token_to_req_indices,
+            block_table,
+            block_table.stride(0),
+            block_size,
             topk,
             is_valid_token,
             num_tokens,
@@ -399,25 +427,22 @@ def compute_global_topk_ragged_indices_and_indptr(
             num_tokens,
             BLOCK_ROWS=triton.next_power_of_2(num_tokens),
         )
-    global_topk_ragged = torch.empty(
-        num_tokens * topk,
-        dtype=torch.int32,
-        device=topk_indices.device,
-    )
-    if global_topk_ragged.numel() > 0:
-        block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
-            global_topk_ragged,
-            topk_indptr,
-            topk_indices,
-            topk_indices.stride(0),
-            token_to_req_indices,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            topk,
-            BLOCK_SIZE=block,
-        )
+        if global_topk_ragged.numel() > 0:
+            block = 128
+            _pack_global_topk_ragged_kernel[
+                (num_tokens, triton.cdiv(topk, block))
+            ](
+                global_topk_ragged,
+                topk_indptr,
+                topk_indices,
+                topk_indices.stride(0),
+                token_to_req_indices,
+                block_table,
+                block_table.stride(0),
+                block_size,
+                topk,
+                BLOCK_SIZE=block,
+            )
     return global_topk_ragged, topk_indptr, topk_lens
 
 
