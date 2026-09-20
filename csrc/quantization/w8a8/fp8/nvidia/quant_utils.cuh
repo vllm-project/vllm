@@ -283,19 +283,6 @@ __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(
   #endif  // ENABLE_FP8
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
-__inline__ __device__ Tout convert(const Tin& x) {
-  #if 0  // Disable the following code to reduce the binary size.
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-    return vec_conversion<Tout, Tin>(x, __NV_E4M3);
-  } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-    return vec_conversion<Tout, Tin>(x, __NV_E5M2);
-  }
-  #endif
-  assert(false);
-  __builtin_unreachable();  // Suppress missing return statement warning
-}
-
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   #ifdef ENABLE_FP8
   if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
