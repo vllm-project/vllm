@@ -5837,21 +5837,15 @@ class GPUModelRunner(
         assert self.mm_budget is not None
 
         # Don't use `max_items_per_batch` here to avoid redundant computation
-        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
-            self.model_config,
-            mm_counts={modality: 1},
-            cache=self.mm_budget.cache,
+        dummy_mm_inputs = self.mm_budget.get_dummy_encoder_profile_inputs(
+            modality,
+            max_items_per_batch,
         )
-        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
-
-        # We use the cache so that the item is saved to the cache,
-        # but not read from the cache
-        assert dummy_mm_item is not None, "Item should not already be cached"
 
         return next(
             mm_kwargs_batch
             for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
-                [(modality, dummy_mm_item)] * max_items_per_batch,
+                dummy_mm_inputs,
                 device=self.device,
                 pin_memory=PIN_MEMORY,
             )
@@ -6164,6 +6158,11 @@ class GPUModelRunner(
                     num_tokens_padded, None, False
                 )
 
+            num_tokens_unpadded = num_tokens_padded if is_profile else 0
+            is_padding = self._prepare_padding_mask(
+                num_tokens_unpadded, num_tokens_padded
+            )
+
             if ubatch_slices_padded is not None:
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
@@ -6171,8 +6170,6 @@ class GPUModelRunner(
                 num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
-
-            is_padding = self._prepare_padding_mask(0, num_tokens_padded)
 
             with (
                 self.maybe_randomize_inputs(
