@@ -35,6 +35,9 @@ async def pause_generation(
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
+    In ``abort`` and ``wait`` modes new requests are rejected with HTTP 503
+    until /resume; ``keep`` continues to accept and queue them.
+
     Args:
         raw_request: The incoming FastAPI request, used to reach the engine
             client on the app state.

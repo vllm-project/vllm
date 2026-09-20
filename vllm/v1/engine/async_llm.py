@@ -21,6 +21,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.exceptions import (
+    EnginePausedError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     QueueOverflowError,
@@ -135,6 +136,10 @@ class AsyncLLM(EngineClient):
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_requests = log_requests
+
+        # Pause state: the lock serializes transitions, the mode gates admission.
+        self._pause_state_lock = asyncio.Lock()
+        self._reject_while_paused: PauseMode | None = None
 
         custom_stat_loggers = list(stat_loggers or [])
         custom_stat_loggers.extend(load_stat_logger_plugin_factories())
@@ -326,8 +331,11 @@ class AsyncLLM(EngineClient):
         Raises:
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+            EnginePausedError: If generation is paused in a rejecting mode.
 
         """
+        self._reject_if_paused()
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current_requests = (
@@ -513,6 +521,7 @@ class AsyncLLM(EngineClient):
                 )
 
             for child_request in child_requests:
+                self._reject_if_paused()
                 await self.engine_core.add_request_async(child_request)
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
@@ -520,6 +529,10 @@ class AsyncLLM(EngineClient):
             await self.abort(parent_request.request_id, internal=True)
             raise
         return queue
+
+    def _reject_if_paused(self) -> None:
+        if self._reject_while_paused is not None:
+            raise EnginePausedError(self._reject_while_paused)
 
     async def _add_request(
         self,
@@ -534,6 +547,8 @@ class AsyncLLM(EngineClient):
         ):
             self.check_admission(request_id=request.request_id)
 
+        # Last checkpoint before the RPC; a pause landing during the send is not.
+        self._reject_if_paused()
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
@@ -623,7 +638,10 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     # Send empty final request to indicate that inputs have
                     # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    try:
+                        await self._add_request(final_req, None, None, 0, queue)
+                    except EnginePausedError as error:
+                        queue.put(InputStreamError(error))
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -910,8 +928,10 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. New generation/encoding requests will not be scheduled
-        until resume is called.
+        in the engine. ``abort`` and ``wait`` reject new requests with a
+        retryable ``EnginePausedError``; ``keep`` accepts and queues them.
+        If this call fails, admission stays closed: call
+        :meth:`resume_generation` to reopen it.
 
         Args:
             mode: How to handle in-flight requests:
@@ -934,9 +954,14 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-        if clear_cache:
-            await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        async with self._pause_state_lock:
+            # "keep" carries requests across the pause, so admission stays open.
+            self._reject_while_paused = mode if mode != "keep" else None
+            if clear_cache:
+                await self.renderer.clear_mm_cache_async()
+            await self.engine_core.pause_scheduler_async(
+                mode=mode, clear_cache=clear_cache
+            )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -945,9 +970,16 @@ class AsyncLLM(EngineClient):
         # of events from caller's pov.
         await asyncio.sleep(0.02)
 
+    async def _reopen_admission_if_servable(self) -> None:
+        """Reopen admission only if the engine is fully servable."""
+        if not await self.engine_core.is_sleeping_async():
+            self._reject_while_paused = None
+
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
-        await self.engine_core.resume_scheduler_async()
+        async with self._pause_state_lock:
+            await self.engine_core.resume_scheduler_async()
+            await self._reopen_admission_if_servable()
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
@@ -1083,9 +1115,11 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        if level >= 1:
-            await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        async with self._pause_state_lock:
+            self._reject_while_paused = mode if mode != "keep" else None
+            if level >= 1:
+                await self.renderer.clear_mm_cache_async()
+            await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
@@ -1098,7 +1132,9 @@ class AsyncLLM(EngineClient):
             self.logger_manager.record_sleep_state(1, 0)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        fully_awake = await self.engine_core.wake_up_async(tags)
+        async with self._pause_state_lock:
+            fully_awake = await self.engine_core.wake_up_async(tags)
+            await self._reopen_admission_if_servable()
 
         if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
