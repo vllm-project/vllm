@@ -238,6 +238,54 @@ class AsyncOperationManager:
         """Check if all save operations for a request are completed."""
         return all(future.done() for future in self._save_futures[request_id])
 
+    def _drain_writers(self, write_batches: list[tuple[Future[Any], int]]) -> bool:
+        """Wait for every writer and validate one result per submitted page."""
+        write_success = True
+        for write_future, expected_results in write_batches:
+            try:
+                results = write_future.result()
+                if (
+                    not isinstance(results, list)
+                    or len(results) != expected_results
+                    or any(
+                        not isinstance(result, int)
+                        or isinstance(result, bool)
+                        or result != self._bytes_per_page
+                        for result in results
+                    )
+                ):
+                    write_success = False
+            except Exception:
+                logger.exception("HF3FS write task failed")
+                write_success = False
+        return write_success
+
+    def _submit_and_drain_writers(
+        self,
+        offsets: list[int],
+        buffers: list[torch.Tensor],
+        save_stream_event: torch.cuda.Event,
+    ) -> bool:
+        """Submit page batches and drain every writer before returning."""
+        write_batches: list[tuple[Future[Any], int]] = []
+        try:
+            for i in range(0, len(offsets), DEFAULT_MAX_IO_ENTRIES):
+                batch_offsets = offsets[i : i + DEFAULT_MAX_IO_ENTRIES]
+                batch_buffers = buffers[i : i + DEFAULT_MAX_IO_ENTRIES]
+                client = self._connector._clients[self._connector._ac.next()]
+                write_future = self._io_executor.submit(
+                    client.batch_write,
+                    batch_offsets,
+                    batch_buffers,
+                    save_stream_event,
+                )
+                write_batches.append((write_future, len(batch_offsets)))
+        except Exception:
+            if write_batches:
+                self._drain_writers(write_batches)
+            raise
+        return self._drain_writers(write_batches)
+
     def _save_worker(self) -> None:
         """Background worker for handling save operations."""
         torch.accelerator.set_device_index(self._device)
@@ -268,6 +316,14 @@ class AsyncOperationManager:
         start_time = time.perf_counter()
         buffers = None
         try:
+            if len(block_ids) != len(block_hashes):
+                return self._fail_task(
+                    "Saved",
+                    "Block ID and cache-key counts differ",
+                    request_id,
+                    future,
+                )
+
             # Step1: Allocate storage pages
             key_pairs = [(hash_val, "") for hash_val in block_hashes]
             allocation_results = (
@@ -276,12 +332,34 @@ class AsyncOperationManager:
                 )
             )
 
-            if any(result[1] < 0 for result in allocation_results):
+            if (
+                not isinstance(allocation_results, list)
+                or len(allocation_results) != len(block_hashes)
+                or any(
+                    not isinstance(result, (list, tuple))
+                    or len(result) != 2
+                    or result[0] != expected_hash
+                    or not isinstance(result[1], int)
+                    or isinstance(result[1], bool)
+                    or result[1] < 0
+                    for expected_hash, result in zip(block_hashes, allocation_results)
+                )
+            ):
                 return self._fail_task(
-                    "Saved", "Page allocation failed", request_id, future
+                    "Saved",
+                    "Invalid page-allocation response",
+                    request_id,
+                    future,
                 )
 
             page_indices = [result[1] for result in allocation_results]
+            if len(set(page_indices)) != len(page_indices):
+                return self._fail_task(
+                    "Saved",
+                    "Page-allocation response reused a page",
+                    request_id,
+                    future,
+                )
             offsets = [idx * self._bytes_per_page for idx in page_indices]
 
             # Step2: Allocate buffers and gather KV cache data
@@ -304,22 +382,9 @@ class AsyncOperationManager:
                 save_stream_event = torch.cuda.Event()
                 save_stream_event.record(self._save_stream)  # Record gather completion
 
-            # Step3: Write data in batches
-            write_futures = []
-            for i in range(0, len(offsets), DEFAULT_MAX_IO_ENTRIES):
-                batch_offsets = offsets[i : i + DEFAULT_MAX_IO_ENTRIES]
-                batch_buffers = buffers[i : i + DEFAULT_MAX_IO_ENTRIES]
-                client = self._connector._clients[self._connector._ac.next()]
-                write_future = self._io_executor.submit(
-                    client.batch_write, batch_offsets, batch_buffers, save_stream_event
-                )
-                write_futures.append(write_future)
-
-            # Check write results
-            write_success = all(
-                result == self._bytes_per_page
-                for write_future in write_futures
-                for result in write_future.result()
+            # Step3: Write data in batches and drain every submitted writer
+            write_success = self._submit_and_drain_writers(
+                offsets, buffers, save_stream_event
             )
 
             # Step4: Confirm writes to metadata server
@@ -333,9 +398,8 @@ class AsyncOperationManager:
                     "Saved", start_time, request_id, len(block_ids), future
                 )
             else:
-                self._connector._metadata_client.confirm_write_for_keys(
-                    self._rank, [], page_indices
-                )
+                # Raw indices can refer to existing live keys. Retain them
+                # rather than release pages without an ownership protocol.
                 self._save_buffer_allocator.free_buffer(buffers)
                 return self._fail_task(
                     "Saved", "Write operation failed", request_id, future
