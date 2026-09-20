@@ -93,6 +93,7 @@ TokenizerMode = Literal[
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
+    "deepseek_v41",
     "inkling",
     "kimi_k3",
     "cohere",

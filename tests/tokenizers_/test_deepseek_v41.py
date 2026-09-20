@@ -4,14 +4,20 @@
 import copy
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
+from vllm.config.model import TokenizerMode
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_deepseek_v41_is_a_valid_tokenizer_mode():
+    assert "deepseek_v41" in get_args(TokenizerMode)
 
 
 def render(messages, **kwargs):
