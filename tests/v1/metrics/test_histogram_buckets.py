@@ -18,6 +18,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -269,5 +270,24 @@ def test_prometheus_logger_default_buckets():
             else:
                 expected = DEFAULT_BUCKET_SNAPSHOTS[family]
             assert found[metric_name] == [float(b) for b in expected], metric_name
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_recomputed_token_counter_is_exposed_and_exact():
+    config = build_logger_config(ObservabilityConfig())
+    try:
+        logger = PrometheusStatLogger(config)
+        logger.record(SchedulerStats(num_recomputed_tokens=8), None)
+        logger.record(SchedulerStats(num_recomputed_tokens=9), None)
+
+        samples = [
+            sample
+            for metric in prometheus_client.REGISTRY.collect()
+            for sample in metric.samples
+            if sample.name == "vllm:recomputed_token_executions_total"
+        ]
+        assert len(samples) == 1
+        assert samples[0].value == 17
     finally:
         unregister_vllm_metrics()

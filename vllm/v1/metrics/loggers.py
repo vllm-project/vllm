@@ -682,6 +682,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, per_engine_labelvalues
         )
 
+        counter_recomputed_token_executions = self._counter_cls(
+            name="vllm:recomputed_token_executions",
+            documentation=(
+                "Cumulative token positions executed again after preemption."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_recomputed_token_executions = create_metric_per_engine(
+            counter_recomputed_token_executions, per_engine_labelvalues
+        )
+
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -1048,6 +1059,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.counter_recomputed_token_executions[engine_idx].inc(
+                scheduler_stats.num_recomputed_tokens
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
