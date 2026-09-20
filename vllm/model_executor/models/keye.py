@@ -1509,6 +1509,8 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
 class KeyeForConditionalGeneration(
     BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    supports_encoder_tp_data = True
+
     def _build_projector(
         self,
         text_config: PretrainedConfig,
