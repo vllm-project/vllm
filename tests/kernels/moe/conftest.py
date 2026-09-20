@@ -59,5 +59,5 @@ def pytest_runtest_setup(item):
     # hook, so tests about to be skipped never reach this, while fixture setup
     # still runs afterwards.
     if item.path.name in NEEDS_CLEAN_ENTRY:
-        cleanup_dist_env_and_memory()
         reset_workspace_manager()
+        cleanup_dist_env_and_memory()

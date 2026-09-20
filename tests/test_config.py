@@ -652,6 +652,15 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def test_v2_model_runner_supports_custom_logits_processors():
+    config = VllmConfig()
+    config.model_config = cast(
+        ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
 def test_dflash2_draft_forces_v2_model_runner():
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
