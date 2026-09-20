@@ -220,7 +220,10 @@ class _SM90State:
         capture: the in-place refreshed plan_info/indptr buffers are what
         captured runs read.
         """
-        if torch.cuda.is_current_stream_capturing():
+        if (
+            torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        ):
             raise RuntimeError(
                 "FlashInferMLASparseSM90 plan() called inside CUDA graph "
                 "capture; lengths must be planned host-side before capture."
@@ -286,10 +289,18 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             )
         topk_indices_buffer = impl.topk_indices_buffer
         assert topk_indices_buffer is not None
+        # FlashInfer's BatchMLAPagedAttentionWrapper expects the logical
+        # dtype (e.g. torch.float8_e4m3fn), not the storage dtype
+        # (torch.uint8) that AttentionSpec.dtype carries for FP8 caches.
+        kv_dtype = (
+            torch.float8_e4m3fn
+            if impl.use_fp8_kv_cache
+            else kv_cache_spec.dtype
+        )
         self.state = _SM90State(
             device,
             impl.num_heads,
-            kv_cache_spec.dtype,
+            kv_dtype,
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,

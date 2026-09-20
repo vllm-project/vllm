@@ -13,6 +13,14 @@ from tblib import pickling_support
 # This should be run before any custom exception subclasses are defined.
 pickling_support.install()
 
+import os
+
+if "VLLM_TARGET_DEVICE" not in os.environ:
+    try:
+        import vllm._C_stable_libtorch  # noqa: F401
+    except ImportError:
+        os.environ["VLLM_TARGET_DEVICE"] = "cpu"
+
 import http.server
 import json
 import math

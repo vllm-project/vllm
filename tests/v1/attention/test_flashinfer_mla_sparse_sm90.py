@@ -229,6 +229,45 @@ def test_plan_uses_state_params(monkeypatch):
     assert kwargs["kv_data_type"] == torch.bfloat16
 
 
+def test_builder_fp8_kv_dtype_mapping(monkeypatch):
+    """Builder maps uint8 storage dtype to torch.float8_e4m3fn for FP8 caches."""
+    captured_kv_dtype = []
+
+    class FakeSM90State:
+        def __init__(self, device, num_heads, kv_dtype, *args, **kwargs):
+            captured_kv_dtype.append(kv_dtype)
+
+    monkeypatch.setattr(sm90_mod, "_SM90State", FakeSM90State)
+
+    impl, _ = make_impl(0, "fp8_e4m3")
+    layer = SimpleNamespace(impl=impl)
+    vllm_cfg = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"layer0": layer}
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=64, async_scheduling=False
+        ),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=2048)
+        ),
+    )
+    kv_spec = SimpleNamespace(
+        dtype=torch.uint8, tokens_per_state=4
+    )
+
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "__init__",
+        lambda *a, **kw: None,
+    )
+
+    FlashInferMLASparseSM90Builder(
+        kv_spec, ["layer0"], vllm_cfg, torch.device("cpu")
+    )
+    assert captured_kv_dtype == [torch.float8_e4m3fn]
+
+
 def test_kv_lens_host_formula():
     """Per-row host lengths: context == position + 1; capped at
     index_topk + trailing-pool remainder past the sparse threshold."""

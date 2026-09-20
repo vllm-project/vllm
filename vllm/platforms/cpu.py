@@ -92,7 +92,8 @@ def get_max_threads(pid=0):
     elif platform.system() == "Darwin":
         return os.cpu_count()
     else:
-        raise NotImplementedError("Unsupported OS")
+        # Windows or other OS without sched_getaffinity
+        return os.cpu_count() or 1
 
 
 class CpuPlatform(Platform):
