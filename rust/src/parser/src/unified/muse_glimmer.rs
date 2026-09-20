@@ -66,15 +66,15 @@ const BODY_STOP_MARKERS: &[&str] = &[EOM, EOT, START];
 /// Content bodies additionally stop at ATEM openers, so a tool block surfaced
 /// inside a content channel can be reclassified.
 const CONTENT_STOP_MARKERS: &[&str] = &[EOM, EOT, START, FUNCTION_CALLS_OPEN, INVOKE_OPEN];
-/// Markers whose trailing partial fragments are held back in an open body.
-const BODY_HOLD_BACK_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE];
+/// The channel framing markers: held back as trailing partial fragments in
+/// any open body, interrupting noise while waiting for the next header (a
+/// bare `<|message|>` opens an untagged content channel), and excluded from
+/// every free-text region of the grammar.
+const FRAMING_MARKERS: &[&str] = &[EOM, EOT, START, MESSAGE];
 /// Content also holds partial ATEM openers, so the markup never streams as
 /// content before reclassification decides.
 const CONTENT_HOLD_BACK_MARKERS: &[&str] =
     &[EOM, EOT, START, MESSAGE, FUNCTION_CALLS_OPEN, INVOKE_OPEN];
-/// Markers that interrupt noise while waiting for the next channel header
-/// (`<|message|>` included: a bare one opens an untagged content channel).
-const IDLE_STOP_MARKERS: &[&str] = &[START, MESSAGE, EOM, EOT];
 /// Markers that interrupt skippable noise inside a tool channel
 /// (`<|message|>` included: a bare header there closes the channel the same
 /// way it closes an unterminated body).
@@ -893,14 +893,13 @@ fn atem_tag_attrs<'i>(input: &mut MuseGlimmerInput<'i>) -> ModalResult<&'i str> 
 
 /// Parse safe text while waiting for the next channel header.
 fn safe_idle_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, IDLE_STOP_MARKERS, BODY_HOLD_BACK_MARKERS)
-        .map(|_| MuseGlimmerEvent::Text)
+    safe_body_text_len(input, FRAMING_MARKERS, FRAMING_MARKERS).map(|_| MuseGlimmerEvent::Text)
 }
 
 /// Parse safe reasoning text before the next channel marker. Reasoning bodies
 /// never reclassify: quoted ATEM markup stays reasoning text.
 fn safe_reasoning_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, BODY_STOP_MARKERS, BODY_HOLD_BACK_MARKERS)
+    safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS)
         .map(|_| MuseGlimmerEvent::Reasoning)
 }
 
@@ -916,8 +915,7 @@ fn safe_content_text_event(input: &mut MuseGlimmerInput<'_>) -> ModalResult<Muse
 fn safe_tagged_content_text_event(
     input: &mut MuseGlimmerInput<'_>,
 ) -> ModalResult<MuseGlimmerEvent> {
-    safe_body_text_len(input, BODY_STOP_MARKERS, BODY_HOLD_BACK_MARKERS)
-        .map(|_| MuseGlimmerEvent::Text)
+    safe_body_text_len(input, BODY_STOP_MARKERS, FRAMING_MARKERS).map(|_| MuseGlimmerEvent::Text)
 }
 
 /// Skip non-content noise between invokes in a tool channel, stopping ahead
@@ -1040,7 +1038,7 @@ fn strip_complete_bare_header(text: &str, anchor: BareHeaderAnchor) -> &str {
 /// marker, or a complete `<|start|>` whose framed header was cut off before
 /// its `<|message|>` (e.g. `<|start|>assist` at a max_tokens stop).
 fn strip_trailing_truncated_framing(text: &str) -> &str {
-    let text = &text[..text.len() - max_partial_prefix_len(text, BODY_HOLD_BACK_MARKERS)];
+    let text = &text[..text.len() - max_partial_prefix_len(text, FRAMING_MARKERS)];
     let Some(start) = text.rfind(START) else {
         return text;
     };

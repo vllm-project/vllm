@@ -12,8 +12,8 @@
 //! The turn grammar and the invoke repetition inside a typed tool channel
 //! rely on `TagsWithSeparator` semantics verified against
 //! xgrammar's `StructuralTagGrammarConverter::VisitSub` for
-//! `TagsWithSeparatorFormat` (`cpp/structural_tag.cc` @ dd729e7, the pinned
-//! xgrammar 0.2.4 revision): the format compiles to
+//! `TagsWithSeparatorFormat` (`cpp/structural_tag.cc` @ 82505d0, the pinned
+//! xgrammar 0.2.7 revision): the format compiles to
 //! `tags_rule (separator tags_rule)*` where every position is a fresh choice
 //! over ALL tags, so one tag may repeat (multiple reasoning blocks, repeated
 //! calls to one tool) and tags may appear in any order. `at_least_one`
@@ -27,8 +27,9 @@ use xgrammar_structural_tag::{Error as XgrammarError, Result as XgrammarResult};
 
 use super::super::{ScopedStructuralTagBuilder, ScopedToolChoice};
 use super::{
-    EOM, EOT, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN, INVOKE_CLOSE, INVOKE_OPEN,
-    MAX_CANDIDATE_LEN, MESSAGE, PARAMETER_CLOSE, PARAMETER_OPEN, START,
+    ChannelKind, EOM, EOT, FRAMING_MARKERS, FUNCTION_CALLS_CLOSE, FUNCTION_CALLS_OPEN,
+    INVOKE_CLOSE, INVOKE_OPEN, MAX_CANDIDATE_LEN, MESSAGE, PARAMETER_CLOSE, PARAMETER_OPEN, START,
+    classify_recipient, is_recipient_char,
 };
 use crate::tool::Tool;
 
@@ -69,57 +70,82 @@ impl ScopedStructuralTagBuilder for MuseGlimmerStructuralTagBuilder {
 }
 
 /// Reasoning and tool channels in any order, with the answer channel last
-/// when present; an empty generation stays valid unless a caller schema must
-/// be honored.
+/// when present. Without a caller schema an empty generation stays valid;
+/// with one, the turn must end in the schema answer or (with tools) a tool
+/// call, so a reasoning-only turn cannot slip past `response_format`.
 fn auto_turn(
     tools: &[Tool],
     caller_schema: Option<&Value>,
     options: &StructuralTagOptions,
 ) -> XgrammarResult<StructuralTag> {
     validate_tool_names(tools)?;
-    let mut tags = vec![reasoning_tag()];
-    for tool in tools {
-        tags.extend(tool_tags(tool, options));
-    }
+    let tool_tags: Vec<TagFormat> =
+        tools.iter().flat_map(|tool| tool_tags(tool, options)).collect();
     // The answer channel, when present, is always LAST. `<|eot|>` is a pure
     // stop token (never grammar content), and the model was never trained to
     // emit it right after `<|eom|>` — if the answer could be followed by more
     // channels, the model keeps re-opening answer channels forever instead of
     // stopping.
-    let answer = Format::sequence(vec![
-        Format::optional(Format::const_string(CHANNEL_SEPARATOR)),
-        Format::Tag(answer_tag(caller_schema, options)),
-    ]);
-    // Without tool channels, a caller schema makes the answer mandatory:
-    // `response_format` must guarantee schema-conforming output. With tool
-    // channels it stays optional — a turn may end on a tool call instead.
-    let answer = if caller_schema.is_some() && tools.is_empty() {
-        answer
+    let answer = Format::Tag(answer_tag(caller_schema, options));
+    let format = if caller_schema.is_none() {
+        let mut tags = vec![reasoning_tag()];
+        tags.extend(tool_tags);
+        Format::sequence(vec![
+            Format::tags_with_separator(tags, CHANNEL_SEPARATOR, false, false),
+            Format::optional(Format::sequence(vec![
+                Format::optional(Format::const_string(CHANNEL_SEPARATOR)),
+                answer,
+            ])),
+        ])
     } else {
-        Format::optional(answer)
+        // `(channel <|start|>assistant)* (tool | answer)`: the tool tags are
+        // serialized twice, once as a repeatable channel and once as a
+        // terminal one.
+        let channels = std::iter::once(reasoning_tag())
+            .chain(tool_tags.iter().cloned())
+            .map(Format::Tag)
+            .collect();
+        let terminal = one_of(tool_tags.into_iter().map(Format::Tag).chain([answer]).collect());
+        Format::sequence(vec![
+            Format::star(Format::sequence(vec![
+                one_of(channels),
+                Format::const_string(CHANNEL_SEPARATOR),
+            ])),
+            terminal,
+        ])
     };
-    Ok(StructuralTag::new(Format::sequence(vec![
-        Format::tags_with_separator(tags, CHANNEL_SEPARATOR, false, false),
-        answer,
-    ])))
+    Ok(StructuralTag::new(format))
 }
 
-/// Reject tool names the streaming parser could not round-trip as channel
-/// recipients (`[A-Za-z0-9_.\-]+` and at most `MAX_CANDIDATE_LEN` bytes — the
-/// parser definitively rejects longer runs): the grammar interpolates them
-/// verbatim into channel begins and invoke wrappers. `self` and `user` are
-/// reserved: the parser classifies those recipients as reasoning/content
-/// channels, so a tool channel with that begin would never be parsed as a
-/// tool call.
+/// An alternation, or the single alternative itself.
+fn one_of(mut alternatives: Vec<Format>) -> Format {
+    if alternatives.len() == 1 {
+        alternatives.pop().expect("one alternative")
+    } else {
+        Format::or(alternatives)
+    }
+}
+
+/// Reject tool names the streaming parser could not round-trip: the grammar
+/// interpolates them verbatim into channel begins and invoke openers, so a
+/// name must be a channel recipient (`[A-Za-z0-9_.\-]+`) whose longest
+/// grammar spelling — doubled for a dot-less name (`ns.ns`, see
+/// [`tool_tags`]) and quoted inside the invoke opener's attribute run —
+/// stays within the parser's `MAX_CANDIDATE_LEN` cap, past which it
+/// definitively rejects a run. `self` and `user` are reserved: the parser
+/// classifies those recipients as reasoning/content channels, so a tool
+/// channel with that begin would never be parsed as a tool call.
 fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
     for tool in tools {
+        let spelled_len = if tool.name.contains('.') {
+            tool.name.len()
+        } else {
+            2 * tool.name.len() + 1
+        };
         let valid = !tool.name.is_empty()
-            && !matches!(tool.name.as_str(), "self" | "user")
-            && tool.name.len() <= MAX_CANDIDATE_LEN
-            && tool
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+            && classify_recipient(Some(&tool.name)) == ChannelKind::Tool
+            && spelled_len + INVOKE_NAME_ATTR_OVERHEAD <= MAX_CANDIDATE_LEN
+            && tool.name.chars().all(is_recipient_char);
         if !valid {
             return Err(XgrammarError::Custom(
                 format!(
@@ -132,6 +158,9 @@ fn validate_tool_names(tools: &[Tool]) -> XgrammarResult<()> {
     }
     Ok(())
 }
+
+/// Bytes the invoke opener's attribute run adds around the name: ` name=""`.
+const INVOKE_NAME_ATTR_OVERHEAD: usize = " name=\"\"".len();
 
 /// `reasoning* tool+`: at least one tool call, with any reasoning before it.
 fn required_turn(tools: &[Tool], options: &StructuralTagOptions) -> XgrammarResult<StructuralTag> {
@@ -155,7 +184,7 @@ fn required_turn(tools: &[Tool], options: &StructuralTagOptions) -> XgrammarResu
 fn reasoning_tag() -> TagFormat {
     TagFormat::new(
         REASONING_BEGIN,
-        Format::any_text_excluding(&[EOM, EOT, START]),
+        Format::any_text_excluding(FRAMING_MARKERS),
         EOM,
     )
 }
@@ -163,16 +192,20 @@ fn reasoning_tag() -> TagFormat {
 /// ` to=user<|message|>...<|eom|>`. A caller schema constrains this body only.
 ///
 /// ALL channels end with `<|eom|>` in the grammar, never `<|eot|>`: vLLM runs
-/// the matcher with `override_stop_tokens`, which intercepts stop tokens
-/// anywhere and rejects them when the matcher cannot terminate — and a
-/// channel-sequence grammar only reaches a terminable state after a tag's end
-/// boundary, so an `<|eot|>` consumed as a tag end would 500 the request.
-/// With `<|eom|>`-only ends, the model closes the final channel with
+/// the matcher with `override_stop_tokens`, so a stop token is masked (and
+/// rejected if it ever reaches the matcher) wherever the grammar cannot
+/// terminate — a channel-sequence grammar only reaches a terminable state
+/// after a tag's end boundary, so a channel ending in `<|eot|>` could never
+/// close. With `<|eom|>`-only ends, the model closes the final channel with
 /// `<|eom|>` and then emits `<|eot|>` purely as the stop token.
+///
+/// A JSON schema body cannot exclude the framing markers (xgrammar's JSON
+/// string grammar admits them), so the streaming parser, which treats
+/// framing as authoritative anywhere, stays the last line of defense there.
 fn answer_tag(caller_schema: Option<&Value>, options: &StructuralTagOptions) -> TagFormat {
     let content = match caller_schema {
         Some(schema) => json_schema(schema.clone(), options),
-        None => Format::any_text_excluding(&[EOT, EOM, START]),
+        None => Format::any_text_excluding(FRAMING_MARKERS),
     };
     TagFormat::new(ANSWER_BEGIN, content, EOM)
 }
@@ -212,14 +245,12 @@ fn tool_channel_content(tool: &Tool, options: &StructuralTagOptions) -> Format {
         );
     }
     Format::sequence(vec![
-        Format::const_string(format!(
-            "{FUNCTION_CALLS_OPEN}\n{}",
-            invoke_begin(&tool.name)
-        )),
+        Format::const_string(format!("{FUNCTION_CALLS_OPEN}\n")),
+        invoke_begin(&tool.name),
         // The body absorbs the newline before the invoke close, so an
         // empty-args call keeps the canonical `<atem:invoke name="N">\n`
         // `</atem:invoke>` shape the template renders.
-        Format::any_text_excluding(&[INVOKE_CLOSE, EOM, EOT, START]),
+        Format::any_text_excluding(&[INVOKE_CLOSE, EOM, EOT, START, MESSAGE]),
         Format::const_string(format!("{INVOKE_CLOSE}\n{FUNCTION_CALLS_CLOSE}")),
     ])
 }
@@ -264,30 +295,59 @@ fn typed_invokes(
     ])
 }
 
-/// One `<atem:invoke>` block. Required properties come first in schema order;
-/// each parameter carries its trailing newline, so a call with no arguments
-/// stays `<atem:invoke name="N">\n</atem:invoke>`.
+/// One `<atem:invoke>` block. Parameters follow the schema's property order
+/// (the order the prompt shows the model), optional ones optionally; each
+/// carries its trailing newline, so a call with no arguments stays
+/// `<atem:invoke name="N">\n</atem:invoke>`.
 fn typed_invoke(
     name: &str,
     properties: &Map<String, Value>,
     required: &[&str],
     options: &StructuralTagOptions,
 ) -> TagFormat {
-    let (required_props, optional_props): (Vec<_>, Vec<_>) =
-        properties.iter().partition(|(key, _)| required.contains(&key.as_str()));
-    let mut lines = Vec::with_capacity(properties.len());
-    for (key, schema) in required_props {
-        lines.push(parameter_line(key, schema, options));
+    let mut elements = vec![invoke_name(name), Format::const_string("\">\n")];
+    for (key, schema) in properties {
+        let line = parameter_line(key, schema, options);
+        elements.push(if required.contains(&key.as_str()) {
+            line
+        } else {
+            Format::optional(line)
+        });
     }
-    for (key, schema) in optional_props {
-        lines.push(Format::optional(parameter_line(key, schema, options)));
-    }
-    TagFormat::new(invoke_begin(name), Format::sequence(lines), INVOKE_CLOSE)
+    TagFormat::new(
+        invoke_name_begin(),
+        Format::sequence(elements),
+        INVOKE_CLOSE,
+    )
+}
+
+/// The invoke opener up to its name: `<atem:invoke name="`.
+fn invoke_name_begin() -> String {
+    format!("{INVOKE_OPEN} name=\"")
 }
 
 /// `<atem:invoke name="NAME">` plus the newline the template emits after it.
-fn invoke_begin(name: &str) -> String {
-    format!("{INVOKE_OPEN} name=\"{name}\">\n")
+fn invoke_begin(name: &str) -> Format {
+    Format::sequence(vec![
+        Format::const_string(invoke_name_begin()),
+        invoke_name(name),
+        Format::const_string("\">\n"),
+    ])
+}
+
+/// The invoke name: the registered tool name verbatim, and for a dot-less
+/// name also its doubled form (the model spells the doubled channel
+/// recipient of [`tool_tags`] into the invoke as well; the parser collapses
+/// it).
+fn invoke_name(name: &str) -> Format {
+    if name.contains('.') {
+        Format::const_string(name)
+    } else {
+        Format::or(vec![
+            Format::const_string(name),
+            Format::const_string(format!("{name}.{name}")),
+        ])
+    }
 }
 
 /// One parameter plus the newline the template emits after it.
@@ -324,14 +384,22 @@ fn parameter_value(schema: &Value, options: &StructuralTagOptions) -> Format {
         // parser cuts the invoke body at the first `</atem:invoke>` and treats
         // quoted framing as a channel boundary, so the grammar must never
         // force bytes the parser cannot round-trip.
-        _ => Format::any_text_excluding(&[PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]),
+        _ => Format::any_text_excluding(&[PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START, MESSAGE]),
     }
 }
 
-/// A scalar `enum` becomes an alternation of its literals as const strings.
-/// Non-scalar values, markers, and huge lists stay free-form.
+/// A scalar `enum` (or a scalar `const`) becomes an alternation of its
+/// literals as const strings. Non-scalar values, markers, and huge lists stay
+/// free-form.
 fn scalar_enum(schema: &Value) -> Option<Format> {
-    let values = schema.get("enum").and_then(Value::as_array)?;
+    let values: Vec<&Value> = match (
+        schema.get("enum").and_then(Value::as_array),
+        schema.get("const"),
+    ) {
+        (Some(values), _) => values.iter().collect(),
+        (None, Some(constant)) => vec![constant],
+        (None, None) => return None,
+    };
     if values.is_empty() || values.len() > 256 {
         return None;
     }
@@ -343,7 +411,7 @@ fn scalar_enum(schema: &Value) -> Option<Format> {
             Value::Bool(boolean) => boolean.to_string(),
             _ => return None,
         };
-        if [PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START]
+        if [PARAMETER_CLOSE, INVOKE_CLOSE, EOM, EOT, START, MESSAGE]
             .iter()
             .any(|marker| literal.contains(marker))
         {
@@ -421,7 +489,7 @@ mod tests {
     use serde_json::json;
     use xgrammar_structural_tag::builders::StructuralTagOptions;
 
-    use super::super::{ASSISTANT, MAX_CANDIDATE_LEN};
+    use super::super::{ASSISTANT, FRAMING_MARKERS, MAX_CANDIDATE_LEN};
     use super::{
         ANSWER_BEGIN, CHANNEL_SEPARATOR, MESSAGE, MuseGlimmerStructuralTagBuilder, REASONING_BEGIN,
         START, ScopedStructuralTagBuilder, ScopedToolChoice, Tool,
@@ -471,8 +539,11 @@ mod tests {
         assert!(json.contains(r#""type":"json_schema""#));
         assert!(!json.contains("atem:invoke"));
         // With no tool channels the schema-bearing answer is mandatory.
-        assert!(json.contains(r#""stop_after_first":false},{"type":"sequence""#));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"json_schema","json_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|eom|>"}]}]}}"#]].assert_eq(&json);
+        // With a schema the turn must END in the answer: `(reasoning sep)*`
+        // then the mandatory answer tag.
+        assert!(json.contains(r#"{"type":"star","content":{"type":"sequence""#));
+        assert!(json.ends_with(r#""end":"<|eom|>"}]}}"#));
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"json_schema","json_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|eom|>"}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -485,7 +556,7 @@ mod tests {
         assert!(json.contains(r#""begin":" to=self<|message|>""#));
         assert!(json.contains(r#""at_least_one":false"#));
         assert!(!json.contains("json_schema"));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -516,18 +587,27 @@ mod tests {
         let json = tag.to_json_string().unwrap();
 
         // Typed tool: exact wrapper bytes with the newline inside each const,
-        // and the invoke tree serialized once per channel.
+        // the invoke tree serialized once per channel, and the dot-less name
+        // admitted doubled in the invoke opener as well as the recipient.
         assert!(json.contains(r#""value":"<atem:function_calls>\n""#));
-        assert!(json.contains(r#""begin":"<atem:invoke name=\"get_weather\">\n""#));
+        assert!(json.contains(r#""begin":"<atem:invoke name=\"""#));
+        assert!(json.contains(
+            r#"{"type":"or","elements":[{"type":"const_string","value":"get_weather"},{"type":"const_string","value":"get_weather.get_weather"}]}"#
+        ));
         assert_eq!(json.matches(r#"<atem:parameter name=\"city\">"#).count(), 2);
+        // Parameters keep the schema's property order: the optional `unit`
+        // precedes the required `city`.
+        assert!(json.find(r#"name=\"unit\""#) < json.find(r#"name=\"city\""#));
         // Loose tool: permissive body keeps channel + invoke framing.
-        assert!(json.contains(r#"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"#));
+        assert!(json.contains(
+            r#"{"type":"or","elements":[{"type":"const_string","value":"loose"},{"type":"const_string","value":"loose.loose"}]}"#
+        ));
         assert!(json.contains(r#""begin":" to=get_weather.get_weather<|message|>""#));
         assert!(json.contains(r#""begin":" to=loose.loose<|message|>""#));
         assert!(json.contains(
             r#"{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]}"#
         ));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"tag","begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"get_weather\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n<atem:invoke name=\"loose\">\n"},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eot|>","<|eom|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"tag","begin":" to=get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"","content":{"type":"sequence","elements":[{"type":"or","elements":[{"type":"const_string","value":"get_weather"},{"type":"const_string","value":"get_weather.get_weather"}]},{"type":"const_string","value":"\">\n"},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=get_weather.get_weather<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"","content":{"type":"sequence","elements":[{"type":"or","elements":[{"type":"const_string","value":"get_weather"},{"type":"const_string","value":"get_weather.get_weather"}]},{"type":"const_string","value":"\">\n"},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"unit\">"},{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"city\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]},{"type":"optional","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"days\">"},{"type":"json_schema","json_schema":{"type":"integer"},"style":"json","any_order":false,"max_whitespace_cnt":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"loose"},{"type":"const_string","value":"loose.loose"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=loose.loose<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"loose"},{"type":"const_string","value":"loose.loose"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":false,"stop_after_first":false},{"type":"optional","content":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|start|>assistant"}},{"type":"tag","begin":" to=user<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"}]}}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -553,7 +633,7 @@ mod tests {
         assert!(json.contains(r#""at_least_one":true"#));
         assert!(json.contains(r#""separator":"<|start|>assistant""#));
         assert!(!json.contains(" to=user<|message|>"));
-        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"search\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=search.search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"search\">\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"tags_with_separator","tags":[{"type":"tag","begin":" to=search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"","content":{"type":"sequence","elements":[{"type":"or","elements":[{"type":"const_string","value":"search"},{"type":"const_string","value":"search.search"}]},{"type":"const_string","value":"\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=search.search<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"tags_with_separator","tags":[{"type":"tag","begin":"<atem:invoke name=\"","content":{"type":"sequence","elements":[{"type":"or","elements":[{"type":"const_string","value":"search"},{"type":"const_string","value":"search.search"}]},{"type":"const_string","value":"\">\n"},{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<atem:parameter name=\"query\">"},{"type":"any_text","excludes":["</atem:parameter>","</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:parameter>"}]},{"type":"const_string","value":"\n"}]}]},"end":"</atem:invoke>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</atem:function_calls>"}]},"end":"<|eom|>"}],"separator":"<|start|>assistant","at_least_one":true,"stop_after_first":false}]}}"#]].assert_eq(&json);
     }
 
     #[test]
@@ -730,11 +810,15 @@ mod tests {
 
         let content = &json["format"]["elements"][1]["tags"][0]["content"];
         let elements = content["elements"].as_array().unwrap();
-        assert_eq!(elements[1]["type"], "any_text");
+        assert_eq!(elements[2]["type"], "any_text");
+        let opener = elements[1]["elements"].as_array().unwrap();
         let minimal = format!(
-            "{}{}",
+            "{}{}{}{}{}",
             elements[0]["value"].as_str().unwrap(),
-            elements[2]["value"].as_str().unwrap()
+            opener[0]["value"].as_str().unwrap(),
+            opener[1]["elements"][0]["value"].as_str().unwrap(),
+            opener[2]["value"].as_str().unwrap(),
+            elements[3]["value"].as_str().unwrap()
         );
         assert_eq!(
             minimal,
@@ -872,6 +956,113 @@ mod tests {
         assert_eq!(
             serde_json::to_value(format).unwrap()["json_schema"],
             json!({"type": "integer", "minimum": 0})
+        );
+    }
+
+    #[test]
+    fn auto_with_tools_and_caller_schema_requires_a_terminal_channel() {
+        // `response_format` with tools under `auto`: the turn may end on a
+        // tool call, but never after reasoning alone or empty.
+        let tools = vec![loose_tool("lookup")];
+        let schema = json!({"type": "object", "properties": {"answer": {"type": "string"}}});
+        let tag = MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Auto),
+                Some(&schema),
+                &StructuralTagOptions::default(),
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&tag.to_json_string().unwrap()).unwrap();
+
+        let elements = json["format"]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["type"], "star");
+        let terminal = elements[1]["elements"].as_array().unwrap();
+        assert_eq!(terminal.last().unwrap()["begin"], ANSWER_BEGIN);
+        assert_eq!(terminal.last().unwrap()["content"]["type"], "json_schema");
+        assert!(
+            terminal[..terminal.len() - 1]
+                .iter()
+                .all(|tag| tag["begin"].as_str().unwrap().starts_with(" to=lookup"))
+        );
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"star","content":{"type":"sequence","elements":[{"type":"or","elements":[{"type":"tag","begin":" to=self<|message|>","content":{"type":"any_text","excludes":["<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},"end":"<|eom|>"},{"type":"tag","begin":" to=lookup<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"lookup"},{"type":"const_string","value":"lookup.lookup"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=lookup.lookup<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"lookup"},{"type":"const_string","value":"lookup.lookup"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"}]},{"type":"const_string","value":"<|start|>assistant"}]}},{"type":"or","elements":[{"type":"tag","begin":" to=lookup<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"lookup"},{"type":"const_string","value":"lookup.lookup"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=lookup.lookup<|message|>","content":{"type":"sequence","elements":[{"type":"const_string","value":"<atem:function_calls>\n"},{"type":"sequence","elements":[{"type":"const_string","value":"<atem:invoke name=\""},{"type":"or","elements":[{"type":"const_string","value":"lookup"},{"type":"const_string","value":"lookup.lookup"}]},{"type":"const_string","value":"\">\n"}]},{"type":"any_text","excludes":["</atem:invoke>","<|eom|>","<|eot|>","<|start|>","<|message|>"],"max_tokens":null,"max_chars":null},{"type":"const_string","value":"</atem:invoke>\n</atem:function_calls>"}]},"end":"<|eom|>"},{"type":"tag","begin":" to=user<|message|>","content":{"type":"json_schema","json_schema":{"type":"object","properties":{"answer":{"type":"string"}}},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|eom|>"}]}]}}"#]].assert_eq(&tag.to_json_string().unwrap());
+    }
+
+    #[test]
+    fn every_free_text_region_excludes_all_framing_markers() {
+        fn check(value: &serde_json::Value) {
+            if let Some(object) = value.as_object() {
+                if object.get("type").and_then(serde_json::Value::as_str) == Some("any_text") {
+                    let excludes = object["excludes"].as_array().unwrap();
+                    for marker in FRAMING_MARKERS {
+                        assert!(
+                            excludes.contains(&json!(marker)),
+                            "{marker} missing in {value}"
+                        );
+                    }
+                }
+                object.values().for_each(check);
+            } else if let Some(array) = value.as_array() {
+                array.iter().for_each(check);
+            }
+        }
+        let tools = vec![
+            tool(
+                "get_weather",
+                json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            ),
+            loose_tool("loose"),
+        ];
+        for tool_choice in [ScopedToolChoice::Auto, ScopedToolChoice::Required] {
+            let tag = MuseGlimmerStructuralTagBuilder
+                .build_scoped(
+                    &tools,
+                    Some(tool_choice),
+                    None,
+                    &StructuralTagOptions::default(),
+                )
+                .unwrap();
+            check(&serde_json::from_str(&tag.to_json_string().unwrap()).unwrap());
+        }
+    }
+
+    #[test]
+    fn dotless_tool_name_bound_covers_its_doubled_spelling() {
+        // `ns.ns` inside ` name=""` must fit the parser's candidate cap.
+        let longest = (MAX_CANDIDATE_LEN - " name=\"\"".len() - 1) / 2;
+        for (len, ok) in [(longest, true), (longest + 1, false)] {
+            let tools = vec![tool(&"a".repeat(len), json!({"type": "object"}))];
+            let result = MuseGlimmerStructuralTagBuilder.build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            );
+            assert_eq!(result.is_ok(), ok, "dot-less name of {len} bytes");
+        }
+        // A dotted name is spelled verbatim, so it may be longer.
+        let dotted = format!("{}.{}", "a".repeat(longest), "b".repeat(longest));
+        let tools = vec![tool(&dotted, json!({"type": "object"}))];
+        MuseGlimmerStructuralTagBuilder
+            .build_scoped(
+                &tools,
+                Some(ScopedToolChoice::Required),
+                None,
+                &StructuralTagOptions::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn string_const_becomes_const_string() {
+        let format = super::parameter_value(
+            &json!({"type": "string", "const": "only"}),
+            &StructuralTagOptions::default(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(format).unwrap(),
+            json!({"type": "const_string", "value": "only"})
         );
     }
 }
