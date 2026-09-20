@@ -1194,22 +1194,20 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         coordinate space, no offset shifting needed afterwards.
         """
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is not None:
-            tensors, placeholder_token_id = prompt_embeds_info
-            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-                list(prompt["prompt_token_ids"]), mm_updates
-            )
+        if prompt_embeds_info is None:
+            return super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
 
+        tensors, placeholder_token_id = prompt_embeds_info
+        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+            list(prompt["prompt_token_ids"]), mm_updates
+        )
         engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
-
-        if prompt_embeds_info is not None:
-            tensors, _ = prompt_embeds_info
-            self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
-            )
+        self._apply_prompt_embeds_to_engine_input(
+            cast(MultiModalInput, engine_input),
+            tensors,
+            mm_updates,
+        )
 
         return engine_input
 
@@ -1222,24 +1220,24 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
-        if prompt_embeds_info is not None:
-            tensors, placeholder_token_id = prompt_embeds_info
-            mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
-            cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
-                list(prompt["prompt_token_ids"]), mm_updates
+        if prompt_embeds_info is None:
+            return await super()._process_tokens_async(
+                prompt, skip_mm_cache=skip_mm_cache
             )
 
+        tensors, placeholder_token_id = prompt_embeds_info
+        mm_updates = _build_prompt_embeds_updates(tensors, placeholder_token_id)
+        cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
+            list(prompt["prompt_token_ids"]), mm_updates
+        )
         engine_input = await super()._process_tokens_async(
             prompt, skip_mm_cache=skip_mm_cache
         )
-
-        if prompt_embeds_info is not None:
-            tensors, _ = prompt_embeds_info
-            self._apply_prompt_embeds_to_engine_input(
-                cast(MultiModalInput, engine_input),
-                tensors,
-                mm_updates,
-            )
+        self._apply_prompt_embeds_to_engine_input(
+            cast(MultiModalInput, engine_input),
+            tensors,
+            mm_updates,
+        )
 
         return engine_input
 
