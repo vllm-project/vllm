@@ -754,8 +754,8 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
-    enable_mamba_fine_grained_prefix_cache: bool = (
-        CacheConfig.enable_mamba_fine_grained_prefix_cache
+    enable_mamba_shared_prefix_checkpoint: bool = (
+        CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
@@ -782,6 +782,7 @@ class EngineArgs:
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+    swa_bounded_replay: bool = CacheConfig.swa_bounded_replay
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
@@ -1316,6 +1317,9 @@ class EngineArgs:
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
         )
         cache_group.add_argument(
+            "--swa-bounded-replay", **cache_kwargs["swa_bounded_replay"]
+        )
+        cache_group.add_argument(
             "--mamba-cache-dtype", **cache_kwargs["mamba_cache_dtype"]
         )
         cache_group.add_argument(
@@ -1331,8 +1335,8 @@ class EngineArgs:
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
-            "--enable-mamba-fine-grained-prefix-cache",
-            **cache_kwargs["enable_mamba_fine_grained_prefix_cache"],
+            "--enable-mamba-shared-prefix-checkpoint",
+            **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -2124,13 +2128,14 @@ class EngineArgs:
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
+            swa_bounded_replay=self.swa_bounded_replay,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
-            enable_mamba_fine_grained_prefix_cache=(
-                self.enable_mamba_fine_grained_prefix_cache
+            enable_mamba_shared_prefix_checkpoint=(
+                self.enable_mamba_shared_prefix_checkpoint
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
