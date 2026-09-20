@@ -374,11 +374,9 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        spec_stats = (
-            build_spec_decoding_metrics(final_res)
-            if request.sampling_params.n == 1
-            else None
-        )
+        spec_stats = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -430,7 +428,7 @@ class ServingTokens(GenerateBaseServing):
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
-        last_res = None
+        last_res: RequestOutput | None = None
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -526,11 +524,9 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
-                spec_stats = (
-                    build_spec_decoding_metrics(last_res)
-                    if sampling_params.n == 1
-                    else None
-                )
+                spec_stats = None
+                if sampling_params.n == 1:
+                    spec_stats = build_spec_decoding_metrics(last_res)
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
                     choices=[],
